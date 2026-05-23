@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 44.3%
-- Portable package average: 33.1%
+- Average estimated completion: 44.9%
+- Portable package average: 33.9%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -30,7 +30,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-gchat` | 15% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message HTTP (messages.create + pre-minted bearer + thread-reply option). 17 tests. |
 | `@chat-sdk/adapter-discord` | 15% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests. |
 | `@chat-sdk/adapter-linear` | 15% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message HTTP (GraphQL commentCreate). 12 tests. |
-| `@chat-sdk/adapter-github` | 18% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (GET issues/<n>). 16 tests. |
+| `@chat-sdk/adapter-github` | 30% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit_message +... |
 | `@chat-sdk/adapter-messenger` | 15% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message HTTP (Send API). 12 tests. |
 | `@chat-sdk/adapter-telegram` | 30% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject (additive) + slice 161 edit_message +... |
 | `@chat-sdk/adapter-whatsapp` | 15% | In progress | adapter package | Slice 133 scaffold + slice 148 post_message HTTP (Cloud API). 13 tests. |

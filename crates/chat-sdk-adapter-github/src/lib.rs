@@ -126,6 +126,25 @@ impl GithubAdapter {
     fn issue_url(&self, owner: &str, repo: &str, number: u64) -> String {
         format!("{}/repos/{owner}/{repo}/issues/{number}", self.api_base())
     }
+
+    /// Build the absolute URL for a specific issue comment:
+    /// `<api_base>/repos/{owner}/{repo}/issues/comments/{comment_id}`.
+    /// Used by `edit_message` (PATCH) and `delete_message` (DELETE).
+    fn comment_url(&self, owner: &str, repo: &str, comment_id: u64) -> String {
+        format!(
+            "{}/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            self.api_base()
+        )
+    }
+
+    /// Build the absolute URL for issue comment reactions:
+    /// `<api_base>/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions`.
+    fn comment_reactions_url(&self, owner: &str, repo: &str, comment_id: u64) -> String {
+        format!(
+            "{}/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+            self.api_base()
+        )
+    }
 }
 
 #[async_trait]
@@ -230,6 +249,168 @@ impl Adapter for GithubAdapter {
         }
 
         Ok(json["title"].as_str().map(str::to_owned))
+    }
+
+    /// Edit an issue comment via the REST API. 1:1 with the
+    /// issue-comment path of upstream `adapter.editMessage` (the
+    /// review-comment branch is deferred). PATCH
+    /// `repos/{owner}/{repo}/issues/comments/{comment_id}` with
+    /// `{body: text}`. Returns the comment id.
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GitHub-encoded"))
+        })?;
+        let comment_id: u64 = message_id.parse().map_err(|_| {
+            AdapterError::InvalidPayload(format!("GitHub comment id {message_id:?} is not numeric"))
+        })?;
+
+        let url = self.comment_url(&decoded.owner, &decoded.repo, comment_id);
+        let body = serde_json::json!({ "body": text });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(self.token())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let message = json["message"].as_str().unwrap_or("GitHub API call failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {message}")));
+        }
+
+        let id = json["id"].as_i64().ok_or_else(|| {
+            AdapterError::InvalidPayload("GitHub comment-update response missing id".to_string())
+        })?;
+        Ok(id.to_string())
+    }
+
+    /// Delete an issue comment. 1:1 with the issue-comment path of
+    /// upstream `adapter.deleteMessage`. DELETE
+    /// `repos/{owner}/{repo}/issues/comments/{comment_id}`.
+    async fn delete_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GitHub-encoded"))
+        })?;
+        let comment_id: u64 = message_id.parse().map_err(|_| {
+            AdapterError::InvalidPayload(format!("GitHub comment id {message_id:?} is not numeric"))
+        })?;
+
+        let url = self.comment_url(&decoded.owner, &decoded.repo, comment_id);
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(self.token())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Add a reaction to an issue comment. 1:1 with the
+    /// issue-comment path of upstream `adapter.addReaction`. POSTs
+    /// `{content}` to
+    /// `repos/{owner}/{repo}/issues/comments/{comment_id}/reactions`.
+    /// The `emoji` parameter is mapped to GitHub's allowed set via
+    /// [`emoji_to_github_reaction`].
+    async fn add_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GitHub-encoded"))
+        })?;
+        let comment_id: u64 = message_id.parse().map_err(|_| {
+            AdapterError::InvalidPayload(format!("GitHub comment id {message_id:?} is not numeric"))
+        })?;
+
+        let content = emoji_to_github_reaction(emoji);
+        let url = self.comment_reactions_url(&decoded.owner, &decoded.repo, comment_id);
+        let body = serde_json::json!({ "content": content });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.token())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// GitHub has no typing indicator. 1:1 with upstream's
+    /// `startTyping` which is a no-op.
+    async fn start_typing(
+        &self,
+        _thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        Ok(())
+    }
+}
+
+/// Map an SDK emoji name to a GitHub reaction `content` value.
+/// 1:1 port of upstream's `emojiToGitHubReaction(emoji)` mapping
+/// (with the same `+1` fallback for unknown emoji).
+pub fn emoji_to_github_reaction(emoji: &str) -> &'static str {
+    match emoji {
+        "thumbs_up" | "+1" => "+1",
+        "thumbs_down" | "-1" => "-1",
+        "laugh" | "smile" => "laugh",
+        "confused" | "thinking" => "confused",
+        "heart" | "love_eyes" => "heart",
+        "hooray" | "party" | "confetti" => "hooray",
+        "rocket" => "rocket",
+        "eyes" => "eyes",
+        _ => "+1",
     }
 }
 
@@ -421,6 +602,102 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_github_thread_ids() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("slack:C1:1.0", "42", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GitHub-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_numeric_comment_id() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("github:vercel/chat:42", "abc", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not numeric"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_rejects_non_github_thread_ids() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("slack:C1:1.0", "42"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GitHub-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_rejects_non_github_thread_ids() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("slack:C1:1.0", "42", "thumbs_up"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GitHub-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_is_a_noop() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        // GitHub doesn't support typing indicators - upstream returns
+        // void unconditionally and never touches the network.
+        assert!(block_on(adapter.start_typing("github:vercel/chat:1", None)).is_ok());
+        assert!(block_on(adapter.start_typing("anything", Some("status"))).is_ok());
+    }
+
+    #[test]
+    fn emoji_to_github_reaction_maps_well_known_names() {
+        assert_eq!(emoji_to_github_reaction("thumbs_up"), "+1");
+        assert_eq!(emoji_to_github_reaction("+1"), "+1");
+        assert_eq!(emoji_to_github_reaction("thumbs_down"), "-1");
+        assert_eq!(emoji_to_github_reaction("laugh"), "laugh");
+        assert_eq!(emoji_to_github_reaction("smile"), "laugh");
+        assert_eq!(emoji_to_github_reaction("confused"), "confused");
+        assert_eq!(emoji_to_github_reaction("thinking"), "confused");
+        assert_eq!(emoji_to_github_reaction("heart"), "heart");
+        assert_eq!(emoji_to_github_reaction("love_eyes"), "heart");
+        assert_eq!(emoji_to_github_reaction("hooray"), "hooray");
+        assert_eq!(emoji_to_github_reaction("party"), "hooray");
+        assert_eq!(emoji_to_github_reaction("confetti"), "hooray");
+        assert_eq!(emoji_to_github_reaction("rocket"), "rocket");
+        assert_eq!(emoji_to_github_reaction("eyes"), "eyes");
+        // Unknown maps to +1 (upstream fallback).
+        assert_eq!(emoji_to_github_reaction("anything_else"), "+1");
+    }
+
+    #[test]
+    fn adapter_comment_url_template() {
+        let adapter = GithubAdapter::new(
+            GithubAdapterOptions::new("t").with_api_base("https://api.example.test"),
+        );
+        assert_eq!(
+            adapter.comment_url("vercel", "chat", 99),
+            "https://api.example.test/repos/vercel/chat/issues/comments/99"
+        );
+        assert_eq!(
+            adapter.comment_reactions_url("vercel", "chat", 99),
+            "https://api.example.test/repos/vercel/chat/issues/comments/99/reactions"
+        );
     }
 
     #[test]
