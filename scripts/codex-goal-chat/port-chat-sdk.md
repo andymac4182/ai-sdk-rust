@@ -972,3 +972,28 @@ near-identical template. Each adapter port ships:
 The remaining 4 adapters (Linear/GChat/Teams/Slack) each
 follow the same recipe with their own auth + endpoint +
 response-shape variances.
+
+## Adapter method matrix (added slice 157)
+
+Per-adapter progress across the 8 Adapter trait methods.
+Each cell tracks the slice number that landed the method on
+that platform. `—` = not yet shipped. `def` = default trait
+impl (returns `Unsupported` or `Ok(None)`); not platform-
+specific.
+
+| Adapter      | post_message | fetch_subject | post_object | edit_message | delete_message | add_reaction | start_typing | parse_message |
+|--------------|--------------|---------------|-------------|--------------|----------------|--------------|--------------|---------------|
+| telegram     | 145          | 155           | —           | —            | —              | —            | —            | —             |
+| github       | 146          | 156           | —           | —            | —              | —            | —            | —             |
+| messenger    | 147          | —             | —           | —            | —              | —            | —            | —             |
+| whatsapp     | 148          | —             | —           | —            | —              | —            | —            | —             |
+| discord      | 149          | —             | —           | —            | —              | —            | —            | —             |
+| linear       | 151          | —             | —           | —            | —              | —            | —            | —             |
+| slack        | 152          | —             | —           | —            | —              | —            | —            | —             |
+| teams        | 153          | —             | —           | —            | —              | —            | —            | —             |
+| gchat        | 154          | —             | —           | —            | —              | —            | —            | —             |
+
+Current: 11/72 cells filled (15%). Future sessions roll out
+the remaining methods following the slice 155/156 reference
+pattern (one slice per method-platform pair, with periodic
+refinement passes at the 5-cycle mark).
