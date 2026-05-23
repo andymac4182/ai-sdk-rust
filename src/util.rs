@@ -16,6 +16,7 @@ use crate::language_model::{LanguageModelAbortController, LanguageModelAbortSign
 use crate::provider_utils::{
     ParseJsonResult, convert_base64_to_bytes, normalize_headers, safe_parse_json,
 };
+use crate::retry::{DEFAULT_MAX_RETRIES, RetryWithExponentialBackoffOptions};
 
 /// Error returned when text cannot be extracted from a data URL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +108,62 @@ impl std::fmt::Display for InvalidArgumentError {
 }
 
 impl std::error::Error for InvalidArgumentError {}
+
+/// Options accepted by [`prepare_retries`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PrepareRetriesOptions {
+    max_retries: Option<usize>,
+}
+
+impl PrepareRetriesOptions {
+    /// Creates retry preparation options with no explicit retry count.
+    pub const fn new() -> Self {
+        Self { max_retries: None }
+    }
+
+    /// Sets the maximum number of retries after the first attempt.
+    pub const fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    /// Returns the explicit maximum retry count, when present.
+    pub const fn max_retries(&self) -> Option<usize> {
+        self.max_retries
+    }
+}
+
+/// Prepared retry settings returned by [`prepare_retries`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedRetries {
+    max_retries: usize,
+    retry_options: RetryWithExponentialBackoffOptions,
+}
+
+impl PreparedRetries {
+    /// Returns the resolved maximum retry count.
+    pub const fn max_retries(&self) -> usize {
+        self.max_retries
+    }
+
+    /// Returns options for the high-level retry executor.
+    pub const fn retry_options(&self) -> RetryWithExponentialBackoffOptions {
+        self.retry_options
+    }
+}
+
+/// Validates and prepares retry settings for high-level AI SDK calls.
+///
+/// Upstream validates JavaScript numbers at runtime. Rust accepts a typed
+/// `usize`, so negative and fractional values are rejected at the type boundary.
+pub fn prepare_retries(options: PrepareRetriesOptions) -> PreparedRetries {
+    let max_retries = options.max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
+
+    PreparedRetries {
+        max_retries,
+        retry_options: RetryWithExponentialBackoffOptions::new().with_max_retries(max_retries),
+    }
+}
 
 /// Result returned by a high-level callback utility.
 pub type CallbackResult = Result<(), String>;
@@ -1309,10 +1366,11 @@ mod tests {
 
     use super::{
         AbortSignalSource, AbortTimeoutOptions, Callback, CallbackResult, DataUrlTextError,
-        InvalidArgumentError, NotifyCallbacks, SerialJobError, SerialJobExecutor,
-        cosine_similarity, fix_json, get_potential_start_index, get_text_from_data_url,
-        is_deep_equal_data, merge_abort_signals, merge_callbacks, merge_objects, notify,
-        parse_partial_json, prepare_headers, set_abort_timeout, split_array,
+        InvalidArgumentError, NotifyCallbacks, PrepareRetriesOptions, SerialJobError,
+        SerialJobExecutor, cosine_similarity, fix_json, get_potential_start_index,
+        get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
+        merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
+        set_abort_timeout, split_array,
     };
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -1863,6 +1921,14 @@ mod tests {
         poll_unit_ready(third.as_mut());
 
         assert_eq!(events.borrow().as_slice(), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn prepare_retries_should_set_default_values_correctly_when_no_input_is_provided() {
+        let prepared = prepare_retries(PrepareRetriesOptions::new());
+
+        assert_eq!(prepared.max_retries(), 2);
+        assert_eq!(prepared.retry_options().max_retries, 2);
     }
 
     #[test]
