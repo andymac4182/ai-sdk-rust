@@ -27,4 +27,5 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 
 [dev-dependencies]
+chat-sdk-state-memory = { path = "../chat-sdk-state-memory" }
 futures-executor = "0.3.32"
