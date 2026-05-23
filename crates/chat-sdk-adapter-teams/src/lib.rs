@@ -6,6 +6,7 @@
 //! encoding is `teams:<conversation_id>:<message_id>` — when posting
 //! a new top-level reply, `message_id` is the root activity id.
 
+pub mod cards;
 pub mod errors;
 pub mod markdown;
 
