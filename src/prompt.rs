@@ -1122,7 +1122,160 @@ mod tests {
     }
 
     #[test]
-    fn standardize_prompt_converts_text_prompt_and_prefers_instructions() {
+    fn standardize_prompt_should_throw_invalid_prompt_error_when_messages_contain_a_system_message_by_default()
+     {
+        let messages = vec![
+            LanguageModelMessage::System(system_message("INSTRUCTIONS")),
+            user_text_message("Hello, world!"),
+        ];
+
+        let error = standardize_prompt(Prompt::from_messages(messages))
+            .expect_err("system messages are rejected by default");
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: System messages are not allowed in the prompt or messages fields. Use the instructions option instead."
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_should_throw_invalid_prompt_error_when_prompt_messages_contain_a_system_message_by_default()
+     {
+        let messages = vec![
+            LanguageModelMessage::System(system_message("INSTRUCTIONS")),
+            user_text_message("Hello, world!"),
+        ];
+
+        let error = standardize_prompt(Prompt::from_prompt(PromptInput::messages(messages)))
+            .expect_err("system messages in prompt array are rejected by default");
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: System messages are not allowed in the prompt or messages fields. Use the instructions option instead."
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_should_allow_system_messages_in_messages_when_allow_system_in_messages_is_true()
+     {
+        let messages = vec![
+            LanguageModelMessage::System(system_message("INSTRUCTIONS")),
+            user_text_message("Hello, world!"),
+        ];
+
+        let standardized = standardize_prompt(
+            Prompt::from_messages(messages.clone()).with_allow_system_in_messages(true),
+        )
+        .expect("system messages are allowed when configured");
+
+        assert_eq!(standardized.instructions, None);
+        assert_eq!(standardized.messages, messages);
+    }
+
+    #[test]
+    fn standardize_prompt_should_allow_system_messages_in_prompt_messages_when_allow_system_in_messages_is_true()
+     {
+        let messages = vec![
+            LanguageModelMessage::System(system_message("INSTRUCTIONS")),
+            user_text_message("Hello, world!"),
+        ];
+
+        let standardized = standardize_prompt(
+            Prompt::from_prompt(PromptInput::messages(messages.clone()))
+                .with_allow_system_in_messages(true),
+        )
+        .expect("system messages in prompt array are allowed when configured");
+
+        assert_eq!(standardized.instructions, None);
+        assert_eq!(standardized.messages, messages);
+    }
+
+    #[test]
+    fn standardize_prompt_should_reject_allowed_system_message_parts_at_type_boundary() {
+        let prompt = serde_json::from_value::<Prompt>(json!({
+            "allowSystemInMessages": true,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "test"
+                        }
+                    ]
+                }
+            ]
+        }));
+
+        assert!(prompt.is_err());
+    }
+
+    #[test]
+    fn standardize_prompt_should_throw_invalid_prompt_error_when_messages_array_is_empty() {
+        let error = standardize_prompt(Prompt::from_messages(Vec::new()))
+            .expect_err("empty messages are rejected");
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: messages must not be empty"
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_should_support_system_model_message_instructions() {
+        let standardized = standardize_prompt(
+            Prompt::from_prompt("Hello, world!").with_instructions(system_message("INSTRUCTIONS")),
+        )
+        .expect("prompt standardizes");
+
+        assert_eq!(
+            standardized,
+            StandardizedPrompt::new(
+                Some(Instructions::message(system_message("INSTRUCTIONS"))),
+                vec![user_text_message("Hello, world!")],
+            )
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_should_support_array_of_system_model_message_instructions() {
+        let instructions = vec![
+            system_message("INSTRUCTIONS"),
+            system_message("INSTRUCTIONS 2"),
+        ];
+
+        let standardized = standardize_prompt(
+            Prompt::from_prompt("Hello, world!").with_instructions(instructions.clone()),
+        )
+        .expect("prompt standardizes");
+
+        assert_eq!(
+            standardized,
+            StandardizedPrompt::new(
+                Some(Instructions::messages(instructions)),
+                vec![user_text_message("Hello, world!")],
+            )
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_should_fall_back_to_system_when_instructions_is_not_defined() {
+        let standardized = standardize_prompt(
+            Prompt::from_prompt("Hello, world!").with_system(system_message("SYSTEM")),
+        )
+        .expect("prompt standardizes");
+
+        assert_eq!(
+            standardized,
+            StandardizedPrompt::new(
+                Some(Instructions::message(system_message("SYSTEM"))),
+                vec![user_text_message("Hello, world!")],
+            )
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_should_prefer_instructions_over_system() {
         let standardized = standardize_prompt(
             Prompt::from_prompt("Hello, world!")
                 .with_system("SYSTEM")
@@ -1163,19 +1316,6 @@ mod tests {
     }
 
     #[test]
-    fn standardize_prompt_falls_back_to_system_alias() {
-        let standardized =
-            standardize_prompt(Prompt::from_prompt("Hello").with_system(system_message("SYSTEM")))
-                .expect("prompt standardizes");
-
-        assert_eq!(
-            standardized.instructions,
-            Some(Instructions::message(system_message("SYSTEM")))
-        );
-        assert_eq!(standardized.messages, vec![user_text_message("Hello")]);
-    }
-
-    #[test]
     fn standardized_prompt_prepends_instructions_as_system_messages() {
         let prompt = StandardizedPrompt::new(
             Some(Instructions::messages(vec![
@@ -1193,40 +1333,6 @@ mod tests {
                 user_text_message("Hello"),
             ]
         );
-    }
-
-    #[test]
-    fn standardize_prompt_rejects_empty_message_arrays() {
-        let error = standardize_prompt(Prompt::from_messages(Vec::new()))
-            .expect_err("empty messages are rejected");
-
-        assert_eq!(
-            error.message(),
-            "Invalid prompt: messages must not be empty"
-        );
-    }
-
-    #[test]
-    fn standardize_prompt_enforces_system_message_location() {
-        let messages = vec![
-            LanguageModelMessage::System(system_message("SYSTEM")),
-            user_text_message("Hello"),
-        ];
-
-        let error = standardize_prompt(Prompt::from_messages(messages.clone()))
-            .expect_err("system messages are rejected by default");
-        assert_eq!(
-            error.message(),
-            "Invalid prompt: System messages are not allowed in the prompt or messages fields. Use the instructions option instead."
-        );
-
-        let standardized = standardize_prompt(
-            Prompt::from_messages(messages.clone()).with_allow_system_in_messages(true),
-        )
-        .expect("system messages are allowed when configured");
-
-        assert_eq!(standardized.messages, messages);
-        assert_eq!(standardized.instructions, None);
     }
 
     #[test]
