@@ -245,11 +245,12 @@ pub fn render_gfm_table(table: &TableElement) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    //! 1:1 port (subset) of
-    //! `packages/adapter-shared/src/card-utils.test.ts` covering the
-    //! standalone helpers shipped in slice 38. Tests for the deferred
-    //! `createEmojiConverter` and `cardToFallbackText` follow when their
-    //! `chat::emoji`/`chat::cards` JSX-layer dependencies land.
+    //! 1:1 port of `packages/adapter-shared/src/card-utils.test.ts`
+    //! covering the standalone helpers + `createEmojiConverter` +
+    //! `cardToFallbackText`. The Rust suite has more cases than
+    //! upstream (50 vs 39) because each chat-cards variant the helper
+    //! observes gets a dedicated test in Rust; upstream batches several
+    //! variants per `it()` block.
 
     use super::*;
     use chat_sdk_chat::cards::{TableOptions, table};
