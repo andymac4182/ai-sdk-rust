@@ -645,6 +645,85 @@ where
     node
 }
 
+/// Render a [`List`] node using the same indent + bullet/number
+/// rules upstream's `BaseFormatConverter.renderList` does. 1:1
+/// port: each item is `"  ".repeat(depth) + prefix + " " + content`
+/// where `prefix` is the `unordered_bullet` for unordered lists or
+/// `"<n>."` for ordered lists, with continuation lines indented by
+/// 2 more spaces. Nested lists recurse with `depth + 1`. The
+/// `node_converter` callback handles non-`List` children (delegating
+/// back to the caller's per-adapter renderer).
+pub fn render_list(
+    node: &List,
+    depth: usize,
+    node_converter: &dyn Fn(&Node) -> String,
+    unordered_bullet: &str,
+) -> String {
+    let indent: String = std::iter::repeat_n(' ', depth * 2).collect();
+    let start = node.start.unwrap_or(1) as usize;
+    let mut lines: Vec<String> = Vec::new();
+    for (i, item) in node.children.iter().enumerate() {
+        let prefix = if node.ordered {
+            format!("{}.", start + i)
+        } else {
+            unordered_bullet.to_string()
+        };
+        let mut is_first_content = true;
+        for child in get_node_children(item) {
+            if let Node::List(nested) = &child {
+                lines.push(render_list(nested, depth + 1, node_converter, unordered_bullet));
+                continue;
+            }
+            let text = node_converter(&child);
+            if text.trim().is_empty() {
+                continue;
+            }
+            if is_first_content {
+                lines.push(format!("{indent}{prefix} {text}"));
+                is_first_content = false;
+            } else {
+                lines.push(format!("{indent}  {text}"));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// Default fallback for converting an unknown mdast node to text.
+/// 1:1 port of upstream `BaseFormatConverter.defaultNodeToText`:
+/// recursively converts children if present via the supplied
+/// `node_converter`, otherwise returns `get_node_value(node)`.
+pub fn default_node_to_text(node: &Node, node_converter: &dyn Fn(&Node) -> String) -> String {
+    let children = get_node_children(node);
+    if !children.is_empty() {
+        return children
+            .iter()
+            .map(node_converter)
+            .collect::<Vec<_>>()
+            .concat();
+    }
+    get_node_value(node)
+}
+
+/// Template method for implementing `from_ast` with a node
+/// converter. 1:1 port of upstream
+/// `BaseFormatConverter.fromAstWithNodeConverter`. Iterates the
+/// `Root`'s children and joins per-node output with `"\n\n"`.
+/// Returns an empty string if the input is not a [`Node::Root`].
+pub fn from_ast_with_node_converter(
+    ast: &Node,
+    node_converter: &dyn Fn(&Node) -> String,
+) -> String {
+    let Node::Root(root) = ast else {
+        return node_converter(ast);
+    };
+    root.children
+        .iter()
+        .map(node_converter)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Parse a Markdown string and extract its plain text. 1:1 port of upstream
 /// `markdownToPlainText(markdown): string` — `parseMarkdown` then
 /// [`to_plain_text`]. Returns an empty string when the input fails to
@@ -2650,5 +2729,99 @@ mod tests {
         let input = "first paragraph\n\nsecond paragraph";
         let ast = parse_markdown(input).unwrap();
         assert_eq!(stringify_markdown(&ast), input);
+    }
+
+    // ---------- render_list (BaseFormatConverter helper) ----------
+
+    #[test]
+    fn render_list_unordered_with_dash_bullet() {
+        let ast = parse_markdown("- one\n- two\n- three").unwrap();
+        let list_node = match &ast {
+            Node::Root(r) => r.children.iter().find_map(|c| {
+                if let Node::List(l) = c { Some(l) } else { None }
+            }),
+            _ => None,
+        }
+        .expect("list");
+        let rendered = render_list(list_node, 0, &|n| match n {
+            Node::Text(t) => t.value.clone(),
+            other => to_plain_text(other),
+        }, "-");
+        assert!(rendered.contains("- one"));
+        assert!(rendered.contains("- two"));
+        assert!(rendered.contains("- three"));
+    }
+
+    #[test]
+    fn render_list_ordered_uses_start_index() {
+        let ast = parse_markdown("1. first\n2. second\n3. third").unwrap();
+        let list_node = match &ast {
+            Node::Root(r) => r.children.iter().find_map(|c| {
+                if let Node::List(l) = c { Some(l) } else { None }
+            }),
+            _ => None,
+        }
+        .expect("list");
+        let rendered = render_list(list_node, 0, &|n| match n {
+            Node::Text(t) => t.value.clone(),
+            other => to_plain_text(other),
+        }, "-");
+        assert!(rendered.contains("1. first"));
+        assert!(rendered.contains("2. second"));
+        assert!(rendered.contains("3. third"));
+    }
+
+    #[test]
+    fn render_list_indents_nested_lists_by_two_spaces_per_depth() {
+        let ast = parse_markdown("- top\n  - nested\n  - nested2").unwrap();
+        let list_node = match &ast {
+            Node::Root(r) => r.children.iter().find_map(|c| {
+                if let Node::List(l) = c { Some(l) } else { None }
+            }),
+            _ => None,
+        }
+        .expect("list");
+        let rendered = render_list(list_node, 0, &|n| match n {
+            Node::Text(t) => t.value.clone(),
+            other => to_plain_text(other),
+        }, "-");
+        assert!(rendered.contains("- top"));
+        // Nested items should be indented (2 spaces per depth level).
+        assert!(
+            rendered.contains("  - nested"),
+            "expected nested indent in: {rendered}"
+        );
+    }
+
+    // ---------- default_node_to_text ----------
+
+    #[test]
+    fn default_node_to_text_recurses_through_children() {
+        // Strong contains a Text child. defaultNodeToText returns the
+        // concatenated child output via the supplied converter.
+        let strong_node = Node::Strong(super::strong(vec![Node::Text(super::text("bold"))]));
+        let result =
+            default_node_to_text(&strong_node, &|n| to_plain_text(n));
+        assert_eq!(result, "bold");
+    }
+
+    #[test]
+    fn default_node_to_text_returns_value_for_leaf() {
+        // Text node has no children; defaultNodeToText returns getNodeValue.
+        let leaf = Node::Text(super::text("hello"));
+        let result =
+            default_node_to_text(&leaf, &|n| to_plain_text(n));
+        assert_eq!(result, "hello");
+    }
+
+    // ---------- from_ast_with_node_converter ----------
+
+    #[test]
+    fn from_ast_with_node_converter_joins_paragraphs_with_double_newline() {
+        let ast = parse_markdown("first paragraph\n\nsecond paragraph").unwrap();
+        let result = from_ast_with_node_converter(&ast, &|n| to_plain_text(n));
+        assert!(result.contains("first paragraph"));
+        assert!(result.contains("second paragraph"));
+        assert!(result.contains("\n\n"));
     }
 }

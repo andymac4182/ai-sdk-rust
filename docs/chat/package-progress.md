@@ -24,7 +24,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 581 chat tests. Phase 1.5 complete. Slice 159 extended Adapter trait with... |
+| `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 587 chat tests. Phase 1.5 complete. Slice 159 extended Adapter trait. Slice... |
 | `@chat-sdk/adapter-slack` | 55% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject (additive) + slice 160 edit/delete/react/typing... |
 | `@chat-sdk/adapter-teams` | 35% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message + slice 167 edit/delete/react/typing + slice 172 errors module... |
 | `@chat-sdk/adapter-gchat` | 38% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message + slice 168 edit/delete/react/typing + slice 190 markdown converter... |
