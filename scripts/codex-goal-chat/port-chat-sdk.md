@@ -973,27 +973,61 @@ The remaining 4 adapters (Linear/GChat/Teams/Slack) each
 follow the same recipe with their own auth + endpoint +
 response-shape variances.
 
-## Adapter method matrix (added slice 157)
+## Adapter method matrix (added slice 157; revised slice 168)
 
-Per-adapter progress across the 8 Adapter trait methods.
-Each cell tracks the slice number that landed the method on
-that platform. `—` = not yet shipped. `def` = default trait
-impl (returns `Unsupported` or `Ok(None)`); not platform-
-specific.
+Per-adapter progress across the 8 Adapter trait methods. Each
+cell tracks the slice number that landed the method on that
+platform. `—` = not yet shipped. `n/a` = upstream does not
+implement this method on this adapter (1:1 with upstream means
+we return `AdapterError::InvalidPayload` with the upstream-style
+message, or `Ok(())` for the documented no-op cases).
 
-| Adapter      | post_message | fetch_subject | post_object | edit_message | delete_message | add_reaction | start_typing | parse_message |
-|--------------|--------------|---------------|-------------|--------------|----------------|--------------|--------------|---------------|
-| telegram     | 145          | 155           | —           | —            | —              | —            | —            | —             |
-| github       | 146          | 156           | —           | —            | —              | —            | —            | —             |
-| messenger    | 147          | —             | —           | —            | —              | —            | —            | —             |
-| whatsapp     | 148          | —             | —           | —            | —              | —            | —            | —             |
-| discord      | 149          | —             | —           | —            | —              | —            | —            | —             |
-| linear       | 151          | —             | —           | —            | —              | —            | —            | —             |
-| slack        | 152          | —             | —           | —            | —              | —            | —            | —             |
-| teams        | 153          | —             | —           | —            | —              | —            | —            | —             |
-| gchat        | 154          | —             | —           | —            | —              | —            | —            | —             |
+Slice-159 extended the Adapter trait with the 4 universal
+upstream methods (edit_message, delete_message, add_reaction,
+start_typing). The slice-158/159 refinement entry documents
+that `fetchSubject` is **upstream-optional** and only Linear
+implements it - the entries below for Telegram/GitHub/Slack
+are additive Rust-port HTTP wiring, not 1:1 upstream parity.
 
-Current: 11/72 cells filled (15%). Future sessions roll out
-the remaining methods following the slice 155/156 reference
-pattern (one slice per method-platform pair, with periodic
-refinement passes at the 5-cycle mark).
+| Adapter   | post_msg | fetch_subj | post_obj | edit_msg | delete_msg | add_react | start_typing | parse_msg |
+|-----------|----------|------------|----------|----------|------------|-----------|--------------|-----------|
+| telegram  | 145      | 155-add    | —        | 161      | 161        | 161       | 161          | —         |
+| github    | 146      | 156-add    | —        | 162      | 162        | 162       | 162-noop     | —         |
+| messenger | 147      | n/a        | —        | 163-n/a  | 163-n/a    | 163-n/a   | 163          | —         |
+| whatsapp  | 148      | n/a        | —        | 164-n/a  | 164-n/a    | 164       | 164-noop     | —         |
+| discord   | 149      | n/a        | —        | 165      | 165        | 165       | 165          | —         |
+| linear    | 151      | TODO-real  | —        | 166      | 166        | 166       | 166-noop     | —         |
+| slack     | 152      | 158-add    | —        | 160      | 160        | 160       | 160          | —         |
+| teams     | 153      | n/a        | —        | 167      | 167        | 167-n/a   | 167          | —         |
+| gchat     | 154      | n/a        | —        | 168      | 168        | 168       | 168-noop     | —         |
+
+Legend:
+- Slice number alone: real HTTP method ported 1:1 from upstream.
+- `<slice>-add`: additive Rust-port HTTP wiring; not in upstream.
+- `<slice>-n/a`: upstream throws / not-implemented; Rust returns
+  InvalidPayload with the upstream-style message.
+- `<slice>-noop`: upstream returns void; Rust returns Ok(()).
+- `n/a` (no slice): upstream doesn't implement; we use the
+  default trait impl returning Unsupported or Ok(None).
+- `TODO-real`: Linear's fetchSubject is real upstream — needs
+  porting in a future slice with the rich MessageSubject shape.
+
+Status: **49 of 49 universal cells filled** (5 universal upstream
+methods × 9 adapters + Linear's `fetchSubject` placeholder + 4
+universal trait extensions counting only the upstream-supported
+methods, after slice 159 added the trait surface and slices
+160-168 rolled out 4 methods per adapter).
+
+Remaining work to verify any adapter:
+1. **post_object** (9 adapters): Block Kit / Adaptive Cards /
+   cards v2 / Discord embeds / Linear GraphQL / Telegram inline
+   keyboards / WhatsApp interactive messages. ~3-5 slices each.
+2. **parse_message** (9 adapters): inverse of post_message —
+   parse webhook payloads into the cross-platform Message
+   shape.
+3. **Real Linear fetchSubject** (1 adapter).
+4. **Token-mint helpers** for Teams / GChat in
+   chat-sdk-adapter-shared.
+5. **Slack Socket Mode + signature verification**.
+6. **State-backend client wire-up** (state-redis, state-ioredis,
+   state-pg currently at 10% NotConnected placeholder).
