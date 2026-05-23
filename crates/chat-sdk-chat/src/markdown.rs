@@ -205,6 +205,89 @@ fn children_mut(node: &mut Node) -> Option<&mut Vec<Node>> {
     }
 }
 
+/// Render an mdast [`Table`] node as a padded ASCII table. 1:1 port of
+/// upstream `tableToAscii(node: Table): string`. Used by adapters that
+/// lack native table support (Slack, GChat, Discord, Telegram).
+pub fn table_to_ascii(node: &Table) -> String {
+    let rows: Vec<Vec<String>> = node
+        .children
+        .iter()
+        .map(|row| match row {
+            Node::TableRow(row) => row.children.iter().map(|cell| cell.to_string()).collect(),
+            // Defensive: a Table should only contain TableRow per mdast
+            // spec, but never panic on malformed input.
+            other => vec![other.to_string()],
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let headers = &rows[0];
+    let data_rows = &rows[1..];
+    table_element_to_ascii(headers, data_rows)
+}
+
+/// Render headers + rows as a padded ASCII table. 1:1 port of upstream
+/// `tableElementToAscii(headers, rows): string`. Used by card
+/// `TableElement` fallback rendering. Pure string formatting with no
+/// AST dependency.
+///
+/// Column widths are the maximum cell length per column; cells are
+/// right-padded with spaces, joined with `" | "`, trailing whitespace
+/// trimmed. The header/data separator is `-`-filled width-segments
+/// joined with `"-|-"`.
+pub fn table_element_to_ascii(headers: &[String], rows: &[Vec<String>]) -> String {
+    let col_count = std::iter::once(headers.len())
+        .chain(rows.iter().map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    if col_count == 0 {
+        return String::new();
+    }
+
+    let mut col_widths = vec![0usize; col_count];
+    let all_rows = std::iter::once(headers).chain(rows.iter().map(|r| r.as_slice()));
+    for row in all_rows {
+        for (i, cell) in row.iter().take(col_count).enumerate() {
+            // `chars().count()` mirrors upstream JS `.length` for
+            // Unicode-friendly width measurement at the BMP-codepoint
+            // level (matching how upstream measures `String.length`).
+            let len = cell.chars().count();
+            if len > col_widths[i] {
+                col_widths[i] = len;
+            }
+        }
+    }
+
+    let format_row = |cells: &[String]| -> String {
+        let parts: Vec<String> = (0..col_count)
+            .map(|i| {
+                let empty = String::new();
+                let cell = cells.get(i).unwrap_or(&empty);
+                let len = cell.chars().count();
+                let pad = col_widths[i].saturating_sub(len);
+                format!("{cell}{}", " ".repeat(pad))
+            })
+            .collect();
+        parts.join(" | ").trim_end().to_string()
+    };
+
+    let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 2);
+    lines.push(format_row(headers));
+    let separator = col_widths
+        .iter()
+        .map(|w| "-".repeat(*w))
+        .collect::<Vec<_>>()
+        .join("-|-");
+    lines.push(separator);
+    for row in rows {
+        lines.push(format_row(row));
+    }
+    lines.join("\n")
+}
+
 /// Walk an mdast tree and transform descendants. 1:1 port of upstream
 /// `walkAst<T extends Content | Root>(node, visitor)`.
 ///
@@ -625,6 +708,100 @@ mod tests {
         // Non-leaf nodes return an empty string per upstream behavior.
         assert_eq!(get_node_value(&make_paragraph()), "");
         assert_eq!(get_node_value(&make_strong()), "");
+    }
+
+    // ------------------------------------------------------------------
+    // table_to_ascii / table_element_to_ascii — slice 30 ports of the
+    // upstream tableToAscii + tableElementToAscii describe blocks.
+    // ------------------------------------------------------------------
+
+    fn s(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn table_element_to_ascii_pads_columns_to_max_width() {
+        let headers = s(&["Name", "Status"]);
+        let rows = vec![s(&["alice", "OK"]), s(&["bob", "FAIL"])];
+        let out = table_element_to_ascii(&headers, &rows);
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "Name  | Status");
+        // Col widths are 5 ("alice") and 6 ("Status"); separator is
+        // "-".repeat(5) + "-|-" + "-".repeat(6) = 6 dashes + '|' + 7
+        // dashes = 14 chars total.
+        assert_eq!(lines[1], "------|-------");
+        assert_eq!(lines[2], "alice | OK");
+        assert_eq!(lines[3], "bob   | FAIL");
+    }
+
+    #[test]
+    fn table_element_to_ascii_returns_empty_string_for_empty_input() {
+        let empty: Vec<String> = Vec::new();
+        let no_rows: Vec<Vec<String>> = Vec::new();
+        assert_eq!(table_element_to_ascii(&empty, &no_rows), "");
+    }
+
+    #[test]
+    fn table_element_to_ascii_fills_short_rows_with_empty_padded_cells() {
+        let headers = s(&["A", "B", "C"]);
+        let rows = vec![s(&["1", "2"])]; // shorter than headers
+        let out = table_element_to_ascii(&headers, &rows);
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines[0], "A | B | C");
+        // Short row gets empty padded cell — trailing whitespace trimmed.
+        assert_eq!(lines[2], "1 | 2 |");
+    }
+
+    #[test]
+    fn table_to_ascii_round_trips_a_simple_mdast_table() {
+        // Build: | A | B |\n|---|---|\n| 1 | 2 |
+        let header_row = Node::TableRow(TableRow {
+            children: vec![
+                Node::TableCell(TableCell {
+                    children: vec![Node::Text(text("A"))],
+                    position: None,
+                }),
+                Node::TableCell(TableCell {
+                    children: vec![Node::Text(text("B"))],
+                    position: None,
+                }),
+            ],
+            position: None,
+        });
+        let data_row = Node::TableRow(TableRow {
+            children: vec![
+                Node::TableCell(TableCell {
+                    children: vec![Node::Text(text("1"))],
+                    position: None,
+                }),
+                Node::TableCell(TableCell {
+                    children: vec![Node::Text(text("2"))],
+                    position: None,
+                }),
+            ],
+            position: None,
+        });
+        let table = Table {
+            children: vec![header_row, data_row],
+            align: vec![],
+            position: None,
+        };
+        let out = table_to_ascii(&table);
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines[0], "A | B");
+        assert_eq!(lines[1], "--|--");
+        assert_eq!(lines[2], "1 | 2");
+    }
+
+    #[test]
+    fn table_to_ascii_returns_empty_for_a_table_with_no_rows() {
+        let table = Table {
+            children: vec![],
+            align: vec![],
+            position: None,
+        };
+        assert_eq!(table_to_ascii(&table), "");
     }
 
     // ------------------------------------------------------------------
