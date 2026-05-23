@@ -2120,6 +2120,7 @@ mod tests {
         create_openai,
     };
     use crate::embed::{EmbedManyOptions, embed_many};
+    use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelUsage};
     use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileData};
     use crate::generate_image::{GenerateImageOptions, GenerateImagePrompt, generate_image};
@@ -2629,6 +2630,215 @@ mod tests {
                 || Some("https://env.openai.example/v1".to_string()),
             ),
             "https://option.openai.example/v1"
+        );
+    }
+
+    #[test]
+    fn openai_embedding_should_extract_embedding() {
+        let provider = openai_embedding_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_embedding_fixture(),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .embedding("text-embedding-3-large")
+                .do_embed(openai_embedding_call_options()),
+        );
+
+        assert_eq!(
+            result.embeddings,
+            vec![
+                vec![
+                    0.0057293195,
+                    -0.012727811,
+                    0.020042092,
+                    -0.013437585,
+                    0.022833068
+                ],
+                vec![
+                    -0.037104916,
+                    -0.05178114,
+                    -0.008340587,
+                    0.001164541,
+                    -0.0035253682
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_embedding_should_expose_the_raw_response_headers() {
+        let provider = openai_embedding_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_embedding_fixture(),
+            Headers::from([("test-header".to_string(), "test-value".to_string())]),
+        );
+
+        let result = poll_ready(
+            provider
+                .embedding("text-embedding-3-large")
+                .do_embed(openai_embedding_call_options()),
+        );
+
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("test-header")),
+            Some(&"test-value".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_embedding_should_expose_the_raw_response_body() {
+        let response_body = openai_embedding_fixture();
+        let provider = openai_embedding_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            response_body.clone(),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .embedding("text-embedding-3-large")
+                .do_embed(openai_embedding_call_options()),
+        );
+
+        assert_eq!(
+            result.response.and_then(|response| response.body),
+            Some(response_body)
+        );
+    }
+
+    #[test]
+    fn openai_embedding_should_extract_usage() {
+        let provider = openai_embedding_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_embedding_fixture(),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .embedding("text-embedding-3-large")
+                .do_embed(openai_embedding_call_options()),
+        );
+
+        assert_eq!(result.usage, Some(EmbeddingModelUsage::new(12)));
+    }
+
+    #[test]
+    fn openai_embedding_should_pass_the_model_and_the_values() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_embedding_test_provider(
+            Arc::clone(&captured_requests),
+            openai_embedding_fixture(),
+            Headers::new(),
+        );
+
+        let _result = poll_ready(
+            provider
+                .embedding("text-embedding-3-large")
+                .do_embed(openai_embedding_call_options()),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "encoding_format": "float",
+                "input": ["sunny day at the beach", "rainy day in the city"],
+                "model": "text-embedding-3-large"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_embedding_should_pass_the_dimensions_setting() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_embedding_test_provider(
+            Arc::clone(&captured_requests),
+            openai_embedding_fixture(),
+            Headers::new(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": { "dimensions": 64 }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            provider
+                .embedding("text-embedding-3-large")
+                .do_embed(openai_embedding_call_options().with_provider_options(provider_options)),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "dimensions": 64,
+                "encoding_format": "float",
+                "input": ["sunny day at the beach", "rainy day in the city"],
+                "model": "text-embedding-3-large"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_embedding_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_embedding_test_provider(
+            Arc::clone(&captured_requests),
+            openai_embedding_fixture(),
+            Headers::new(),
+        )
+        .with_organization("test-organization")
+        .with_project("test-project")
+        .with_header("Custom-Provider-Header", "provider-header-value");
+
+        let _result = poll_ready(
+            provider.embedding("text-embedding-3-large").do_embed(
+                openai_embedding_call_options()
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let request = captured_request(&captured_requests);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("test-organization")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("test-project")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-provider-header")
+                .map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-request-header")
+                .map(String::as_str),
+            Some("request-header-value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai/"))
         );
     }
 
@@ -4710,6 +4920,74 @@ mod tests {
             .and_then(ProviderApiRequestBody::as_form_data)
             .cloned()
             .expect("form data body is captured")
+    }
+
+    fn openai_embedding_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(response_headers.clone()))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_transport(transport)
+    }
+
+    fn openai_embedding_call_options() -> EmbeddingModelCallOptions {
+        EmbeddingModelCallOptions::new(vec![
+            "sunny day at the beach".to_string(),
+            "rainy day in the city".to_string(),
+        ])
+    }
+
+    fn openai_embedding_fixture() -> JsonValue {
+        json!({
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": [
+                        0.0057293195,
+                        -0.012727811,
+                        0.020042092,
+                        -0.013437585,
+                        0.022833068
+                    ]
+                },
+                {
+                    "object": "embedding",
+                    "index": 1,
+                    "embedding": [
+                        -0.037104916,
+                        -0.05178114,
+                        -0.008340587,
+                        0.001164541,
+                        -0.0035253682
+                    ]
+                }
+            ],
+            "model": "text-embedding-3-large",
+            "usage": {
+                "prompt_tokens": 12,
+                "total_tokens": 12
+            }
+        })
     }
 
     fn openai_files_test_provider(
