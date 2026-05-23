@@ -7,6 +7,7 @@
 //! `whatsapp:<phone_number_id>:<customer_phone>`.
 
 pub mod cards;
+pub mod markdown;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
