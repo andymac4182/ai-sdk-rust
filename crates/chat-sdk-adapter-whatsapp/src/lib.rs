@@ -310,6 +310,65 @@ impl Adapter for WhatsappAdapter {
     }
 }
 
+/// Maximum message length the WhatsApp Cloud API accepts in a single
+/// send. 1:1 with upstream's `WHATSAPP_MESSAGE_LIMIT = 4096`.
+pub const WHATSAPP_MESSAGE_LIMIT: usize = 4096;
+
+/// Split text into chunks that fit within WhatsApp's message limit.
+/// 1:1 port of upstream's `splitMessage(text)`:
+///
+/// 1. Short-circuit when the input already fits in
+///    [`WHATSAPP_MESSAGE_LIMIT`] bytes.
+/// 2. Otherwise, in a loop slice off the first
+///    [`WHATSAPP_MESSAGE_LIMIT`]-byte prefix and look for a paragraph
+///    boundary (`\n\n`); fall back to a line boundary (`\n`); fall back
+///    to a hard byte cut at the limit. Reject break points that land
+///    before the halfway mark of the prefix (matches upstream's
+///    `breakIndex < WHATSAPP_MESSAGE_LIMIT / 2` guard, which prevents
+///    creating tiny "early" chunks).
+/// 3. `trim_end` the emitted chunk and `trim_start` the remainder
+///    around the break (so leading/trailing whitespace from the
+///    boundary itself is collapsed).
+///
+/// All slicing operates on bytes; `\n` is a single ASCII byte so the
+/// break-finder works for any UTF-8 input without splitting multi-byte
+/// sequences as long as the hard-cut byte position lands on a char
+/// boundary. (For the upstream test suite all inputs are ASCII.)
+pub fn split_message(text: &str) -> Vec<String> {
+    if text.len() <= WHATSAPP_MESSAGE_LIMIT {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut remaining = text;
+
+    while remaining.len() > WHATSAPP_MESSAGE_LIMIT {
+        let slice = &remaining[..WHATSAPP_MESSAGE_LIMIT];
+        let half = WHATSAPP_MESSAGE_LIMIT / 2;
+
+        // Try paragraph boundary first.
+        let mut break_index: Option<usize> = slice
+            .rfind("\n\n")
+            .filter(|&idx| idx >= half);
+
+        // Then line boundary.
+        if break_index.is_none() {
+            break_index = slice.rfind('\n').filter(|&idx| idx >= half);
+        }
+
+        // Hard break.
+        let cut = break_index.unwrap_or(WHATSAPP_MESSAGE_LIMIT);
+        chunks.push(remaining[..cut].trim_end().to_string());
+        remaining = remaining[cut..].trim_start();
+    }
+
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_string());
+    }
+
+    chunks
+}
+
 /// Encode a WhatsApp thread id. 1:1 with upstream's inline format:
 /// `whatsapp:<phone_number_id>:<customer_phone>`.
 pub fn encode_thread_id(phone_number_id: &str, customer_phone: &str) -> String {
@@ -408,6 +467,87 @@ mod tests {
     // ---------- channel_id_from_thread_id + is_dm ----------
     // 1:1 with upstream `adapter.channelIdFromThreadId(_) -> threadId`
     // and `adapter.isDM(_) -> true`. WhatsApp is DM-only.
+
+    #[test]
+    // ---------- splitMessage (8 upstream cases) ----------
+    // 1:1 with upstream `packages/adapter-whatsapp/src/index.test.ts`
+    // `describe("splitMessage")` describe block.
+
+    #[test]
+    fn split_message_returns_a_single_chunk_for_short_messages() {
+        assert_eq!(split_message("Hello world"), vec!["Hello world"]);
+    }
+
+    #[test]
+    fn split_message_returns_a_single_chunk_for_exactly_4096_chars() {
+        let text = "a".repeat(WHATSAPP_MESSAGE_LIMIT);
+        assert_eq!(split_message(&text), vec![text.clone()]);
+    }
+
+    #[test]
+    fn split_message_splits_on_paragraph_boundaries_when_possible() {
+        let p1 = "a".repeat(3000);
+        let p2 = "b".repeat(3000);
+        let text = format!("{p1}\n\n{p2}");
+        let result = split_message(&text);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], p1);
+        assert_eq!(result[1], p2);
+    }
+
+    #[test]
+    fn split_message_splits_on_line_boundaries_when_no_paragraph_break() {
+        let l1 = "a".repeat(3000);
+        let l2 = "b".repeat(3000);
+        let text = format!("{l1}\n{l2}");
+        let result = split_message(&text);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], l1);
+        assert_eq!(result[1], l2);
+    }
+
+    #[test]
+    fn split_message_hard_breaks_when_no_line_boundaries_exist() {
+        let text = "a".repeat(5000);
+        let result = split_message(&text);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "a".repeat(4096));
+        assert_eq!(result[1], "a".repeat(904));
+    }
+
+    #[test]
+    fn split_message_handles_three_chunks() {
+        let p1 = "a".repeat(4000);
+        let p2 = "b".repeat(4000);
+        let p3 = "c".repeat(4000);
+        let text = format!("{p1}\n\n{p2}\n\n{p3}");
+        let result = split_message(&text);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], p1);
+        assert_eq!(result[1], p2);
+        assert_eq!(result[2], p3);
+    }
+
+    #[test]
+    fn split_message_skips_break_that_is_too_early_in_the_chunk() {
+        // A paragraph break at position 1000 (< 2048 = limit/2) should
+        // be skipped per upstream's `< WHATSAPP_MESSAGE_LIMIT / 2`
+        // guard, falling through to a hard break at the limit.
+        let early = "a".repeat(1000);
+        let rest = "b".repeat(4500);
+        let text = format!("{early}\n\n{rest}");
+        let result = split_message(&text);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].len(), 4096);
+        assert_eq!(result[1].len(), text.len() - 4096);
+    }
+
+    #[test]
+    fn split_message_preserves_all_content_across_chunks() {
+        let text = "x".repeat(10000);
+        let result = split_message(&text);
+        assert_eq!(result.join(""), text);
+    }
 
     #[test]
     fn channel_id_from_thread_id_returns_the_thread_id_unchanged() {
