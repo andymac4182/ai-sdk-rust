@@ -103,6 +103,145 @@ pub fn ends_with_orphan_backslash(text: &str) -> bool {
     trailing % 2 == 1
 }
 
+/// Like [`find_unescaped_positions`] but skips occurrences inside
+/// fenced code blocks (```` ``` ````) or inline code spans
+/// (`` ` ``). 1:1 port of upstream
+/// `findUnescapedPositionsOutsideCode(text, marker)`. Returns
+/// character-indices in `text`.
+fn find_unescaped_positions_outside_code(text: &str, marker: char) -> Vec<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut positions: Vec<usize> = Vec::new();
+    let mut in_fence = false;
+    let mut in_inline = false;
+    let mut backslashes = 0usize;
+
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' {
+            backslashes += 1;
+            i += 1;
+            continue;
+        }
+
+        let escaped = backslashes % 2 == 1;
+        backslashes = 0;
+
+        if ch == '`' && !escaped {
+            let is_triple = chars.get(i + 1) == Some(&'`') && chars.get(i + 2) == Some(&'`');
+            if is_triple && !in_inline {
+                in_fence = !in_fence;
+                i += 3;
+                continue;
+            }
+            if !in_fence {
+                in_inline = !in_inline;
+            }
+            i += 1;
+            continue;
+        }
+
+        if ch == marker && !escaped && !in_fence && !in_inline {
+            positions.push(i);
+        }
+        i += 1;
+    }
+
+    positions
+}
+
+/// Drop any trailing characters that would produce invalid
+/// MarkdownV2 after a length-based truncation: orphan trailing `\`,
+/// unclosed entity delimiters (`*`, `_`, `~`, `` ` ``), or unmatched
+/// `[`. 1:1 port of upstream private `trimToMarkdownV2SafeBoundary`.
+fn trim_to_markdown_v2_safe_boundary(text: &str) -> String {
+    let mut current: Vec<char> = text.chars().collect();
+    let max_iterations = current.len() + 1;
+
+    for _ in 0..max_iterations {
+        let current_str: String = current.iter().collect();
+        if ends_with_orphan_backslash(&current_str) {
+            current.pop();
+            continue;
+        }
+
+        let mut min_unsafe_position = current.len();
+
+        for marker in ['*', '_', '~', '`'] {
+            let positions = if marker == '`' {
+                find_unescaped_positions(&current_str, marker)
+            } else {
+                find_unescaped_positions_outside_code(&current_str, marker)
+            };
+            if positions.len() % 2 == 1 {
+                let last_unpaired = *positions.last().unwrap_or(&current.len());
+                if last_unpaired < min_unsafe_position {
+                    min_unsafe_position = last_unpaired;
+                }
+            }
+        }
+
+        let open_brackets = find_unescaped_positions_outside_code(&current_str, '[');
+        let close_brackets = find_unescaped_positions_outside_code(&current_str, ']');
+        if open_brackets.len() > close_brackets.len() {
+            let last_open = *open_brackets.last().unwrap_or(&current.len());
+            if last_open < min_unsafe_position {
+                min_unsafe_position = last_open;
+            }
+        }
+
+        if min_unsafe_position >= current.len() {
+            return current.into_iter().collect();
+        }
+
+        current.truncate(min_unsafe_position);
+    }
+
+    current.into_iter().collect()
+}
+
+const MARKDOWN_V2_ELLIPSIS: &str = "\\.\\.\\.";
+const PLAIN_ELLIPSIS: &str = "...";
+
+/// Truncate a rendered string to `limit` characters, appending a
+/// parse-mode-appropriate ellipsis. 1:1 port of upstream
+/// `truncateForTelegram(text, limit, parseMode)`. For MarkdownV2 the
+/// naive slice + "..." is unsafe (`.` is reserved + the slice can
+/// leave orphan escape characters or cut through a paired entity),
+/// so this uses an escaped ellipsis (`\.\.\.`) and trims back past
+/// any unbalanced entity delimiter or orphan backslash before
+/// appending.
+pub fn truncate_for_telegram(text: &str, limit: usize, parse_mode: TelegramParseMode) -> String {
+    let is_markdown_v2 = matches!(parse_mode, TelegramParseMode::MarkdownV2);
+    let text_len = text.chars().count();
+
+    if text_len <= limit {
+        return if is_markdown_v2 {
+            trim_to_markdown_v2_safe_boundary(text)
+        } else {
+            text.to_string()
+        };
+    }
+
+    let ellipsis = if is_markdown_v2 {
+        MARKDOWN_V2_ELLIPSIS
+    } else {
+        PLAIN_ELLIPSIS
+    };
+    let ellipsis_len = ellipsis.chars().count();
+
+    let take = limit.saturating_sub(ellipsis_len);
+    let slice: String = text.chars().take(take).collect();
+
+    let slice = if is_markdown_v2 {
+        trim_to_markdown_v2_safe_boundary(&slice)
+    } else {
+        slice
+    };
+
+    format!("{slice}{ellipsis}")
+}
+
 /// Escape text inside a code block. 1:1 with upstream
 /// `escapeCodeBlock(text)`: only `` ` `` and `\` need escaping.
 pub fn escape_code_block(text: &str) -> String {
@@ -427,6 +566,86 @@ mod tests {
     #[test]
     fn ends_with_orphan_backslash_returns_false_for_empty_string() {
         assert!(!ends_with_orphan_backslash(""));
+    }
+
+    // ---------- truncateForTelegram (9 upstream cases) ----------
+
+    #[test]
+    fn truncate_for_telegram_returns_text_unchanged_when_under_limit() {
+        assert_eq!(
+            truncate_for_telegram("hello", 100, TelegramParseMode::Plain),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn truncate_for_telegram_truncates_plain_text_with_literal_ellipsis() {
+        let result = truncate_for_telegram(&"a".repeat(200), 100, TelegramParseMode::Plain);
+        assert_eq!(result.chars().count(), 100);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_for_telegram_truncates_markdown_v2_with_escaped_ellipsis() {
+        let result = truncate_for_telegram(&"a".repeat(200), 100, TelegramParseMode::MarkdownV2);
+        assert!(result.chars().count() <= 100);
+        assert!(result.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn truncate_for_telegram_strips_orphan_backslash_before_ellipsis() {
+        let input = format!("{}\\{}", "a".repeat(90), "b".repeat(50));
+        let result = truncate_for_telegram(&input, 100, TelegramParseMode::MarkdownV2);
+        let before_ellipsis = result.replace("\\.\\.\\.", "");
+        assert!(!ends_with_orphan_backslash(&before_ellipsis));
+        assert!(result.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn truncate_for_telegram_strips_unclosed_bold_before_ellipsis() {
+        let input = format!("{}*{}", "a".repeat(80), "b".repeat(100));
+        let result = truncate_for_telegram(&input, 100, TelegramParseMode::MarkdownV2);
+        let before_ellipsis = result.replace("\\.\\.\\.", "");
+        let stars = before_ellipsis.chars().filter(|&c| c == '*').count();
+        assert_eq!(stars % 2, 0);
+    }
+
+    #[test]
+    fn truncate_for_telegram_handles_input_that_is_all_special_chars() {
+        let input = ".".repeat(200);
+        let rendered = escape_markdown_v2(&input);
+        let result = truncate_for_telegram(&rendered, 100, TelegramParseMode::MarkdownV2);
+        assert!(result.chars().count() <= 100);
+        assert!(result.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn truncate_for_telegram_strips_unpaired_entity_markers_when_under_limit() {
+        let input = "Hello *world* _italic and bold *bold*";
+        let result = truncate_for_telegram(input, 4096, TelegramParseMode::MarkdownV2);
+        let underscores = result.chars().filter(|&c| c == '_').count();
+        assert_eq!(underscores % 2, 0);
+    }
+
+    #[test]
+    fn truncate_for_telegram_preserves_code_fences_with_literal_asterisks() {
+        let input = "```python\nprint(*args, **kwargs)\n```";
+        let result = truncate_for_telegram(input, 4096, TelegramParseMode::MarkdownV2);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_for_telegram_does_not_modify_plain_parse_mode_messages() {
+        let input = "Hello *world* _unclosed";
+        let result = truncate_for_telegram(input, 4096, TelegramParseMode::Plain);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_for_telegram_preserves_balanced_markdown_v2_under_the_limit() {
+        let input = "*bold* _italic_ ~strike~ `code`";
+        let result = truncate_for_telegram(input, 4096, TelegramParseMode::MarkdownV2);
+        assert_eq!(result, input);
     }
 
     // ---------- additive Rust-side ----------
