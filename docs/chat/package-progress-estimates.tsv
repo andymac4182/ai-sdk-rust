@@ -10,7 +10,7 @@ adapter-whatsapp	28	Slice 133 scaffold + slice 148 post_message + slice 164 edit
 adapter-discord	30	Slice 134 scaffold + slice 149 post_message + slice 165 edit_message + delete_message + add_reaction (PUT reactions/@me) + start_typing (POST typing). 19 tests. 6 of 8 Adapter methods.
 adapter-linear	28	Slice 136 scaffold + slice 151 post_message + slice 166 edit_message (commentUpdate) + delete_message + add_reaction (reactionCreate) + start_typing (no-op for comments). 19 tests. 5 of 8 Adapter methods (real fetchSubject still pending).
 adapter-slack	30	Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject (additive) + slice 160 edit_message + delete_message + add_reaction + start_typing. 20 tests. 6 of 8 Adapter methods (post_object + parse_message deferred).
-adapter-teams	15	Slice 138 scaffold + slice 153 post_message HTTP (Bot Framework activities + pre-minted bearer). 15 tests.
+adapter-teams	30	Slice 138 scaffold + slice 153 post_message + slice 167 edit_message + delete_message + add_reaction (not-implemented per upstream) + start_typing (TypingActivity). 20 tests. 6 of 8 Adapter methods.
 adapter-gchat	15	Slice 137 scaffold + slice 154 post_message HTTP (messages.create + pre-minted bearer + thread-reply option). 17 tests.
 state-redis	10	Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up deferred.
 state-ioredis	10	Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter. 11 tests. redis-rs cluster client deferred.
