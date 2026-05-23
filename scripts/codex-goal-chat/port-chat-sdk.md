@@ -607,3 +607,44 @@ many sessions. Each session inherits the ledger + per-file triage
 in `docs/chat/upstream-parity.md` as its pick-up point. The Stop
 hook will not be satisfiable inside a single conversation window
 until all of that lands.
+
+## Test-count hygiene (added slice 108)
+
+Every per-module slice that bumps a test count MUST also:
+
+1. Run `cargo test -p chat-sdk-chat --lib <module>::` and capture
+   the actual `test result: ok. N passed; ...` total.
+2. Update the matching `<module> N` token in
+   `docs/chat/package-progress-estimates.tsv`'s `chat` row basis
+   text so the basis stays truthful.
+3. Re-run `scripts/package-progress-table.sh --ledger
+   docs/chat/upstream-parity.md --estimates
+   docs/chat/package-progress-estimates.tsv --output
+   docs/chat/package-progress.md --title "Chat SDK Rust Package
+   Progress"` and commit the regenerated `package-progress.md`
+   alongside the tsv.
+4. Verify the diff: `git diff --stat docs/chat/` should always
+   include both the tsv AND the regenerated `package-progress.md`.
+
+Slices that touch only doc text (no test additions) can skip
+step 1 but MUST still complete steps 2-4 so the generated table
+stays in sync.
+
+## Merge-back execution (added slice 108)
+
+The atomic merge-back command chain is long (~8 piped commands).
+Two recurring failure modes:
+
+- **Background hangs.** If the harness backgrounds the chain
+  (and you don't pass `run_in_background: false`), the lock dir
+  can stay held while the parent shell idles. Always run the
+  merge-back synchronously (`run_in_background: false`, with a
+  120000ms `timeout`).
+- **Trailing pipes mask exit codes.** Never put `| tail`,
+  `| head`, or `| grep` inside the `&&` chain - those return 0
+  even on failure. Run the gate as a separate `cargo test ...`
+  command BEFORE the merge, then chain
+  `... && git push origin main && rmdir lock`.
+
+Both of these have caused validation-bypass incidents (see
+`docs/chat/goal-refinements.md` slices 80, 91, 108).
