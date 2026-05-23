@@ -383,6 +383,77 @@ pub fn is_card_element(value: &serde_json::Value) -> bool {
         .is_some_and(|s| s == "card")
 }
 
+/// Read the `type` discriminator off any card-related JSON object.
+/// Returns `None` when the input isn't an object or carries no
+/// `type` field. Mirrors upstream's inline `value.type` access used
+/// by the card renderer's `switch (child.type)` dispatch.
+pub fn card_child_kind(value: &serde_json::Value) -> Option<&str> {
+    value.get("type").and_then(serde_json::Value::as_str)
+}
+
+/// Predicate: does the JSON value look like a [`ButtonElement`]? 1:1
+/// with upstream's inline `child.type === "button"` check.
+pub fn is_button_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("button")
+}
+
+/// Predicate: does the JSON value look like a [`LinkButtonElement`]?
+/// 1:1 with upstream's inline `child.type === "link-button"` check.
+pub fn is_link_button_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("link-button")
+}
+
+/// Predicate: does the JSON value look like a card-level
+/// [`TextElement`]? 1:1 with upstream's inline `child.type === "text"`
+/// check used by the card renderer.
+pub fn is_card_text_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("text")
+}
+
+/// Predicate: does the JSON value look like an [`ImageElement`]? 1:1
+/// with upstream's inline `child.type === "image"` check.
+pub fn is_image_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("image")
+}
+
+/// Predicate: does the JSON value look like a [`DividerElement`]? 1:1
+/// with upstream's inline `child.type === "divider"` check.
+pub fn is_divider_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("divider")
+}
+
+/// Predicate: does the JSON value look like a [`SectionElement`]? 1:1
+/// with upstream's inline `child.type === "section"` check.
+pub fn is_section_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("section")
+}
+
+/// Predicate: does the JSON value look like an [`ActionsElement`]?
+/// 1:1 with upstream's inline `child.type === "actions"` check.
+pub fn is_actions_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("actions")
+}
+
+/// Predicate: does the JSON value look like a card-level
+/// [`LinkElement`]? 1:1 with upstream's inline `child.type === "link"`
+/// check used by the card renderer.
+pub fn is_card_link_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("link")
+}
+
+/// Predicate: does the JSON value look like a [`FieldsElement`]? 1:1
+/// with upstream's inline `child.type === "fields"` check at card
+/// callsites.
+pub fn is_card_fields_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("fields")
+}
+
+/// Predicate: does the JSON value look like a [`TableElement`]? 1:1
+/// with upstream's inline `child.type === "table"` check.
+pub fn is_table_element(value: &serde_json::Value) -> bool {
+    card_child_kind(value) == Some("table")
+}
+
 /// Children of an [`ActionsElement`]. 1:1 port of upstream's
 /// `(ButtonElement | LinkButtonElement | SelectElement | RadioSelectElement)[]`
 /// children-type union.
@@ -1367,5 +1438,97 @@ mod tests {
         assert_eq!(elem.children.len(), 2);
         let json = serde_json::to_string(&elem).unwrap();
         assert!(json.contains("\"type\":\"section\""));
+    }
+
+    // ---------- slice 116: card_child_kind + per-element predicates ----------
+
+    #[test]
+    fn card_child_kind_reads_the_type_field() {
+        assert_eq!(
+            card_child_kind(&serde_json::json!({"type": "button"})),
+            Some("button")
+        );
+        assert_eq!(
+            card_child_kind(&serde_json::json!({"type": "link-button"})),
+            Some("link-button")
+        );
+        assert!(card_child_kind(&serde_json::json!({})).is_none());
+        assert!(card_child_kind(&serde_json::json!(null)).is_none());
+        assert!(card_child_kind(&serde_json::json!("text")).is_none());
+        assert!(card_child_kind(&serde_json::json!([])).is_none());
+    }
+
+    #[test]
+    fn is_button_element_only_matches_button_type() {
+        assert!(is_button_element(&serde_json::json!({"type": "button"})));
+        assert!(!is_button_element(
+            &serde_json::json!({"type": "link-button"})
+        ));
+        assert!(!is_button_element(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn is_link_button_element_only_matches_link_button_type() {
+        assert!(is_link_button_element(
+            &serde_json::json!({"type": "link-button"})
+        ));
+        assert!(!is_link_button_element(
+            &serde_json::json!({"type": "button"})
+        ));
+    }
+
+    #[test]
+    fn is_card_text_element_only_matches_text_type() {
+        assert!(is_card_text_element(&serde_json::json!({"type": "text"})));
+        // text vs link-button vs button — only "text" matches.
+        assert!(!is_card_text_element(&serde_json::json!({"type": "link"})));
+    }
+
+    #[test]
+    fn is_image_element_only_matches_image_type() {
+        assert!(is_image_element(&serde_json::json!({"type": "image"})));
+        assert!(!is_image_element(&serde_json::json!({"type": "divider"})));
+    }
+
+    #[test]
+    fn is_divider_element_only_matches_divider_type() {
+        assert!(is_divider_element(&serde_json::json!({"type": "divider"})));
+        assert!(!is_divider_element(&serde_json::json!({"type": "image"})));
+    }
+
+    #[test]
+    fn is_section_element_only_matches_section_type() {
+        assert!(is_section_element(&serde_json::json!({"type": "section"})));
+        assert!(!is_section_element(&serde_json::json!({"type": "actions"})));
+    }
+
+    #[test]
+    fn is_actions_element_only_matches_actions_type() {
+        assert!(is_actions_element(&serde_json::json!({"type": "actions"})));
+        assert!(!is_actions_element(&serde_json::json!({"type": "section"})));
+    }
+
+    #[test]
+    fn is_card_link_element_only_matches_link_type() {
+        assert!(is_card_link_element(&serde_json::json!({"type": "link"})));
+        assert!(!is_card_link_element(
+            &serde_json::json!({"type": "link-button"})
+        ));
+    }
+
+    #[test]
+    fn is_card_fields_element_only_matches_fields_type() {
+        assert!(is_card_fields_element(
+            &serde_json::json!({"type": "fields"})
+        ));
+        assert!(!is_card_fields_element(
+            &serde_json::json!({"type": "field"})
+        ));
+    }
+
+    #[test]
+    fn is_table_element_only_matches_table_type() {
+        assert!(is_table_element(&serde_json::json!({"type": "table"})));
+        assert!(!is_table_element(&serde_json::json!({"type": "fields"})));
     }
 }
