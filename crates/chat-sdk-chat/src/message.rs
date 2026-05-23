@@ -151,6 +151,22 @@ impl Message {
         }
     }
 
+    /// Convert to a wire-shape [`SerializedMessage`] with inline
+    /// attachment payloads stripped. 1:1 with upstream
+    /// `Message.toJSON()`'s `data` / `fetchData` strip behavior. Use
+    /// this when emitting transcripts or workflow snapshots that must
+    /// not embed raw binary bytes (the receiver rehydrates via the
+    /// adapter's media-fetch path).
+    pub fn to_serialized_stripped(&self) -> SerializedMessage {
+        let mut serialized = self.to_serialized();
+        serialized.attachments = serialized
+            .attachments
+            .iter()
+            .map(Attachment::without_inline_data)
+            .collect();
+        serialized
+    }
+
     /// Reconstruct a [`Message`] from a [`SerializedMessage`]. 1:1
     /// port of upstream `Message.fromJSON(json): Message`.
     pub fn from_serialized(serialized: SerializedMessage) -> Self {
@@ -209,15 +225,18 @@ pub struct SerializedMessage {
 mod tests {
     //! Subset port of `packages/chat/src/message.test.ts`.
     //!
-    //! **Cases ported (10 of 19 upstream cases):**
+    //! **Cases ported (12 of 19 upstream cases):**
     //!
     //! - Constructor: both `constructor` cases (basic + isMention).
     //! - `toJSON`: type-tag literal, ISO date round-trip, fetchMetadata
     //!   passthrough, isMention flag.
+    //! - `toJSON` buffer strip: drops inline `data`, leaves
+    //!   `fetch_metadata` / URL / mime type intact, no-op when `data`
+    //!   already absent (the `to_serialized_stripped` helper).
     //! - `fromJSON`: present + absent `editedAt`.
     //! - Round-trip: preserves all fields.
     //!
-    //! **Cases deferred (9 of 19 upstream cases):**
+    //! **Cases deferred (7 of 19 upstream cases):**
     //!
     //! - The 5 `subject` getter cases (`should return null when no
     //!   adapter is set`, `... when adapter has no fetchSubject`, `...
@@ -229,9 +248,6 @@ mod tests {
     //! - The 2 `WORKFLOW_SERIALIZE` / `WORKFLOW_DESERIALIZE` cases use
     //!   a JS Symbol-key static method that has no Rust analogue
     //!   (Rust uses serde directly).
-    //! - The 2 attachment cases that pass `Buffer` /`fetchData`
-    //!   fields will land alongside the `Attachment::without_inline_data`
-    //!   helper documented in the module header.
     use super::*;
     use crate::markdown::root;
     use crate::types::{Attachment, AttachmentKind, Author, FileBytes, LinkPreview};
@@ -442,6 +458,65 @@ mod tests {
         assert_eq!(restored.metadata.date_sent, msg.metadata.date_sent);
         assert_eq!(restored.attachments[0].url, msg.attachments[0].url);
         assert_eq!(restored.links[0].url, "https://example.com");
+    }
+
+    // ---------- buffer-strip (upstream toJSON data/fetchData strip) ----------
+
+    #[test]
+    fn to_serialized_stripped_drops_inline_attachment_data() {
+        let mut msg = sample_message();
+        msg.attachments = vec![Attachment {
+            data: Some(FileBytes::from(b"binary-bytes".to_vec())),
+            fetch_metadata: Some(std::collections::HashMap::from([(
+                "mediaId".to_string(),
+                "123".to_string(),
+            )])),
+            height: None,
+            mime_type: Some("image/png".to_string()),
+            name: Some("img.png".to_string()),
+            size: Some(12),
+            kind: AttachmentKind::Image,
+            url: Some("https://example.com/img.png".to_string()),
+            width: None,
+        }];
+        let stripped = msg.to_serialized_stripped();
+        assert!(stripped.attachments[0].data.is_none());
+        // Every other field still flows through so the receiver can
+        // rehydrate via the adapter's media-fetch path.
+        assert_eq!(
+            stripped.attachments[0].url.as_deref(),
+            Some("https://example.com/img.png")
+        );
+        assert_eq!(
+            stripped.attachments[0].mime_type.as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(stripped.attachments[0].size, Some(12));
+        let fm = stripped.attachments[0].fetch_metadata.as_ref().unwrap();
+        assert_eq!(fm.get("mediaId").map(String::as_str), Some("123"));
+    }
+
+    #[test]
+    fn to_serialized_stripped_leaves_attachments_without_data_unchanged() {
+        let mut msg = sample_message();
+        msg.attachments = vec![Attachment {
+            data: None,
+            fetch_metadata: None,
+            height: None,
+            mime_type: None,
+            name: Some("f.pdf".to_string()),
+            size: None,
+            kind: AttachmentKind::File,
+            url: Some("https://example.com/f.pdf".to_string()),
+            width: None,
+        }];
+        let stripped = msg.to_serialized_stripped();
+        assert!(stripped.attachments[0].data.is_none());
+        assert_eq!(stripped.attachments[0].name.as_deref(), Some("f.pdf"));
+        assert_eq!(
+            stripped.attachments[0].url.as_deref(),
+            Some("https://example.com/f.pdf")
+        );
     }
 
     #[test]
