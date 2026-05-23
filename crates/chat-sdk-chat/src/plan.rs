@@ -405,6 +405,36 @@ mod tests {
     }
 
     #[test]
+    fn streaming_plan_new_stores_stream_and_options() {
+        let events = vec![serde_json::json!({"type": "text-delta", "textDelta": "hi"})];
+        let plan = StreamingPlan::new(
+            events.clone(),
+            StreamingPlanOptions {
+                group_tasks: Some(GroupTasksMode::Plan),
+                update_interval_ms: Some(500),
+                ..Default::default()
+            },
+        );
+        assert_eq!(plan.kind(), "stream");
+        assert_eq!(plan.fallback_text(), "");
+        assert_eq!(plan.stream(), events.as_slice());
+        assert_eq!(plan.options().group_tasks, Some(GroupTasksMode::Plan));
+        assert_eq!(plan.options().update_interval_ms, Some(500));
+    }
+
+    #[test]
+    fn group_tasks_mode_serializes_to_upstream_lowercase_strings() {
+        assert_eq!(
+            serde_json::to_string(&GroupTasksMode::Plan).unwrap(),
+            "\"plan\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GroupTasksMode::Timeline).unwrap(),
+            "\"timeline\""
+        );
+    }
+
+    #[test]
     fn plan_complete_in_model_marks_non_error_tasks_as_complete() {
         let mut plan = Plan::new(StartPlanOptions {
             initial_message: "Plan".into(),
@@ -594,6 +624,88 @@ impl Plan {
                 task.status = PlanTaskStatus::Complete;
             }
         }
+    }
+}
+
+/// Group-tasks display mode from [`StreamingPlanOptions`]. 1:1 port
+/// of upstream `groupTasks?: "plan" | "timeline"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupTasksMode {
+    /// All tasks grouped into a single plan block.
+    Plan,
+    /// Individual task cards shown inline with text (default).
+    Timeline,
+}
+
+/// Options for [`StreamingPlan`]. 1:1 port of upstream
+/// `interface StreamingPlanOptions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamingPlanOptions {
+    /// Block-Kit elements to attach when the stream stops (Slack only).
+    #[serde(rename = "endWith", default, skip_serializing_if = "Option::is_none")]
+    pub end_with: Option<Vec<serde_json::Value>>,
+    /// Display grouping mode (Slack only).
+    #[serde(
+        rename = "groupTasks",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub group_tasks: Option<GroupTasksMode>,
+    /// Minimum interval between updates in ms (default 500).
+    #[serde(
+        rename = "updateIntervalMs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub update_interval_ms: Option<u64>,
+}
+
+/// A `StreamingPlan` wraps an async iterable with platform-specific
+/// streaming options. 1:1 port (data-only) of upstream
+/// `class StreamingPlan implements PostableObject<StreamingPlanData>`.
+///
+/// **Stream representation.** Upstream stores the stream as an
+/// `AsyncIterable<string | StreamChunk | StreamEvent>`. The Rust port
+/// holds the lowered `Vec<serde_json::Value>` (or an iterator that
+/// produces them); adapters consuming a StreamingPlan should run the
+/// values through [`crate::from_full_stream::from_full_stream`] to
+/// extract text + StreamChunk yields. A future slice will swap the
+/// `Vec` for `futures::Stream` once an async-runtime decision has
+/// been made.
+#[derive(Debug, Clone)]
+pub struct StreamingPlan {
+    options: StreamingPlanOptions,
+    stream: Vec<serde_json::Value>,
+}
+
+impl StreamingPlan {
+    /// 1:1 port of upstream
+    /// `new StreamingPlan(stream, options = {}): StreamingPlan`.
+    pub fn new(stream: Vec<serde_json::Value>, options: StreamingPlanOptions) -> Self {
+        Self { options, stream }
+    }
+
+    /// Options pass-through. 1:1 with upstream `get options(): StreamingPlanOptions`.
+    pub fn options(&self) -> &StreamingPlanOptions {
+        &self.options
+    }
+
+    /// Stream pass-through. 1:1 with upstream
+    /// `get stream(): AsyncIterable<...>`.
+    pub fn stream(&self) -> &[serde_json::Value] {
+        &self.stream
+    }
+
+    /// Upstream `kind` discriminator: always `"stream"`.
+    pub fn kind(&self) -> &'static str {
+        "stream"
+    }
+
+    /// Upstream `getFallbackText(): string` — always empty for a
+    /// streaming plan.
+    pub fn fallback_text(&self) -> String {
+        String::new()
     }
 }
 
