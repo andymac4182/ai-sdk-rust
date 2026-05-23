@@ -105,6 +105,24 @@ impl DiscordAdapter {
     fn channel_messages_url(&self, channel_id: &str) -> String {
         format!("{}/channels/{channel_id}/messages", self.api_base())
     }
+
+    /// Derive channel id from a Discord thread id. 1:1 with upstream
+    /// `adapter.channelIdFromThreadId(threadId)` — splits on `:` and
+    /// joins the first 3 parts: `discord:<guild_id>:<channel_id>`.
+    /// If `thread_id` has fewer than 3 parts, returns the input
+    /// unchanged (upstream's `slice(0,3).join(":")` behavior).
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> String {
+        thread_id.splitn(4, ':').take(3).collect::<Vec<_>>().join(":")
+    }
+
+    /// Predicate: is the conversation a 1:1 DM? 1:1 with upstream's
+    /// `adapter.isDM(threadId)` which decodes and tests `guildId ==
+    /// "@me"`. Returns `None` when `thread_id` isn't a Discord-encoded
+    /// value.
+    pub fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(decoded.is_dm())
+    }
 }
 
 #[async_trait]
@@ -481,6 +499,46 @@ mod tests {
         assert!(decode_thread_id("discord:onlyone").is_none());
         assert!(decode_thread_id("discord::456").is_none());
         assert!(decode_thread_id("discord:123:").is_none());
+    }
+
+    #[test]
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`
+    // (first 3 colon-segments of any string) and `adapter.isDM(threadId)`
+    // (true iff guild_id == "@me").
+
+    #[test]
+    fn channel_id_from_thread_id_takes_first_three_colon_segments() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
+        // Channel-only thread id passes through unchanged.
+        assert_eq!(
+            adapter.channel_id_from_thread_id("discord:G1:C1"),
+            "discord:G1:C1"
+        );
+        // Channel-with-sub-thread strips the 4th segment.
+        assert_eq!(
+            adapter.channel_id_from_thread_id("discord:G1:C1:T9"),
+            "discord:G1:C1"
+        );
+        // DM channel preserves the @me guild marker.
+        assert_eq!(
+            adapter.channel_id_from_thread_id("discord:@me:DM1"),
+            "discord:@me:DM1"
+        );
+    }
+
+    #[test]
+    fn is_dm_true_for_at_me_guild_only() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
+        assert_eq!(adapter.is_dm("discord:@me:DM1"), Some(true));
+        assert_eq!(adapter.is_dm("discord:G1:C1"), Some(false));
+    }
+
+    #[test]
+    fn is_dm_returns_none_for_non_discord_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
+        assert_eq!(adapter.is_dm("slack:C1:1.0"), None);
+        assert_eq!(adapter.is_dm(""), None);
     }
 
     #[test]
