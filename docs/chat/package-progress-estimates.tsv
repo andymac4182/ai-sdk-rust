@@ -2,4 +2,4 @@
 # Conservative completion estimates for `in-progress` rows in docs/chat/upstream-parity.md.
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages.
-chat	72	Crate + colocated tests: errors 17 + logger 13 + chat_singleton 5 + emoji 42/42 (1:1) + callback_url 5/17 (pure helpers) + message 10/19 (portable subset) + plan 10 (additive). Module subsets: markdown 33/122, cards 29/28 incl card_to_fallback_text, modals 13/29 (data complete). 14 types layers + MessageMetadata + AdapterPostableMessage + Plan types + QueueEntry. 9/23 upstream test files partially mapped, 253 Rust tests total.
+chat	74	Crate + colocated tests: errors 17 + logger 13 + chat_singleton 5 + emoji 42/42 (1:1) + modals 25 (20 portable + 5 additive; 9 JSX deferred) + callback_url 5/17 + message 10/19 + plan 10 additive. Module subsets: markdown 33/122, cards 29/28 incl card_to_fallback_text. 14 types layers + MessageMetadata + AdapterPostableMessage + Plan types + QueueEntry. 9/23 upstream test files partially mapped, 265 Rust tests total.
