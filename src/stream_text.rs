@@ -4001,11 +4001,8 @@ fn ui_message_error_text(error: &JsonValue, options: &StreamTextUiMessageStreamO
     default_ui_message_error_text(error)
 }
 
-fn default_ui_message_error_text(error: &JsonValue) -> String {
-    error
-        .as_str()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "An error occurred.".to_string())
+fn default_ui_message_error_text(_error: &JsonValue) -> String {
+    "An error occurred.".to_string()
 }
 
 fn tool_call_error_text(error: Option<&str>, options: &StreamTextUiMessageStreamOptions) -> String {
@@ -4283,6 +4280,59 @@ mod tests {
         LanguageModelFinishReason {
             unified: FinishReason::Stop,
             raw: Some("stop".to_string()),
+        }
+    }
+
+    fn stream_text_result_from_parts(parts: Vec<LanguageModelStreamPart>) -> StreamTextResult {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(parts));
+        poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )))
+    }
+
+    #[derive(Default)]
+    struct MockStreamTextUiMessageResponse {
+        status: Option<u16>,
+        status_text: Option<String>,
+        headers: Headers,
+        chunks: Vec<Vec<u8>>,
+        ended: bool,
+    }
+
+    impl MockStreamTextUiMessageResponse {
+        fn decoded_chunks(&self) -> Vec<String> {
+            self.chunks
+                .iter()
+                .map(|chunk| String::from_utf8(chunk.clone()).expect("chunk decodes"))
+                .collect()
+        }
+    }
+
+    impl UiMessageStreamResponseWriter for MockStreamTextUiMessageResponse {
+        type Error = std::convert::Infallible;
+
+        fn write_head(
+            &mut self,
+            status: u16,
+            status_text: Option<&str>,
+            headers: &Headers,
+        ) -> Result<(), Self::Error> {
+            self.status = Some(status);
+            self.status_text = status_text.map(ToString::to_string);
+            self.headers = headers.clone();
+            Ok(())
+        }
+
+        fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), Self::Error> {
+            self.chunks.push(chunk.to_vec());
+            Ok(())
+        }
+
+        fn end(&mut self) -> Result<(), Self::Error> {
+            self.ended = true;
+            Ok(())
         }
     }
 
@@ -7162,6 +7212,63 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_to_ui_message_stream_masks_error_messages_by_default() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!("error"))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        assert!(
+            serde_json::to_value(result.to_ui_message_stream())
+                .expect("chunks serialize")
+                .as_array()
+                .expect("chunks are an array")
+                .contains(&json!({
+                    "type": "error",
+                    "errorText": "An error occurred."
+                }))
+        );
+    }
+
+    #[test]
+    fn stream_text_result_to_ui_message_stream_supports_custom_error_messages() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!("error"))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        assert!(
+            serde_json::to_value(result.to_ui_message_stream_with_options(
+                StreamTextUiMessageStreamOptions::new().with_on_error(|error| {
+                    format!(
+                        "custom error message: {}",
+                        error.as_str().unwrap_or("unknown error")
+                    )
+                }),
+            ))
+            .expect("chunks serialize")
+            .as_array()
+            .expect("chunks are an array")
+            .contains(&json!({
+                "type": "error",
+                "errorText": "custom error message: error"
+            }))
+        );
+    }
+
+    #[test]
     fn stream_text_result_applies_ui_message_metadata_callback_in_sequence() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -7476,6 +7583,324 @@ mod tests {
 
 "#
         );
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_writes_data_stream_parts() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response(&mut response, UiMessageStreamResponseInit::new())
+            .expect("mock response writes");
+
+        assert_eq!(response.status, Some(200));
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some(crate::ui_message_stream::UI_MESSAGE_STREAM_CONTENT_TYPE)
+        );
+        assert_eq!(
+            response
+                .headers
+                .get(crate::ui_message_stream::UI_MESSAGE_STREAM_VERSION_HEADER)
+                .map(String::as_str),
+            Some(crate::ui_message_stream::UI_MESSAGE_STREAM_VERSION)
+        );
+        assert_eq!(
+            response.decoded_chunks(),
+            vec![
+                r#"data: {"type":"start"}
+
+"#,
+                r#"data: {"type":"start-step"}
+
+"#,
+                r#"data: {"type":"text-start","id":"1"}
+
+"#,
+                r#"data: {"type":"text-delta","id":"1","delta":"Hello"}
+
+"#,
+                r#"data: {"type":"text-delta","id":"1","delta":", "}
+
+"#,
+                r#"data: {"type":"text-delta","id":"1","delta":"world!"}
+
+"#,
+                r#"data: {"type":"text-end","id":"1"}
+
+"#,
+                r#"data: {"type":"finish-step"}
+
+"#,
+                r#"data: {"type":"finish","finishReason":"stop"}
+
+"#,
+                "data: [DONE]\n\n"
+            ]
+        );
+        assert!(response.ended);
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_applies_custom_headers() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response(
+                &mut response,
+                UiMessageStreamResponseInit::new()
+                    .with_status(201)
+                    .with_status_text("foo")
+                    .with_header("custom-header", "custom-value"),
+            )
+            .expect("mock response writes");
+
+        assert_eq!(response.status, Some(201));
+        assert_eq!(response.status_text.as_deref(), Some("foo"));
+        assert_eq!(
+            response.headers.get("custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some(crate::ui_message_stream::UI_MESSAGE_STREAM_CONTENT_TYPE)
+        );
+        assert!(response.ended);
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_masks_error_messages_by_default() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!("error"))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response(&mut response, UiMessageStreamResponseInit::new())
+            .expect("mock response writes");
+
+        assert!(
+            response.decoded_chunks().iter().any(|chunk| {
+                chunk
+                    == r#"data: {"type":"error","errorText":"An error occurred."}
+
+"#
+            }),
+            "expected masked error chunk in {:?}",
+            response.decoded_chunks()
+        );
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_supports_custom_error_messages() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!("error"))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response_with_options(
+                &mut response,
+                UiMessageStreamResponseInit::new(),
+                StreamTextUiMessageStreamOptions::new().with_on_error(|error| {
+                    format!(
+                        "custom error message: {}",
+                        error.as_str().unwrap_or("unknown error")
+                    )
+                }),
+            )
+            .expect("mock response writes");
+
+        assert!(
+            response.decoded_chunks().iter().any(|chunk| {
+                chunk
+                    == r#"data: {"type":"error","errorText":"custom error message: error"}
+
+"#
+            }),
+            "expected custom error chunk in {:?}",
+            response.decoded_chunks()
+        );
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_omits_finish_when_send_finish_false() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, World!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response_with_options(
+                &mut response,
+                UiMessageStreamResponseInit::new(),
+                StreamTextUiMessageStreamOptions::new().with_send_finish(false),
+            )
+            .expect("mock response writes");
+
+        let chunks = response.decoded_chunks();
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| chunk.contains(r#""type":"finish""#)),
+            "finish chunk should be omitted: {chunks:?}"
+        );
+        assert!(chunks.iter().any(|chunk| chunk.contains("finish-step")));
+        assert_eq!(chunks.last().map(String::as_str), Some("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_writes_reasoning_content() {
+        let metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("1234567890"))]),
+        )]);
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+            LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                "1",
+                "I will open the conversation",
+            )),
+            LanguageModelStreamPart::ReasoningDelta(
+                LanguageModelReasoningDelta::new("1", "").with_provider_metadata(metadata.clone()),
+            ),
+            LanguageModelStreamPart::ReasoningEnd(
+                LanguageModelReasoningEnd::new("1").with_provider_metadata(metadata),
+            ),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hi")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response_with_options(
+                &mut response,
+                UiMessageStreamResponseInit::new(),
+                StreamTextUiMessageStreamOptions::new().with_send_reasoning(true),
+            )
+            .expect("mock response writes");
+
+        let chunks = response.decoded_chunks();
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk == "data: {\"type\":\"reasoning-start\",\"id\":\"1\"}\n\n")
+        );
+        assert!(chunks.iter().any(|chunk| {
+            chunk == "data: {\"type\":\"reasoning-delta\",\"id\":\"1\",\"delta\":\"I will open the conversation\"}\n\n"
+        }));
+        assert!(chunks.iter().any(|chunk| {
+            chunk == "data: {\"type\":\"reasoning-end\",\"id\":\"1\",\"providerMetadata\":{\"testProvider\":{\"signature\":\"1234567890\"}}}\n\n"
+        }));
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_writes_source_content() {
+        let metadata = ProviderMetadata::from([(
+            "provider".to_string(),
+            Map::from_iter([("custom".to_string(), json!("value"))]),
+        )]);
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::Source(LanguageModelSource::Url(
+                LanguageModelUrlSource::new("123", "https://example.com")
+                    .with_title("Example")
+                    .with_provider_metadata(metadata),
+            )),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response_with_options(
+                &mut response,
+                UiMessageStreamResponseInit::new(),
+                StreamTextUiMessageStreamOptions::new().with_send_sources(true),
+            )
+            .expect("mock response writes");
+
+        assert!(response.decoded_chunks().iter().any(|chunk| {
+            chunk == "data: {\"type\":\"source-url\",\"sourceId\":\"123\",\"url\":\"https://example.com\",\"title\":\"Example\",\"providerMetadata\":{\"provider\":{\"custom\":\"value\"}}}\n\n"
+        }));
+    }
+
+    #[test]
+    fn stream_text_result_pipe_ui_message_stream_to_response_writes_file_content() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::File(LanguageModelFile::new(
+                "text/plain",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("SGVsbG8=".to_string()),
+                },
+            )),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let mut response = MockStreamTextUiMessageResponse::default();
+
+        result
+            .pipe_ui_message_stream_to_response(&mut response, UiMessageStreamResponseInit::new())
+            .expect("mock response writes");
+
+        assert!(response.decoded_chunks().iter().any(|chunk| {
+            chunk
+                == "data: {\"type\":\"file\",\"mediaType\":\"text/plain\",\"url\":\"data:text/plain;base64,SGVsbG8=\"}\n\n"
+        }));
     }
 
     #[test]
