@@ -1299,9 +1299,10 @@ impl EmojiValue {
     }
 
     /// Render the upstream placeholder string used in formatted messages
-    /// and as the `toString()` / `toJSON()` value.
+    /// and as the `toString()` / `toJSON()` value. Upstream format:
+    /// `{{emoji:name}}`.
     pub fn placeholder(&self) -> String {
-        format!(":{}:", self.name)
+        format!("{{{{emoji:{}}}}}", self.name)
     }
 }
 
@@ -1313,8 +1314,9 @@ impl std::fmt::Display for EmojiValue {
 
 impl Serialize for EmojiValue {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Upstream toJSON() returns the `:name:` placeholder, not the raw
-        // name. Preserving that on the wire keeps message-formatting parity.
+        // Upstream toJSON() returns the `{{emoji:name}}` placeholder, not
+        // the raw name. Preserving that on the wire keeps message-formatting
+        // parity.
         serializer.serialize_str(&self.placeholder())
     }
 }
@@ -1323,11 +1325,11 @@ impl<'de> Deserialize<'de> for EmojiValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let placeholder = String::deserialize(deserializer)?;
         let name = placeholder
-            .strip_prefix(':')
-            .and_then(|s| s.strip_suffix(':'))
+            .strip_prefix("{{emoji:")
+            .and_then(|s| s.strip_suffix("}}"))
             .ok_or_else(|| {
                 serde::de::Error::custom(format!(
-                    "expected EmojiValue placeholder `:name:`, got {placeholder:?}"
+                    "expected EmojiValue placeholder `{{{{emoji:name}}}}`, got {placeholder:?}"
                 ))
             })?;
         Ok(Self {
@@ -1539,15 +1541,15 @@ mod tests {
     fn emoji_value_to_string_and_placeholder_match_upstream() {
         let value = EmojiValue::new("thumbs_up");
         assert_eq!(value.name, "thumbs_up");
-        assert_eq!(value.placeholder(), ":thumbs_up:");
-        assert_eq!(value.to_string(), ":thumbs_up:");
+        assert_eq!(value.placeholder(), "{{emoji:thumbs_up}}");
+        assert_eq!(value.to_string(), "{{emoji:thumbs_up}}");
     }
 
     #[test]
     fn emoji_value_serializes_as_placeholder_string() {
         let value = EmojiValue::new("heart");
         let json = serde_json::to_string(&value).unwrap();
-        assert_eq!(json, "\":heart:\"");
+        assert_eq!(json, "\"{{emoji:heart}}\"");
         let back: EmojiValue = serde_json::from_str(&json).unwrap();
         assert_eq!(back, value);
     }
@@ -1557,7 +1559,7 @@ mod tests {
         let bad = serde_json::from_str::<EmojiValue>("\"thumbs_up\"");
         assert!(
             bad.is_err(),
-            "expected placeholder without colons to fail to deserialize"
+            "expected placeholder without the {{{{emoji:...}}}} wrapper to fail"
         );
     }
 
