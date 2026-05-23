@@ -1256,6 +1256,28 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {}
 /// this trait, never define a new trait.
 pub trait StateAdapter: Send + Sync + std::fmt::Debug {}
 
+/// Metadata fields carried alongside the body of a [`crate::message::Message`].
+/// 1:1 port of upstream `interface MessageMetadata`.
+///
+/// **Date representation.** Upstream `dateSent: Date` is a JavaScript
+/// `Date` instance. On the Rust port the serialized wire form keeps the
+/// upstream ISO-8601 string, and the in-memory struct also stores the
+/// ISO string directly. Adopters that need a typed clock can parse the
+/// string with `chrono::DateTime` or `time::OffsetDateTime`; the Rust
+/// port refuses to take on a heavy datetime dependency just for this
+/// pass-through. The same applies to `edited_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageMetadata {
+    /// ISO-8601 UTC timestamp of when the message was sent.
+    #[serde(rename = "dateSent")]
+    pub date_sent: String,
+    /// Whether the message has been edited at least once.
+    pub edited: bool,
+    /// ISO-8601 UTC timestamp of the last edit, when present.
+    #[serde(rename = "editedAt", default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
+}
+
 /// Queue entry used by the per-thread message queues in the
 /// `queue`/`debounce`/`burst` concurrency strategies. 1:1 port of
 /// upstream `interface QueueEntry { enqueuedAt; expiresAt; message }`.
