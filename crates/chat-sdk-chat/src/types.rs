@@ -594,6 +594,74 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Formatted markdown content carried alongside chat messages and stored
+/// transcripts. Upstream this is `Root` from the `mdast` package — the
+/// canonical Markdown AST node — `export type FormattedContent = Root`.
+///
+/// **Placeholder representation.** The Rust port has not yet picked a
+/// markdown crate (`markdown-rs` is the leading candidate, see slice 19
+/// refinement-loop entry). Until that decision lands, `FormattedContent`
+/// is exposed as `serde_json::Value` so the upstream JSON shape of an
+/// mdast tree is preserved on the wire and consumers can introspect it.
+/// The future `chat-sdk-chat::markdown` module will replace this alias
+/// with a typed AST in a single coordinated slice; every downstream type
+/// that holds a `FormattedContent` will pick up the new type
+/// automatically.
+pub type FormattedContent = serde_json::Value;
+
+/// Input shape for appending a non-`Message` transcript entry (typically
+/// an assistant reply already posted via `thread.post`). 1:1 port of
+/// upstream `interface AppendInput`.
+///
+/// `formatted` is opaque mdast carried as [`FormattedContent`] (currently
+/// `serde_json::Value` — see the placeholder note on that alias).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppendInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<FormattedContent>,
+    #[serde(
+        rename = "platformMessageId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub platform_message_id: Option<String>,
+    pub role: TranscriptRole,
+    pub text: String,
+}
+
+/// Single entry in a cross-platform transcript. 1:1 port of upstream
+/// `interface TranscriptEntry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptEntry {
+    /// mdast AST. Present only when `transcripts.storeFormatted` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<FormattedContent>,
+    /// UUID assigned by the SDK at append time. Opaque — not
+    /// lexicographically sortable. Use [`Self::timestamp`] to reason about
+    /// ordering across stores.
+    pub id: String,
+    /// Originating adapter name.
+    pub platform: String,
+    /// Platform-native message ID, when known.
+    #[serde(
+        rename = "platformMessageId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub platform_message_id: Option<String>,
+    pub role: TranscriptRole,
+    /// Plain-text body — canonical field for prompt building.
+    pub text: String,
+    /// Originating thread ID.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// Milliseconds since epoch, set at append time on the SDK side.
+    pub timestamp: u64,
+    /// Cross-platform user key from the `IdentityResolver`.
+    #[serde(rename = "userKey")]
+    pub user_key: String,
+}
+
 /// Options for `Postable::post_ephemeral`. 1:1 port of upstream
 /// `interface PostEphemeralOptions`.
 ///
@@ -1498,6 +1566,83 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn append_input_round_trips_with_formatted_opaque_value() {
+        // FormattedContent today is serde_json::Value (see placeholder
+        // note). The wire shape must accept *any* JSON value there —
+        // future markdown-crate decision swaps the type but preserves
+        // this shape.
+        let input = AppendInput {
+            formatted: Some(serde_json::json!({"type": "root", "children": []})),
+            platform_message_id: Some("M1".to_string()),
+            role: TranscriptRole::Assistant,
+            text: "hi".to_string(),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("\"role\":\"assistant\""));
+        assert!(json.contains("\"platformMessageId\":\"M1\""));
+        assert!(json.contains("\"text\":\"hi\""));
+        assert!(json.contains("\"formatted\":{"));
+        let back: AppendInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, input);
+    }
+
+    #[test]
+    fn append_input_omits_optional_fields_when_absent() {
+        let input = AppendInput {
+            formatted: None,
+            platform_message_id: None,
+            role: TranscriptRole::User,
+            text: "msg".to_string(),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(!json.contains("formatted"));
+        assert!(!json.contains("platformMessageId"));
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"text\":\"msg\""));
+    }
+
+    #[test]
+    fn transcript_entry_round_trips_camelcase_keys_with_formatted_value() {
+        let entry = TranscriptEntry {
+            formatted: Some(serde_json::json!({"type": "root"})),
+            id: "uuid_1".to_string(),
+            platform: "slack".to_string(),
+            platform_message_id: Some("M2".to_string()),
+            role: TranscriptRole::User,
+            text: "hello".to_string(),
+            thread_id: "T9".to_string(),
+            timestamp: 1_700_000_000_000,
+            user_key: "user_x".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"platformMessageId\":\"M2\""));
+        assert!(json.contains("\"threadId\":\"T9\""));
+        assert!(json.contains("\"userKey\":\"user_x\""));
+        assert!(json.contains("\"timestamp\":1700000000000"));
+        assert!(json.contains("\"formatted\":{"));
+        let back: TranscriptEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn transcript_entry_omits_formatted_when_storage_disabled() {
+        let entry = TranscriptEntry {
+            formatted: None,
+            id: "uuid_2".to_string(),
+            platform: "teams".to_string(),
+            platform_message_id: None,
+            role: TranscriptRole::Assistant,
+            text: "reply".to_string(),
+            thread_id: "T10".to_string(),
+            timestamp: 1,
+            user_key: "user_y".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("formatted"));
+        assert!(!json.contains("platformMessageId"));
     }
 
     #[test]
