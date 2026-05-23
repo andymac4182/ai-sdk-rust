@@ -667,6 +667,19 @@ mod tests {
     }
 
     #[test]
+    fn filter_modal_children_filters_non_object_items() {
+        // 1:1 with upstream `filterModalChildren(["string", null, 42] as unknown[])`.
+        let input = vec![
+            serde_json::Value::String("string".to_string()),
+            serde_json::Value::Null,
+            serde_json::Value::Number(42.into()),
+        ];
+        let (kept, dropped) = filter_modal_children(&input);
+        assert_eq!(kept.len(), 0);
+        assert_eq!(dropped, 3);
+    }
+
+    #[test]
     fn filter_modal_children_drops_invalid_children_and_reports_count() {
         let input = vec![
             serde_json::to_value(text_input(TextInputOptions {
