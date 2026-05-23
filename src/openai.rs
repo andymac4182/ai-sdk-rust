@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::headers::Headers;
+use crate::json::JsonValue;
 use crate::open_responses::{
     OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
 };
@@ -17,6 +18,38 @@ use crate::provider_utils::without_trailing_slash;
 
 /// Default base URL for upstream `@ai-sdk/openai` API calls.
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// OpenAI-compatible error response payload.
+///
+/// Mirrors upstream `openaiErrorDataSchema`: `message` is required while
+/// provider-specific `type`, `param`, and string-or-number `code` fields are
+/// intentionally loose for OpenAI-compatible providers.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIErrorData {
+    /// Error details returned by the OpenAI-compatible API.
+    pub error: OpenAIErrorDetails,
+}
+
+/// Details from an OpenAI-compatible error response.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIErrorDetails {
+    /// Human-readable error message.
+    pub message: String,
+
+    /// Provider-specific error type.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+
+    /// Provider-specific parameter context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<JsonValue>,
+
+    /// Provider-specific string or numeric error code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<JsonValue>,
+}
 
 /// Settings for the upstream OpenAI provider.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -339,7 +372,10 @@ fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_OPENAI_BASE_URL, OpenAIProvider, OpenAIProviderSettings, create_openai};
+    use super::{
+        DEFAULT_OPENAI_BASE_URL, OpenAIErrorData, OpenAIProvider, OpenAIProviderSettings,
+        create_openai,
+    };
     use crate::embed::{EmbedManyOptions, embed_many};
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{GenerateImageOptions, GenerateImagePrompt, generate_image};
@@ -354,14 +390,46 @@ mod tests {
     use crate::prompt::Prompt;
     use crate::provider::{Provider, ProviderOptions};
     use crate::provider_utils::{
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse, Schema, safe_parse_json_with_schema,
     };
-    use serde_json::json;
+    use serde_json::{Map, json};
     use std::future::Future;
     use std::future::ready;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+
+    #[test]
+    fn openai_error_data_schema_should_parse_openrouter_resource_exhausted_error() {
+        let error = r#"
+{"error":{"message":"{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n","code":429}}
+"#;
+
+        let result = safe_parse_json_with_schema::<OpenAIErrorData>(error, Schema::new(Map::new()));
+        let expected = OpenAIErrorData {
+            error: super::OpenAIErrorDetails {
+                message: "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"
+                    .to_string(),
+                error_type: None,
+                param: None,
+                code: Some(json!(429)),
+            },
+        };
+
+        assert_eq!(
+            result,
+            ParseJsonResult::Success {
+                value: expected.clone(),
+                raw_value: json!({
+                    "error": {
+                        "message": expected.error.message,
+                        "code": 429
+                    }
+                })
+            }
+        );
+    }
 
     #[test]
     fn openai_provider_creates_chat_model_with_headers_and_base_url() {

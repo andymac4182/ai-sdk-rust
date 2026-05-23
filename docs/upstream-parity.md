@@ -632,6 +632,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   detector/pattern validation tests; `Intl.Segmenter` cases remain
   JavaScript-runtime-specific unless a future dependency-backed segmentation
   strategy is intentionally added.
+- 2026-05-23: `packages/openai` non-Responses error schema parity added
+  `OpenAIErrorData` / `OpenAIErrorDetails` plus
+  `openai_error_data_schema_should_parse_openrouter_resource_exhausted_error`
+  in `src/openai.rs`, mapping upstream `openai-error.test.ts` for OpenRouter's
+  nested resource-exhausted error body with a numeric `code`. The Rust schema
+  keeps upstream's loose OpenAI-compatible boundary: required `message`,
+  optional `type`, optional arbitrary `param`, and optional string-or-number
+  `code`.
 - 2026-05-23: `packages/ai` restricted telemetry dispatcher parity added
   named Rust counterparts for every portable upstream
   `generate-text/restricted-telemetry-dispatcher.test.ts` case:
@@ -3512,6 +3520,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    counterparts for every portable current Responses case. Continue
    `packages/openai` from non-Responses surfaces such as files, skills, speech,
    transcription, images, and non-Responses error mappings.
+   The upstream `openai-error.test.ts` non-Responses schema case now has the
+   named Rust counterpart
+   `openai_error_data_schema_should_parse_openrouter_resource_exhausted_error`.
 5. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
    expanding to unrelated providers. Continue choosing from `packages/ai`,
