@@ -1325,4 +1325,47 @@ mod tests {
         let json = serde_json::to_string(&elem).unwrap();
         assert!(json.contains("\"callbackUrl\":\"https://example.com/cb\""));
     }
+
+    // ---------- slice 103: 4 more 1:1 cards.test.ts cases ----------
+
+    #[test]
+    fn text_with_bold_style_carries_style_field_through() {
+        let elem = text("important", Some(TextStyle::Bold));
+        assert_eq!(elem.style, Some(TextStyle::Bold));
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"style\":\"bold\""));
+    }
+
+    #[test]
+    fn text_with_muted_style_carries_style_field_through() {
+        let elem = text("subtle", Some(TextStyle::Muted));
+        assert_eq!(elem.style, Some(TextStyle::Muted));
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"style\":\"muted\""));
+    }
+
+    #[test]
+    fn button_with_value_carries_payload_through_to_wire_shape() {
+        let elem = button(ButtonOptions {
+            id: "submit".to_string(),
+            label: "Submit".to_string(),
+            value: Some("payload-123".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(elem.value.as_deref(), Some("payload-123"));
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"value\":\"payload-123\""));
+    }
+
+    #[test]
+    fn section_creates_a_section_container_with_provided_children() {
+        let elem = section(vec![
+            card_text("First", None).into(),
+            card_text("Second", None).into(),
+        ]);
+        assert_eq!(elem.kind, SectionKind::Section);
+        assert_eq!(elem.children.len(), 2);
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"section\""));
+    }
 }
