@@ -75,16 +75,31 @@ impl GithubAdapterOptions {
 }
 
 /// GitHub adapter. 1:1 port (in progress) of upstream
-/// `class GithubAdapter implements Adapter`.
+/// `class GithubAdapter implements Adapter`. Holds a shared
+/// [`reqwest::Client`] from
+/// [`chat_sdk_adapter_shared::runtime::default_http_client`].
 #[derive(Debug, Clone)]
 pub struct GithubAdapter {
     options: GithubAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
 }
 
 impl GithubAdapter {
     /// 1:1 port of upstream `new GithubAdapter({ token, apiBase? })`.
     pub fn new(options: GithubAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+        }
+    }
+
+    /// Override the HTTP client (mostly useful for tests).
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
     }
 
     /// Read the auth token.
@@ -96,12 +111,73 @@ impl GithubAdapter {
     pub fn api_base(&self) -> &str {
         self.options.effective_api_base()
     }
+
+    /// Build the absolute URL for `POST /repos/{owner}/{repo}/issues/{number}/comments`.
+    /// 1:1 with upstream's inline comment-create URL template.
+    fn comments_url(&self, owner: &str, repo: &str, number: u64) -> String {
+        format!(
+            "{}/repos/{owner}/{repo}/issues/{number}/comments",
+            self.api_base()
+        )
+    }
 }
 
 #[async_trait]
 impl Adapter for GithubAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a comment on a GitHub issue or PR via the REST API.
+    /// 1:1 with upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes the chat-sdk thread id (`github:<owner>/<repo>:<number>`)
+    ///   into the issue/PR coordinates.
+    /// - POSTs JSON `{body: text}` to
+    ///   `<api_base>/repos/<owner>/<repo>/issues/<number>/comments`
+    ///   with the `Authorization: Bearer <token>` and
+    ///   `Accept: application/vnd.github+json` headers.
+    /// - Returns the comment id formatted as a decimal string.
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GitHub-encoded"))
+        })?;
+
+        let url = self.comments_url(&decoded.owner, &decoded.repo, decoded.number);
+        let body = serde_json::json!({ "body": text });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.token())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let message = json["message"].as_str().unwrap_or("GitHub API call failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {message}")));
+        }
+
+        let id = json["id"].as_i64().ok_or_else(|| {
+            AdapterError::InvalidPayload("GitHub comment-create response missing id".to_string())
+        })?;
+        Ok(id.to_string())
     }
 }
 
@@ -248,14 +324,27 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_github_thread_ids() {
         let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.post_message("github:vercel/chat:1", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GitHub-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_comments_url_builds_the_upstream_endpoint() {
+        let adapter = GithubAdapter::new(
+            GithubAdapterOptions::new("t").with_api_base("https://api.github.example"),
+        );
+        assert_eq!(
+            adapter.comments_url("vercel", "chat", 42),
+            "https://api.github.example/repos/vercel/chat/issues/42/comments"
+        );
     }
 
     #[test]
