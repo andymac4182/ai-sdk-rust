@@ -247,6 +247,26 @@ pub enum Emoji {
 /// `export type EmojiMapConfig = Partial<Record<Emoji, EmojiFormats>>`.
 pub type EmojiMapConfig = std::collections::HashMap<Emoji, EmojiFormats>;
 
+/// State-backend lock token. 1:1 port of upstream
+/// `interface Lock { expiresAt: number; threadId: string; token: string }`.
+///
+/// Locks are issued by [`StateAdapter::acquireLock`-equivalent] implementations
+/// (e.g. the future `chat-sdk-state-memory` crate). The `token` is the
+/// ownership credential — a release call only succeeds when the supplied
+/// token matches the stored one. `expiresAt` is a Unix timestamp in
+/// milliseconds (matching upstream `Date.now() + ttlMs`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Lock {
+    /// Unix-ms timestamp at which the lock auto-expires.
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
+    /// Thread the lock guards.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// Ownership credential — only the holder of this token can release.
+    pub token: String,
+}
+
 /// Immutable emoji value with object identity (upstream singletons).
 ///
 /// 1:1 port of upstream `interface EmojiValue` — see
@@ -530,5 +550,22 @@ mod tests {
             bad.is_err(),
             "expected placeholder without colons to fail to deserialize"
         );
+    }
+
+    #[test]
+    fn lock_round_trips_with_camelcase_fields() {
+        // Upstream JSON shape uses camelCase keys.
+        let lock = Lock {
+            expires_at: 1_700_000_000_000,
+            thread_id: "T123".to_string(),
+            token: "tok_abc".to_string(),
+        };
+        let json = serde_json::to_string(&lock).unwrap();
+        assert_eq!(
+            json,
+            "{\"expiresAt\":1700000000000,\"threadId\":\"T123\",\"token\":\"tok_abc\"}"
+        );
+        let back: Lock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, lock);
     }
 }

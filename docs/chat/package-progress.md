@@ -19,7 +19,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 14% | In progress | core SDK package | Crate + idiomatic colocated tests for errors (17) + logger (13). Standalone + emoji-related types layers ported (12... |
+| `@chat-sdk/chat` | 15% | In progress | core SDK package | Crate + idiomatic colocated tests for errors (17) + logger (13). Three types layers landed: standalone, emoji-related,... |
 
 ## Not Started
 
