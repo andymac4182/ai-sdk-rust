@@ -2181,8 +2181,10 @@ mod tests {
         let body = "word ".repeat(500);
         let node = parse_markdown(&body).expect("parses");
         let plain = to_plain_text(&node);
-        assert!(plain.contains("word "));
-        assert!(plain.len() >= 2500);
+        // markdown-rs collapses inline whitespace runs. Count "word"
+        // occurrences instead of total bytes.
+        let count = plain.matches("word").count();
+        assert_eq!(count, 500, "expected 500 word tokens, got {count}");
     }
 
     #[test]
