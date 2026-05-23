@@ -592,7 +592,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
-| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/tool-choice/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
+| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/tool-choice/tool-model-output/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
 | Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI-compatible non-language abort request forwarding, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream `get-error-message.test.ts` now has a one-to-one Rust test split for every portable original case, including null/undefined, strings, named/custom errors, custom `toString`, and JSON-like values. The package row remains in progress while v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented in the matching `ai-sdk-provider-utils` crate, including one-to-one `filterNullable`, `removeUndefinedEntries`, complete portable `validateTypes`/`safeValidateTypes`, complete portable `secureJsonParse`, complete portable `parseJSON`/`safeParseJSON`/`isParsableJson`, complete portable `injectJsonInstruction`, exact `mediaTypeToExtension` table rows, complete portable `normalizeHeaders` cases, complete portable `mapReasoningToProvider*` cases, complete portable `resolve` cases, complete portable `createToolNameMapping` cases, complete portable `withUserAgentSuffix`, `getRuntimeEnvironmentUserAgent`, `isUrlSupported`, `validateDownloadUrl`, `downloadBlob`/`DownloadError`, `getFromApi`, `delay`, `executeTool`, `isExecutableTool`, portable `asSchema`/`StandardSchema`, `readResponseWithSizeLimit`, `responseHandler`, `handleFetchError`, `convertAsyncIteratorToReadableStream`, `isJSONSerializable`, `StreamingToolCallTracker`, `serializeModelOptions`, and provider-utils `content-part` type-contract cases, complete portable `createIdGenerator`/`generateId` cases, complete portable `DelayedPromise` cases, portable `isProviderReference` cases, and complete portable `resolveProviderReference` cases plus abort propagation for GET, JSON, form-data, and generic POST request helpers, but exact browser stream/fetch parity and Zod adapter snapshots are incomplete or JavaScript-specific. |
@@ -604,6 +604,34 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` tool model-output parity added public
+  `create_tool_model_output` and `ToolModelOutputErrorMode` in
+  `src/generate_text.rs`, with named Rust counterparts for all 21 upstream
+  `prompt/create-tool-model-output.test.ts` cases:
+  `create_tool_model_output_should_return_error_type_with_string_value_when_is_error_is_true_and_output_is_string`,
+  `create_tool_model_output_should_return_error_type_with_json_stringified_value_when_is_error_is_true_and_output_is_not_string`,
+  `create_tool_model_output_should_return_error_type_with_json_stringified_value_for_complex_objects`,
+  `create_tool_model_output_should_use_tool_to_model_output_when_available`,
+  `create_tool_model_output_should_use_tool_to_model_output_with_complex_output`,
+  `create_tool_model_output_should_use_tool_to_model_output_returning_content_type`,
+  `create_tool_model_output_should_return_text_type_for_string_output`,
+  `create_tool_model_output_should_return_text_type_for_string_output_even_with_tool_that_has_no_to_model_output`,
+  `create_tool_model_output_should_return_text_type_for_empty_string`,
+  `create_tool_model_output_should_return_json_type_for_object_output`,
+  `create_tool_model_output_should_return_json_type_for_array_output`,
+  `create_tool_model_output_should_return_json_type_for_number_output`,
+  `create_tool_model_output_should_return_json_type_for_boolean_output`,
+  `create_tool_model_output_should_return_json_type_for_null_output`,
+  `create_tool_model_output_should_return_json_type_for_complex_nested_object`,
+  `create_tool_model_output_should_prioritize_is_error_over_tool_to_model_output`,
+  `create_tool_model_output_should_handle_undefined_output_in_error_text_case`,
+  `create_tool_model_output_should_use_null_for_undefined_output_in_error_json_case`,
+  `create_tool_model_output_should_use_null_for_undefined_output_in_non_error_case`,
+  `create_tool_model_output_should_pass_tool_call_id_to_tool_to_model_output`,
+  and `create_tool_model_output_should_pass_input_to_tool_to_model_output`.
+  Rust represents JavaScript `undefined` output as `None`, mapping it to
+  `unknown error` for text errors and JSON `null` for JSON/non-error outputs,
+  matching the upstream `toJSONValue` boundary.
 - 2026-05-23: `packages/ai` tool-choice preparation parity added
   `prepare_tool_choice` in `src/prompt.rs`, with named Rust counterparts for
   every upstream `prompt/prepare-tool-choice.test.ts` case: missing tool choice
@@ -3174,6 +3202,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    counterparts in `prepare_tool_choice_*`, covering missing/default `auto`,
    `none`, specific tool object with `toolName`, explicit `auto`, and
    `required`.
+   The upstream `prompt/create-tool-model-output.test.ts` cases now have named
+   Rust counterparts in `create_tool_model_output_should_*`, covering text and
+   JSON error modes, custom `toModelOutput`, content output, string and JSON
+   fallback output, `undefined`-as-null boundaries, and tool-call/input
+   argument forwarding.
    The upstream `model/resolve-model.test.ts` current-provider cases now have
    named Rust counterparts in `resolve_*_model_should_*`, covering direct model
    identity, Gateway fallback model-id resolution, explicit default-provider

@@ -6821,9 +6821,10 @@ fn provider_executed_approval_provider_options(approval_id: &str) -> ProviderOpt
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ToolModelOutputErrorMode {
+pub enum ToolModelOutputErrorMode {
     None,
     Text,
+    Json,
 }
 
 fn find_tool_for_result<'a>(
@@ -6841,7 +6842,7 @@ async fn tool_result_output(
         return create_tool_model_output(
             &tool_result.tool_call_id,
             &tool_result.input,
-            &tool_result.output,
+            Some(&tool_result.output),
             tool,
             ToolModelOutputErrorMode::Text,
         )
@@ -6851,32 +6852,40 @@ async fn tool_result_output(
     create_tool_model_output(
         &tool_result.tool_call_id,
         &tool_result.input,
-        &tool_result.output,
+        Some(&tool_result.output),
         tool,
         ToolModelOutputErrorMode::None,
     )
     .await
 }
 
-async fn create_tool_model_output(
+pub async fn create_tool_model_output(
     tool_call_id: &str,
     input: &JsonValue,
-    output: &JsonValue,
+    output: Option<&JsonValue>,
     tool: Option<&Tool>,
     error_mode: ToolModelOutputErrorMode,
 ) -> LanguageModelToolResultOutput {
     match error_mode {
         ToolModelOutputErrorMode::Text => {
-            if let JsonValue::String(message) = output {
+            if let Some(JsonValue::String(message)) = output {
                 return LanguageModelToolResultOutput::error_text(message.clone());
             }
 
-            return LanguageModelToolResultOutput::error_text(get_error_message(Some(
-                output as &dyn fmt::Display,
-            )));
+            return LanguageModelToolResultOutput::error_text(match output {
+                Some(output) => get_error_message(Some(output as &dyn fmt::Display)),
+                None => get_error_message(None),
+            });
+        }
+        ToolModelOutputErrorMode::Json => {
+            return LanguageModelToolResultOutput::error_json(
+                output.cloned().unwrap_or(JsonValue::Null),
+            );
         }
         ToolModelOutputErrorMode::None => {}
     }
+
+    let output = output.cloned().unwrap_or(JsonValue::Null);
 
     if let Some(model_output) = tool.and_then(|tool| {
         tool.model_output(ToolModelOutputOptions::new(
@@ -6889,8 +6898,8 @@ async fn create_tool_model_output(
     }
 
     match output {
-        JsonValue::String(output) => LanguageModelToolResultOutput::text(output.clone()),
-        output => LanguageModelToolResultOutput::json(output.clone()),
+        JsonValue::String(output) => LanguageModelToolResultOutput::text(output),
+        output => LanguageModelToolResultOutput::json(output),
     }
 }
 
@@ -7680,12 +7689,12 @@ mod tests {
         ToolApprovalResponseOutput, ToolApprovalStatus, ToolApprovalStatusKind,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
         ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
-        ToolInputRefinementError, TypedToolCall, TypedToolError, TypedToolOutputDenied,
-        TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
-        calculate_tokens_per_second, collect_tool_approvals, experimental_filter_active_tools,
-        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
-        resolve_tool_approval, step_count_is, sum_token_counts,
+        ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
+        TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
+        calculate_tokens_per_second, collect_tool_approvals, create_tool_model_output,
+        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
+        prune_messages, resolve_tool_approval, step_count_is, sum_token_counts,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -7704,8 +7713,9 @@ mod tests {
         LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
         LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
@@ -9044,6 +9054,430 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
         }
+    }
+
+    fn create_tool_model_output_test_result(
+        tool_call_id: &str,
+        input: JsonValue,
+        output: Option<JsonValue>,
+        tool: Option<&Tool>,
+        error_mode: ToolModelOutputErrorMode,
+    ) -> LanguageModelToolResultOutput {
+        poll_ready(create_tool_model_output(
+            tool_call_id,
+            &input,
+            output.as_ref(),
+            tool,
+            error_mode,
+        ))
+    }
+
+    fn empty_tool_schema() -> JsonObject {
+        json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone()
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_error_type_with_string_value_when_is_error_is_true_and_output_is_string()
+     {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("Error message")),
+            None,
+            ToolModelOutputErrorMode::Text,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::error_text("Error message")
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_error_type_with_json_stringified_value_when_is_error_is_true_and_output_is_not_string()
+     {
+        let error_output = json!({ "error": "Something went wrong", "code": 500 });
+        let expected = serde_json::to_string(&error_output).expect("error output serializes");
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(error_output),
+            None,
+            ToolModelOutputErrorMode::Text,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::error_text(expected));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_error_type_with_json_stringified_value_for_complex_objects()
+     {
+        let complex_error = json!({
+            "message": "Complex error",
+            "details": {
+                "timestamp": "2023-01-01T00:00:00Z",
+                "stack": ["line1", "line2"]
+            }
+        });
+        let expected = serde_json::to_string(&complex_error).expect("complex output serializes");
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(complex_error),
+            None,
+            ToolModelOutputErrorMode::Text,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::error_text(expected));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_use_tool_to_model_output_when_available() {
+        let mock_tool =
+            Tool::new("mock", empty_tool_schema()).with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::text(format!(
+                    "Custom output: {}",
+                    options.output.as_str().expect("output is text")
+                ))
+            });
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("test output")),
+            Some(&mock_tool),
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::text("Custom output: test output")
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_use_tool_to_model_output_with_complex_output() {
+        let mock_tool =
+            Tool::new("mock", empty_tool_schema()).with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::json(json!({
+                    "processed": options.output,
+                    "timestamp": "2023-01-01"
+                }))
+            });
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!({ "data": [1, 2, 3], "status": "success" })),
+            Some(&mock_tool),
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::json(json!({
+                "processed": {
+                    "data": [1, 2, 3],
+                    "status": "success"
+                },
+                "timestamp": "2023-01-01"
+            }))
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_use_tool_to_model_output_returning_content_type() {
+        let mock_tool =
+            Tool::new("mock", empty_tool_schema()).with_to_model_output(|_options| async move {
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                        "Here is the result:",
+                    )),
+                    LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                        "Additional information",
+                    )),
+                ])
+            });
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("any output")),
+            Some(&mock_tool),
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::content(vec![
+                LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                    "Here is the result:",
+                )),
+                LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                    "Additional information",
+                )),
+            ])
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_text_type_for_string_output() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("Simple string output")),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::text("Simple string output")
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_text_type_for_string_output_even_with_tool_that_has_no_to_model_output()
+     {
+        let tool =
+            Tool::new("mock", empty_tool_schema()).with_description("A tool without toModelOutput");
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("String output")),
+            Some(&tool),
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::text("String output"));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_text_type_for_empty_string() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("")),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::text(""));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_json_type_for_object_output() {
+        let output = json!({ "result": "success", "data": [1, 2, 3] });
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(output.clone()),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(output));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_json_type_for_array_output() {
+        let output = json!([1, 2, 3, "test"]);
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(output.clone()),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(output));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_json_type_for_number_output() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!(42)),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(json!(42)));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_json_type_for_boolean_output() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!(true)),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(json!(true)));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_json_type_for_null_output() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(JsonValue::Null),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(JsonValue::Null));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_return_json_type_for_complex_nested_object() {
+        let output = json!({
+            "user": {
+                "id": 123,
+                "name": "John Doe",
+                "preferences": {
+                    "theme": "dark",
+                    "notifications": true
+                }
+            },
+            "metadata": {
+                "timestamp": "2023-01-01T00:00:00Z",
+                "version": "1.0.0"
+            },
+            "items": [
+                { "id": 1, "name": "Item 1" },
+                { "id": 2, "name": "Item 2" }
+            ]
+        });
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(output.clone()),
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(output));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_prioritize_is_error_over_tool_to_model_output() {
+        let mock_tool =
+            Tool::new("mock", empty_tool_schema()).with_to_model_output(|_options| async move {
+                LanguageModelToolResultOutput::text("This should not be called")
+            });
+
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            Some(json!("Error occurred")),
+            Some(&mock_tool),
+            ToolModelOutputErrorMode::Text,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::error_text("Error occurred")
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_handle_undefined_output_in_error_text_case() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            None,
+            None,
+            ToolModelOutputErrorMode::Text,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::error_text("unknown error")
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_use_null_for_undefined_output_in_error_json_case() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            None,
+            None,
+            ToolModelOutputErrorMode::Json,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::error_json(JsonValue::Null)
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_use_null_for_undefined_output_in_non_error_case() {
+        let result = create_tool_model_output_test_result(
+            "123",
+            json!({}),
+            None,
+            None,
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::json(JsonValue::Null));
+    }
+
+    #[test]
+    fn create_tool_model_output_should_pass_tool_call_id_to_tool_to_model_output() {
+        let mock_tool =
+            Tool::new("mock", empty_tool_schema()).with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::text(format!(
+                    "Tool call ID: {}",
+                    options.tool_call_id
+                ))
+            });
+
+        let result = create_tool_model_output_test_result(
+            "2344",
+            json!({}),
+            Some(json!("test")),
+            Some(&mock_tool),
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(
+            result,
+            LanguageModelToolResultOutput::text("Tool call ID: 2344")
+        );
+    }
+
+    #[test]
+    fn create_tool_model_output_should_pass_input_to_tool_to_model_output() {
+        let mock_tool =
+            Tool::new("mock", empty_tool_schema()).with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::text(format!("Input: {}", options.input["number"]))
+            });
+
+        let result = create_tool_model_output_test_result(
+            "2344",
+            json!({ "number": 8877 }),
+            Some(json!("test")),
+            Some(&mock_tool),
+            ToolModelOutputErrorMode::None,
+        );
+
+        assert_eq!(result, LanguageModelToolResultOutput::text("Input: 8877"));
     }
 
     #[derive(Debug)]

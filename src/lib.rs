@@ -207,11 +207,12 @@ pub use generate_text::{
     ToolCallRepairFunction, ToolCallRepairFuture, ToolCallRepairOptions,
     ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
     ToolInputRefinement, ToolInputRefinementError, ToolInputRefinementFunction,
-    ToolInputRefinementFuture, TypedToolCall, TypedToolError, TypedToolOutputDenied,
-    TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
-    experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-    is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
-    prune_messages, resolve_tool_approval, step_count_is,
+    ToolInputRefinementFuture, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
+    TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
+    collect_tool_approvals, create_tool_model_output, experimental_filter_active_tools,
+    filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+    is_stop_condition_met, normalize_tool_approval_status, prune_messages, resolve_tool_approval,
+    step_count_is,
 };
 #[allow(deprecated)]
 pub use generate_text::{
