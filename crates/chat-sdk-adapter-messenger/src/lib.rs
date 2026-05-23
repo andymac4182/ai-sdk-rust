@@ -9,9 +9,9 @@
 //! `/me/messages` endpoint).
 //!
 //! Slice 173 corrected the wire format: earlier slices used the
-//! non-upstream `messenger:<page_id>:<user_id>` shape and `/v22.0/
+//! non-upstream `messenger:<page_id>:<user_id>` shape and `/v21.0/
 //! <page_id>/messages`. The corrected port matches upstream's
-//! `messenger:<recipient_id>` + `/v22.0/me/messages` and rejects
+//! `messenger:<recipient_id>` + `/v21.0/me/messages` and rejects
 //! multi-colon thread ids in `decode_thread_id` (1:1 with upstream
 //! `decodeThreadId` which throws `ValidationError` on multi-colon).
 
@@ -146,8 +146,8 @@ impl MessengerAdapter {
     }
 
     /// Graph API version used in URLs. 1:1 with upstream's
-    /// `apiVersion = "v22.0"` default.
-    pub const GRAPH_API_VERSION: &'static str = "v22.0";
+    /// `apiVersion = "v21.0"` default.
+    pub const GRAPH_API_VERSION: &'static str = "v21.0";
 
     /// Build the Send API URL. 1:1 with upstream's call to
     /// `graphApiFetch("me/messages", "POST", body)` which composes
@@ -203,7 +203,7 @@ impl Adapter for MessengerAdapter {
     ///
     /// - Decodes `messenger:<recipient_id>`.
     /// - POSTs JSON `{recipient: {id: recipient_id}, message: {text}}` to
-    ///   `<graph_base>/v22.0/me/messages?access_token=<page_token>`.
+    ///   `<graph_base>/v21.0/me/messages?access_token=<page_token>`.
     /// - Returns the Send API's `message_id` as the chat-sdk
     ///   message id.
     async fn post_message(
@@ -642,7 +642,7 @@ mod tests {
         );
         assert_eq!(
             adapter.send_url(),
-            "https://graph.example.test/v22.0/me/messages"
+            "https://graph.example.test/v21.0/me/messages"
         );
     }
 
