@@ -9,8 +9,8 @@ use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
     LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
-    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelUserContentPart,
-    LanguageModelUserMessage,
+    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolChoice,
+    LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
 use crate::provider_utils::convert_to_base64;
@@ -551,6 +551,13 @@ pub fn prepare_language_model_call_options(
     Ok(options)
 }
 
+/// Prepares the language-model tool choice for a high-level model call.
+pub fn prepare_tool_choice(
+    tool_choice: Option<LanguageModelToolChoice>,
+) -> LanguageModelToolChoice {
+    tool_choice.unwrap_or(LanguageModelToolChoice::Auto)
+}
+
 /// Request-facing controls for high-level SDK calls.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -871,8 +878,8 @@ mod tests {
     use crate::json::JsonValue;
     use crate::language_model::{
         LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolChoice,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
 
     use super::{
@@ -881,7 +888,7 @@ mod tests {
         StandardizedPrompt, TimeoutConfiguration, TimeoutConfigurationOptions,
         convert_data_content_to_base64_string, get_chunk_timeout_ms, get_step_timeout_ms,
         get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
-        standardize_prompt,
+        prepare_tool_choice, standardize_prompt,
     };
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
@@ -1388,6 +1395,61 @@ mod tests {
                 "maxOutputTokens": 100,
                 "temperature": 0.7
             })
+        );
+    }
+
+    #[test]
+    fn prepare_tool_choice_returns_auto_when_tool_choice_is_not_provided() {
+        let result = prepare_tool_choice(None);
+
+        assert_eq!(
+            serde_json::to_value(result).expect("tool choice serializes"),
+            json!({ "type": "auto" })
+        );
+    }
+
+    #[test]
+    fn prepare_tool_choice_handles_string_tool_choice_none() {
+        let result = prepare_tool_choice(Some(LanguageModelToolChoice::None));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("tool choice serializes"),
+            json!({ "type": "none" })
+        );
+    }
+
+    #[test]
+    fn prepare_tool_choice_handles_object_tool_choice() {
+        let result = prepare_tool_choice(Some(LanguageModelToolChoice::Tool {
+            tool_name: "tool2".to_string(),
+        }));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("tool choice serializes"),
+            json!({
+                "type": "tool",
+                "toolName": "tool2",
+            })
+        );
+    }
+
+    #[test]
+    fn prepare_tool_choice_handles_string_tool_choice_auto() {
+        let result = prepare_tool_choice(Some(LanguageModelToolChoice::Auto));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("tool choice serializes"),
+            json!({ "type": "auto" })
+        );
+    }
+
+    #[test]
+    fn prepare_tool_choice_handles_string_tool_choice_required() {
+        let result = prepare_tool_choice(Some(LanguageModelToolChoice::Required));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("tool choice serializes"),
+            json!({ "type": "required" })
         );
     }
 

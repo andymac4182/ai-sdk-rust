@@ -314,7 +314,7 @@ pub use prompt::{
     MessageConversionError, Prompt, PromptInput, PromptSource, RequestOptions, StandardizedPrompt,
     TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
     get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
-    prepare_language_model_call_options, standardize_prompt,
+    prepare_language_model_call_options, prepare_tool_choice, standardize_prompt,
 };
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
