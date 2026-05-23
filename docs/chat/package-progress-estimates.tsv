@@ -2,4 +2,5 @@
 # Conservative completion estimates for `in-progress` rows in docs/chat/upstream-parity.md.
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages — the generator will reject stale entries.
-chat	19	Crate + idiomatic colocated tests for errors (17) + logger (13). Five types layers landed: standalone, emoji-related, Lock primitive, concurrency/Author/UserInfo, DurationString/TranscriptsConfig (24 types + 30 additive serde tests). 2/23 upstream test files mapped; remaining types layers blocked on cards, channel, message, modals, postable-object, thread, plan, mock-adapter, markdown modules.
+chat	19	Crate + idiomatic colocated tests for errors (17) + logger (13). Five types layers landed (24 types + 30 additive serde tests). 2/23 upstream test files mapped; remaining types layers blocked on cards, channel, message, modals, postable-object, thread, plan, mock-adapter, markdown modules.
+adapter-shared	25	Crate + idiomatic colocated tests for errors (24 cases 1:1 with packages/adapter-shared/src/errors.test.ts). 1/4 upstream test files mapped. Remaining: adapter-utils, buffer-utils, card-utils modules.
