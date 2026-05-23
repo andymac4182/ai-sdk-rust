@@ -5,14 +5,16 @@ ledger="docs/upstream-parity.md"
 estimates="docs/package-progress-estimates.tsv"
 portable_only=0
 output=""
+title="AI SDK Rust Package Progress"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/package-progress-table.sh [--ledger PATH] [--estimates PATH] [--portable-only] [--output PATH]
+Usage: scripts/package-progress-table.sh [--ledger PATH] [--estimates PATH] [--portable-only] [--output PATH] [--title TITLE]
 
 Emits a Markdown package-completion report from docs/upstream-parity.md.
 For in-progress package rows, estimates come from docs/package-progress-estimates.tsv.
 Verified and JavaScript-only rows are always 100%; not-started rows are always 0%.
+--title overrides the report's top-level heading (default: "AI SDK Rust Package Progress").
 USAGE
 }
 
@@ -34,6 +36,10 @@ while [ "$#" -gt 0 ]; do
       output="$2"
       shift 2
       ;;
+    --title)
+      title="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -51,9 +57,10 @@ if [ ! -f "$ledger" ]; then
   exit 1
 fi
 
-ruby - "$ledger" "$estimates" "$portable_only" "$output" <<'RUBY'
-ledger_path, estimates_path, portable_only_arg, output_path = ARGV
+ruby - "$ledger" "$estimates" "$portable_only" "$output" "$title" <<'RUBY'
+ledger_path, estimates_path, portable_only_arg, output_path, title = ARGV
 portable_only = portable_only_arg == "1"
+title = "AI SDK Rust Package Progress" if title.nil? || title.empty?
 
 Estimate = Struct.new(:percent, :basis)
 
@@ -217,7 +224,7 @@ in_progress = rows.select { |row| row[:status] == "in-progress" }
 not_started = rows.select { |row| row[:status] == "not-started" }
 
 document = []
-document << "# AI SDK Rust Package Progress"
+document << "# #{title}"
 document << ""
 document << "_Generated from `#{escape_markdown(ledger_path)}` and `#{escape_markdown(estimates_path)}`._"
 document << ""
