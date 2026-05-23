@@ -322,6 +322,28 @@ mod tests {
         assert!(optional_string(&serde_json::json!({})).is_none());
     }
 
+    // ---------- import boundary (1 upstream case from webhook/boundary.test.ts) ----------
+
+    #[test]
+    fn webhook_import_boundary_does_not_pull_in_chat_or_adapter_shared() {
+        // 1:1 with upstream `packages/adapter-slack/src/webhook/
+        // boundary.test.ts`. Forbidden import strings built with
+        // concat! so the test body doesn't match itself.
+        let source = include_str!("webhook.rs");
+        let forbidden = [
+            concat!("use ", "chat_sdk_chat::"),
+            concat!("use ", "chat_sdk_adapter_shared::"),
+            concat!("use ", "tokio::"),
+            concat!("use ", "reqwest::"),
+        ];
+        for f in forbidden {
+            assert!(
+                !source.contains(f),
+                "webhook.rs must not import {f:?} (edge-runtime portable)"
+            );
+        }
+    }
+
     // ---------- verify_slack_signature_value ----------
 
     fn sign(body: &str, secret: &str, timestamp: &str) -> String {

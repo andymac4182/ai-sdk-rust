@@ -179,7 +179,10 @@ pub fn assert_slack_ok(method: &str, response: &SlackApiResponse) -> Result<(), 
     if response.ok {
         return Ok(());
     }
-    let error_code = response.error.clone().unwrap_or_else(|| "unknown_error".to_string());
+    let error_code = response
+        .error
+        .clone()
+        .unwrap_or_else(|| "unknown_error".to_string());
     Err(SlackApiError {
         method: method.to_string(),
         message: format!("Slack {method} failed: {error_code}"),
@@ -285,6 +288,28 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&encoded.body).unwrap();
         assert_eq!(parsed["channel"], "C123");
         assert_eq!(parsed["text"], "hi");
+    }
+
+    // ---------- import boundary (1 upstream case from api/boundary.test.ts) ----------
+
+    #[test]
+    fn api_import_boundary_does_not_pull_in_chat_or_adapter_shared() {
+        // 1:1 with upstream `packages/adapter-slack/src/api/boundary.test.ts`.
+        // Forbidden import strings are built with concat! so they don't
+        // match the test body itself when scanning the source file.
+        let source = include_str!("api.rs");
+        let forbidden_chat = concat!("use ", "chat_sdk_chat::");
+        let forbidden_shared = concat!("use ", "chat_sdk_adapter_shared::");
+        let forbidden_super = concat!("use ", "super::lib");
+        assert!(!source.contains(forbidden_chat), "api.rs imports chat_sdk_chat");
+        assert!(
+            !source.contains(forbidden_shared),
+            "api.rs imports chat_sdk_adapter_shared"
+        );
+        assert!(
+            !source.contains(forbidden_super),
+            "api.rs reaches back into the adapter's main module"
+        );
     }
 
     #[test]
