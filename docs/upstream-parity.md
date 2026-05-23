@@ -604,6 +604,37 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` UI last-assistant completion predicates now have
+  named Rust counterparts for every portable upstream
+  `last-assistant-message-is-complete-with-tool-calls.test.ts` and
+  `last-assistant-message-is-complete-with-approval-responses.test.ts` case.
+  The split replaced the aggregate catch-all tests with
+  `last_assistant_tool_calls_false_when_last_step_only_has_text`,
+  `last_assistant_tool_calls_true_when_text_follows_last_tool_result`,
+  `last_assistant_tool_calls_true_when_tool_has_output_error`,
+  `last_assistant_tool_calls_true_when_dynamic_tool_is_complete`,
+  `last_assistant_tool_calls_false_when_dynamic_tool_input_streaming`,
+  `last_assistant_tool_calls_false_when_dynamic_tool_has_input_only`,
+  `last_assistant_tool_calls_true_when_dynamic_tool_has_output_error`,
+  `last_assistant_tool_calls_true_when_regular_and_dynamic_tools_complete`,
+  `last_assistant_tool_calls_false_when_mixed_tools_include_incomplete`,
+  `last_assistant_tool_calls_true_when_last_step_dynamic_tool_complete`,
+  `last_assistant_tool_calls_false_when_last_step_dynamic_tool_incomplete`,
+  `last_assistant_tool_calls_false_for_provider_executed_tool_only`,
+  `last_assistant_approval_responses_false_when_messages_empty`,
+  `last_assistant_approval_responses_false_when_last_message_is_user`,
+  `last_assistant_approval_responses_false_when_last_step_has_no_tools`,
+  `last_assistant_approval_responses_false_when_no_tool_approval_responded`,
+  `last_assistant_approval_responses_false_when_any_tool_approval_requested`,
+  `last_assistant_approval_responses_true_when_non_provider_tool_approval_responded`,
+  `last_assistant_approval_responses_true_when_provider_tool_approval_responded`,
+  `last_assistant_approval_responses_true_when_terminal_tools_include_approval_response`,
+  `last_assistant_approval_responses_true_when_provider_approval_and_regular_output`,
+  `last_assistant_approval_responses_false_when_regular_tool_still_needs_approval`,
+  and
+  `last_assistant_approval_responses_false_when_only_prior_step_has_approval`.
+  The approval matrix now also covers the upstream provider-executed
+  approval-response plus regular output-available tool mix.
 - 2026-05-23: `packages/ai` `executeToolCall` timeout/callback-array/
   telemetry-wrapper parity added named counterparts for per-tool timeout abort
   signal creation and merging, per-tool timeout lookup without a default
@@ -1495,13 +1526,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   and reconnect/prepared override tests in `src/chat_transport.rs`, covering
   upstream `ChatTransport`/`HttpChatTransport` send and reconnect request
   construction without browser fetch/WebStream bindings.
-- 2026-05-19: UI-message last-assistant completion predicate parity added
-  `last_assistant_message_is_complete_with_tool_calls_matches_upstream_cases`
-  and
-  `last_assistant_message_is_complete_with_approval_responses_matches_upstream_cases`
-  in `src/ui_message_stream.rs`, covering last-step-only tool completion,
-  dynamic tools, provider-executed tool exclusion for ordinary tool-completion
-  checks, and approval-response terminal-state rules.
+- 2026-05-19: UI-message last-assistant completion predicate parity added the
+  initial aggregate checks in `src/ui_message_stream.rs`, covering
+  last-step-only tool completion, dynamic tools, provider-executed tool
+  exclusion for ordinary tool-completion checks, and approval-response
+  terminal-state rules. These aggregate checks were split into one named Rust
+  counterpart per upstream case on 2026-05-23.
 - 2026-05-19: `streamText.toUIMessageStream` portable non-text chunk parity
   added `stream_text_result_maps_portable_non_text_parts_to_ui_message_stream`
   in `src/stream_text.rs`, covering source gating, file and reasoning-file data

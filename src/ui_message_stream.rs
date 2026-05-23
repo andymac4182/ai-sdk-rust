@@ -3067,11 +3067,7 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
     }
 
     #[test]
-    fn last_assistant_message_is_complete_with_tool_calls_matches_upstream_cases() {
-        assert!(!last_assistant_message_is_complete_with_tool_calls(&[]));
-        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
-            UiMessage::new("user-id", UiMessageRole::User)
-        ]));
+    fn last_assistant_tool_calls_false_when_last_step_only_has_text() {
         assert!(!last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3086,6 +3082,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 json!({ "type": "text", "text": "The current weather is windy.", "state": "done" }),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_true_when_text_follows_last_tool_result() {
         assert!(last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3099,6 +3099,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 json!({ "type": "text", "text": "The current weather is windy.", "state": "done" }),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_true_when_tool_has_output_error() {
         assert!(last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3109,8 +3113,13 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                     json!({ "city": "New York" }),
                     None,
                 ),
+                json!({ "type": "text", "text": "The current weather is windy.", "state": "done" }),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_true_when_dynamic_tool_is_complete() {
         assert!(last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3123,6 +3132,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_false_when_dynamic_tool_input_streaming() {
         assert!(!last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3135,6 +3148,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_false_when_dynamic_tool_has_input_only() {
         assert!(!last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3147,6 +3164,26 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_true_when_dynamic_tool_has_output_error() {
+        assert!(last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "output-error",
+                    json!({ "location": "San Francisco" }),
+                    None,
+                ),
+            ])
+        ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_true_when_regular_and_dynamic_tools_complete() {
         assert!(last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3166,6 +3203,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_false_when_mixed_tools_include_incomplete() {
         assert!(!last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3185,6 +3226,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_true_when_last_step_dynamic_tool_complete() {
         assert!(last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3206,6 +3251,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 json!({ "type": "text", "text": "The current weather is cloudy.", "state": "done" }),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_false_when_last_step_dynamic_tool_incomplete() {
         assert!(!last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3226,6 +3275,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])
         ]));
+    }
+
+    #[test]
+    fn last_assistant_tool_calls_false_for_provider_executed_tool_only() {
         assert!(!last_assistant_message_is_complete_with_tool_calls(&[
             assistant_message(vec![
                 step_start_json(),
@@ -3248,25 +3301,41 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
     }
 
     #[test]
-    fn last_assistant_message_is_complete_with_approval_responses_matches_upstream_cases() {
+    fn last_assistant_approval_responses_false_when_messages_empty() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
             &[]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_false_when_last_message_is_user() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
-            &[UiMessage::new("user-id", UiMessageRole::User,)]
+            &[UiMessage::new("user-id", UiMessageRole::User)]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_false_when_last_step_has_no_tools() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
                 json!({ "type": "text", "text": "Hello", "state": "done" })
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_false_when_no_tool_approval_responded() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
                 approval_tool_part_json("tool-getWeather", "call-1", "approval-requested", false),
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_false_when_any_tool_approval_requested() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
@@ -3274,18 +3343,30 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 approval_tool_part_json("tool-getWeather", "call-2", "approval-requested", false),
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_true_when_non_provider_tool_approval_responded() {
         assert!(last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
                 approval_tool_part_json("tool-getWeather", "call-1", "approval-responded", false),
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_true_when_provider_tool_approval_responded() {
         assert!(last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
                 approval_tool_part_json("dynamic-tool", "call-1", "approval-responded", true),
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_true_when_terminal_tools_include_approval_response() {
         assert!(last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
@@ -3299,6 +3380,27 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 ),
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_true_when_provider_approval_and_regular_output() {
+        assert!(last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("dynamic-tool", "call-1", "approval-responded", true),
+                tool_part_json(
+                    "tool-getWeather",
+                    "call-2",
+                    "output-available",
+                    json!({ "city": "Tokyo" }),
+                    Some(json!({ "temperature": 25, "weather": "sunny" })),
+                ),
+            ])]
+        ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_false_when_regular_tool_still_needs_approval() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
@@ -3306,6 +3408,10 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 approval_tool_part_json("tool-getWeather", "call-2", "approval-requested", false),
             ])]
         ));
+    }
+
+    #[test]
+    fn last_assistant_approval_responses_false_when_only_prior_step_has_approval() {
         assert!(!last_assistant_message_is_complete_with_approval_responses(
             &[assistant_message(vec![
                 step_start_json(),
