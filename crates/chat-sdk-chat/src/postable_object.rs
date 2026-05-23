@@ -109,6 +109,69 @@ pub fn is_postable_object(value: &serde_json::Value) -> bool {
         .is_some_and(|s| s == POSTABLE_OBJECT_DISCRIMINATOR)
 }
 
+/// Build the wire envelope upstream's `PostableObject.toJSON()`
+/// produces. 1:1 with the upstream object literal:
+///
+/// ```text
+/// { $$typeof: Symbol.for("chat.postable"), kind, data, fallbackText }
+/// ```
+///
+/// `$$typeof` is lowered from a JS Symbol to the matching string
+/// discriminator on the wire (see [`POSTABLE_OBJECT_DISCRIMINATOR`]).
+pub fn postable_envelope(
+    kind: &str,
+    data: serde_json::Value,
+    fallback_text: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "$$typeof": POSTABLE_OBJECT_DISCRIMINATOR,
+        "kind": kind,
+        "data": data,
+        "fallbackText": fallback_text,
+    })
+}
+
+/// Read the `kind` discriminator off a postable envelope. 1:1 with
+/// upstream's `value.kind` access on the deserialized envelope used
+/// by `adapter.postObject` to route the object.
+///
+/// Returns `None` for any value that isn't a postable envelope or
+/// that's missing the `kind` field.
+pub fn postable_envelope_kind(value: &serde_json::Value) -> Option<&str> {
+    if !is_postable_object(value) {
+        return None;
+    }
+    value.get("kind").and_then(serde_json::Value::as_str)
+}
+
+/// Read the `data` payload off a postable envelope. 1:1 with
+/// upstream's `value.data` access used by `adapter.postObject` to
+/// hand off the typed payload to platform-specific renderers.
+///
+/// Returns `None` for any value that isn't a postable envelope.
+pub fn postable_envelope_data(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    if !is_postable_object(value) {
+        return None;
+    }
+    value.get("data")
+}
+
+/// Read the `fallbackText` field off a postable envelope. 1:1 with
+/// upstream's `value.fallbackText` access, used by adapters that
+/// don't natively support the envelope's `kind` and fall back to a
+/// plain-text post.
+///
+/// Returns `None` for any value that isn't a postable envelope or
+/// is missing the field.
+pub fn postable_envelope_fallback_text(value: &serde_json::Value) -> Option<&str> {
+    if !is_postable_object(value) {
+        return None;
+    }
+    value
+        .get("fallbackText")
+        .and_then(serde_json::Value::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     //! Additive coverage. Upstream ships no `postable-object.test.ts`;
@@ -141,5 +204,63 @@ mod tests {
     #[test]
     fn discriminator_matches_upstream_symbol_description() {
         assert_eq!(POSTABLE_OBJECT_DISCRIMINATOR, "chat.postable");
+    }
+
+    // ---------- slice 109: envelope builder + accessors ----------
+
+    #[test]
+    fn postable_envelope_builds_the_upstream_to_json_shape() {
+        let envelope = postable_envelope("plan", json!({"title": "T"}), "Plan: T");
+        assert!(is_postable_object(&envelope));
+        assert_eq!(envelope.get("kind").and_then(|v| v.as_str()), Some("plan"));
+        assert_eq!(envelope.get("data"), Some(&json!({"title": "T"})));
+        assert_eq!(
+            envelope.get("fallbackText").and_then(|v| v.as_str()),
+            Some("Plan: T")
+        );
+    }
+
+    #[test]
+    fn postable_envelope_kind_reads_the_kind_field() {
+        let envelope = postable_envelope("poll", json!({}), "");
+        assert_eq!(postable_envelope_kind(&envelope), Some("poll"));
+    }
+
+    #[test]
+    fn postable_envelope_kind_rejects_non_envelopes() {
+        assert!(postable_envelope_kind(&json!({"kind": "plan"})).is_none());
+        assert!(postable_envelope_kind(&json!(null)).is_none());
+        assert!(postable_envelope_kind(&json!("string")).is_none());
+    }
+
+    #[test]
+    fn postable_envelope_data_returns_the_payload_for_a_valid_envelope() {
+        let data = json!({"items": [1, 2, 3]});
+        let envelope = postable_envelope("kind", data.clone(), "fb");
+        assert_eq!(postable_envelope_data(&envelope), Some(&data));
+    }
+
+    #[test]
+    fn postable_envelope_data_returns_none_for_non_envelopes() {
+        assert!(postable_envelope_data(&json!({"data": {"x": 1}})).is_none());
+        assert!(postable_envelope_data(&json!([1, 2, 3])).is_none());
+    }
+
+    #[test]
+    fn postable_envelope_fallback_text_reads_the_fallback_field() {
+        let envelope = postable_envelope("plan", json!({}), "Plan: Title");
+        assert_eq!(
+            postable_envelope_fallback_text(&envelope),
+            Some("Plan: Title")
+        );
+    }
+
+    #[test]
+    fn postable_envelope_round_trips_through_serde_json() {
+        let envelope = postable_envelope("plan", json!({"title": "T"}), "Plan: T");
+        let text = serde_json::to_string(&envelope).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(is_postable_object(&parsed));
+        assert_eq!(postable_envelope_kind(&parsed), Some("plan"));
     }
 }
