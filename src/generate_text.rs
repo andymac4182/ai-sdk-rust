@@ -30,7 +30,8 @@ use crate::language_model::{
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
-    Prompt, prompt_has_url_files, standardize_and_convert_to_language_model_prompt,
+    Prompt, TimeoutConfiguration, get_tool_timeout_ms, prompt_has_url_files,
+    standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{
     ApiCallError, InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
@@ -39,13 +40,14 @@ use crate::provider::{
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     Base64DecodeError, ExecuteToolOutput, ExperimentalSandbox, IdGeneratorOptions, Tool,
-    ToolExecutionOptions, ToolInputAvailableOptions, ToolInputDeltaOptions, ToolModelOutputOptions,
-    ToolNeedsApprovalOptions, convert_base64_to_bytes, convert_bytes_to_base64,
-    create_id_generator, execute_tool, generate_id, prepare_tools_with_context,
+    ToolExecutionError, ToolExecutionOptions, ToolInputAvailableOptions, ToolInputDeltaOptions,
+    ToolModelOutputOptions, ToolNeedsApprovalOptions, convert_base64_to_bytes,
+    convert_bytes_to_base64, create_id_generator, execute_tool, generate_id,
+    prepare_tools_with_context,
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher};
-use crate::util::{Callback, notify};
+use crate::util::{AbortSignalSource, Callback, NotifyCallbacks, merge_abort_signals, notify};
 use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
@@ -1012,7 +1014,7 @@ pub type OnToolExecutionStartCallback<'a> = GenerateTextOnToolExecutionStartFunc
 /// Callback wrapper for upstream `onToolExecutionStart`.
 #[derive(Clone)]
 pub struct GenerateTextOnToolExecutionStart<'a> {
-    on_tool_execution_start: Callback<'a, GenerateTextToolExecutionStartEvent>,
+    on_tool_execution_start: NotifyCallbacks<'a, GenerateTextToolExecutionStartEvent>,
 }
 
 impl<'a> GenerateTextOnToolExecutionStart<'a> {
@@ -1023,7 +1025,27 @@ impl<'a> GenerateTextOnToolExecutionStart<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_tool_execution_start: Callback::infallible(on_tool_execution_start),
+            on_tool_execution_start: NotifyCallbacks::one(Some(Callback::infallible(
+                on_tool_execution_start,
+            ))),
+        }
+    }
+
+    /// Creates a tool-execution start callback list.
+    pub fn many(
+        callbacks: impl IntoIterator<Item = Callback<'a, GenerateTextToolExecutionStartEvent>>,
+    ) -> Self {
+        Self {
+            on_tool_execution_start: NotifyCallbacks::many(callbacks),
+        }
+    }
+
+    /// Creates a tool-execution start callback list with optional entries skipped.
+    pub fn many_optional(
+        callbacks: impl IntoIterator<Item = Option<Callback<'a, GenerateTextToolExecutionStartEvent>>>,
+    ) -> Self {
+        Self {
+            on_tool_execution_start: NotifyCallbacks::many_optional(callbacks),
         }
     }
 
@@ -1057,7 +1079,7 @@ pub type OnToolExecutionEndCallback<'a> = GenerateTextOnToolExecutionEndFunction
 /// Callback wrapper for upstream `onToolExecutionEnd`.
 #[derive(Clone)]
 pub struct GenerateTextOnToolExecutionEnd<'a> {
-    on_tool_execution_end: Callback<'a, GenerateTextToolExecutionEndEvent>,
+    on_tool_execution_end: NotifyCallbacks<'a, GenerateTextToolExecutionEndEvent>,
 }
 
 impl<'a> GenerateTextOnToolExecutionEnd<'a> {
@@ -1068,7 +1090,27 @@ impl<'a> GenerateTextOnToolExecutionEnd<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_tool_execution_end: Callback::infallible(on_tool_execution_end),
+            on_tool_execution_end: NotifyCallbacks::one(Some(Callback::infallible(
+                on_tool_execution_end,
+            ))),
+        }
+    }
+
+    /// Creates a tool-execution end callback list.
+    pub fn many(
+        callbacks: impl IntoIterator<Item = Callback<'a, GenerateTextToolExecutionEndEvent>>,
+    ) -> Self {
+        Self {
+            on_tool_execution_end: NotifyCallbacks::many(callbacks),
+        }
+    }
+
+    /// Creates a tool-execution end callback list with optional entries skipped.
+    pub fn many_optional(
+        callbacks: impl IntoIterator<Item = Option<Callback<'a, GenerateTextToolExecutionEndEvent>>>,
+    ) -> Self {
+        Self {
+            on_tool_execution_end: NotifyCallbacks::many_optional(callbacks),
         }
     }
 
@@ -1085,6 +1127,98 @@ impl fmt::Debug for GenerateTextOnToolExecutionEnd<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GenerateTextOnToolExecutionEnd")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a tool execution closure wrapped by telemetry.
+pub type GenerateTextExecuteToolInTelemetryContextFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<ExecuteToolOutput>, ToolExecutionError>> + Send + 'a>>;
+
+/// Closure that runs a local Rust tool executor.
+pub type GenerateTextExecuteToolInTelemetryContextExecute<'a> =
+    dyn FnOnce() -> GenerateTextExecuteToolInTelemetryContextFuture<'a> + Send + 'a;
+
+/// Options passed to an upstream-style tool execution telemetry wrapper.
+pub struct GenerateTextExecuteToolInTelemetryContextOptions<'a> {
+    /// Identifier for the high-level generate/stream call.
+    pub call_id: String,
+
+    /// Identifier for the model tool call being executed.
+    pub tool_call_id: String,
+
+    execute: Box<GenerateTextExecuteToolInTelemetryContextExecute<'a>>,
+}
+
+impl<'a> GenerateTextExecuteToolInTelemetryContextOptions<'a> {
+    fn new(
+        call_id: String,
+        tool_call_id: String,
+        execute: impl FnOnce() -> GenerateTextExecuteToolInTelemetryContextFuture<'a> + Send + 'a,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_call_id,
+            execute: Box::new(execute),
+        }
+    }
+
+    /// Runs the wrapped tool executor.
+    pub fn execute(self) -> GenerateTextExecuteToolInTelemetryContextFuture<'a> {
+        (self.execute)()
+    }
+}
+
+impl fmt::Debug for GenerateTextExecuteToolInTelemetryContextOptions<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextExecuteToolInTelemetryContextOptions")
+            .field("call_id", &self.call_id)
+            .field("tool_call_id", &self.tool_call_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Callback invoked to run a local Rust tool inside telemetry context.
+pub type GenerateTextExecuteToolInTelemetryContextFunction<'a> =
+    dyn Fn(
+            GenerateTextExecuteToolInTelemetryContextOptions<'a>,
+        ) -> GenerateTextExecuteToolInTelemetryContextFuture<'a>
+        + 'a;
+
+/// Wrapper for upstream `executeToolInTelemetryContext`.
+#[derive(Clone)]
+pub struct GenerateTextExecuteToolInTelemetryContext<'a> {
+    execute_tool_in_telemetry_context: Rc<GenerateTextExecuteToolInTelemetryContextFunction<'a>>,
+}
+
+impl<'a> GenerateTextExecuteToolInTelemetryContext<'a> {
+    /// Creates a local tool telemetry wrapper.
+    pub fn new<F, Fut>(execute_tool_in_telemetry_context: F) -> Self
+    where
+        F: Fn(GenerateTextExecuteToolInTelemetryContextOptions<'a>) -> Fut + 'a,
+        Fut: Future<Output = Result<Vec<ExecuteToolOutput>, ToolExecutionError>> + Send + 'a,
+    {
+        Self {
+            execute_tool_in_telemetry_context: Rc::new(move |options| {
+                Box::pin(execute_tool_in_telemetry_context(options))
+            }),
+        }
+    }
+
+    /// Runs the wrapper with a local tool execute closure.
+    pub fn execute(
+        &self,
+        options: GenerateTextExecuteToolInTelemetryContextOptions<'a>,
+    ) -> GenerateTextExecuteToolInTelemetryContextFuture<'a> {
+        (self.execute_tool_in_telemetry_context)(options)
+    }
+}
+
+impl fmt::Debug for GenerateTextExecuteToolInTelemetryContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextExecuteToolInTelemetryContext")
             .finish_non_exhaustive()
     }
 }
@@ -3433,6 +3567,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Optional request timeout configuration.
+    pub timeout: Option<TimeoutConfiguration>,
+
     /// Maximum number of retries for failed provider requests.
     pub max_retries: usize,
 
@@ -3470,6 +3607,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
@@ -3509,6 +3647,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
@@ -3809,6 +3948,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Deprecated upstream alias for [`GenerateTextOptions::with_telemetry`].
     pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
         self.with_telemetry(telemetry)
+    }
+
+    /// Sets the request timeout configuration.
+    pub fn with_timeout(mut self, timeout: impl Into<TimeoutConfiguration>) -> Self {
+        self.timeout = Some(timeout.into());
+        self
     }
 
     /// Sets the maximum number of retries for failed provider requests.
@@ -5132,6 +5277,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         on_step_finish,
         on_finish,
         telemetry,
+        timeout,
         max_retries,
         max_steps,
         stop_conditions,
@@ -5195,6 +5341,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         (
             experimental_sandbox.as_ref(),
             call_options.abort_signal.as_ref(),
+            timeout.as_ref(),
+            None,
             None,
             on_tool_execution_start.as_ref(),
             on_tool_execution_end.as_ref(),
@@ -5412,6 +5560,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             (
                 step_experimental_sandbox.as_ref(),
                 step_call_options.abort_signal.as_ref(),
+                timeout.as_ref(),
+                None,
                 None,
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
@@ -6219,6 +6369,8 @@ fn tool_approval_response_part(
 pub(crate) type GenerateTextToolExecutionContext<'a, 'b> = (
     Option<&'a Arc<dyn ExperimentalSandbox>>,
     Option<&'a LanguageModelAbortSignal>,
+    Option<&'a TimeoutConfiguration>,
+    Option<&'a GenerateTextExecuteToolInTelemetryContext<'b>>,
     Option<&'a Callback<'b, GenerateTextToolResult>>,
     Option<&'a GenerateTextOnToolExecutionStart<'b>>,
     Option<&'a GenerateTextOnToolExecutionEnd<'b>>,
@@ -6239,6 +6391,8 @@ pub(crate) async fn execute_tool_calls(
     let (
         experimental_sandbox,
         abort_signal,
+        timeout,
+        execute_tool_in_telemetry_context,
         on_preliminary_tool_result,
         on_tool_execution_start,
         on_tool_execution_end,
@@ -6298,6 +6452,12 @@ pub(crate) async fn execute_tool_calls(
             }
         }
 
+        let tool_timeout_ms = get_tool_timeout_ms(timeout, &tool_call.tool_name);
+        let tool_abort_signal = merge_abort_signals([
+            abort_signal.cloned().map(AbortSignalSource::signal),
+            tool_timeout_ms.map(AbortSignalSource::timeout_ms),
+        ]);
+
         let mut execution_options =
             ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages.clone());
         if let Some(context) = &tool_context {
@@ -6307,13 +6467,44 @@ pub(crate) async fn execute_tool_calls(
             execution_options =
                 execution_options.with_experimental_sandbox(Arc::clone(experimental_sandbox));
         }
-        if let Some(abort_signal) = abort_signal {
-            execution_options = execution_options.with_abort_signal(abort_signal.clone());
+        if let Some(abort_signal) = tool_abort_signal {
+            execution_options = execution_options.with_abort_signal(abort_signal);
         }
 
-        let tool_started_at = Instant::now();
-        let tool_result = match execute_tool(tool, tool_call.input.clone(), execution_options).await
-        {
+        let elapsed_ms = Arc::new(std::sync::Mutex::new(0u64));
+        let elapsed_ms_for_execute = Arc::clone(&elapsed_ms);
+        let tool_for_execute = tool.clone();
+        let input_for_execute = tool_call.input.clone();
+        let execute = move || {
+            let elapsed_ms = Arc::clone(&elapsed_ms_for_execute);
+            Box::pin(async move {
+                let tool_started_at = Instant::now();
+                let result =
+                    execute_tool(&tool_for_execute, input_for_execute, execution_options).await;
+                *elapsed_ms
+                    .lock()
+                    .expect("tool execution duration lock is not poisoned") =
+                    duration_ms(tool_started_at.elapsed());
+                result
+            }) as GenerateTextExecuteToolInTelemetryContextFuture<'_>
+        };
+        let execute_result =
+            if let Some(execute_tool_in_telemetry_context) = execute_tool_in_telemetry_context {
+                execute_tool_in_telemetry_context
+                    .execute(GenerateTextExecuteToolInTelemetryContextOptions::new(
+                        call_id.to_string(),
+                        tool_call.tool_call_id.clone(),
+                        execute,
+                    ))
+                    .await
+            } else {
+                execute().await
+            };
+        let elapsed_ms = *elapsed_ms
+            .lock()
+            .expect("tool execution duration lock is not poisoned");
+
+        let tool_result = match execute_result {
             Ok(outputs) => {
                 let mut final_result = None;
                 for output in outputs {
@@ -6338,7 +6529,6 @@ pub(crate) async fn execute_tool_calls(
             }
             Err(error) => GenerateTextToolResult::error(tool_call, error.into_message()),
         };
-        let elapsed_ms = duration_ms(tool_started_at.elapsed());
 
         if on_tool_execution_end.is_some() || telemetry_dispatcher.is_some() {
             let tool_execution_end_event = GenerateTextToolExecutionEndEvent {
@@ -7884,12 +8074,12 @@ mod tests {
     use super::{
         ActiveTools, ContentPart, DefaultGeneratedFile, DynamicToolCall, DynamicToolError,
         DynamicToolResult, ExperimentalGeneratedImage, GenerateTextContentPart,
-        GenerateTextEndEvent, GenerateTextFileContent, GenerateTextFinishEvent,
-        GenerateTextInclude, GenerateTextModelInfo, GenerateTextOnToolExecutionEnd,
-        GenerateTextOnToolExecutionStart, GenerateTextOptions, GenerateTextReasoning,
-        GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepEndEvent,
-        GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
-        GenerateTextToolError, GenerateTextToolExecutionEndEvent,
+        GenerateTextEndEvent, GenerateTextExecuteToolInTelemetryContext, GenerateTextFileContent,
+        GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo,
+        GenerateTextOnToolExecutionEnd, GenerateTextOnToolExecutionStart, GenerateTextOptions,
+        GenerateTextReasoning, GenerateTextResult, GenerateTextStartEvent, GenerateTextStep,
+        GenerateTextStepEndEvent, GenerateTextStepPerformance, GenerateTextStepStartEvent,
+        GenerateTextToolCall, GenerateTextToolError, GenerateTextToolExecutionEndEvent,
         GenerateTextToolExecutionStartEvent, GenerateTextToolOutputDenied, GenerateTextToolResult,
         GeneratedFile, GenericToolApprovalOptions, InvalidStreamPartError,
         InvalidToolApprovalError, InvalidToolInputError, LanguageModelCallEndEvent,
@@ -7938,7 +8128,7 @@ mod tests {
     };
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
-    use crate::prompt::Prompt;
+    use crate::prompt::{Prompt, TimeoutConfiguration, TimeoutConfigurationOptions};
     use crate::provider::{
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
@@ -11902,6 +12092,9 @@ mod tests {
     struct ExecuteToolCallsTestContext<'a, 'b> {
         experimental_sandbox: Option<&'a Arc<dyn ExperimentalSandbox>>,
         abort_signal: Option<&'a LanguageModelAbortSignal>,
+        timeout: Option<&'a TimeoutConfiguration>,
+        execute_tool_in_telemetry_context:
+            Option<&'a GenerateTextExecuteToolInTelemetryContext<'b>>,
         on_preliminary_tool_result: Option<&'a Callback<'b, GenerateTextToolResult>>,
         on_tool_execution_start: Option<&'a GenerateTextOnToolExecutionStart<'b>>,
         on_tool_execution_end: Option<&'a GenerateTextOnToolExecutionEnd<'b>>,
@@ -11926,6 +12119,8 @@ mod tests {
             (
                 context.experimental_sandbox,
                 context.abort_signal,
+                context.timeout,
+                context.execute_tool_in_telemetry_context,
                 context.on_preliminary_tool_result,
                 context.on_tool_execution_start,
                 context.on_tool_execution_end,
@@ -12067,6 +12262,174 @@ mod tests {
 
         let (tool_results, _) =
             execute_tool_calls_for_test(&tools, execute_tool_call_test_call(), JsonObject::new());
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert!(!received_signal.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_tool_result_when_tool_completes_before_timeout() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_tool_ms(5_000));
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                timeout: Some(&timeout),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+    }
+
+    #[test]
+    fn execute_tool_call_should_pass_abort_signal_when_tool_timeout_is_set() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_tool_ms(5_000));
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        *received_signal.lock().expect("signal lock") = options.abort_signal;
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                timeout: Some(&timeout),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool timeout creates abort signal");
+        assert!(!captured_signal.is_aborted());
+    }
+
+    #[test]
+    fn execute_tool_call_should_merge_tool_timeout_with_existing_abort_signal() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_tool_ms(5_000));
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        *received_signal.lock().expect("signal lock") = options.abort_signal;
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                abort_signal: Some(&abort_signal),
+                timeout: Some(&timeout),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool received merged abort signal");
+        assert!(!captured_signal.is_aborted());
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(captured_signal.is_aborted());
+        assert_eq!(captured_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
+    fn execute_tool_call_should_use_per_tool_timeout_without_default_tool_timeout() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new().with_tool_timeout("testTool", 2_000),
+        );
+        let received_signal = Arc::new(AtomicBool::new(false));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        received_signal.store(options.abort_signal.is_some(), Ordering::SeqCst);
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                timeout: Some(&timeout),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert!(received_signal.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn execute_tool_call_should_not_create_abort_signal_when_tool_timeout_does_not_match() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new().with_tool_timeout("otherTool", 2_000),
+        );
+        let received_signal = Arc::new(AtomicBool::new(true));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        received_signal.store(options.abort_signal.is_some(), Ordering::SeqCst);
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                timeout: Some(&timeout),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
 
         assert_eq!(tool_results[0].output, json!("test-result"));
         assert!(!received_signal.load(Ordering::SeqCst));
@@ -12531,6 +12894,136 @@ mod tests {
     }
 
     #[test]
+    fn execute_tool_call_should_call_all_start_listeners_in_an_array() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_calls = Arc::clone(&calls);
+        let second_calls = Arc::clone(&calls);
+        let on_start = GenerateTextOnToolExecutionStart::many([
+            Callback::infallible(move |_event| {
+                let calls = Arc::clone(&first_calls);
+                async move {
+                    calls.lock().expect("calls lock").push("first".to_string());
+                }
+            }),
+            Callback::infallible(move |_event| {
+                let calls = Arc::clone(&second_calls);
+                async move {
+                    calls.lock().expect("calls lock").push("second".to_string());
+                }
+            }),
+        ]);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            Some(&on_start),
+            None,
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(
+            calls.lock().expect("calls lock").as_slice(),
+            ["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_call_all_end_listeners_in_an_array() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_calls = Arc::clone(&calls);
+        let second_calls = Arc::clone(&calls);
+        let on_end = GenerateTextOnToolExecutionEnd::many([
+            Callback::infallible(move |_event| {
+                let calls = Arc::clone(&first_calls);
+                async move {
+                    calls.lock().expect("calls lock").push("first".to_string());
+                }
+            }),
+            Callback::infallible(move |_event| {
+                let calls = Arc::clone(&second_calls);
+                async move {
+                    calls.lock().expect("calls lock").push("second".to_string());
+                }
+            }),
+        ]);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(
+            calls.lock().expect("calls lock").as_slice(),
+            ["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_not_break_when_one_listener_in_array_panics() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let start_calls = Arc::clone(&calls);
+        let end_calls = Arc::clone(&calls);
+        let on_start = GenerateTextOnToolExecutionStart::many([
+            Callback::infallible(|_event| async move { panic!("listener error") }),
+            Callback::infallible(move |_event| {
+                let calls = Arc::clone(&start_calls);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls lock")
+                        .push("second-start".to_string());
+                }
+            }),
+        ]);
+        let on_end = GenerateTextOnToolExecutionEnd::many([
+            Callback::infallible(|_event| async move { panic!("listener error") }),
+            Callback::infallible(move |_event| {
+                let calls = Arc::clone(&end_calls);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls lock")
+                        .push("second-finish".to_string());
+                }
+            }),
+        ]);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            Some(&on_start),
+            Some(&on_end),
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(
+            calls.lock().expect("calls lock").as_slice(),
+            ["second-start".to_string(), "second-finish".to_string()]
+        );
+    }
+
+    #[test]
     fn execute_tool_call_should_record_tool_execution_duration_on_success() {
         let tools = vec![
             Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
@@ -12599,6 +13092,94 @@ mod tests {
         assert_eq!(
             end_events.lock().expect("end events lock")[0].tool_execution_ms,
             elapsed
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_execute_tool_inside_telemetry_context_wrapper_when_provided() {
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let wrapper_order = Arc::clone(&order);
+        let execute_order = Arc::clone(&order);
+        let wrapper = GenerateTextExecuteToolInTelemetryContext::new(move |options| {
+            let order = Arc::clone(&wrapper_order);
+            async move {
+                assert_eq!(options.call_id, "test-telemetry-call-id");
+                assert_eq!(options.tool_call_id, "call-1");
+                order
+                    .lock()
+                    .expect("order lock")
+                    .push("wrapper-before".to_string());
+                let result = options.execute().await;
+                order
+                    .lock()
+                    .expect("order lock")
+                    .push("wrapper-after".to_string());
+                result
+            }
+        });
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, _options| {
+                    let order = Arc::clone(&execute_order);
+                    async move {
+                        order
+                            .lock()
+                            .expect("order lock")
+                            .push("execute".to_string());
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                execute_tool_in_telemetry_context: Some(&wrapper),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(
+            order.lock().expect("order lock").as_slice(),
+            [
+                "wrapper-before".to_string(),
+                "execute".to_string(),
+                "wrapper-after".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_measure_only_inner_execute_duration_when_wrapped() {
+        let wrapper = GenerateTextExecuteToolInTelemetryContext::new(|options| async move {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let result = options.execute().await;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            result
+        });
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, tool_execution_ms) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                execute_tool_in_telemetry_context: Some(&wrapper),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert!(
+            tool_execution_ms["call-1"] < 20,
+            "wrapper overhead should not be included in tool execution time"
         );
     }
 

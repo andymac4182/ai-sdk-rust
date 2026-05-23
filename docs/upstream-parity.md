@@ -604,6 +604,12 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `executeToolCall` timeout/callback-array/
+  telemetry-wrapper parity added named counterparts for per-tool timeout abort
+  signal creation and merging, per-tool timeout lookup without a default
+  timeout, callback array fan-out and panic tolerance, and
+  `executeToolInTelemetryContext` wrapper execution plus inner-only duration
+  accounting.
 - 2026-05-23: `packages/ai` `executeToolCall` abort/preliminary parity
   wired existing Rust abort signals into local tool execution, switched local
   execution to the provider-utils `execute_tool` final/preliminary contract,
@@ -3464,9 +3470,21 @@ focused tests for each portable behavior before changing rows to `verified`.
    `execute_tool_call_should_return_final_result_even_with_preliminary_results`;
    Rust maps upstream async-generator tool outputs through
    `Tool::with_execute_outputs`/`execute_tool` records, with final output
-   normalization handled by provider-utils. Remaining callback arrays,
-   timeout-created abort signals, and the telemetry wrapper stay in the
-   follow-up queue.
+   normalization handled by provider-utils. The timeout/callback-array/
+   telemetry-wrapper slice added
+   `execute_tool_call_should_return_tool_result_when_tool_completes_before_timeout`,
+   `execute_tool_call_should_pass_abort_signal_when_tool_timeout_is_set`,
+   `execute_tool_call_should_merge_tool_timeout_with_existing_abort_signal`,
+   `execute_tool_call_should_use_per_tool_timeout_without_default_tool_timeout`,
+   `execute_tool_call_should_not_create_abort_signal_when_tool_timeout_does_not_match`,
+   `execute_tool_call_should_call_all_start_listeners_in_an_array`,
+   `execute_tool_call_should_call_all_end_listeners_in_an_array`,
+   `execute_tool_call_should_not_break_when_one_listener_in_array_panics`,
+   `execute_tool_call_should_execute_tool_inside_telemetry_context_wrapper_when_provided`,
+   and
+   `execute_tool_call_should_measure_only_inner_execute_duration_when_wrapped`.
+   Rust documents JavaScript object identity checks for merged `AbortSignal`
+   as native signal-linkage assertions instead of pointer identity.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error

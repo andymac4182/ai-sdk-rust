@@ -49,7 +49,8 @@ use crate::language_model::{
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
-    Prompt, prompt_has_url_files, standardize_and_convert_to_language_model_prompt,
+    Prompt, TimeoutConfiguration, prompt_has_url_files,
+    standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
@@ -904,6 +905,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Optional request timeout configuration.
+    pub timeout: Option<TimeoutConfiguration>,
+
     /// Maximum number of retries for failed provider stream requests.
     pub max_retries: usize,
 
@@ -955,6 +959,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             smooth_stream: None,
             transforms: Vec::new(),
@@ -996,6 +1001,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             smooth_stream: None,
             transforms: Vec::new(),
@@ -1273,6 +1279,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
     /// Deprecated upstream alias for [`StreamTextOptions::with_telemetry`].
     pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
         self.with_telemetry(telemetry)
+    }
+
+    /// Sets the request timeout configuration.
+    pub fn with_timeout(mut self, timeout: impl Into<TimeoutConfiguration>) -> Self {
+        self.timeout = Some(timeout.into());
+        self
     }
 
     /// Sets the maximum number of retries for failed provider stream requests.
@@ -2175,6 +2187,7 @@ where
         on_step_finish,
         on_finish,
         telemetry,
+        timeout,
         max_retries,
         smooth_stream,
         transforms,
@@ -2437,6 +2450,8 @@ where
             (
                 experimental_sandbox.as_ref(),
                 step_call_options.abort_signal.as_ref(),
+                timeout.as_ref(),
+                None,
                 None,
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
