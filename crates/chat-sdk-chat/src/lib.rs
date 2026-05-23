@@ -13,4 +13,5 @@
 pub mod chat_singleton;
 pub mod errors;
 pub mod logger;
+pub mod markdown;
 pub mod types;
