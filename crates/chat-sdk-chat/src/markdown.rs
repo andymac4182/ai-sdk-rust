@@ -1886,4 +1886,57 @@ mod tests {
         }
         assert_eq!(find_ordered_start(&node), Some(5));
     }
+
+    // ---------- slice 84: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_table_with_three_columns_extracts_all_headers() {
+        let input = "| col1 | col2 | col3 |\n| --- | --- | --- |\n| a | b | c |";
+        let node = parse_markdown(input).expect("parses");
+        let plain = to_plain_text(&node);
+        for cell in ["col1", "col2", "col3", "a", "b", "c"] {
+            assert!(plain.contains(cell), "missing {cell}: {plain:?}");
+        }
+    }
+
+    #[test]
+    fn parse_markdown_inline_code_alongside_emphasis_in_same_paragraph() {
+        let node = parse_markdown("see `code` and *emphasis*").expect("parses");
+        fn has_inline_code(n: &Node) -> bool {
+            matches!(n, Node::InlineCode(_)) || get_node_children(n).iter().any(has_inline_code)
+        }
+        fn has_emphasis(n: &Node) -> bool {
+            matches!(n, Node::Emphasis(_)) || get_node_children(n).iter().any(has_emphasis)
+        }
+        assert!(has_inline_code(&node));
+        assert!(has_emphasis(&node));
+    }
+
+    #[test]
+    fn parse_markdown_blank_lines_inside_code_block_preserved() {
+        let node = parse_markdown("```\nline1\n\nline3\n```").expect("parses");
+        fn find_code_value(n: &Node) -> Option<String> {
+            if let Node::Code(c) = n {
+                return Some(c.value.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(v) = find_code_value(c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        let value = find_code_value(&node).expect("code parses");
+        assert!(value.contains("line1"));
+        assert!(value.contains("line3"));
+        // Blank line in the middle survives.
+        assert!(value.contains("\n\n"));
+    }
+
+    #[test]
+    fn parse_markdown_link_with_special_characters_in_label() {
+        let node = parse_markdown("[Q&A: how to?](https://example.com/q)").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("Q&A: how to?"));
+    }
 }
