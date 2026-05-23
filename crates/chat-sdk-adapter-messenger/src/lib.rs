@@ -194,6 +194,98 @@ impl Adapter for MessengerAdapter {
                 )
             })
     }
+
+    /// Messenger does not support message editing. 1:1 with
+    /// upstream's `adapter.editMessage` which throws
+    /// `ValidationError("messenger", "Messenger does not support
+    /// editing messages")`.
+    async fn edit_message(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "Messenger does not support editing messages".to_string(),
+        ))
+    }
+
+    /// Messenger does not support message deletion. 1:1 with
+    /// upstream's `adapter.deleteMessage`.
+    async fn delete_message(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "Messenger does not support deleting messages".to_string(),
+        ))
+    }
+
+    /// Messenger does not expose reactions via the API. 1:1 with
+    /// upstream's `adapter.addReaction`.
+    async fn add_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "Messenger does not support reactions via API".to_string(),
+        ))
+    }
+
+    /// Send a Messenger typing indicator via the Send API
+    /// `sender_action: typing_on`. 1:1 with upstream's
+    /// `adapter.startTyping` (status arg ignored — upstream's
+    /// signature omits it).
+    async fn start_typing(
+        &self,
+        thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!(
+                "thread_id {thread_id:?} is not Messenger-encoded"
+            ))
+        })?;
+
+        let url = format!(
+            "{}?access_token={}",
+            self.send_url(&decoded.page_id),
+            self.page_access_token()
+        );
+        let body = serde_json::json!({
+            "recipient": { "id": decoded.user_id },
+            "sender_action": "typing_on",
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            let error_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Messenger Send API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {error_msg}"
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 /// Encode a Messenger thread id. 1:1 with upstream's inline format:
@@ -317,6 +409,58 @@ mod tests {
         let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Messenger-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_edit_message_is_unsupported_with_validation_error() {
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("messenger:PAGE:USER", "msg", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not support editing"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_is_unsupported_with_validation_error() {
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("messenger:PAGE:USER", "msg"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not support deleting"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_is_unsupported_with_validation_error() {
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("messenger:PAGE:USER", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not support reactions"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_rejects_non_messenger_thread_ids() {
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.start_typing("slack:C1:1.0", None));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("not Messenger-encoded"));
