@@ -2,7 +2,7 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-ai	94	Core surface is broad; abort, callback, serial job, prepare-retries, and simulate-readable-stream utility parity are now mapped, with remaining stream/UI/agent edge cases and root/package boundary cleanup.
+ai	94	Core surface is broad; abort, callback, serial job, prepare-retries, simulate-readable-stream, and server-response utility parity are now mapped, with remaining stream/UI/agent edge cases and root/package boundary cleanup.
 provider	75	Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain.
 provider-utils	82	Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod cases remain.
 openai	65	OpenAI/Open Responses foundations exist; broader Responses, files, speech, transcription, and provider surfaces remain.
