@@ -120,6 +120,12 @@ impl GithubAdapter {
             self.api_base()
         )
     }
+
+    /// Build the absolute URL for `GET /repos/{owner}/{repo}/issues/{number}`.
+    /// Used by `fetch_subject` to read the issue/PR title.
+    fn issue_url(&self, owner: &str, repo: &str, number: u64) -> String {
+        format!("{}/repos/{owner}/{repo}/issues/{number}", self.api_base())
+    }
 }
 
 #[async_trait]
@@ -178,6 +184,52 @@ impl Adapter for GithubAdapter {
             AdapterError::InvalidPayload("GitHub comment-create response missing id".to_string())
         })?;
         Ok(id.to_string())
+    }
+
+    /// Fetch a GitHub issue/PR title via the REST API. 1:1 with
+    /// upstream's `adapter.fetchSubject`:
+    ///
+    /// - Decodes `github:<owner>/<repo>:<number>`.
+    /// - GETs `<api_base>/repos/<owner>/<repo>/issues/<number>`
+    ///   with bearer auth + GitHub API headers.
+    /// - Returns `Some(title)` from the response, matching
+    ///   upstream's "subject = issue title" convention.
+    async fn fetch_subject(
+        &self,
+        thread_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<Option<String>> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GitHub-encoded"))
+        })?;
+
+        let url = self.issue_url(&decoded.owner, &decoded.repo, decoded.number);
+
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(self.token())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let message = json["message"]
+                .as_str()
+                .unwrap_or("GitHub issue-fetch failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {message}")));
+        }
+
+        Ok(json["title"].as_str().map(str::to_owned))
     }
 }
 
@@ -345,6 +397,30 @@ mod tests {
             adapter.comments_url("vercel", "chat", 42),
             "https://api.github.example/repos/vercel/chat/issues/42/comments"
         );
+    }
+
+    #[test]
+    fn adapter_issue_url_builds_the_upstream_endpoint() {
+        let adapter = GithubAdapter::new(
+            GithubAdapterOptions::new("t").with_api_base("https://api.github.example"),
+        );
+        assert_eq!(
+            adapter.issue_url("vercel", "chat", 42),
+            "https://api.github.example/repos/vercel/chat/issues/42"
+        );
+    }
+
+    #[test]
+    fn adapter_fetch_subject_rejects_non_github_thread_ids() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.fetch_subject("slack:C1:1.0"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GitHub-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
     }
 
     #[test]
