@@ -25,6 +25,7 @@ members = [
     "crates/ai-sdk-revai",
     "crates/chat-sdk-chat",
     "crates/chat-sdk-adapter-shared",
+    "crates/chat-sdk-state-memory",
 ]
 resolver = "3"
 

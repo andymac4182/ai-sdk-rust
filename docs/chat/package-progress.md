@@ -3,18 +3,19 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 9.3%
-- Portable package average: 9.3%
-- Closed package rows: 1 / 18
-- Strict portable verified rows: 1 / 18
+- Average estimated completion: 14.9%
+- Portable package average: 14.9%
+- Closed package rows: 2 / 18
+- Strict portable verified rows: 2 / 18
 - In-progress rows: 1
-- Not-started rows: 16
+- Not-started rows: 15
 
 ## 100% Closed
 
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
 | `@chat-sdk/adapter-shared` | 100% | Verified | shared adapter utilities |
+| `@chat-sdk/state-memory` | 100% | Verified | state backend (in-memory) |
 
 ## In Progress
 
@@ -27,7 +28,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
 | `@chat-sdk/tests` | 0% | Not started | test support library |
-| `@chat-sdk/state-memory` | 0% | Not started | state backend (in-memory) |
 | `@chat-sdk/adapter-slack` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-teams` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-gchat` | 0% | Not started | adapter package |
