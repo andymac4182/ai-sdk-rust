@@ -6,9 +6,71 @@
 //! The full `cardToDiscordPayload` Embed/Action-Row renderer is
 //! deferred to a follow-up slice.
 
+use chat_sdk_adapter_shared::errors::AdapterError;
 use chat_sdk_chat::cards::{CardChild, CardElement, card_child_to_fallback_text};
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use chat_sdk_chat::markdown::table_element_to_ascii;
+
+const DISCORD_CUSTOM_ID_DELIMITER: char = '\n';
+const DISCORD_CUSTOM_ID_MAX_LENGTH: usize = 100;
+
+fn validate_discord_custom_id(custom_id: &str) -> Result<(), AdapterError> {
+    if custom_id.is_empty() || custom_id.len() > DISCORD_CUSTOM_ID_MAX_LENGTH {
+        return Err(AdapterError::validation(
+            "discord",
+            format!(
+                "Discord custom_id must be 1-{DISCORD_CUSTOM_ID_MAX_LENGTH} characters. \
+                 Shorten the button id or value."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 1:1 port of upstream `encodeDiscordCustomId(actionId, value?)`.
+///
+/// Encodes `actionId` (alone if `value` is empty/None) into a Discord
+/// component `custom_id`, joining with `\n` when a value is provided.
+/// Returns `ValidationError` when the resulting string is empty or
+/// exceeds 100 chars.
+pub fn encode_discord_custom_id(action_id: &str, value: Option<&str>) -> Result<String, AdapterError> {
+    match value {
+        None | Some("") => {
+            validate_discord_custom_id(action_id)?;
+            Ok(action_id.to_string())
+        }
+        Some(v) => {
+            let encoded = format!("{action_id}{DISCORD_CUSTOM_ID_DELIMITER}{v}");
+            validate_discord_custom_id(&encoded)?;
+            Ok(encoded)
+        }
+    }
+}
+
+/// Decoded Discord `custom_id` pair. Mirrors upstream
+/// `{ actionId, value: string | undefined }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordCustomId {
+    pub action_id: String,
+    pub value: Option<String>,
+}
+
+/// 1:1 port of upstream `decodeDiscordCustomId(customId)`. Splits on
+/// the first `\n`; everything before becomes `actionId`, the
+/// remainder becomes `value`. Returns `value: None` when there is no
+/// delimiter.
+pub fn decode_discord_custom_id(custom_id: &str) -> DiscordCustomId {
+    match custom_id.find(DISCORD_CUSTOM_ID_DELIMITER) {
+        None => DiscordCustomId {
+            action_id: custom_id.to_string(),
+            value: None,
+        },
+        Some(idx) => DiscordCustomId {
+            action_id: custom_id[..idx].to_string(),
+            value: Some(custom_id[idx + 1..].to_string()),
+        },
+    }
+}
 
 /// Convert emoji placeholders to Discord shortcode. 1:1 with upstream
 /// private `convertEmoji(text) = convertEmojiPlaceholders(text, "discord")`.
@@ -226,6 +288,118 @@ mod tests {
     fn handles_empty_card() {
         let c = card(None, None, vec![]);
         assert_eq!(card_to_fallback_text_discord(&c), "");
+    }
+
+    // ---------- encodeDiscordCustomId / decodeDiscordCustomId ----------
+    // 11 portable upstream cases (2 cardToDiscordPayload-dependent cases
+    // deferred until the full embed/action-row renderer lands).
+
+    #[test]
+    fn encodes_action_id_only_when_no_value() {
+        assert_eq!(
+            encode_discord_custom_id("approve", None).unwrap(),
+            "approve"
+        );
+    }
+
+    #[test]
+    fn encodes_action_id_with_value() {
+        assert_eq!(
+            encode_discord_custom_id("approve", Some("order-123")).unwrap(),
+            "approve\norder-123"
+        );
+    }
+
+    #[test]
+    fn skips_encoding_when_empty_value() {
+        assert_eq!(
+            encode_discord_custom_id("approve", Some("")).unwrap(),
+            "approve"
+        );
+    }
+
+    #[test]
+    fn throws_when_action_id_is_empty() {
+        let err = encode_discord_custom_id("", None).unwrap_err();
+        assert!(err.is_validation(), "expected ValidationError, got {err}");
+    }
+
+    #[test]
+    fn throws_when_action_id_exceeds_100_chars() {
+        let long = "x".repeat(101);
+        let err = encode_discord_custom_id(&long, None).unwrap_err();
+        assert!(err.is_validation());
+    }
+
+    #[test]
+    fn throws_when_encoded_custom_id_exceeds_100_chars() {
+        let long_value = "x".repeat(100);
+        let err = encode_discord_custom_id("btn", Some(&long_value)).unwrap_err();
+        assert!(err.is_validation());
+    }
+
+    #[test]
+    fn decodes_action_id_only() {
+        assert_eq!(
+            decode_discord_custom_id("approve"),
+            DiscordCustomId {
+                action_id: "approve".to_string(),
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_action_id_with_value() {
+        assert_eq!(
+            decode_discord_custom_id("approve\norder-123"),
+            DiscordCustomId {
+                action_id: "approve".to_string(),
+                value: Some("order-123".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn round_trips_encode_decode() {
+        let encoded = encode_discord_custom_id("btn", Some("__cb:a1b2c3d4e5f6g7h8")).unwrap();
+        let decoded = decode_discord_custom_id(&encoded);
+        assert_eq!(decoded.action_id, "btn");
+        assert_eq!(decoded.value.as_deref(), Some("__cb:a1b2c3d4e5f6g7h8"));
+    }
+
+    #[test]
+    fn preserves_embedded_delimiter_chars_in_the_value() {
+        let decoded = decode_discord_custom_id("btn\nfirst\nsecond");
+        assert_eq!(decoded.action_id, "btn");
+        assert_eq!(decoded.value.as_deref(), Some("first\nsecond"));
+    }
+
+    #[test]
+    fn treats_explicitly_none_value_as_no_value() {
+        assert_eq!(
+            encode_discord_custom_id("approve", None).unwrap(),
+            "approve"
+        );
+    }
+
+    #[test]
+    fn encodes_a_custom_id_at_the_100_char_boundary() {
+        let action_id = "a".repeat(50);
+        let value = "b".repeat(49);
+        let encoded = encode_discord_custom_id(&action_id, Some(&value)).unwrap();
+        assert_eq!(encoded.len(), 100);
+        let decoded = decode_discord_custom_id(&encoded);
+        assert_eq!(decoded.action_id, action_id);
+        assert_eq!(decoded.value.as_deref(), Some(value.as_str()));
+    }
+
+    #[test]
+    fn rejects_a_custom_id_one_char_past_the_boundary() {
+        let action_id = "a".repeat(50);
+        let value = "b".repeat(50);
+        let err = encode_discord_custom_id(&action_id, Some(&value)).unwrap_err();
+        assert!(err.is_validation());
     }
 
     #[test]
