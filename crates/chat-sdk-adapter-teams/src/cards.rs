@@ -10,6 +10,11 @@ use chat_sdk_adapter_shared::card_utils::{
 };
 use chat_sdk_chat::cards::CardElement;
 
+/// Stable action id Teams uses for the implicit submit button
+/// attached to inputs without an explicit submit action. 1:1 with
+/// upstream `export const AUTO_SUBMIT_ACTION_ID = "__auto_submit"`.
+pub const AUTO_SUBMIT_ACTION_ID: &str = "__auto_submit";
+
 /// Render a [`CardElement`] as Teams markdown fallback text. 1:1
 /// port of upstream `cardToFallbackText(card)`: delegates to the
 /// shared helper with `boldFormat: "**"`, `lineBreak: "\n\n"`, and
@@ -123,5 +128,14 @@ mod tests {
     fn handles_card_with_only_title() {
         let c = card(Some("Simple Card"), None, vec![]);
         assert_eq!(card_to_fallback_text_teams(&c), "**Simple Card**");
+    }
+
+    #[test]
+    fn auto_submit_action_id_matches_upstream() {
+        // 1:1 with upstream `export const AUTO_SUBMIT_ACTION_ID =
+        // "__auto_submit"`. Stable identifier used by
+        // `cardToAdaptiveCard` when wiring up inputs without an
+        // explicit submit action.
+        assert_eq!(AUTO_SUBMIT_ACTION_ID, "__auto_submit");
     }
 }
