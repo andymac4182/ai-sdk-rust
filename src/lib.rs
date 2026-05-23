@@ -469,10 +469,11 @@ pub use upload_skill::{
     UploadSkillFile, UploadSkillFileData, UploadSkillOptions, UploadSkillResult, upload_skill,
 };
 pub use util::{
-    DataUrlTextError, InvalidArgumentError as AiInvalidArgumentError, ParsePartialJsonResult,
-    ParsePartialJsonState, SplitArrayError, cosine_similarity, fix_json, get_potential_start_index,
-    get_text_from_data_url, is_deep_equal_data, merge_objects, parse_partial_json, prepare_headers,
-    split_array,
+    AbortSignalSource, AbortTimeoutHandle, AbortTimeoutOptions, DataUrlTextError,
+    InvalidArgumentError as AiInvalidArgumentError, ParsePartialJsonResult, ParsePartialJsonState,
+    SplitArrayError, cosine_similarity, fix_json, get_potential_start_index,
+    get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_objects,
+    parse_partial_json, prepare_headers, set_abort_timeout, split_array,
 };
 pub use vercel::{
     DEFAULT_VERCEL_BASE_URL, VercelProvider, VercelProviderSettings, create_vercel, vercel,

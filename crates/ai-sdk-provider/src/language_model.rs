@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
@@ -20,6 +21,7 @@ struct LanguageModelAbortState {
     aborted: AtomicBool,
     reason: Mutex<Option<JsonValue>>,
     wakers: Mutex<Vec<Waker>>,
+    followers: Mutex<Vec<Weak<LanguageModelAbortState>>>,
 }
 
 /// Caller-controlled abort signal passed to provider language-model calls.
@@ -43,6 +45,11 @@ impl LanguageModelAbortSignal {
             .clone()
     }
 
+    /// Returns whether two abort signal handles point at the same abort state.
+    pub fn is_same_signal(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     /// Polls until the signal is aborted, registering the current task for wake-up.
     pub fn poll_aborted(&self, context: &Context<'_>) -> Poll<()> {
         if self.is_aborted() {
@@ -64,6 +71,65 @@ impl LanguageModelAbortSignal {
         }
 
         Poll::Pending
+    }
+
+    /// Aborts `target` when this signal aborts, preserving this signal's reason.
+    pub fn aborts_signal(&self, target: &LanguageModelAbortSignal) {
+        if self.is_aborted() {
+            target.abort_inner(self.reason());
+            return;
+        }
+
+        let mut followers = self
+            .state
+            .followers
+            .lock()
+            .expect("language model abort follower lock is not poisoned");
+
+        if self.is_aborted() {
+            drop(followers);
+            target.abort_inner(self.reason());
+            return;
+        }
+
+        followers.push(Arc::downgrade(&target.state));
+    }
+
+    fn abort_inner(&self, reason: Option<JsonValue>) {
+        let already_aborted = self.state.aborted.swap(true, Ordering::SeqCst);
+        if already_aborted {
+            return;
+        }
+
+        *self
+            .state
+            .reason
+            .lock()
+            .expect("language model abort reason lock is not poisoned") = reason.clone();
+
+        let mut wakers = self
+            .state
+            .wakers
+            .lock()
+            .expect("language model abort waker lock is not poisoned");
+        for waker in wakers.drain(..) {
+            waker.wake();
+        }
+        drop(wakers);
+
+        let followers = self
+            .state
+            .followers
+            .lock()
+            .expect("language model abort follower lock is not poisoned")
+            .drain(..)
+            .collect::<Vec<_>>();
+
+        for follower in followers {
+            if let Some(state) = follower.upgrade() {
+                LanguageModelAbortSignal { state }.abort_inner(reason.clone());
+            }
+        }
     }
 }
 
@@ -94,33 +160,12 @@ impl LanguageModelAbortController {
 
     /// Aborts without a reason.
     pub fn abort(&self) {
-        self.abort_inner(None);
+        self.signal.abort_inner(None);
     }
 
     /// Aborts with a reason.
     pub fn abort_with_reason(&self, reason: impl Into<JsonValue>) {
-        self.abort_inner(Some(reason.into()));
-    }
-
-    fn abort_inner(&self, reason: Option<JsonValue>) {
-        let already_aborted = self.signal.state.aborted.swap(true, Ordering::SeqCst);
-        if !already_aborted {
-            *self
-                .signal
-                .state
-                .reason
-                .lock()
-                .expect("language model abort reason lock is not poisoned") = reason;
-            let mut wakers = self
-                .signal
-                .state
-                .wakers
-                .lock()
-                .expect("language model abort waker lock is not poisoned");
-            for waker in wakers.drain(..) {
-                waker.wake();
-            }
-        }
+        self.signal.abort_inner(Some(reason.into()));
     }
 }
 
