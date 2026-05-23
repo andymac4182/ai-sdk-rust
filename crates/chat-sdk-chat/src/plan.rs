@@ -451,6 +451,123 @@ mod tests {
             assert_eq!(task.status, PlanTaskStatus::Complete);
         }
     }
+
+    // ---------- slice 112: pure accessor helpers ----------
+
+    #[test]
+    fn task_count_returns_the_number_of_tasks() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Step 1".into(),
+        });
+        assert_eq!(plan.task_count(), 1);
+        plan.add_task(AddTaskOptions {
+            children: None,
+            title: "Step 2".into(),
+        });
+        assert_eq!(plan.task_count(), 2);
+    }
+
+    #[test]
+    fn task_by_id_returns_the_matching_task() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Seed".into(),
+        });
+        let added = plan
+            .add_task(AddTaskOptions {
+                children: None,
+                title: "Second".into(),
+            })
+            .id
+            .clone();
+        let found = plan.task_by_id(&added).unwrap();
+        assert_eq!(found.title, "Second");
+        assert_eq!(found.status, PlanTaskStatus::Pending);
+    }
+
+    #[test]
+    fn task_by_id_returns_none_when_no_task_matches() {
+        let plan = Plan::new(StartPlanOptions {
+            initial_message: "Seed".into(),
+        });
+        assert!(plan.task_by_id("no-such-task").is_none());
+    }
+
+    #[test]
+    fn completed_task_count_only_counts_complete_status() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        let t2_id = plan
+            .add_task(AddTaskOptions {
+                children: None,
+                title: "Step 2".into(),
+            })
+            .id
+            .clone();
+        assert_eq!(plan.completed_task_count(), 0);
+        plan.update_task_in_model(UpdateTaskInput::Fields(UpdateTaskFields {
+            id: Some(t2_id),
+            output: None,
+            status: Some(PlanTaskStatus::Complete),
+        }));
+        assert_eq!(plan.completed_task_count(), 1);
+    }
+
+    #[test]
+    fn is_terminal_is_false_while_any_task_is_pending_or_in_progress() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        // The seed task starts in_progress.
+        assert!(!plan.is_terminal());
+        plan.add_task(AddTaskOptions {
+            children: None,
+            title: "Step 2".into(),
+        });
+        // The new task is pending.
+        assert!(!plan.is_terminal());
+    }
+
+    #[test]
+    fn is_terminal_is_true_when_every_task_is_complete_or_error() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        plan.add_task(AddTaskOptions {
+            children: None,
+            title: "Step 2".into(),
+        });
+        plan.complete_in_model(CompletePlanOptions {
+            complete_message: "Done".into(),
+        });
+        assert!(plan.is_terminal());
+    }
+
+    #[test]
+    fn is_terminal_treats_error_status_as_terminal() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        let seed_id = plan.tasks()[0].id.clone();
+        let extra_id = plan
+            .add_task(AddTaskOptions {
+                children: None,
+                title: "Extra".into(),
+            })
+            .id
+            .clone();
+        plan.update_task_in_model(UpdateTaskInput::Fields(UpdateTaskFields {
+            id: Some(seed_id),
+            output: None,
+            status: Some(PlanTaskStatus::Error),
+        }));
+        plan.update_task_in_model(UpdateTaskInput::Fields(UpdateTaskFields {
+            id: Some(extra_id),
+            output: None,
+            status: Some(PlanTaskStatus::Complete),
+        }));
+        assert!(plan.is_terminal());
+    }
 }
 
 /// In-memory plan with a task list. 1:1 port (in progress) of upstream
@@ -607,6 +724,53 @@ impl Plan {
             task.status = s;
         }
         Some(task)
+    }
+
+    /// Total task count. Convenience accessor matching upstream's
+    /// `plan.tasks.length`.
+    pub fn task_count(&self) -> usize {
+        self.model.tasks.len()
+    }
+
+    /// Look up a task by id. Returns `None` when no task carries the
+    /// given id. Matches upstream's inline
+    /// `plan.tasks.find(t => t.id === id)` pattern at adapter
+    /// callsites.
+    pub fn task_by_id(&self, id: &str) -> Option<PlanTask> {
+        self.model
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| PlanTask {
+                id: t.id.clone(),
+                status: t.status,
+                title: t.title.clone(),
+            })
+    }
+
+    /// Number of tasks currently in [`PlanTaskStatus::Complete`].
+    /// Matches the upstream completed-counter expression
+    /// `plan.tasks.filter(t => t.status === "complete").length` used
+    /// inside the streaming-plan renderer.
+    pub fn completed_task_count(&self) -> usize {
+        self.model
+            .tasks
+            .iter()
+            .filter(|t| t.status == PlanTaskStatus::Complete)
+            .count()
+    }
+
+    /// Returns `true` when every task is in a terminal status
+    /// (`complete` or `error`). 1:1 with upstream's inline
+    /// `plan.tasks.every(t => t.status === "complete" || t.status ===
+    /// "error")` check that gates "render this plan as final".
+    pub fn is_terminal(&self) -> bool {
+        !self.model.tasks.is_empty()
+            && self
+                .model
+                .tasks
+                .iter()
+                .all(|t| t.status == PlanTaskStatus::Complete || t.status == PlanTaskStatus::Error)
     }
 
     /// Mark the plan as complete, replacing the title with the supplied
