@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 50.3%
-- Portable package average: 40.3%
+- Average estimated completion: 50.5%
+- Portable package average: 40.6%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -29,7 +29,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-teams` | 30% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message + slice 167 edit_message + delete_message + add_reaction (not-implemented... |
 | `@chat-sdk/adapter-gchat` | 30% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message + slice 168 edit_message (PATCH with updateMask) + delete_message +... |
 | `@chat-sdk/adapter-discord` | 30% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit_message + delete_message + add_reaction (PUT... |
-| `@chat-sdk/adapter-linear` | 28% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message + slice 166 edit_message (commentUpdate) + delete_message + add_reaction... |
+| `@chat-sdk/adapter-linear` | 32% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message + slice 166 edit/delete/react/typing + slice 171 utils module... |
 | `@chat-sdk/adapter-github` | 30% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit_message +... |
 | `@chat-sdk/adapter-messenger` | 28% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react (all unsupported per upstream) +... |
 | `@chat-sdk/adapter-telegram` | 30% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject (additive) + slice 161 edit_message +... |

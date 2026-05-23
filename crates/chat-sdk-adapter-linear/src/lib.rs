@@ -7,6 +7,8 @@
 //! `team_key` (e.g. "ENG") plus the GraphQL issue UUID is sufficient
 //! to address comments through Linear's API.
 
+pub mod utils;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
