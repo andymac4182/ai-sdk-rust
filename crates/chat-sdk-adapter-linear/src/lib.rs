@@ -24,6 +24,18 @@ pub const THREAD_ID_PREFIX: &str = "linear:";
 /// Default Linear GraphQL API URL.
 pub const DEFAULT_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 
+/// State-key prefix the adapter writes per-installation OAuth
+/// credentials under. 1:1 with upstream's private
+/// `INSTALLATION_KEY_PREFIX = "linear:installation"`.
+pub const INSTALLATION_KEY_PREFIX: &str = "linear:installation";
+
+/// Refresh buffer the adapter uses before an installation access
+/// token expires — proactive refresh fires this much in advance so
+/// transient renewal failures still leave wall-clock slack. 1:1
+/// with upstream's private
+/// `INSTALLATION_REFRESH_BUFFER_MS = 5 * 60 * 1000` (5 min).
+pub const INSTALLATION_REFRESH_BUFFER_MS: u64 = 5 * 60 * 1000;
+
 /// Options for [`LinearAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct LinearAdapterOptions {
@@ -489,6 +501,15 @@ mod tests {
 
     #[test]
     // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    #[test]
+    fn linear_installation_constants_match_upstream() {
+        // 1:1 with upstream's private `INSTALLATION_KEY_PREFIX` and
+        // `INSTALLATION_REFRESH_BUFFER_MS`.
+        assert_eq!(INSTALLATION_KEY_PREFIX, "linear:installation");
+        assert_eq!(INSTALLATION_REFRESH_BUFFER_MS, 5 * 60 * 1000);
+    }
+
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {
         use chat_sdk_chat::markdown::{Node, paragraph, root, text};
