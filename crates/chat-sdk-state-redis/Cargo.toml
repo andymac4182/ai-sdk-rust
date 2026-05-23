@@ -1,0 +1,28 @@
+[package]
+name = "chat-sdk-state-redis"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust port of the Vercel Chat SDK `state-redis` package (production Redis state backend)."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "chat_sdk_state_redis"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+async-trait = "0.1.89"
+chat-sdk-chat = { path = "../chat-sdk-chat" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+
+[dev-dependencies]
+futures-executor = "0.3.32"
