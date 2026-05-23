@@ -604,6 +604,14 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `resolveToolApproval` callback
+  normalization parity added named Rust counterparts
+  `resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable`,
+  `resolve_tool_approval_uses_generic_callback_before_tool_defined_approval`,
+  `resolve_tool_approval_treats_none_from_per_tool_callback_as_not_applicable`,
+  and `resolve_tool_approval_passes_no_tool_context_without_context_schema`.
+  Rust now covers the upstream generic and per-tool callback precedence,
+  missing-return normalization, and omitted `toolContext` behavior.
 - 2026-05-23: `packages/ai` `resolveToolApproval` context-validation
   parity added named Rust counterparts
   `resolve_tool_approval_passes_validated_context_to_user_defined_approval_callback`,
@@ -3529,6 +3537,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving validated tool context is passed to approval callbacks and invalid
    context fails before invoking user-defined or tool-defined approval
    callbacks.
+   The same upstream file's callback precedence and normalization cases now
+   have named Rust counterparts in
+   `resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable`,
+   `resolve_tool_approval_uses_generic_callback_before_tool_defined_approval`,
+   `resolve_tool_approval_treats_none_from_per_tool_callback_as_not_applicable`,
+   and `resolve_tool_approval_passes_no_tool_context_without_context_schema`,
+   proving generic callbacks run before tool-defined approval callbacks,
+   missing callback returns normalize to `not-applicable`, and absent
+   `toolsContext` entries become absent `toolContext` options.
    The upstream `generate-text/sum-token-counts.test.ts` cases now have named
    Rust counterparts in `sum_token_counts_should_*`. The upstream
    `generate-text/calculate-tokens-per-second.test.ts` portable cases now have
