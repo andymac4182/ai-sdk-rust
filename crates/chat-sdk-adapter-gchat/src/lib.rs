@@ -26,6 +26,23 @@ pub const THREAD_ID_PREFIX: &str = "gchat:";
 /// Default Google Chat REST API base URL.
 pub const DEFAULT_API_BASE: &str = "https://chat.googleapis.com/v1";
 
+/// Refresh buffer for space subscriptions. The adapter renews a
+/// subscription this long before its declared expiry so transient
+/// renewal failures still leave wall-clock slack. 1:1 with
+/// upstream's private `SUBSCRIPTION_REFRESH_BUFFER_MS = 60 * 60 *
+/// 1000` (1 h).
+pub const SUBSCRIPTION_REFRESH_BUFFER_MS: u64 = 60 * 60 * 1000;
+
+/// TTL the adapter caches space-subscription metadata under (just
+/// over the 24 h Chat-imposed cap). 1:1 with upstream's private
+/// `SUBSCRIPTION_CACHE_TTL_MS = 25 * 60 * 60 * 1000` (25 h).
+pub const SUBSCRIPTION_CACHE_TTL_MS: u64 = 25 * 60 * 60 * 1000;
+
+/// State-key prefix the adapter writes space-subscription metadata
+/// under. 1:1 with upstream's private
+/// `SPACE_SUB_KEY_PREFIX = "gchat:space-sub:"`.
+pub const SPACE_SUB_KEY_PREFIX: &str = "gchat:space-sub:";
+
 /// Options for [`GchatAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct GchatAdapterOptions {
@@ -500,6 +517,16 @@ mod tests {
 
     #[test]
     // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    #[test]
+    fn gchat_subscription_constants_match_upstream() {
+        // 1:1 with upstream's private `SUBSCRIPTION_REFRESH_BUFFER_MS`,
+        // `SUBSCRIPTION_CACHE_TTL_MS`, `SPACE_SUB_KEY_PREFIX`.
+        assert_eq!(SUBSCRIPTION_REFRESH_BUFFER_MS, 60 * 60 * 1000);
+        assert_eq!(SUBSCRIPTION_CACHE_TTL_MS, 25 * 60 * 60 * 1000);
+        assert_eq!(SPACE_SUB_KEY_PREFIX, "gchat:space-sub:");
+    }
+
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {
         use chat_sdk_chat::markdown::{Node, paragraph, root, text};
