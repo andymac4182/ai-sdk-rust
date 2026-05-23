@@ -1357,4 +1357,55 @@ mod tests {
         }
         assert_eq!(find_link_title(&node).as_deref(), Some("Title"));
     }
+
+    // ---------- slice 73: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_treats_inline_html_entity_as_text() {
+        let node = parse_markdown("AT&amp;T").expect("parses");
+        assert!(to_plain_text(&node).contains("AT&T"));
+    }
+
+    #[test]
+    fn parse_markdown_nested_emphasis_inside_strong_round_trips() {
+        let node = parse_markdown("**bold _and italic_ here**").expect("parses");
+        assert!(to_plain_text(&node).contains("bold and italic here"));
+        fn nesting_present(n: &Node) -> bool {
+            if let Node::Strong(s) = n {
+                if s.children.iter().any(|c| matches!(c, Node::Emphasis(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(nesting_present)
+        }
+        assert!(nesting_present(&node));
+    }
+
+    #[test]
+    fn parse_markdown_list_with_mixed_ordered_and_unordered_items() {
+        let node = parse_markdown("- alpha\n\n1. one\n2. two").expect("parses");
+        fn count_lists(n: &Node) -> usize {
+            let self_count = if matches!(n, Node::List(_)) { 1 } else { 0 };
+            self_count + get_node_children(n).iter().map(count_lists).sum::<usize>()
+        }
+        // Two separate List blocks (one unordered, one ordered).
+        assert_eq!(count_lists(&node), 2);
+    }
+
+    #[test]
+    fn parse_markdown_inline_code_with_backticks_preserves_value() {
+        let node = parse_markdown("Use `npm install` here").expect("parses");
+        fn find_inline_code(n: &Node) -> Option<String> {
+            if let Node::InlineCode(c) = n {
+                return Some(c.value.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(v) = find_inline_code(c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        assert_eq!(find_inline_code(&node).as_deref(), Some("npm install"));
+    }
 }
