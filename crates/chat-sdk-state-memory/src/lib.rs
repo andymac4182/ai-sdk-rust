@@ -468,11 +468,62 @@ impl MemoryStateAdapter {
     }
 }
 
-// Placeholder StateAdapter implementation. The chat::types::StateAdapter
-// trait is intentionally empty in the current types layer; the impl is
-// here so MemoryStateAdapter can be cast to `dyn StateAdapter` once a
-// future slice extends the trait with concrete async methods.
-impl chat_sdk_chat::types::StateAdapter for MemoryStateAdapter {}
+impl From<StateError> for chat_sdk_chat::types::StateAdapterError {
+    fn from(err: StateError) -> Self {
+        match err {
+            StateError::NotConnected => Self::NotConnected,
+        }
+    }
+}
+
+/// `StateAdapter` impl for the in-memory backend. Phase 1.5 (slice 117).
+///
+/// The in-memory backend's internals are sync (no real I/O), so each
+/// async-trait method here trivially awaits the matching synchronous
+/// inherent method. The trait surface stays async because production
+/// state backends (Redis, ioredis, Postgres) WILL perform I/O.
+#[async_trait::async_trait]
+impl chat_sdk_chat::types::StateAdapter for MemoryStateAdapter {
+    async fn get(&self, key: &str) -> chat_sdk_chat::types::StateResult<Option<serde_json::Value>> {
+        MemoryStateAdapter::get(self, key).map_err(Into::into)
+    }
+
+    async fn set(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        ttl_ms: Option<u64>,
+    ) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::set(self, key, value, ttl_ms).map_err(Into::into)
+    }
+
+    async fn delete(&self, key: &str) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::delete(self, key).map_err(Into::into)
+    }
+
+    async fn append_to_list(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        max_length: Option<usize>,
+        ttl_ms: Option<u64>,
+    ) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::append_to_list(self, key, value, max_length, ttl_ms).map_err(Into::into)
+    }
+
+    async fn get_list(
+        &self,
+        key: &str,
+        limit: Option<usize>,
+    ) -> chat_sdk_chat::types::StateResult<Vec<serde_json::Value>> {
+        let list: Vec<serde_json::Value> = MemoryStateAdapter::get_list(self, key)
+            .map_err(chat_sdk_chat::types::StateAdapterError::from)?;
+        Ok(match limit {
+            Some(n) if list.len() > n => list[list.len() - n..].to_vec(),
+            _ => list,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
