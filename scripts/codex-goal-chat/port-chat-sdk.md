@@ -844,3 +844,65 @@ When the workspace commits to an async HTTP client (per "Phase
 2 / Phase 3 prep" above), the adapter scaffolds become the
 landing points for the real I/O methods — each adapter then
 needs ~30-50 additional slices for full upstream parity.
+
+## State-backend scaffold variant (added slice 143)
+
+State backends follow the same template as adapters with three
+swaps:
+
+1. Impl `chat_sdk_chat::types::StateAdapter` (not `Adapter`).
+   The 5 required methods (get, set, delete, append_to_list,
+   get_list) have NO defaults, so each impl MUST provide a
+   body. For scaffolds, return
+   `Err(StateAdapterError::NotConnected)` from every method —
+   that's the minimal valid impl, matches upstream's
+   "not connected" throw, and exercises the trait shape in
+   tests. The 5 default-impl methods (set_if_not_exists +
+   4 lock methods from slice 125) inherit the trait defaults
+   automatically.
+2. No thread-id codec. State backends are agnostic to the
+   chat-sdk thread-id format — adapters build the keys.
+3. Per-backend config struct shape varies: single-node URL
+   (`state-redis`), cluster + Sentinel (`state-ioredis`),
+   database URL + table prefix (`state-pg`). Match the
+   upstream package's options interface.
+
+Tests: 10-11 colocated cases covering options construction +
+overrides + accessors + 5 `NotConnected` returns. The full
+recipe lives in `crates/chat-sdk-state-redis/src/lib.rs` and
+`crates/chat-sdk-state-pg/src/lib.rs` as live examples.
+
+## Session 2 kickoff checklist (added slice 143)
+
+All 18 upstream packages now have either a verified mark, a
+js-only-documented mark, or an in-progress scaffold. The next
+session's first slice should ship the workspace runtime
+commitment that unblocks every in-progress package's HTTP /
+DB layer:
+
+1. Add `tokio = { version = "1", features = ["rt-multi-thread",
+   "macros"] }` and `reqwest = { version = "0.12", features =
+   ["json", "rustls-tls"], default-features = false }` to
+   `crates/chat-sdk-adapter-shared/Cargo.toml`. Re-export the
+   chosen runtime via `chat_sdk_adapter_shared::runtime`.
+2. Pick the Postgres client (recommend `sqlx` for compile-time
+   query checking; `tokio-postgres` for lower dep footprint).
+3. Add `redis = { version = "0.27", features = ["tokio-comp"] }`
+   and `bb8-redis = "0.18"` to
+   `crates/chat-sdk-state-redis/Cargo.toml`. The cluster
+   variant goes into `chat-sdk-state-ioredis` with
+   `redis = { features = ["cluster-async", "tokio-comp"] }`.
+4. Pick the smallest adapter (Telegram) and ship the
+   `post_message` HTTP slice end-to-end as the reference
+   implementation. The other 8 adapters' `post_message`
+   methods follow the same recipe.
+5. After 1 adapter + 1 state backend have real HTTP/DB layer,
+   re-baseline the percent scale in
+   `docs/chat/package-progress-estimates.tsv` so the 10%
+   scaffold mark and the 100% verified target have empirical
+   anchor points.
+
+Estimated session 2 budget: ~50-100 slices for HTTP wire-up
+across 9 adapters + 3 state backends. Subsequent sessions
+ship verified marks per package as full upstream test parity
+lands.
