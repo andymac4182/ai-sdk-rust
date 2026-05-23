@@ -266,6 +266,123 @@ pub enum TableKind {
     Table,
 }
 
+/// Section container for grouping card children. 1:1 port of upstream
+/// `interface SectionElement`. Discriminator `"section"`. Children are
+/// drawn from [`CardChild`] (any card child type, including nested
+/// `Section`s).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SectionElement {
+    pub children: Vec<CardChild>,
+    #[serde(rename = "type")]
+    pub kind: SectionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SectionKind {
+    #[default]
+    #[serde(rename = "section")]
+    Section,
+}
+
+/// Children of a [`CardElement`] or [`SectionElement`]. 1:1 port of
+/// upstream `export type CardChild = TextElement | ImageElement |
+/// DividerElement | ActionsElement | SectionElement | FieldsElement |
+/// LinkElement | TableElement`.
+///
+/// Modeled `#[serde(untagged)]` over the eight element structs — each
+/// carries its own discriminator string field, so serde can disambiguate
+/// from the JSON without an outer wrapper. The variant order in this
+/// enum is the upstream variant order; serde's untagged matcher tries
+/// variants in declaration order so the most specific shapes (with
+/// required non-overlapping fields) ship first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CardChild {
+    Text(TextElement),
+    Image(ImageElement),
+    Divider(DividerElement),
+    Actions(ActionsElement),
+    Section(SectionElement),
+    Fields(FieldsElement),
+    Link(LinkElement),
+    Table(TableElement),
+}
+
+impl From<TextElement> for CardChild {
+    fn from(value: TextElement) -> Self {
+        Self::Text(value)
+    }
+}
+impl From<ImageElement> for CardChild {
+    fn from(value: ImageElement) -> Self {
+        Self::Image(value)
+    }
+}
+impl From<DividerElement> for CardChild {
+    fn from(value: DividerElement) -> Self {
+        Self::Divider(value)
+    }
+}
+impl From<ActionsElement> for CardChild {
+    fn from(value: ActionsElement) -> Self {
+        Self::Actions(value)
+    }
+}
+impl From<SectionElement> for CardChild {
+    fn from(value: SectionElement) -> Self {
+        Self::Section(value)
+    }
+}
+impl From<FieldsElement> for CardChild {
+    fn from(value: FieldsElement) -> Self {
+        Self::Fields(value)
+    }
+}
+impl From<LinkElement> for CardChild {
+    fn from(value: LinkElement) -> Self {
+        Self::Link(value)
+    }
+}
+impl From<TableElement> for CardChild {
+    fn from(value: TableElement) -> Self {
+        Self::Table(value)
+    }
+}
+
+/// Root card element. 1:1 port of upstream `interface CardElement`.
+/// Discriminator `"card"`. `title`/`subtitle`/`image_url` are optional;
+/// `children` is required (an empty `Vec` is fine).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CardElement {
+    pub children: Vec<CardChild>,
+    #[serde(rename = "imageUrl", default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: CardKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CardKind {
+    #[default]
+    #[serde(rename = "card")]
+    Card,
+}
+
+/// Type guard for [`CardElement`]. 1:1 port of upstream
+/// `isCardElement(value: unknown): value is CardElement`. Returns
+/// `true` when the JSON value is an object whose `type` field equals
+/// `"card"`.
+pub fn is_card_element(value: &serde_json::Value) -> bool {
+    value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "card")
+}
+
 /// Children of an [`ActionsElement`]. 1:1 port of upstream's
 /// `(ButtonElement | LinkButtonElement | SelectElement | RadioSelectElement)[]`
 /// children-type union.
@@ -339,6 +456,41 @@ pub fn actions(children: Vec<ActionsChild>) -> ActionsElement {
     ActionsElement {
         children,
         kind: ActionsKind::Actions,
+    }
+}
+
+/// 1:1 port of upstream `Section(children: CardChild[]): SectionElement`.
+/// Children can be passed as concrete element values via
+/// `From<...>` impls on [`CardChild`] (`Text`, `Image`, `Divider`,
+/// `Actions`, `Section`, `Fields`, `Link`, `Table`).
+pub fn section(children: Vec<CardChild>) -> SectionElement {
+    SectionElement {
+        children,
+        kind: SectionKind::Section,
+    }
+}
+
+/// Options for [`card`]. Mirrors upstream `interface CardOptions`. All
+/// fields optional (the upstream default is `{ children: [] }`).
+#[derive(Debug, Default, Clone)]
+pub struct CardOptions {
+    pub children: Option<Vec<CardChild>>,
+    pub image_url: Option<String>,
+    pub subtitle: Option<String>,
+    pub title: Option<String>,
+}
+
+/// 1:1 port of upstream `Card(options?): CardElement`. Builds a root
+/// card element with the given title/subtitle/image and children. The
+/// upstream `children ?? []` default lands here as
+/// `options.children.unwrap_or_default()`.
+pub fn card(options: CardOptions) -> CardElement {
+    CardElement {
+        children: options.children.unwrap_or_default(),
+        image_url: options.image_url,
+        subtitle: options.subtitle,
+        title: options.title,
+        kind: CardKind::Card,
     }
 }
 
@@ -758,6 +910,96 @@ mod tests {
         assert_eq!(back.children.len(), 2);
         assert!(matches!(back.children[0], ActionsChild::LinkButton(_)));
         assert!(matches!(back.children[1], ActionsChild::RadioSelect(_)));
+    }
+
+    #[test]
+    fn section_builder_wraps_card_children() {
+        let elem = section(vec![
+            text("hi", None).into(),
+            divider().into(),
+            image("https://example.com/x.png", None).into(),
+        ]);
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"section\""));
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"type\":\"divider\""));
+        assert!(json.contains("\"type\":\"image\""));
+        let back: SectionElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, elem);
+    }
+
+    #[test]
+    fn card_builder_with_no_options_emits_empty_children_and_only_type() {
+        let elem = card(CardOptions::default());
+        let json = serde_json::to_string(&elem).unwrap();
+        assert_eq!(json, "{\"children\":[],\"type\":\"card\"}");
+        let back: CardElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, elem);
+    }
+
+    #[test]
+    fn card_builder_full_shape_round_trips_camelcase_image_url() {
+        let elem = card(CardOptions {
+            children: Some(vec![text("Total: $50", None).into()]),
+            image_url: Some("https://example.com/banner.png".to_string()),
+            subtitle: Some("Order #1234".to_string()),
+            title: Some("Welcome".to_string()),
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"card\""));
+        assert!(json.contains("\"title\":\"Welcome\""));
+        assert!(json.contains("\"subtitle\":\"Order #1234\""));
+        assert!(json.contains("\"imageUrl\":\"https://example.com/banner.png\""));
+        assert!(json.contains("\"type\":\"text\""));
+        let back: CardElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, elem);
+    }
+
+    #[test]
+    fn is_card_element_distinguishes_cards_from_other_shapes() {
+        let card_json = serde_json::to_value(card(CardOptions::default())).unwrap();
+        assert!(is_card_element(&card_json));
+
+        let text_json = serde_json::to_value(text("hello", None)).unwrap();
+        assert!(!is_card_element(&text_json));
+
+        let plain_object = serde_json::json!({"foo": "bar"});
+        assert!(!is_card_element(&plain_object));
+
+        let null_value = serde_json::Value::Null;
+        assert!(!is_card_element(&null_value));
+    }
+
+    #[test]
+    fn card_child_untagged_round_trip_handles_every_variant() {
+        let payload: Vec<CardChild> = vec![
+            text("hello", Some(TextStyle::Bold)).into(),
+            image("https://example.com/x.png", Some("alt".to_string())).into(),
+            divider().into(),
+            actions(vec![]).into(),
+            section(vec![text("nested", None).into()]).into(),
+            fields(vec![field("k", "v")]).into(),
+            card_link("https://example.com", "Open").into(),
+            table(TableOptions {
+                headers: vec!["A".to_string()],
+                rows: vec![vec!["1".to_string()]],
+                align: None,
+            })
+            .into(),
+        ];
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: Vec<CardChild> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), payload.len());
+        // Spot-check that variants round-tripped to the correct enum
+        // arms (not the leftmost-untagged-match catch-all).
+        assert!(matches!(back[0], CardChild::Text(_)));
+        assert!(matches!(back[1], CardChild::Image(_)));
+        assert!(matches!(back[2], CardChild::Divider(_)));
+        assert!(matches!(back[3], CardChild::Actions(_)));
+        assert!(matches!(back[4], CardChild::Section(_)));
+        assert!(matches!(back[5], CardChild::Fields(_)));
+        assert!(matches!(back[6], CardChild::Link(_)));
+        assert!(matches!(back[7], CardChild::Table(_)));
     }
 
     #[test]
