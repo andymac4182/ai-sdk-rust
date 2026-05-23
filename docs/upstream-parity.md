@@ -604,6 +604,11 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `executeToolCall` abort/preliminary parity
+  wired existing Rust abort signals into local tool execution, switched local
+  execution to the provider-utils `execute_tool` final/preliminary contract,
+  and added named counterparts for preliminary-result callbacks and final
+  result selection from streamed tool outputs.
 - 2026-05-23: `packages/ai` `executeToolCall` callback/sandbox parity
   added named counterparts for sandbox forwarding, missing-tool/empty-tools
   no-op behavior, tool-execution start/end callback payloads, callback panic
@@ -3451,9 +3456,17 @@ focused tests for each portable behavior before changing rows to `verified`.
    `execute_tool_call_should_return_none_when_tool_is_not_found_in_tools`;
    exact mocked JavaScript `now()` sequencing is replaced by native Rust
    monotonic duration equality between callback event and returned performance
-   map. Remaining callback arrays, timeout/abort-signal wiring, telemetry
-   wrapper, and preliminary async-generator result cases stay in the follow-up
-   queue.
+   map. The abort/preliminary slice added
+   `execute_tool_call_should_pass_abort_signal_to_tool_execution_when_available`,
+   `execute_tool_call_should_not_pass_abort_signal_when_unavailable`,
+   `execute_tool_call_should_call_preliminary_tool_result_callback_for_preliminary_results`,
+   and
+   `execute_tool_call_should_return_final_result_even_with_preliminary_results`;
+   Rust maps upstream async-generator tool outputs through
+   `Tool::with_execute_outputs`/`execute_tool` records, with final output
+   normalization handled by provider-utils. Remaining callback arrays,
+   timeout-created abort signals, and the telemetry wrapper stay in the
+   follow-up queue.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error

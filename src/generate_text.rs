@@ -38,10 +38,10 @@ use crate::provider::{
 };
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
-    Base64DecodeError, ExperimentalSandbox, IdGeneratorOptions, Tool, ToolExecutionOptions,
-    ToolInputAvailableOptions, ToolInputDeltaOptions, ToolModelOutputOptions,
+    Base64DecodeError, ExecuteToolOutput, ExperimentalSandbox, IdGeneratorOptions, Tool,
+    ToolExecutionOptions, ToolInputAvailableOptions, ToolInputDeltaOptions, ToolModelOutputOptions,
     ToolNeedsApprovalOptions, convert_base64_to_bytes, convert_bytes_to_base64,
-    create_id_generator, generate_id, prepare_tools_with_context,
+    create_id_generator, execute_tool, generate_id, prepare_tools_with_context,
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher};
@@ -5194,6 +5194,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         &tools_context,
         (
             experimental_sandbox.as_ref(),
+            call_options.abort_signal.as_ref(),
+            None,
             on_tool_execution_start.as_ref(),
             on_tool_execution_end.as_ref(),
             Some(&telemetry_dispatcher),
@@ -5409,6 +5411,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             &tool_approvals.blocked_tool_call_ids,
             (
                 step_experimental_sandbox.as_ref(),
+                step_call_options.abort_signal.as_ref(),
+                None,
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
                 Some(&telemetry_dispatcher),
@@ -6214,6 +6218,8 @@ fn tool_approval_response_part(
 
 pub(crate) type GenerateTextToolExecutionContext<'a, 'b> = (
     Option<&'a Arc<dyn ExperimentalSandbox>>,
+    Option<&'a LanguageModelAbortSignal>,
+    Option<&'a Callback<'b, GenerateTextToolResult>>,
     Option<&'a GenerateTextOnToolExecutionStart<'b>>,
     Option<&'a GenerateTextOnToolExecutionEnd<'b>>,
     Option<&'a TelemetryDispatcher>,
@@ -6232,6 +6238,8 @@ pub(crate) async fn execute_tool_calls(
     let mut tool_execution_ms = BTreeMap::new();
     let (
         experimental_sandbox,
+        abort_signal,
+        on_preliminary_tool_result,
         on_tool_execution_start,
         on_tool_execution_end,
         telemetry_dispatcher,
@@ -6299,14 +6307,35 @@ pub(crate) async fn execute_tool_calls(
             execution_options =
                 execution_options.with_experimental_sandbox(Arc::clone(experimental_sandbox));
         }
-
-        let Some(execute) = tool.execute(tool_call.input.clone(), execution_options) else {
-            continue;
-        };
+        if let Some(abort_signal) = abort_signal {
+            execution_options = execution_options.with_abort_signal(abort_signal.clone());
+        }
 
         let tool_started_at = Instant::now();
-        let tool_result = match execute.await {
-            Ok(output) => GenerateTextToolResult::success(tool_call, output),
+        let tool_result = match execute_tool(tool, tool_call.input.clone(), execution_options).await
+        {
+            Ok(outputs) => {
+                let mut final_result = None;
+                for output in outputs {
+                    match output {
+                        ExecuteToolOutput::Preliminary { output } => {
+                            if let Some(on_preliminary_tool_result) = on_preliminary_tool_result {
+                                let mut preliminary_result =
+                                    GenerateTextToolResult::success(tool_call, output);
+                                preliminary_result.preliminary = Some(true);
+                                notify(preliminary_result, (*on_preliminary_tool_result).clone())
+                                    .await;
+                            }
+                        }
+                        ExecuteToolOutput::Final { output } => {
+                            final_result = Some(GenerateTextToolResult::success(tool_call, output));
+                        }
+                    }
+                }
+
+                final_result
+                    .unwrap_or_else(|| GenerateTextToolResult::success(tool_call, JsonValue::Null))
+            }
             Err(error) => GenerateTextToolResult::error(tool_call, error.into_message()),
         };
         let elapsed_ms = duration_ms(tool_started_at.elapsed());
@@ -7889,21 +7918,21 @@ mod tests {
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
     use crate::language_model::{
-        FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelCustomContent, LanguageModelFile, LanguageModelFileData,
-        LanguageModelFilePart, LanguageModelFinishReason, LanguageModelFunctionTool,
-        LanguageModelGenerateResult, LanguageModelMessage, LanguageModelPrompt,
-        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningFile,
-        LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelRequest,
-        LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
-        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+        FinishReason, InputTokenUsage, LanguageModel, LanguageModelAbortController,
+        LanguageModelAbortSignal, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
+        LanguageModelCallOptions, LanguageModelContent, LanguageModelCustomContent,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
+        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
+        LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
+        LanguageModelToolResult, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
         LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
         LanguageModelUserMessage, OutputTokenUsage,
     };
@@ -7914,13 +7943,15 @@ mod tests {
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
     use crate::provider_utils::{
-        ExperimentalSandbox, FlexibleSchema, SandboxCommandOptions, SandboxCommandResult,
-        SandboxRunCommandFuture, Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool,
+        ExecuteToolOutput, ExperimentalSandbox, FlexibleSchema, SandboxCommandOptions,
+        SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool, ToolExecutionError,
+        ValidationResult, dynamic_tool,
     };
     use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
+    use crate::util::Callback;
     use crate::warning::Warning;
     use serde_json::json;
     use std::cell::RefCell;
@@ -11838,7 +11869,12 @@ mod tests {
         tool_call: GenerateTextToolCall,
         tools_context: JsonObject,
     ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
-        execute_tool_calls_for_test_with_context(tools, tool_call, tools_context, None, None, None)
+        execute_tool_calls_for_test_with_extra_context(
+            tools,
+            tool_call,
+            tools_context,
+            ExecuteToolCallsTestContext::default(),
+        )
     }
 
     fn execute_tool_calls_for_test_with_context<'a, 'b>(
@@ -11848,6 +11884,34 @@ mod tests {
         experimental_sandbox: Option<&'a Arc<dyn ExperimentalSandbox>>,
         on_tool_execution_start: Option<&'a GenerateTextOnToolExecutionStart<'b>>,
         on_tool_execution_end: Option<&'a GenerateTextOnToolExecutionEnd<'b>>,
+    ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
+        execute_tool_calls_for_test_with_extra_context(
+            tools,
+            tool_call,
+            tools_context,
+            ExecuteToolCallsTestContext {
+                experimental_sandbox,
+                on_tool_execution_start,
+                on_tool_execution_end,
+                ..ExecuteToolCallsTestContext::default()
+            },
+        )
+    }
+
+    #[derive(Default)]
+    struct ExecuteToolCallsTestContext<'a, 'b> {
+        experimental_sandbox: Option<&'a Arc<dyn ExperimentalSandbox>>,
+        abort_signal: Option<&'a LanguageModelAbortSignal>,
+        on_preliminary_tool_result: Option<&'a Callback<'b, GenerateTextToolResult>>,
+        on_tool_execution_start: Option<&'a GenerateTextOnToolExecutionStart<'b>>,
+        on_tool_execution_end: Option<&'a GenerateTextOnToolExecutionEnd<'b>>,
+    }
+
+    fn execute_tool_calls_for_test_with_extra_context<'a, 'b>(
+        tools: &[Tool],
+        tool_call: GenerateTextToolCall,
+        tools_context: JsonObject,
+        context: ExecuteToolCallsTestContext<'a, 'b>,
     ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
         let tool_calls = vec![tool_call];
         let messages = vec![user_message("test message")];
@@ -11860,9 +11924,11 @@ mod tests {
             &tools_context,
             &BTreeSet::new(),
             (
-                experimental_sandbox,
-                on_tool_execution_start,
-                on_tool_execution_end,
+                context.experimental_sandbox,
+                context.abort_signal,
+                context.on_preliminary_tool_result,
+                context.on_tool_execution_start,
+                context.on_tool_execution_end,
                 None,
             ),
         ))
@@ -11940,6 +12006,163 @@ mod tests {
             received_sandbox.lock().expect("sandbox lock").as_deref(),
             Some("test sandbox")
         );
+    }
+
+    #[test]
+    fn execute_tool_call_should_pass_abort_signal_to_tool_execution_when_available() {
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        *received_signal.lock().expect("signal lock") = options.abort_signal;
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                abort_signal: Some(&abort_signal),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool received abort signal");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+        assert!(!captured_signal.is_aborted());
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(captured_signal.is_aborted());
+        assert_eq!(captured_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
+    fn execute_tool_call_should_not_pass_abort_signal_when_unavailable() {
+        let received_signal = Arc::new(AtomicBool::new(true));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        received_signal.store(options.abort_signal.is_some(), Ordering::SeqCst);
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) =
+            execute_tool_calls_for_test(&tools, execute_tool_call_test_call(), JsonObject::new());
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert!(!received_signal.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn execute_tool_call_should_call_preliminary_tool_result_callback_for_preliminary_results() {
+        let preliminary_results = Arc::new(Mutex::new(Vec::<GenerateTextToolResult>::new()));
+        let preliminary_results_for_callback = Arc::clone(&preliminary_results);
+        let on_preliminary = Callback::infallible(move |result: GenerateTextToolResult| {
+            let preliminary_results = Arc::clone(&preliminary_results_for_callback);
+            async move {
+                preliminary_results
+                    .lock()
+                    .expect("preliminary results lock")
+                    .push(result);
+            }
+        });
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute_outputs(
+                |_input, _options| async move {
+                    Ok(vec![
+                        ExecuteToolOutput::preliminary(json!("partial-1")),
+                        ExecuteToolOutput::preliminary(json!("partial-2")),
+                        ExecuteToolOutput::final_output(json!("test-final")),
+                    ])
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                on_preliminary_tool_result: Some(&on_preliminary),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        let preliminary_results = preliminary_results
+            .lock()
+            .expect("preliminary results lock");
+        assert_eq!(preliminary_results.len(), 2);
+        assert_eq!(preliminary_results[0].output, json!("partial-1"));
+        assert_eq!(preliminary_results[0].preliminary, Some(true));
+        assert_eq!(preliminary_results[1].output, json!("partial-2"));
+        assert_eq!(preliminary_results[1].preliminary, Some(true));
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_results[0].output, json!("test-final"));
+        assert_eq!(tool_results[0].preliminary, None);
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_final_result_even_with_preliminary_results() {
+        let preliminary_results = Arc::new(Mutex::new(Vec::<GenerateTextToolResult>::new()));
+        let preliminary_results_for_callback = Arc::clone(&preliminary_results);
+        let on_preliminary = Callback::infallible(move |result: GenerateTextToolResult| {
+            let preliminary_results = Arc::clone(&preliminary_results_for_callback);
+            async move {
+                preliminary_results
+                    .lock()
+                    .expect("preliminary results lock")
+                    .push(result);
+            }
+        });
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute_outputs(
+                |_input, _options| async move {
+                    Ok(vec![
+                        ExecuteToolOutput::preliminary(json!("partial-1")),
+                        ExecuteToolOutput::preliminary(json!("test-final")),
+                    ])
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                on_preliminary_tool_result: Some(&on_preliminary),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        let preliminary_results = preliminary_results
+            .lock()
+            .expect("preliminary results lock");
+        assert_eq!(preliminary_results.len(), 2);
+        assert_eq!(preliminary_results[0].output, json!("partial-1"));
+        assert_eq!(preliminary_results[1].output, json!("test-final"));
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_results[0].output, json!("test-final"));
+        assert_eq!(tool_results[0].preliminary, None);
     }
 
     #[test]
