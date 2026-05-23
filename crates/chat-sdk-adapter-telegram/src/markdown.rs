@@ -32,8 +32,7 @@ pub const TELEGRAM_CAPTION_LIMIT: usize = 1024;
 /// when appearing outside of an entity. 1:1 with upstream's
 /// `MARKDOWNV2_SPECIAL_CHARS = /([_*[\]()~`>#+\-=|{}.!\\])/g`.
 const MARKDOWNV2_SPECIAL_CHARS: &[char] = &[
-    '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
-    '\\',
+    '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\',
 ];
 
 /// Translate the internal parse mode to the Bot API wire value.
@@ -262,10 +261,9 @@ pub fn render_markdown_v2(node: &chat_sdk_chat::markdown::Node) -> String {
         Node::FootnoteReference(fr) => escape_markdown_v2(&format!("[^{}]", fr.identifier)),
         // Definition / FootnoteDefinition / Yaml / Toml: no visible
         // output upstream.
-        Node::Definition(_)
-        | Node::FootnoteDefinition(_)
-        | Node::Yaml(_)
-        | Node::Toml(_) => String::new(),
+        Node::Definition(_) | Node::FootnoteDefinition(_) | Node::Yaml(_) | Node::Toml(_) => {
+            String::new()
+        }
         // Tables shouldn't reach the renderer; from_ast preprocesses
         // them into code blocks. Defensive fallback returns the ascii
         // table.
@@ -373,11 +371,7 @@ mod tests {
         for &ch in MARKDOWNV2_SPECIAL_CHARS {
             let input = format!("a{ch}b");
             let expected = format!("a\\{ch}b");
-            assert_eq!(
-                escape_markdown_v2(&input),
-                expected,
-                "for char {ch:?}"
-            );
+            assert_eq!(escape_markdown_v2(&input), expected, "for char {ch:?}");
         }
     }
 
@@ -560,6 +554,128 @@ mod tests {
         let c = TelegramFormatConverter::new();
         let ast = c.to_ast("**bold**").unwrap();
         assert_eq!(c.render_postable_ast(&ast), "*bold*");
+    }
+
+    // ---------- links and images (4 upstream cases) ----------
+
+    #[test]
+    fn escapes_only_paren_and_backslash_inside_url() {
+        let input = "[label](https://example.com/path)";
+        assert_eq!(rt(input), "[label](https://example.com/path)");
+    }
+
+    #[test]
+    fn escapes_special_chars_inside_link_label_text() {
+        let output = rt("[hello!](https://example.com)");
+        assert_eq!(output, "[hello\\!](https://example.com)");
+    }
+
+    #[test]
+    fn renders_an_image_as_a_link_to_the_source() {
+        let output = rt("![alt text](https://example.com/pic.png)");
+        assert!(output.contains("alt text"), "got: {output}");
+        assert!(
+            output.contains("https://example.com/pic.png"),
+            "got: {output}"
+        );
+    }
+
+    // ---------- block structures (6 upstream cases) ----------
+
+    #[test]
+    fn renders_headings_as_bold_all_levels() {
+        for level in 1..=6 {
+            let hashes = "#".repeat(level);
+            let output = rt(&format!("{hashes} Title"));
+            assert_eq!(output, "*Title*", "level {level}");
+        }
+    }
+
+    #[test]
+    fn renders_unordered_lists_with_escaped_dashes() {
+        let output = rt("- one\n- two");
+        assert!(output.contains("\\- one"), "got: {output}");
+        assert!(output.contains("\\- two"), "got: {output}");
+    }
+
+    #[test]
+    fn renders_ordered_lists_with_escaped_periods() {
+        let output = rt("1. first\n2. second");
+        assert!(output.contains("1\\. first"), "got: {output}");
+        assert!(output.contains("2\\. second"), "got: {output}");
+    }
+
+    #[test]
+    fn renders_blockquotes_with_gt_prefix_per_line() {
+        let output = rt("> quoted text");
+        assert!(output.contains(">quoted text"), "got: {output}");
+    }
+
+    #[test]
+    fn renders_thematic_break_as_escaped_em_dashes() {
+        assert_eq!(rt("---"), "———");
+    }
+
+    #[test]
+    fn converts_tables_to_ascii_code_blocks_and_drops_pipe_syntax() {
+        let output = rt("| Name | Age |\n|------|-----|\n| Alice | 30 |");
+        assert!(output.contains("```"), "got: {output}");
+        assert!(output.contains("Name"), "got: {output}");
+        assert!(output.contains("Alice"), "got: {output}");
+        // Should not contain raw pipe-table syntax (a `|` adjacent to text).
+        assert!(
+            !output.contains("| Name "),
+            "raw pipe syntax leaked: {output}"
+        );
+    }
+
+    // ---------- nested formatting (3 upstream cases) ----------
+
+    #[test]
+    fn renders_bold_containing_italic() {
+        let output = rt("**bold _italic_**");
+        assert!(output.contains('*'), "got: {output}");
+        assert!(output.contains("_italic_"), "got: {output}");
+    }
+
+    #[test]
+    fn renders_link_containing_inline_code() {
+        let output = rt("[`code` link](https://example.com)");
+        assert!(output.contains("`code`"), "got: {output}");
+        assert!(output.contains("https://example.com"), "got: {output}");
+    }
+
+    #[test]
+    fn renders_list_containing_bold() {
+        let output = rt("- **important** one\n- plain two");
+        assert!(output.contains("*important*"), "got: {output}");
+        assert!(output.contains("plain two"), "got: {output}");
+    }
+
+    // ---------- edge cases (4 upstream cases) ----------
+
+    #[test]
+    fn handles_empty_input() {
+        assert_eq!(rt(""), "");
+    }
+
+    #[test]
+    fn handles_whitespace_only_input() {
+        assert_eq!(rt("   "), "");
+    }
+
+    #[test]
+    fn trims_trailing_whitespace() {
+        let output = rt("Hello\n\n");
+        assert!(!output.ends_with('\n'), "got: {output:?}");
+    }
+
+    #[test]
+    fn escapes_html_input_literally_rather_than_interpreting_it() {
+        // Telegram MarkdownV2 has no HTML support; raw HTML must not crash
+        // and must not appear as `<b>` in output.
+        let output = rt("<b>hi</b>");
+        assert!(!output.contains("<b>"), "got: {output}");
     }
 
     // ---------- escape helpers ----------
