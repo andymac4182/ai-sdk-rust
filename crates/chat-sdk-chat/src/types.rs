@@ -1256,6 +1256,28 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {}
 /// this trait, never define a new trait.
 pub trait StateAdapter: Send + Sync + std::fmt::Debug {}
 
+/// Queue entry used by the per-thread message queues in the
+/// `queue`/`debounce`/`burst` concurrency strategies. 1:1 port of
+/// upstream `interface QueueEntry { enqueuedAt; expiresAt; message }`.
+///
+/// **Layered port.** Upstream's `message: Message` field references
+/// the not-yet-ported `interface Message` from `chat::types`. The Rust
+/// port uses `serde_json::Value` as the placeholder until [the
+/// `Message` layer lands](../../docs/chat/upstream-parity.md). Adapter
+/// + state-backend tests treat the field as opaque, so the placeholder
+/// preserves wire-shape parity without forcing a Message port.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueEntry {
+    /// Unix-ms timestamp when this entry was enqueued.
+    #[serde(rename = "enqueuedAt")]
+    pub enqueued_at: u64,
+    /// Unix-ms expiry; stale entries are discarded on dequeue.
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
+    /// Opaque payload (upstream `Message`).
+    pub message: serde_json::Value,
+}
+
 /// State-backend lock token. 1:1 port of upstream
 /// `interface Lock { expiresAt: number; threadId: string; token: string }`.
 ///
