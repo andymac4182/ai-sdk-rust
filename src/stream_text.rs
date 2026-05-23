@@ -47,6 +47,7 @@ use crate::language_model::{
     LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
     LanguageModelUsage,
 };
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
@@ -2339,6 +2340,11 @@ where
             break;
         }
 
+        log_warnings(
+            &LogWarningsOptions::new(collected_step.warnings.clone())
+                .with_scope(model.provider(), model.model_id()),
+        );
+
         mark_unavailable_tool_calls(
             &mut collected_step.tool_calls,
             step_call_options.tools.as_deref(),
@@ -4220,6 +4226,7 @@ mod tests {
         LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelUrlSource,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider_utils::{Tool, ToolExecutionError};
@@ -4227,6 +4234,7 @@ mod tests {
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
     use crate::ui_message_stream::UiMessageRole;
+    use crate::warning::Warning;
     use url::Url;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -4554,6 +4562,139 @@ mod tests {
             unified: FinishReason::ToolCalls,
             raw: Some("tool_calls".to_string()),
         }
+    }
+
+    fn warning_logger_text_stream_result(
+        text: &str,
+        warnings: Vec<Warning>,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(warnings)),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", text)),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ])
+    }
+
+    fn warning_logger_tool_call_stream_result(
+        tool_name: &str,
+        warnings: Vec<Warning>,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(warnings)),
+            LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                "call-1",
+                tool_name,
+                r#"{ "value": "test" }"#,
+            )),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                tool_calls_finish_reason(),
+            )),
+        ])
+    }
+
+    fn warning_logger_tool() -> Tool {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        Tool::new("testTool", input_schema)
+            .with_execute(|_input, _options| async move { Ok(json!("result")) })
+    }
+
+    #[test]
+    fn stream_text_calls_log_warnings_with_warnings_from_a_single_step() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("Temperature parameter not supported".to_string()),
+            },
+        ];
+        let model = MockLanguageModel::new().with_stream_result(warning_logger_text_stream_result(
+            "Hello, world!",
+            expected_warnings.clone(),
+        ));
+        take_log_warning_calls_for_tests();
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Hello")],
+        )));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("mock-provider", "mock-model-id")
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step() {
+        let warning1 = vec![Warning::Other {
+            message: "warning1".to_string(),
+        }];
+        let warning2 = vec![Warning::Other {
+            message: "warning2".to_string(),
+        }];
+        let model = MockLanguageModel::new().with_stream_results([
+            warning_logger_tool_call_stream_result("testTool", warning1.clone()),
+            warning_logger_text_stream_result("Final response", warning2.clone()),
+        ]);
+        take_log_warning_calls_for_tests();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Hello")])
+                .with_tool(warning_logger_tool())
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.text, "Final response");
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(warning1).with_scope("mock-provider", "mock-model-id"),
+                LogWarningsOptions::new(warning2).with_scope("mock-provider", "mock-model-id"),
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present() {
+        let model = MockLanguageModel::new().with_stream_result(warning_logger_text_stream_result(
+            "Hello, world!",
+            Vec::new(),
+        ));
+        take_log_warning_calls_for_tests();
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Hello")],
+        )));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![LogWarningsOptions::new(Vec::new()).with_scope("mock-provider", "mock-model-id")]
+        );
     }
 
     #[test]
