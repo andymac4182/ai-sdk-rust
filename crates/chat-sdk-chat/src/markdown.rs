@@ -1299,4 +1299,62 @@ mod tests {
         // children depending on input shape.
         assert!(has_heading(&node) || to_plain_text(&node).contains("Title"));
     }
+
+    // ---------- slice 72: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_extracts_html_inline_as_html_node() {
+        let node = parse_markdown("plain <span>html</span> text").expect("parses");
+        fn has_html(n: &Node) -> bool {
+            matches!(n, Node::Html(_)) || get_node_children(n).iter().any(has_html)
+        }
+        assert!(has_html(&node));
+    }
+
+    #[test]
+    fn parse_markdown_html_block_at_root() {
+        let node = parse_markdown("<div>\nblock html\n</div>").expect("parses");
+        fn has_html(n: &Node) -> bool {
+            matches!(n, Node::Html(_)) || get_node_children(n).iter().any(has_html)
+        }
+        assert!(has_html(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_definition_node_from_link_reference_target() {
+        let input = "[foo][1]\n\n[1]: https://example.com \"Example\"";
+        let node = parse_markdown(input).expect("parses");
+        fn find_definition_url(n: &Node) -> Option<String> {
+            if let Node::Definition(d) = n {
+                return Some(d.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_definition_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_definition_url(&node).as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_preserves_link_title_attribute() {
+        let node = parse_markdown("[label](https://example.com \"Title\")").expect("parses");
+        fn find_link_title(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return l.title.clone();
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(t) = find_link_title(c) {
+                    return Some(t);
+                }
+            }
+            None
+        }
+        assert_eq!(find_link_title(&node).as_deref(), Some("Title"));
+    }
 }
