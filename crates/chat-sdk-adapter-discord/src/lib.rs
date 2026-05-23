@@ -162,6 +162,200 @@ impl Adapter for DiscordAdapter {
             AdapterError::InvalidPayload("Discord message-create response missing id".to_string())
         })
     }
+
+    /// Edit a Discord message via PATCH
+    /// `/channels/<channel_id>/messages/<message_id>`. 1:1 with
+    /// upstream's text-only path (cards/components deferred).
+    /// Returns the (unchanged) message id.
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
+        })?;
+
+        let url = format!(
+            "{}/{}",
+            self.channel_messages_url(&decoded.channel_id),
+            message_id
+        );
+        let body = serde_json::json!({ "content": text });
+
+        let response = self
+            .http
+            .patch(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let msg = json["message"]
+                .as_str()
+                .unwrap_or("Discord API call failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {msg}")));
+        }
+
+        json["id"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload("Discord message-update response missing id".to_string())
+        })
+    }
+
+    /// Delete a Discord message via DELETE
+    /// `/channels/<channel_id>/messages/<message_id>`. 1:1 with
+    /// upstream's `adapter.deleteMessage`.
+    async fn delete_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
+        })?;
+
+        let url = format!(
+            "{}/{}",
+            self.channel_messages_url(&decoded.channel_id),
+            message_id
+        );
+
+        let response = self
+            .http
+            .delete(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token()))
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Add a reaction via PUT `/channels/<channel_id>/messages/
+    /// <message_id>/reactions/<url-encoded-emoji>/@me`. 1:1 with
+    /// upstream's `adapter.addReaction`. The emoji is URL-encoded
+    /// (Discord accepts either raw glyphs or `<name:id>` for
+    /// custom emoji).
+    async fn add_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
+        })?;
+
+        let emoji_encoded = url_encode_emoji(emoji);
+        let url = format!(
+            "{}/{}/reactions/{}/@me",
+            self.channel_messages_url(&decoded.channel_id),
+            message_id,
+            emoji_encoded
+        );
+
+        let response = self
+            .http
+            .put(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token()))
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Send a Discord typing indicator via POST
+    /// `/channels/<channel_id>/typing`. 1:1 with upstream's
+    /// `adapter.startTyping` (status arg ignored — Discord has
+    /// no per-action status text; upstream ignores it too).
+    async fn start_typing(
+        &self,
+        thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
+        })?;
+
+        let url = format!("{}/channels/{}/typing", self.api_base(), decoded.channel_id);
+
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token()))
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Percent-encode an emoji glyph (or `<name:id>` custom emoji
+/// token) for inclusion in a Discord reaction URL path. 1:1 with
+/// upstream's `encodeURIComponent(emoji)`.
+fn url_encode_emoji(emoji: &str) -> String {
+    let mut out = String::with_capacity(emoji.len() * 3);
+    for byte in emoji.as_bytes() {
+        let b = *byte;
+        let unreserved = b.is_ascii_alphanumeric()
+            || b == b'-'
+            || b == b'_'
+            || b == b'.'
+            || b == b'~'
+            || b == b'*'
+            || b == b'\''
+            || b == b'('
+            || b == b')'
+            || b == b'!';
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Encode a Discord thread id. 1:1 with upstream's inline format:
@@ -313,6 +507,68 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("b", "a"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("slack:C1:1.0", "msg", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Discord-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_rejects_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("b", "a"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("slack:C1:1.0", "msg"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Discord-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_rejects_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("b", "a"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("slack:C1:1.0", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Discord-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_rejects_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("b", "a"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.start_typing("slack:C1:1.0", None));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Discord-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn url_encode_emoji_percent_encodes_unicode_glyphs() {
+        // U+1F44D (👍) is bytes F0 9F 91 8D
+        assert_eq!(url_encode_emoji("👍"), "%F0%9F%91%8D");
+        // ASCII-friendly emoji name token
+        assert_eq!(url_encode_emoji("smile"), "smile");
+        // Custom emoji <name:id> includes characters that need encoding
+        assert_eq!(url_encode_emoji("<custom:123>"), "%3Ccustom%3A123%3E");
     }
 
     #[test]
