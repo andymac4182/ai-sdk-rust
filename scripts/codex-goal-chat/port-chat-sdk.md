@@ -215,15 +215,33 @@ intentionally non-portable.
    per dependency module as that module lands. Each layer's slice
    extends `crates/chat-sdk-chat/src/types.rs` with the next batch of
    types it unblocks; do not block on porting `types.ts` whole.
-5. **Land upstream interfaces with large method sets as placeholder
-   traits first.** For any `interface X` with more than ~5 methods that
-   would otherwise block downstream modules, ship an empty
-   `pub trait X: Send + Sync + Debug {}` in `types.rs` (or the owning
-   module) and grow the trait one slice at a time as each dependency
-   module lands. NEVER define a new trait for the same upstream
-   interface — every adapter/state slice extends the canonical
-   placeholder. Slice 14 of this port (`Adapter`, `StateAdapter`)
-   established the pattern.
+5. **Placeholder pattern — defer big decisions, ship dependents now.**
+   - **Placeholder traits.** For any `interface X` with more than ~5
+     methods that would otherwise block downstream modules, ship an
+     empty `pub trait X: Send + Sync + Debug {}` in `types.rs` (or the
+     owning module) and grow the trait one slice at a time as each
+     dependency module lands. NEVER define a new trait for the same
+     upstream interface — every adapter/state slice extends the
+     canonical placeholder. Slice 14 (`Adapter`, `StateAdapter`)
+     established this; slice 20 (`LockScopeContext`) was the first
+     consumer and validated that the pattern compiles cleanly.
+   - **Placeholder type aliases.** When a type is defined in upstream
+     as `export type X = <ExternalLib>.Y` and the decision over which
+     Rust analogue of `<ExternalLib>` to bring in is itself a separate
+     architectural slice, ship `pub type X = serde_json::Value;` as a
+     placeholder. Every downstream type that holds `X` automatically
+     picks up the future typed version when the alias is swapped. Slice
+     22 (`FormattedContent = serde_json::Value`, opaque mdast) is the
+     canonical example — the markdown-crate decision can land in one
+     coordinated slice without re-touching AppendInput, TranscriptEntry,
+     or any other holder.
+   - **Data shape + elided callback recipe.** When an upstream
+     interface bundles serializable data with `() => Promise<T>`
+     methods (e.g. `Attachment.fetchData`, `LinkPreview.fetchMessage`),
+     port the data fields only and document the elided callback inline
+     by upstream name. The callback graduates to a trait method on the
+     placeholder `Adapter` trait when the matching adapter module
+     lands. Slice 23's `Attachment` and `LinkPreview` established this.
 6. **Never panic while holding a `std::sync::Mutex` guard you might
    want to reuse.** A panic inside a `lock().expect(...)`-then-`expect`
    chain poisons the mutex for every sibling test that runs in
@@ -253,7 +271,24 @@ intentionally non-portable.
    `vi.fn`, Node Buffer, etc.) and (b) the ledger row and Exceptions
    row land together. Pure-classification slices count toward the 5-
    merge refinement cadence.
-10. Add focused serialization/deserialization and behavior tests for every new
+10. **Single-field structs count as proper slices.** A 9-line
+    `pub struct X { pub field: T }` plus a colocated wire-format
+    round-trip test is a complete slice if the type cements a stable
+    upstream JSON contract. See slice 21's `PostEphemeralOptions`.
+11. **Skip the `Hash` derive when any field cannot be hashed.**
+    `HashMap`, `BTreeMap`, `serde_json::Map`, `serde_json::Value`, and
+    `Vec<NonHash>` block the default `#[derive(Hash)]`. Data types
+    containing any of these fields ship with `Debug, Clone, PartialEq,
+    Eq, Serialize, Deserialize` (no `Hash`). Slice 23's `Attachment`
+    regressed this once before the fix; do not let it slip back.
+12. **Structurally-similar types need a wire-distinction test.** When
+    two ported types share most of their fields and differ only in a
+    single required key (e.g. `PostableRaw.raw` vs
+    `PostableMarkdown.markdown` in slice 24), add a colocated test that
+    asserts `serde_json::to_string` of each renders distinct JSON.
+    Adapters branch on which key is present, so the wire-shape
+    invariant is load-bearing — make it test-enforced.
+13. Add focused serialization/deserialization and behavior tests for every new
    public contract.
 4. Port EVERY portable test from the original upstream TypeScript package
    into Rust before marking that package row `verified`. This is a hard
