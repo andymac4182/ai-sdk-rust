@@ -1627,3 +1627,123 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
 - **Token-mint helpers in `chat-sdk-adapter-shared`**: for
   Teams (`login.microsoftonline.com`) and GChat
   (`oauth2.googleapis.com` with service-account JWT).
+
+### 2026-05-24 — slices 173..177
+
+**What the brief got wrong or left out**
+
+- **Two upstream adapter files share the same renderer pattern,
+  porting via copy-rename.** Slice 175 ported
+  `packages/adapter-github/src/cards.ts` ->
+  `crates/chat-sdk-adapter-github/src/cards.rs` (348 LOC). Slice
+  177 noticed that `packages/adapter-linear/src/cards.ts` is
+  essentially identical to GitHub's (verified with `diff`: only
+  function rename + a few comment edits) and copy-ported with
+  `sed`. All 12 `cards.test.ts` cases in both packages now port
+  1:1. The same shape-shared pattern likely exists for other
+  "plain-markdown" adapters (Telegram cards.ts may also be
+  closely related to upstream's Telegram MarkdownV2 layer);
+  worth checking before re-implementing.
+
+- **Wire-format violations sneak in at scaffold time and stay
+  invisible until upstream tests are ported.** Slice 173 found
+  Messenger had been encoding `messenger:<page_id>:<user_id>`
+  (multi-colon, non-upstream) since slice 132. Upstream's
+  `encodeThreadId({recipientId: x})` returns `messenger:x` and
+  `decodeThreadId` throws `ValidationError` on multi-colon
+  strings - so my Rust port was both encoding wrong AND
+  accepting wrong inputs. Lesson: scaffold-time test ports
+  (sample inputs/outputs from upstream test files) would catch
+  wire-format mistakes immediately rather than after several
+  rounds of method port work on top of the broken encoding.
+  The fix recipe: pin the encode/decode invariants by porting
+  the upstream "thread ID encoding" describe-block BEFORE
+  writing any methods that use the thread id.
+
+- **Pure-helper modules with edge-runtime-portable constraints
+  exist throughout the slack adapter** and are good
+  single-slice ports. Slice 174 found `webhook/utils.ts` is
+  std-only (no `node:crypto`, no `chat`, no `@chat-adapter/
+  shared`), matching upstream's deliberate "boundary.test.ts"
+  invariant that the webhook subfolder stays portable. The
+  Rust port mirrors that posture: `chat-sdk-adapter-slack/src/
+  webhook.rs` depends only on `std + serde_json`. Future slices
+  can pile up `webhook/parse.rs`, `webhook/verify.rs` (HMAC-
+  SHA256), and `webhook/types.rs` on top of this foundation
+  without dragging chat-sdk-chat into the boundary.
+
+**Stale or misleading guidance**
+
+- The brief's "Adapter method matrix" tracks methods, not
+  test-file completion. After 5 slices of test-port-focused
+  work (170 crypto, 171 utils, 172 errors, 173 thread-id
+  reformat with tests, 175-176 github cards, 177 linear cards)
+  the test-floor metric is the dominant remaining surface. The
+  matrix should also track per-test-file completion - already
+  noted in slice 169..172 refinement, repeated here for
+  emphasis.
+
+- The "Phase 2 / Phase 3 prep" section still recommends
+  picking an HTTP client and async runtime in a single slice.
+  Those have already shipped (reqwest + tokio via slice 144).
+  The remaining infrastructure decisions are: redis client
+  (for state-redis), tokio-postgres or sqlx (for state-pg),
+  and HMAC-SHA256 (for webhook signature verification on
+  Slack/GitHub/Discord). Each is its own slice.
+
+**Edits applied**
+
+- `crates/chat-sdk-adapter-messenger/src/lib.rs` (slice 173):
+  wire format corrected to upstream `messenger:<recipient_id>`
+  + `/v22.0/me/messages` + 4 upstream test cases ported.
+- `crates/chat-sdk-adapter-slack/src/webhook.rs` (slice 174):
+  pure-helper port of upstream `webhook/utils.ts`. 11 tests.
+- `crates/chat-sdk-adapter-github/src/cards.rs` (slices
+  175-176): full port of `cardToGitHubMarkdown` +
+  `cardToPlainText` + escape helper + all 12 upstream
+  `cards.test.ts` cases.
+- `crates/chat-sdk-adapter-linear/src/cards.rs` (slice 177):
+  copy-rename of github cards.rs (upstream files are
+  near-identical) + 12 upstream test cases.
+- `docs/chat/upstream-parity.md` + `docs/chat/package-progress-
+  estimates.tsv`: updated github (30->40%), linear (32->38%),
+  slack (42->45%), messenger (28->32%).
+
+**Open refinements deferred**
+
+- **Test-floor port budget remains large.** Approximate
+  remaining upstream `*.test.ts` files not yet ported:
+  - adapter-slack: cards (36), markdown (31), modals (33),
+    webhook/index (~150), webhook/boundary (1 - structural),
+    api/index (~), api/boundary, format/index, format/
+    boundary, index (~). ~10 files.
+  - adapter-linear: markdown (~), index (~). ~2 files.
+  - adapter-teams: cards (~), graph-api, markdown, modals,
+    index. ~5 files.
+  - adapter-gchat: 6 test files.
+  - adapter-discord: gateway (1, heavy mocks), cards (38),
+    markdown (50), index (157). ~4 files.
+  - adapter-github: markdown (23), index (~). ~2 files.
+  - adapter-telegram: cards (~), markdown (~), index (87).
+    ~3 files.
+  - adapter-messenger: cards (~), index (~). ~2 files.
+  - adapter-whatsapp: cards (23), markdown (26), index (65).
+    ~3 files.
+  - chat: many partial-coverage modules.
+  Total: ~40 test files. Average ~30 cases each = 1200+ test
+  cases. At ~10-15 cases per slice this is 80-100+ slices.
+
+- **State-backend client wire-up** still deferred (state-redis,
+  state-ioredis, state-pg at 10%). Integration test
+  infrastructure needed.
+
+- **HMAC-SHA256 webhook signature verification**: Slack
+  (`v0:<ts>:<body>`), GitHub (`sha256=<hex>`), Discord (Ed25519
+  for interactions), WhatsApp (`sha256=<hex>` over body),
+  Messenger (`sha1=<hex>`). All distinct flavours; each is a
+  small targeted slice.
+
+- **Markdown<->platform-specific transcoding**: WhatsApp
+  (*bold* vs **bold**), Telegram MarkdownV2 (escape rules),
+  GChat. All depend on chat-sdk-chat's `stringify_markdown`
+  which isn't yet implemented; that's a chat-sdk-chat slice.
