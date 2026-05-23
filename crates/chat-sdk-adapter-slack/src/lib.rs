@@ -465,6 +465,76 @@ impl Adapter for SlackAdapter {
 
         Ok(())
     }
+
+    /// Post a structured object (plan, …) via Slack. 1:1 with the
+    /// text-only path of upstream `adapter.postObject`:
+    ///
+    /// - For any `kind` other than `"plan"`, fall back to
+    ///   `post_message(thread_id, &format!("[{kind}]"))` (the
+    ///   upstream "unsupported kind — post as plain text fallback"
+    ///   branch).
+    /// - For `kind == "plan"`, parse `data` as a `PlanModel`,
+    ///   render the upstream-shape fallback text
+    ///   ([`render_plan_fallback_text`]), and post via
+    ///   `chat.postMessage`. **Block Kit rendering of plans is
+    ///   deferred** to a follow-up slice; the fallback text alone
+    ///   matches what upstream sends in the `text` field.
+    async fn post_object(
+        &self,
+        thread_id: &str,
+        kind: &str,
+        data: serde_json::Value,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        if kind != "plan" {
+            return self.post_message(thread_id, &format!("[{kind}]")).await;
+        }
+
+        let plan: chat_sdk_chat::plan::PlanModel = serde_json::from_value(data).map_err(|err| {
+            AdapterError::InvalidPayload(format!(
+                "Slack post_object(plan): data is not a PlanModel: {err}"
+            ))
+        })?;
+        let text = render_plan_fallback_text(&plan);
+        self.post_message(thread_id, &text).await
+    }
+}
+
+/// Render a [`PlanModel`] as plain text matching upstream Slack
+/// adapter's `protected renderPlanFallbackText(plan)`:
+///
+/// ```text
+/// {plan.title or "Plan"}
+/// - ({task.status}) {task.title}
+/// - ...
+/// ```
+pub fn render_plan_fallback_text(plan: &chat_sdk_chat::plan::PlanModel) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(1 + plan.tasks.len());
+    let title = if plan.title.is_empty() {
+        "Plan".to_string()
+    } else {
+        plan.title.clone()
+    };
+    lines.push(title);
+    for task in &plan.tasks {
+        lines.push(format!(
+            "- ({}) {}",
+            plan_task_status_str(task.status),
+            task.title
+        ));
+    }
+    lines.join("\n")
+}
+
+fn plan_task_status_str(status: chat_sdk_chat::plan::PlanTaskStatus) -> &'static str {
+    use chat_sdk_chat::plan::PlanTaskStatus;
+    match status {
+        PlanTaskStatus::Pending => "pending",
+        PlanTaskStatus::InProgress => "in_progress",
+        PlanTaskStatus::Complete => "complete",
+        PlanTaskStatus::Error => "error",
+    }
 }
 
 /// Encode a Slack thread id. 1:1 with upstream's inline format:
@@ -703,6 +773,101 @@ mod tests {
             adapter.method_url("chat.postMessage"),
             "https://slack.example.test/api/chat.postMessage"
         );
+    }
+
+    #[test]
+    fn adapter_post_object_rejects_non_slack_thread_ids_via_fallback_path() {
+        // Unknown kind -> falls back to post_message which decodes the
+        // thread id first.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.post_object("teams:CONV:MSG", "card", serde_json::json!({})));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_post_object_plan_rejects_non_plan_payloads() {
+        // Slack post_object with kind="plan" requires PlanModel-shaped
+        // data; non-conforming JSON surfaces as InvalidPayload.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.post_object(
+            "slack:C0123:1.0",
+            "plan",
+            serde_json::json!({ "not-a-plan": true }),
+        ));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("is not a PlanModel"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_plan_fallback_text_matches_upstream_layout() {
+        // Mirrors upstream renderPlanFallbackText:
+        //   title
+        //   - (status) task title
+        //   ...
+        use chat_sdk_chat::plan::{PlanModel, PlanModelTask, PlanTaskStatus};
+        let plan = PlanModel {
+            title: "Onboarding".to_string(),
+            tasks: vec![
+                PlanModelTask {
+                    id: "t1".to_string(),
+                    title: "Read docs".to_string(),
+                    status: PlanTaskStatus::Complete,
+                    details: None,
+                    output: None,
+                },
+                PlanModelTask {
+                    id: "t2".to_string(),
+                    title: "Run setup".to_string(),
+                    status: PlanTaskStatus::InProgress,
+                    details: None,
+                    output: None,
+                },
+                PlanModelTask {
+                    id: "t3".to_string(),
+                    title: "Verify".to_string(),
+                    status: PlanTaskStatus::Pending,
+                    details: None,
+                    output: None,
+                },
+                PlanModelTask {
+                    id: "t4".to_string(),
+                    title: "Cleanup".to_string(),
+                    status: PlanTaskStatus::Error,
+                    details: None,
+                    output: None,
+                },
+            ],
+        };
+        let text = render_plan_fallback_text(&plan);
+        assert_eq!(
+            text,
+            "Onboarding\n\
+             - (complete) Read docs\n\
+             - (in_progress) Run setup\n\
+             - (pending) Verify\n\
+             - (error) Cleanup"
+        );
+    }
+
+    #[test]
+    fn render_plan_fallback_text_uses_default_title_when_empty() {
+        use chat_sdk_chat::plan::PlanModel;
+        let plan = PlanModel {
+            title: String::new(),
+            tasks: vec![],
+        };
+        assert_eq!(render_plan_fallback_text(&plan), "Plan");
     }
 
     #[test]
