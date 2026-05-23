@@ -1227,3 +1227,99 @@ messages with non-standard `Authorization: Bot <token>` header.
   Slack (`chat.postMessage` with `application/json` body +
   bearer auth). Each follows the slice 145 recipe with
   per-platform variance.
+
+### 2026-05-24 - slices 151..156
+
+**Slices covered**
+
+151 (Linear post_message HTTP via GraphQL commentCreate, 12
+tests, 10% -> 15%).
+152 (Slack post_message HTTP via chat.postMessage Web API,
+14 -> 15 tests, 10% -> 15%).
+153 (Teams post_message HTTP via Bot Framework activities +
+pre-minted bearer pattern, 12 -> 15 tests, 10% -> 15%).
+154 (GChat post_message HTTP via messages.create + thread-
+reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
+**All 9 Phase-2 adapters now have post_message HTTP.**
+155 (Telegram fetch_subject reference impl via getChat, 14 ->
+15 tests, 15% -> 18%).
+156 (GitHub fetch_subject via GET issues/<n>, 14 -> 16 tests,
+15% -> 18%).
+
+**What the brief got right (validated)**
+
+- The post_message recipe extended across all 9 Phase-2
+  adapters in 9 slices (145-149, 151-154) — one slice each
+  with ~80-150 LOC + 2-3 new tests. The per-adapter variance
+  was contained entirely in the auth scheme, URL template,
+  request body shape, and response-id extraction. Total
+  Adapter-method completion stays on-track for the slice 143
+  ~50-100 slices/total estimate (9 adapters × 8 methods + 3
+  state backends × 5 methods = ~87 methods).
+- The pre-minted-bearer pattern from slice 153 (Teams) ported
+  cleanly to slice 154 (GChat). Both platforms mint OAuth2
+  tokens out-of-band; deferring the token-mint helper to
+  `chat-sdk-adapter-shared` keeps the per-adapter slice small.
+  Open refinement: when a third adapter wants the same token
+  cache, extract.
+- The slice 155 fetch_subject reference recipe on Telegram is
+  the natural next port template. Slice 156 applied it to
+  GitHub with one variance (GET vs POST). The other 7 adapters
+  follow.
+
+**What the brief got wrong or left out**
+
+- **GraphQL (Linear) has a distinct 200-status error envelope.**
+  Unlike REST adapters, Linear returns 200 even for query
+  errors; the errors live at `data.errors[]` or
+  `errors[]`. Codified in slice 151 — surface as
+  InvalidPayload with the first message. When the second
+  GraphQL adapter lands (Discord uses REST; Slack uses Web
+  API JSON), factor into adapter-shared.
+- **Pre-HTTP validation pattern is the bedrock.** Every
+  adapter's post_message + fetch_subject test only exercises
+  the pre-HTTP decode_thread_id rejection path. This works
+  without tokio because no HTTP call is made. Real HTTP
+  testing (with wiremock) is a separate per-adapter slice
+  that follows the test-recipe scaffolding step.
+- **fetch_subject return shape varies more than post_message
+  did.** Some platforms return None for DMs (Telegram private
+  chats have no title); some always return a value (GitHub
+  issues always have a title). Both are valid; document
+  per-adapter.
+
+**Stale or misleading guidance**
+
+- The slice 150 estimate of "5 auth-scheme variants" needs
+  one more: GraphQL adapters set `Authorization: <api_key>`
+  WITHOUT a scheme prefix (Linear), distinct from the
+  Bearer-prefixed adapters. Discovered slice 151.
+- The slice 143 refinement said "remaining 4 adapters" would
+  follow the post_message recipe. After slices 151-154, that
+  prediction held exactly: each landed in one slice with no
+  surprises beyond per-platform body/response shape.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending — add
+  a per-method matrix tracking the (adapter × method) progress
+  grid.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- **fetch_subject rollout**: 7 adapters remain (Messenger,
+  WhatsApp, Discord, Linear, Slack, Teams, GChat). Each
+  follows the slice 155/156 recipe.
+- **post_object HTTP**: 9 adapters need card/modal rendering
+  per-platform. This is the biggest remaining surface area
+  (Discord embeds, Slack Block Kit, GChat cards v2, Teams
+  Adaptive Cards). Likely 3-5 slices per adapter.
+- **Remaining 5 Adapter methods**: edit_message, delete_message,
+  add_reaction, start_typing, parse_message — each ~9 slices
+  to roll across all adapters.
+- **State-backend client wire-up**: state-redis/state-ioredis
+  need `redis = { features = ["tokio-comp"] }` + actual GET/
+  SET/DEL/LPUSH/LRANGE wiring. state-pg needs `sqlx` or
+  `tokio-postgres` + schema migrations + INSERT/SELECT/DELETE.
+  Each is ~3-5 slices.
