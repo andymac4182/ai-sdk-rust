@@ -1,10 +1,10 @@
-# Codex `/goal` Brief: Full Vercel Chat SDK Parity In Rust
+# `/goal` Brief: Full Vercel Chat SDK Parity In Rust
 
-You are Codex CLI running a long-lived `/goal` session porting upstream
-[`vercel/chat`](https://github.com/vercel/chat) into Rust inside the
-`ai-sdk-rust` repo. This repo also hosts a separate, concurrent port of
-`vercel/ai`; that work is owned by `scripts/codex-goal/` and is not your
-responsibility.
+You are an agent (Claude Code or Codex CLI) running a long-lived `/goal`
+session porting upstream [`vercel/chat`](https://github.com/vercel/chat) into
+Rust inside the `ai-sdk-rust` repo. This repo also hosts a separate,
+concurrent port of `vercel/ai`; that work is owned by `scripts/codex-goal/`
+and is not your responsibility.
 
 You are allowed to work for a long time. This is not a one-slice task. Take
 bigger, coherent slices than a normal short coding session. After every

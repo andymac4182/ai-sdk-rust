@@ -56,7 +56,7 @@ adapter tests only as opt-in `#[ignore]` validation that skips cleanly when
 credentials are missing. Never print or commit secrets.
 
 Coexistence with the ai-sdk port (CRITICAL):
-- Another Codex `/goal` session is concurrently porting `vercel/ai` in this
+- Another `/goal` session is concurrently porting `vercel/ai` in this
   same repo. It owns `crates/ai-sdk-*`, `docs/upstream-parity.md`,
   `docs/package-progress.md`, `docs/package-progress-estimates.tsv`, and
   `scripts/codex-goal/`. NEVER touch those.
