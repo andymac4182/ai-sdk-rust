@@ -15,6 +15,8 @@
 //! multi-colon thread ids in `decode_thread_id` (1:1 with upstream
 //! `decodeThreadId` which throws `ValidationError` on multi-colon).
 
+pub mod cards;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
