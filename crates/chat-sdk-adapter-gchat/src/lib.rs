@@ -151,6 +151,13 @@ impl GchatAdapter {
     pub fn is_dm(&self, thread_id: &str) -> bool {
         crate::thread_utils::is_dm_thread(thread_id)
     }
+
+    /// Render formatted content to Google-Chat-flavored markdown.
+    /// 1:1 with upstream `adapter.renderFormatted(content)` which
+    /// delegates to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::GoogleChatFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -490,6 +497,19 @@ mod tests {
     // 1:1 with upstream's `channelIdFromThreadId(threadId)` (returns
     // `gchat:<spaceName>`) and `isDM(threadId)` (delegates to
     // `isDMThread` which checks the `:dm` suffix).
+
+    #[test]
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
+    }
 
     #[test]
     fn channel_id_from_thread_id_returns_the_space_name() {

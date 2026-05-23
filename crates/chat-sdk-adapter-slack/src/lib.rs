@@ -141,6 +141,13 @@ impl SlackAdapter {
         let decoded = decode_thread_id(thread_id)?;
         Some(decoded.channel_id.starts_with('D'))
     }
+
+    /// Render formatted content to Slack-flavored mrkdwn. 1:1 with
+    /// upstream `adapter.renderFormatted(content)` which delegates
+    /// to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::SlackFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -696,6 +703,19 @@ mod tests {
     // 1:1 with upstream's `channelIdFromThreadId(threadId)` (returns
     // `slack:<channel>`) and `isDM(threadId)` (true iff the underlying
     // Slack channel id starts with `D`).
+
+    #[test]
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("bot-token", "signing"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
+    }
 
     #[test]
     fn channel_id_from_thread_id_strips_the_thread_ts_suffix() {

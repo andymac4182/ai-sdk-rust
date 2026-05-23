@@ -112,6 +112,13 @@ impl LinearAdapter {
     pub fn is_dm(&self, _thread_id: &str) -> bool {
         false
     }
+
+    /// Render formatted content to Linear-flavored markdown. 1:1
+    /// with upstream `adapter.renderFormatted(content)` which
+    /// delegates to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::LinearFormatConverter::new().from_ast(ast)
+    }
 }
 
 /// GraphQL mutation Linear uses to create a comment on an issue.
@@ -479,6 +486,19 @@ mod tests {
     // 1:1 with upstream's helpers (channel = `linear:<issueId>`,
     // isDM always `false`). Uses the upstream-shape
     // `thread_id::decode_thread_id` so all 4 wire formats decode.
+
+    #[test]
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
+    }
 
     #[test]
     fn channel_id_from_thread_id_returns_linear_prefix_plus_issue_id() {

@@ -139,6 +139,13 @@ impl TelegramAdapter {
         let decoded = decode_thread_id(thread_id)?;
         Some(decoded.chat_id >= 0)
     }
+
+    /// Render formatted content to Telegram MarkdownV2. 1:1 with
+    /// upstream `adapter.renderFormatted(content)` which delegates
+    /// to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::TelegramFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -717,6 +724,21 @@ mod tests {
     // 1:1 with upstream `adapter.channelIdFromThreadId(threadId)` and
     // `adapter.isDM(threadId)`. Telegram supports both DMs (positive
     // chat ids) and groups/supergroups/channels (negative chat ids).
+
+    #[test]
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        // Telegram MarkdownV2 escapes "!" but plain "Hello world" has
+        // no special chars, so it should appear verbatim.
+        assert!(result.contains("Hello world"), "got: {result}");
+    }
 
     #[test]
     fn channel_id_from_thread_id_strips_the_message_thread_suffix() {

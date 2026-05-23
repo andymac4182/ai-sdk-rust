@@ -142,6 +142,13 @@ impl MessengerAdapter {
     pub fn is_dm(&self, _thread_id: &str) -> bool {
         true
     }
+
+    /// Render formatted content to Messenger-flavored markdown.
+    /// 1:1 with upstream `adapter.renderFormatted(content)` which
+    /// delegates to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::MessengerFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -428,6 +435,19 @@ mod tests {
     // 1:1 with upstream `adapter.channelIdFromThreadId(_) -> threadId`
     // and `adapter.isDM(_) -> true`. Messenger is DM-only so both
     // helpers ignore the thread id structure.
+
+    #[test]
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("page-token", "verify"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
+    }
 
     #[test]
     fn channel_id_from_thread_id_returns_the_thread_id_unchanged() {

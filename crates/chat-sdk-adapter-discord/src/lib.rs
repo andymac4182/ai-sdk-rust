@@ -123,6 +123,13 @@ impl DiscordAdapter {
         let decoded = decode_thread_id(thread_id)?;
         Some(decoded.is_dm())
     }
+
+    /// Render formatted content to Discord-flavored markdown. 1:1
+    /// with upstream `adapter.renderFormatted(content)` which
+    /// delegates to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::DiscordFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -537,6 +544,19 @@ mod tests {
     // 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`
     // (first 3 colon-segments of any string) and `adapter.isDM(threadId)`
     // (true iff guild_id == "@me").
+
+    #[test]
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
+    }
 
     #[test]
     fn channel_id_from_thread_id_takes_first_three_colon_segments() {
