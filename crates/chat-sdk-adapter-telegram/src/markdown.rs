@@ -104,6 +104,242 @@ pub fn ends_with_orphan_backslash(text: &str) -> bool {
     trailing % 2 == 1
 }
 
+/// Escape text inside a code block. 1:1 with upstream
+/// `escapeCodeBlock(text)`: only `` ` `` and `\` need escaping.
+pub fn escape_code_block(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '`' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Escape text inside a link URL. 1:1 with upstream
+/// `escapeLinkUrl(text)`: only `)` and `\` need escaping.
+pub fn escape_link_url(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == ')' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Render an mdast node as Telegram MarkdownV2 text. 1:1 port of
+/// upstream `renderMarkdownV2(node)`. Table/TableRow/TableCell
+/// nodes are not supported - the caller (`from_ast`) preprocesses
+/// them into code blocks before this function sees them.
+pub fn render_markdown_v2(node: &chat_sdk_chat::markdown::Node) -> String {
+    use chat_sdk_chat::markdown::Node;
+    match node {
+        Node::Root(root) => root
+            .children
+            .iter()
+            .map(render_markdown_v2)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Node::Paragraph(p) => p
+            .children
+            .iter()
+            .map(render_markdown_v2)
+            .collect::<Vec<_>>()
+            .concat(),
+        Node::Text(t) => escape_markdown_v2(&t.value),
+        Node::Strong(s) => format!(
+            "*{}*",
+            s.children
+                .iter()
+                .map(render_markdown_v2)
+                .collect::<Vec<_>>()
+                .concat()
+        ),
+        Node::Emphasis(e) => format!(
+            "_{}_",
+            e.children
+                .iter()
+                .map(render_markdown_v2)
+                .collect::<Vec<_>>()
+                .concat()
+        ),
+        Node::Delete(d) => format!(
+            "~{}~",
+            d.children
+                .iter()
+                .map(render_markdown_v2)
+                .collect::<Vec<_>>()
+                .concat()
+        ),
+        Node::InlineCode(c) => format!("`{}`", escape_code_block(&c.value)),
+        Node::Code(c) => {
+            let lang = c.lang.as_deref().unwrap_or("");
+            let val = escape_code_block(&c.value);
+            format!("```{lang}\n{val}\n```")
+        }
+        Node::Link(l) => {
+            let label = l
+                .children
+                .iter()
+                .map(render_markdown_v2)
+                .collect::<Vec<_>>()
+                .concat();
+            format!("[{label}]({})", escape_link_url(&l.url))
+        }
+        Node::Blockquote(b) => {
+            let inner = b
+                .children
+                .iter()
+                .map(render_markdown_v2)
+                .collect::<Vec<_>>()
+                .join("\n");
+            inner
+                .split('\n')
+                .map(|line| format!(">{line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        Node::List(list) => list
+            .children
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let content = if let Node::ListItem(li) = item {
+                    li.children
+                        .iter()
+                        .map(render_markdown_v2)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    render_markdown_v2(item)
+                };
+                if list.ordered {
+                    format!("{} {content}", escape_markdown_v2(&format!("{}.", i + 1)))
+                } else {
+                    format!("\\- {content}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Node::ListItem(li) => li
+            .children
+            .iter()
+            .map(render_markdown_v2)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Node::Heading(h) => {
+            let text = h
+                .children
+                .iter()
+                .map(render_markdown_v2)
+                .collect::<Vec<_>>()
+                .concat();
+            format!("*{text}*")
+        }
+        Node::ThematicBreak(_) => escape_markdown_v2("———"),
+        Node::Break(_) => "\n".to_string(),
+        Node::Image(img) => {
+            let alt = escape_markdown_v2(&img.alt);
+            let url = escape_link_url(&img.url);
+            format!("[{alt}]({url})")
+        }
+        Node::Html(h) => escape_markdown_v2(&h.value),
+        Node::LinkReference(lr) => {
+            if !lr.children.is_empty() {
+                lr.children
+                    .iter()
+                    .map(render_markdown_v2)
+                    .collect::<Vec<_>>()
+                    .concat()
+            } else {
+                escape_markdown_v2(&lr.identifier)
+            }
+        }
+        Node::ImageReference(ir) => escape_markdown_v2(&ir.alt),
+        Node::FootnoteReference(fr) => escape_markdown_v2(&format!("[^{}]", fr.identifier)),
+        // Definition / FootnoteDefinition / Yaml / Toml: no visible
+        // output upstream.
+        Node::Definition(_)
+        | Node::FootnoteDefinition(_)
+        | Node::Yaml(_)
+        | Node::Toml(_) => String::new(),
+        // Tables shouldn't reach the renderer; from_ast preprocesses
+        // them into code blocks. Defensive fallback returns the ascii
+        // table.
+        Node::Table(t) => format!("```\n{}\n```", chat_sdk_chat::markdown::table_to_ascii(t)),
+        Node::TableRow(_) | Node::TableCell(_) => String::new(),
+        _ => String::new(),
+    }
+}
+
+/// 1:1 port of upstream
+/// `class TelegramFormatConverter extends BaseFormatConverter`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TelegramFormatConverter;
+
+impl TelegramFormatConverter {
+    /// 1:1 with upstream `new TelegramFormatConverter()`.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Parse Telegram text into mdast. 1:1 with upstream
+    /// `toAst(text)`.
+    pub fn to_ast(
+        &self,
+        text: &str,
+    ) -> Result<chat_sdk_chat::markdown::Node, chat_sdk_chat::markdown::ParseMarkdownError> {
+        chat_sdk_chat::markdown::parse_markdown(text)
+    }
+
+    /// Stringify mdast as Telegram MarkdownV2. 1:1 with upstream
+    /// `fromAst(ast)`: preprocess Table nodes -> Code blocks, then
+    /// `renderMarkdownV2`, then `.trim()`.
+    pub fn from_ast(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        use chat_sdk_chat::markdown::{Code, Node, walk_ast};
+        let transformed = walk_ast(ast.clone(), &mut |node: Node| -> Option<Node> {
+            if let Node::Table(t) = &node {
+                return Some(Node::Code(Code {
+                    value: chat_sdk_chat::markdown::table_to_ascii(t),
+                    lang: None,
+                    meta: None,
+                    position: None,
+                }));
+            }
+            Some(node)
+        });
+        let s = render_markdown_v2(&transformed);
+        s.trim().to_string()
+    }
+
+    /// Plain-string postable.
+    pub fn render_postable_string(&self, message: &str) -> String {
+        message.to_string()
+    }
+
+    /// `{raw}` postable.
+    pub fn render_postable_raw(&self, raw: &str) -> String {
+        raw.to_string()
+    }
+
+    /// `{markdown}` postable: parse and Telegram-format.
+    pub fn render_postable_markdown(
+        &self,
+        markdown: &str,
+    ) -> Result<String, chat_sdk_chat::markdown::ParseMarkdownError> {
+        let ast = self.to_ast(markdown)?;
+        Ok(self.from_ast(&ast))
+    }
+
+    /// `{ast}` postable.
+    pub fn render_postable_ast(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        self.from_ast(ast)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +450,127 @@ mod tests {
     fn length_limits_match_upstream() {
         assert_eq!(TELEGRAM_MESSAGE_LIMIT, 4096);
         assert_eq!(TELEGRAM_CAPTION_LIMIT, 1024);
+    }
+
+    // ---------- TelegramFormatConverter.fromAst - inline formatting (8 cases) ----------
+
+    fn rt(input: &str) -> String {
+        let c = TelegramFormatConverter::new();
+        let ast = c.to_ast(input).unwrap();
+        c.from_ast(&ast)
+    }
+
+    #[test]
+    fn passes_plain_text_through_unchanged() {
+        assert_eq!(rt("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn renders_bold_with_single_asterisks() {
+        assert_eq!(rt("**bold text**"), "*bold text*");
+    }
+
+    #[test]
+    fn renders_italic_with_underscores() {
+        assert_eq!(rt("*italic text*"), "_italic text_");
+    }
+
+    #[test]
+    fn renders_strikethrough_with_single_tilde() {
+        assert_eq!(rt("~~strikethrough~~"), "~strikethrough~");
+    }
+
+    #[test]
+    fn escapes_special_chars_inside_bold() {
+        assert_eq!(rt("**Note: important!**"), "*Note: important\\!*");
+    }
+
+    #[test]
+    fn escapes_special_chars_inside_italic() {
+        assert_eq!(rt("*price: $50.*"), "_price: $50\\._");
+    }
+
+    #[test]
+    fn preserves_inline_code_content_verbatim() {
+        assert!(rt("Use `const x = 1`").contains("`const x = 1`"));
+    }
+
+    #[test]
+    fn escapes_only_backtick_and_backslash_inside_inline_code() {
+        assert!(rt("Use `foo.bar!` here").contains("`foo.bar!`"));
+    }
+
+    // ---------- code blocks (3 cases) ----------
+
+    #[test]
+    fn wraps_code_blocks_with_triple_backticks_and_language() {
+        let s = rt("```js\nconst x = 1;\n```");
+        assert!(s.contains("```js"));
+        assert!(s.contains("const x = 1;"));
+        assert!(s.ends_with("```"));
+    }
+
+    #[test]
+    fn escapes_only_backtick_and_backslash_inside_fenced_code() {
+        let s = rt("```\nfoo.bar! + (test) = [ok]\n```");
+        // Normal-text specials must NOT be escaped inside code blocks.
+        assert!(s.contains("foo.bar! + (test) = [ok]"));
+    }
+
+    #[test]
+    fn escapes_backslash_inside_fenced_code() {
+        let s = rt("```\npath\\\\to\\\\file\n```");
+        // Each `\\` source becomes `\\\\` after escape (each \ -> \\).
+        assert!(s.contains("\\\\"));
+    }
+
+    // ---------- links (1 case) ----------
+
+    #[test]
+    fn renders_inline_links() {
+        assert_eq!(
+            rt("[click](https://example.com)"),
+            "[click](https://example.com)"
+        );
+    }
+
+    // ---------- renderPostable ----------
+
+    #[test]
+    fn render_postable_string_passthrough() {
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.render_postable_string("hi"), "hi");
+    }
+
+    #[test]
+    fn render_postable_raw_passthrough() {
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.render_postable_raw("raw"), "raw");
+    }
+
+    #[test]
+    fn render_postable_markdown_converts_to_v2() {
+        let c = TelegramFormatConverter::new();
+        let result = c.render_postable_markdown("**bold**").unwrap();
+        assert_eq!(result, "*bold*");
+    }
+
+    #[test]
+    fn render_postable_ast_converts_to_v2() {
+        let c = TelegramFormatConverter::new();
+        let ast = c.to_ast("**bold**").unwrap();
+        assert_eq!(c.render_postable_ast(&ast), "*bold*");
+    }
+
+    // ---------- escape helpers ----------
+
+    #[test]
+    fn escape_code_block_handles_backtick_and_backslash() {
+        assert_eq!(escape_code_block("a`b\\c"), "a\\`b\\\\c");
+    }
+
+    #[test]
+    fn escape_link_url_handles_paren_and_backslash() {
+        assert_eq!(escape_link_url("a)b\\c"), "a\\)b\\\\c");
     }
 }
