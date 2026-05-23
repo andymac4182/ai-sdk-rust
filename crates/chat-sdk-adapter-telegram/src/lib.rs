@@ -40,6 +40,20 @@ pub const THREAD_ID_PREFIX: &str = "telegram:";
 /// `const DEFAULT_BASE_URL = "https://api.telegram.org"`.
 pub const DEFAULT_BASE_URL: &str = "https://api.telegram.org";
 
+/// HTTP request header Telegram sends with each webhook payload
+/// when the bot has set a `secret_token` on its webhook config.
+/// Webhook verifiers compare the header value byte-for-byte
+/// against the configured secret token. 1:1 with upstream's
+/// private `TELEGRAM_SECRET_TOKEN_HEADER =
+/// "x-telegram-bot-api-secret-token"`.
+pub const TELEGRAM_SECRET_TOKEN_HEADER: &str = "x-telegram-bot-api-secret-token";
+
+/// Default long-polling timeout (in seconds) the adapter uses when
+/// `mode: "polling"` or when auto mode falls back to polling. 1:1
+/// with upstream's private
+/// `TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS = 30`.
+pub const TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS: u64 = 30;
+
 /// Options for [`TelegramAdapter::new`]. 1:1 with upstream
 /// `interface TelegramAdapterOptions`.
 #[derive(Debug, Clone)]
@@ -686,6 +700,18 @@ mod tests {
         let opts = TelegramAdapterOptions::new("test-token");
         assert_eq!(opts.token, "test-token");
         assert_eq!(opts.effective_base_url(), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    #[test]
+    fn telegram_webhook_secret_header_and_polling_timeout_match_upstream() {
+        // 1:1 with upstream `TELEGRAM_SECRET_TOKEN_HEADER` and
+        // `TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS` consts.
+        assert_eq!(
+            TELEGRAM_SECRET_TOKEN_HEADER,
+            "x-telegram-bot-api-secret-token"
+        );
+        assert_eq!(TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS, 30);
     }
 
     #[test]
