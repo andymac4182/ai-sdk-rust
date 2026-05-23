@@ -2,7 +2,7 @@
 
 _This ledger tracks the Rust port of [`vercel/chat`](https://github.com/vercel/chat) and is maintained by the `/goal` session driven from [`scripts/codex-goal-chat/`](../../scripts/codex-goal-chat/)._
 
-> Sibling project: the AI SDK port lives in [`docs/upstream-parity.md`](../upstream-parity.md). That ledger is owned by a different `/goal` session — do not edit it from a chat-sdk slice.
+> Sibling project: the AI SDK port lives in [`docs/upstream-parity.md`](../upstream-parity.md). That ledger is owned by a different `/goal` session - do not edit it from a chat-sdk slice.
 
 ## Upstream Source
 
@@ -34,16 +34,16 @@ Upstream test extensions counted: `*.test.ts`, `*.test.tsx`, `*.test-d.ts`, `*.t
 
 Two-phase gate, enforced strictly:
 
-1. **Phase 1 — Core/shared.** `packages/chat` (the unified surface), `packages/adapter-shared` (utilities used by every adapter), `packages/tests` (test factories/matchers used by every other package), and `packages/state-memory` (deterministic in-memory state backend usable by every adapter test). No adapter package may start while any phase-1 row is `not-started` or `in-progress`.
-2. **Phase 2 — Adapters.** All 11 `adapter-*` packages.
-3. **Phase 3 — Production state backends.** `state-redis`, `state-ioredis`, `state-pg`.
-4. **Phase 4 — Integration tests, examples, skills, docs.** `integration-tests`, examples, skills, apps/docs.
+1. **Phase 1 - Core/shared.** `packages/chat` (the unified surface), `packages/adapter-shared` (utilities used by every adapter), `packages/tests` (test factories/matchers used by every other package), and `packages/state-memory` (deterministic in-memory state backend usable by every adapter test). No adapter package may start while any phase-1 row is `not-started` or `in-progress`.
+2. **Phase 2 - Adapters.** All 11 `adapter-*` packages.
+3. **Phase 3 - Production state backends.** `state-redis`, `state-ioredis`, `state-pg`.
+4. **Phase 4 - Integration tests, examples, skills, docs.** `integration-tests`, examples, skills, apps/docs.
 
 ## Package And Provider Inventory
 
 | Item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `packages/chat` (`@chat-sdk/chat`) | core SDK package | in-progress | `crates/chat-sdk-chat` | `crates/chat-sdk-chat/src/{errors,logger,chat_singleton,types}.rs::tests` (17 + 13 + 5 + 73 colocated tests; the first three are 1:1 ports of upstream `*.test.ts`, the `types` tests are additive Rust-only serde coverage because upstream `types.ts` has no test file). | 54 src files, 23 test files upstream. Crate skeleton + `errors`, `logger`, `chat_singleton` modules, plus fourteen layers of `types` covering 54 upstream interfaces/enums (now including PostableRaw and PostableMarkdown built on the slice-23 Attachment/FileUpload data shapes) + FormattedContent placeholder + placeholder Adapter/StateAdapter traits. 3/23 upstream test files mapped, 108 Rust tests total. Phase-1. |
+| `packages/chat` (`@chat-sdk/chat`) | core SDK package | in-progress | `crates/chat-sdk-chat` | `crates/chat-sdk-chat/src/{errors,logger,chat_singleton,markdown,types}.rs::tests` (17 + 13 + 5 + 12 + 73 colocated tests; the first three are 1:1 ports of upstream `*.test.ts`, the `markdown` tests are a subset port of `markdown.test.ts` covering the AST-builder + parse surface shipped in slice 26, the `types` tests are additive Rust-only serde coverage because upstream `types.ts` has no test file). | 54 src files, 23 test files upstream. Crate skeleton + `errors`, `logger`, `chat_singleton`, **`markdown` (architectural scaffold via markdown-rs crate - AST type re-exports, `parse_markdown` with GFM, AST builders for text/paragraph/root/strong/emphasis/inline_code/link/code_block/blockquote/strikethrough)** modules, plus fourteen layers of `types` covering 54 upstream interfaces/enums + FormattedContent placeholder + placeholder Adapter/StateAdapter traits. 4/23 upstream test files partially mapped (errors/logger/chat-singleton full, markdown subset = 12 of 122 cases), 120 Rust tests total. Phase-1. |
 | `packages/adapter-shared` (`@chat-sdk/adapter-shared`) | shared adapter utilities | in-progress | `crates/chat-sdk-adapter-shared` | `crates/chat-sdk-adapter-shared/src/errors.rs::tests` (24 colocated 1:1 ports of `packages/adapter-shared/src/errors.test.ts`) | 10 src files, 4 test files upstream. Crate skeleton + `errors` module ported (1/4 test files, 24 cases). Remaining: `adapter-utils`, `buffer-utils`, `card-utils`. Phase-1. Name uses upstream-mirroring "shared" exception (already in `scripts/check-naming-conventions.sh`). |
 | `packages/tests` (`@chat-sdk/tests`) | test support library | not-started | none | none | 6 src files, 2 test files. Vitest factories, matchers, setup utilities for testing adapters and bots. Phase-1. |
 | `packages/state-memory` (`@chat-sdk/state-memory`) | state backend (in-memory) | not-started | none | none | 2 src files, 1 test file. Dev/testing in-memory state adapter. Phase-1. |
@@ -66,9 +66,9 @@ Two-phase gate, enforced strictly:
 
 | Item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `apps/docs` | documentation site | js-only-documented | n/a | rationale below | Next.js documentation site (`next.config.ts`, React `app/`, `components/`, MDX `content/`). Whole-app surface is Next.js + React rendering, not portable to Rust. The user-facing content (`content/*.mdx`) is portable as plain markdown if the docs are rebuilt under a Rust static-site generator, but that is intentionally out of scope — Rust adopters consume the same MDX upstream renders. See JavaScript-only Exceptions table for the formal entry. |
+| `apps/docs` | documentation site | js-only-documented | n/a | rationale below | Next.js documentation site (`next.config.ts`, React `app/`, `components/`, MDX `content/`). Whole-app surface is Next.js + React rendering, not portable to Rust. The user-facing content (`content/*.mdx`) is portable as plain markdown if the docs are rebuilt under a Rust static-site generator, but that is intentionally out of scope - Rust adopters consume the same MDX upstream renders. See JavaScript-only Exceptions table for the formal entry. |
 | `examples/nextjs-chat` | Next.js example | js-only-documented | n/a | rationale below | Next.js web UI example built on `adapter-web`'s browser chat protocol. Both the example and `adapter-web`'s React/DOM portions are Next.js/React-only; the example has no portable Rust counterpart. The protocol/server half of adapter-web stays in scope (see the `adapter-web` row above). |
-| `examples/telegram-chat` | runnable example | not-started | none | none | Telegram bot example. Portable target — port to a Rust example crate once `chat-sdk-adapter-telegram` exists. |
+| `examples/telegram-chat` | runnable example | not-started | none | none | Telegram bot example. Portable target - port to a Rust example crate once `chat-sdk-adapter-telegram` exists. |
 | `skills/chat` | Anthropic skill spec | not-started | none | none | `SKILL.md` Markdown skill spec. Carry the spec into the Rust docs tree verbatim; mark `js-only-documented` if the skill consumes JS-only APIs. |
 | `scripts/` (upstream) | build/release tooling | not-started | none | none | Repo-local pnpm/turbo/changeset scripts. Classify case-by-case; most are tooling-only and `js-only-documented`. |
 
@@ -76,8 +76,8 @@ Two-phase gate, enforced strictly:
 
 Phase-1 order (do these next, in this order):
 
-1. **Slice 2 (planned):** Create `crates/chat-sdk-chat` skeleton mirroring `packages/chat`. Stub the public surface from `packages/chat/src/index.ts`, lift the top-level types (`Chat`, `Message`, `Channel`, `Thread`, error types), and seed serde shapes against upstream JSON contracts. Do NOT pull JSX runtime or React-only surfaces — those are `js-only-documented` and live as documented exceptions.
-2. **Slice 3 (planned):** Port `packages/chat` deterministic-only modules — `errors`, `logger`, `markdown`, `streaming-markdown`, `emoji`, `serialization`, `reviver`, `postable-object`, `cards`, `modals`, `message`, `thread-history`, `message-history`, `callback-url`, `from-full-stream`, `channel`, `mock-adapter`. Each module ports its `*.test.ts` cases 1:1 into Rust tests in `crates/chat-sdk-chat/src/<module>.rs` + `tests/<module>.rs`.
+1. **Slice 2 (planned):** Create `crates/chat-sdk-chat` skeleton mirroring `packages/chat`. Stub the public surface from `packages/chat/src/index.ts`, lift the top-level types (`Chat`, `Message`, `Channel`, `Thread`, error types), and seed serde shapes against upstream JSON contracts. Do NOT pull JSX runtime or React-only surfaces - those are `js-only-documented` and live as documented exceptions.
+2. **Slice 3 (planned):** Port `packages/chat` deterministic-only modules - `errors`, `logger`, `markdown`, `streaming-markdown`, `emoji`, `serialization`, `reviver`, `postable-object`, `cards`, `modals`, `message`, `thread-history`, `message-history`, `callback-url`, `from-full-stream`, `channel`, `mock-adapter`. Each module ports its `*.test.ts` cases 1:1 into Rust tests in `crates/chat-sdk-chat/src/<module>.rs` + `tests/<module>.rs`.
 3. **Slice 4 (planned):** Port `packages/adapter-shared` (depends on `crates/chat-sdk-chat::errors` and serialization). All 4 test files mapped.
 4. **Slice 5 (planned):** Port `packages/tests` (depends on `chat-sdk-chat` + `chat-sdk-adapter-shared`).
 5. **Slice 6 (planned):** Port `packages/state-memory` (depends on `chat-sdk-chat` state contracts).
@@ -91,8 +91,8 @@ Tracked here as they are confirmed. Each entry must cite the upstream file and t
 
 | Upstream surface | Reason |
 | --- | --- |
-| `packages/chat/src/jsx-runtime.ts`, `jsx-runtime.test.ts`, `jsx-runtime.test.tsx`, `jsx-react.test.tsx`, `jsx-dev-runtime` export | JSX runtime is a TypeScript/React-only authoring surface; Rust has no equivalent template compiler binding. Card/modal data shapes ARE portable (see `cards.ts`, `modals.ts`) — only the JSX authoring layer is excluded. |
-| `apps/docs/**` (Next.js documentation site) | Whole-app surface: `next.config.ts`, React `app/`, hooks, components, MDX rendering pipeline. Not portable to Rust. The MDX content under `apps/docs/content/` is portable as raw markdown if reused under a Rust SSG, but that is intentionally out of scope — Rust adopters consume the same upstream-rendered docs. |
+| `packages/chat/src/jsx-runtime.ts`, `jsx-runtime.test.ts`, `jsx-runtime.test.tsx`, `jsx-react.test.tsx`, `jsx-dev-runtime` export | JSX runtime is a TypeScript/React-only authoring surface; Rust has no equivalent template compiler binding. Card/modal data shapes ARE portable (see `cards.ts`, `modals.ts`) - only the JSX authoring layer is excluded. |
+| `apps/docs/**` (Next.js documentation site) | Whole-app surface: `next.config.ts`, React `app/`, hooks, components, MDX rendering pipeline. Not portable to Rust. The MDX content under `apps/docs/content/` is portable as raw markdown if reused under a Rust SSG, but that is intentionally out of scope - Rust adopters consume the same upstream-rendered docs. |
 | `examples/nextjs-chat/**` (Next.js web chat example) | Browser-only React app built on `adapter-web`. Not portable as a Rust example. The protocol/server half of `adapter-web` itself remains in scope and is classified per-subfile during the `adapter-web` slice. |
 
 ## Test-Case Parity Map
