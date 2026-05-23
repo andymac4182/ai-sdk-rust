@@ -195,6 +195,101 @@ impl Adapter for WhatsappAdapter {
                 )
             })
     }
+
+    /// WhatsApp does not support editing messages. 1:1 with
+    /// upstream's `adapter.editMessage`.
+    async fn edit_message(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "WhatsApp does not support editing messages. Use postMessage to send a new message instead.".to_string(),
+        ))
+    }
+
+    /// WhatsApp does not support deleting messages. 1:1 with
+    /// upstream's `adapter.deleteMessage`.
+    async fn delete_message(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "WhatsApp does not support deleting messages.".to_string(),
+        ))
+    }
+
+    /// Add an emoji reaction via WhatsApp Cloud API. 1:1 with
+    /// upstream's `adapter.addReaction`: POST `{messaging_product:
+    /// "whatsapp", recipient_type: "individual", to: <customer_phone>,
+    /// type: "reaction", reaction: {message_id, emoji}}`.
+    async fn add_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not WhatsApp-encoded"))
+        })?;
+
+        if decoded.phone_number_id != self.options.phone_number_id {
+            return Err(AdapterError::InvalidPayload(format!(
+                "thread_id phone_number_id {:?} does not match adapter's {:?}",
+                decoded.phone_number_id, self.options.phone_number_id
+            )));
+        }
+
+        let url = self.send_url();
+        let body = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": decoded.customer_phone,
+            "type": "reaction",
+            "reaction": {
+                "message_id": message_id,
+                "emoji": emoji,
+            },
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.access_token())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            let error_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("WhatsApp Cloud API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {error_msg}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// WhatsApp Cloud API does not support typing indicators. 1:1
+    /// with upstream's no-op `adapter.startTyping`.
+    async fn start_typing(
+        &self,
+        _thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        Ok(())
+    }
 }
 
 /// Encode a WhatsApp thread id. 1:1 with upstream's inline format:
@@ -337,6 +432,54 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_is_unsupported() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("P", "a", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("whatsapp:P:1234567890", "msg", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not support editing"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_is_unsupported() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("P", "a", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("whatsapp:P:1234567890", "msg"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not support deleting"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_rejects_non_whatsapp_thread_ids() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("P", "a", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("slack:C1:1.0", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not WhatsApp-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_is_a_noop() {
+        // WhatsApp Cloud API doesn't expose typing indicators -
+        // upstream's body is empty.
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("P", "a", "v"));
+        assert!(block_on(adapter.start_typing("anything", None)).is_ok());
+        assert!(block_on(adapter.start_typing("anything", Some("s"))).is_ok());
     }
 
     #[test]

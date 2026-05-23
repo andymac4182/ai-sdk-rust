@@ -6,7 +6,7 @@ chat	99	Crate + colocated tests across 16 modules: 567 chat tests. Phase 1.5 com
 adapter-telegram	30	Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject (additive) + slice 161 edit_message + delete_message + add_reaction + start_typing. 22 tests. 6 of 8 Adapter methods.
 adapter-github	30	Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit_message + delete_message + add_reaction + start_typing (no-op). 23 tests. 6 of 8 Adapter methods.
 adapter-messenger	28	Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react (all unsupported per upstream) + start_typing (sender_action). 16 tests. 5 of 8 Adapter methods.
-adapter-whatsapp	15	Slice 133 scaffold + slice 148 post_message HTTP (Cloud API). 13 tests.
+adapter-whatsapp	28	Slice 133 scaffold + slice 148 post_message + slice 164 edit/delete (unsupported per upstream) + add_reaction (Cloud API) + start_typing (no-op). 17 tests. 5 of 8 Adapter methods.
 adapter-discord	15	Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests.
 adapter-linear	15	Slice 136 scaffold + slice 151 post_message HTTP (GraphQL commentCreate). 12 tests.
 adapter-slack	30	Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject (additive) + slice 160 edit_message + delete_message + add_reaction + start_typing. 20 tests. 6 of 8 Adapter methods (post_object + parse_message deferred).
