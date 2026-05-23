@@ -96,16 +96,19 @@ impl LanguageModelAbortSignal {
     }
 
     fn abort_inner(&self, reason: Option<JsonValue>) {
-        let already_aborted = self.state.aborted.swap(true, Ordering::SeqCst);
-        if already_aborted {
-            return;
-        }
-
-        *self
+        let mut reason_guard = self
             .state
             .reason
             .lock()
-            .expect("language model abort reason lock is not poisoned") = reason.clone();
+            .expect("language model abort reason lock is not poisoned");
+
+        if self.state.aborted.load(Ordering::SeqCst) {
+            return;
+        }
+
+        *reason_guard = reason.clone();
+        self.state.aborted.store(true, Ordering::SeqCst);
+        drop(reason_guard);
 
         let mut wakers = self
             .state
