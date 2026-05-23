@@ -35,6 +35,7 @@ members = [
     "crates/chat-sdk-adapter-telegram",
     "crates/chat-sdk-adapter-whatsapp",
     "crates/chat-sdk-state-memory",
+    "crates/chat-sdk-state-redis",
 ]
 resolver = "3"
 
