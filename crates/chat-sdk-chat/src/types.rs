@@ -1249,16 +1249,104 @@ pub struct StreamOptions {
 ///
 /// **Layered port.** Upstream `Adapter` has ~20 methods (`getUser`,
 /// `getChannelInfo`, `openModal`, etc.) that depend on `cards`, `modals`,
-/// `message`, `channel`, `thread`, and the JSX runtime. Those methods will
-/// land on this trait as their dependency modules are ported. For now the
-/// trait is intentionally empty — it exists so types referencing
-/// `dyn Adapter` (the singleton holder, the future event payloads, …) can
-/// compile against an opaque object. Each adapter slice MUST extend this
-/// trait with the upstream method(s) it adds, never define a new trait.
+/// `message`, `channel`, `thread`, and the JSX runtime. Phase 1.5 (slice
+/// 122) added the 4-method subset that the chat-sdk consumer modules
+/// (`message`, `postable_object`, `reviver`) need; the remaining ~16
+/// methods follow as each adapter package ships.
+///
+/// **Async surface.** Methods are `async` because every adapter method
+/// performs platform I/O (Slack Web API, Teams Bot Framework, etc.).
+/// Default implementations return [`AdapterError::Unsupported`] so
+/// adapters can opt into only the methods their platform supports.
 ///
 /// Implementors must be `Send + Sync` since adapters are shared across
 /// async tasks; the supertrait bounds enforce that statically.
-pub trait Adapter: Send + Sync + std::fmt::Debug {}
+#[async_trait::async_trait]
+pub trait Adapter: Send + Sync + std::fmt::Debug {
+    /// Adapter platform name (e.g. `"slack"`, `"teams"`). 1:1 with
+    /// upstream's required `readonly name: string` field. Adapters MUST
+    /// implement this; there is no sensible default.
+    fn name(&self) -> &str;
+
+    /// Fetch the subject of a thread (the channel topic or DM partner
+    /// label). 1:1 with upstream `fetchSubject(threadId): Promise<string
+    /// | null>`. The default returns `Ok(None)` so adapters that don't
+    /// expose a subject (1-on-1 DMs on some platforms) can leave it
+    /// unimplemented.
+    async fn fetch_subject(&self, _thread_id: &str) -> AdapterResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// Post a plain-text message to a thread. 1:1 with upstream
+    /// `postMessage(threadId, text, options?): Promise<{ id: string }>`.
+    /// Returns the platform-assigned message id. Adapters that don't
+    /// implement this return [`AdapterError::Unsupported`].
+    async fn post_message(&self, _thread_id: &str, _text: &str) -> AdapterResult<String> {
+        Err(AdapterError::Unsupported("post_message"))
+    }
+
+    /// Post a typed object (card, modal, plan, …) to a thread. 1:1
+    /// with upstream `postObject(threadId, kind, data): Promise<{ id:
+    /// string }>`. The receiving adapter routes by `kind` to the
+    /// platform-specific renderer.
+    async fn post_object(
+        &self,
+        _thread_id: &str,
+        _kind: &str,
+        _data: serde_json::Value,
+    ) -> AdapterResult<String> {
+        Err(AdapterError::Unsupported("post_object"))
+    }
+
+    /// Parse a platform-native message payload into the cross-platform
+    /// [`crate::message::Message`] shape. 1:1 with upstream
+    /// `parseMessage(raw): Message`. The default returns
+    /// [`AdapterError::Unsupported`] because parsing is inherently
+    /// platform-specific.
+    async fn parse_message(
+        &self,
+        _raw: serde_json::Value,
+    ) -> AdapterResult<crate::message::Message> {
+        Err(AdapterError::Unsupported("parse_message"))
+    }
+}
+
+/// Errors returned by [`Adapter`] methods. Mirrors upstream's
+/// `throw new Error(...)` posture across the platform-specific
+/// adapter implementations.
+#[derive(Debug)]
+pub enum AdapterError {
+    /// The adapter does not implement this method. Matches upstream's
+    /// `throw new Error("not implemented")` pattern.
+    Unsupported(&'static str),
+    /// Platform-specific I/O or API error wrapped from the adapter's
+    /// HTTP/SDK layer.
+    Io(Box<dyn std::error::Error + Send + Sync>),
+    /// The supplied raw payload didn't match the platform's expected
+    /// shape (used by `parse_message` when a Slack event-payload field
+    /// is missing, a Teams `messageId` is malformed, …).
+    InvalidPayload(String),
+}
+
+impl std::fmt::Display for AdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(method) => {
+                write!(f, "Adapter does not implement `{method}`")
+            }
+            Self::Io(err) => write!(f, "Adapter I/O error: {err}"),
+            Self::InvalidPayload(msg) => {
+                write!(f, "Adapter parsed an invalid payload: {msg}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdapterError {}
+
+/// Convenience alias for the `Result` shape every [`Adapter`] method
+/// returns.
+pub type AdapterResult<T> = Result<T, AdapterError>;
 
 /// State-backend trait — the storage abstraction (`state-memory`,
 /// `state-redis`, `state-ioredis`, `state-pg`, …). 1:1 port of upstream
@@ -2188,11 +2276,17 @@ mod tests {
 
     #[test]
     fn lock_scope_context_holds_arc_dyn_adapter_and_renders_stable_debug() {
-        // Mock adapter with no methods (Adapter is an empty placeholder
-        // trait today — see types.rs module docs).
+        // Mock adapter using the default impls of the Phase 1.5
+        // Adapter trait methods (slice 122) — only `name` needs to
+        // be supplied; the four async methods take the trait defaults.
         #[derive(Debug)]
         struct MockAdapter;
-        impl Adapter for MockAdapter {}
+        #[async_trait::async_trait]
+        impl Adapter for MockAdapter {
+            fn name(&self) -> &str {
+                "mock"
+            }
+        }
 
         let ctx = LockScopeContext {
             adapter: std::sync::Arc::new(MockAdapter) as std::sync::Arc<dyn Adapter>,
@@ -2696,5 +2790,111 @@ mod tests {
         // Plain string text
         let s: AdapterPostableMessage = AdapterPostableMessage::from("plain");
         assert!(matches!(s, AdapterPostableMessage::Text(_)));
+    }
+
+    // ---------- slice 122: Adapter trait extension ----------
+
+    use futures_executor::block_on;
+
+    /// Bare-minimum adapter that overrides only the required `name`.
+    /// Used to exercise the default impls of the four async methods.
+    #[derive(Debug)]
+    struct UnconfiguredAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for UnconfiguredAdapter {
+        fn name(&self) -> &str {
+            "unconfigured"
+        }
+    }
+
+    /// Adapter that overrides every method with a recognizable
+    /// behavior, used to verify the trait surface dispatches.
+    #[derive(Debug)]
+    struct EchoAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for EchoAdapter {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        async fn fetch_subject(&self, thread_id: &str) -> AdapterResult<Option<String>> {
+            Ok(Some(format!("subject:{thread_id}")))
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            Ok(format!("msg:{thread_id}:{text}"))
+        }
+        async fn post_object(
+            &self,
+            thread_id: &str,
+            kind: &str,
+            _data: serde_json::Value,
+        ) -> AdapterResult<String> {
+            Ok(format!("obj:{thread_id}:{kind}"))
+        }
+    }
+
+    #[test]
+    fn adapter_default_fetch_subject_returns_none() {
+        let a = UnconfiguredAdapter;
+        let subject = block_on(a.fetch_subject("t1")).unwrap();
+        assert!(subject.is_none());
+    }
+
+    #[test]
+    fn adapter_default_post_message_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.post_message("t1", "hi")) {
+            Err(AdapterError::Unsupported("post_message")) => {}
+            other => panic!("expected Unsupported(post_message), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_default_post_object_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.post_object("t1", "plan", serde_json::json!({}))) {
+            Err(AdapterError::Unsupported("post_object")) => {}
+            other => panic!("expected Unsupported(post_object), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_default_parse_message_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.parse_message(serde_json::json!({}))) {
+            Err(AdapterError::Unsupported("parse_message")) => {}
+            other => panic!("expected Unsupported(parse_message), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_overridden_methods_dispatch_to_the_impl() {
+        let a = EchoAdapter;
+        assert_eq!(a.name(), "echo");
+        assert_eq!(
+            block_on(a.fetch_subject("t1")).unwrap().as_deref(),
+            Some("subject:t1")
+        );
+        assert_eq!(block_on(a.post_message("t1", "hi")).unwrap(), "msg:t1:hi");
+        assert_eq!(
+            block_on(a.post_object("t1", "card", serde_json::json!({}))).unwrap(),
+            "obj:t1:card"
+        );
+    }
+
+    #[test]
+    fn adapter_error_display_includes_method_name_for_unsupported() {
+        let err = AdapterError::Unsupported("post_message");
+        assert_eq!(err.to_string(), "Adapter does not implement `post_message`");
+    }
+
+    #[test]
+    fn adapter_error_display_includes_payload_message_for_invalid_payload() {
+        let err = AdapterError::InvalidPayload("missing field `id`".into());
+        assert_eq!(
+            err.to_string(),
+            "Adapter parsed an invalid payload: missing field `id`"
+        );
     }
 }
