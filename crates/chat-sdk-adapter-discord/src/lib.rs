@@ -59,13 +59,26 @@ impl DiscordAdapterOptions {
 #[derive(Debug, Clone)]
 pub struct DiscordAdapter {
     options: DiscordAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
 }
 
 impl DiscordAdapter {
     /// 1:1 port of upstream
     /// `new DiscordAdapter({ botToken, applicationId, apiBase? })`.
     pub fn new(options: DiscordAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+        }
+    }
+
+    /// Override the HTTP client.
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
     }
 
     /// Read the bot token.
@@ -82,12 +95,72 @@ impl DiscordAdapter {
     pub fn api_base(&self) -> &str {
         self.options.effective_api_base()
     }
+
+    /// Build the channel-messages URL. 1:1 with upstream's inline
+    /// `<api_base>/channels/<channel_id>/messages` template.
+    fn channel_messages_url(&self, channel_id: &str) -> String {
+        format!("{}/channels/{channel_id}/messages", self.api_base())
+    }
 }
 
 #[async_trait]
 impl Adapter for DiscordAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a text message to a Discord channel. 1:1 with upstream's
+    /// `adapter.postMessage`:
+    ///
+    /// - Decodes `discord:<guild_id>:<channel_id>` (guild is opaque
+    ///   here; Discord routes by channel_id alone).
+    /// - POSTs JSON `{content: text}` to
+    ///   `<api_base>/channels/<channel_id>/messages`.
+    /// - Auth via `Authorization: Bot <bot_token>` (Discord's
+    ///   "Bot " auth-scheme prefix is non-standard; reqwest's
+    ///   `.bearer_auth` uses "Bearer ", so we set the header
+    ///   manually).
+    /// - Returns the response's `id` field (Discord message
+    ///   snowflake).
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
+        })?;
+
+        let url = self.channel_messages_url(&decoded.channel_id);
+        let body = serde_json::json!({ "content": text });
+
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let msg = json["message"]
+                .as_str()
+                .unwrap_or("Discord API call failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {msg}")));
+        }
+
+        json["id"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload("Discord message-create response missing id".to_string())
+        })
     }
 }
 
@@ -230,14 +303,28 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_discord_thread_ids() {
         let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("b", "a"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.post_message("discord:123:456", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Discord-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_channel_messages_url_builds_the_upstream_endpoint() {
+        let adapter = DiscordAdapter::new(
+            DiscordAdapterOptions::new("b", "a")
+                .with_api_base("https://discord.example.test/api/v10"),
+        );
+        assert_eq!(
+            adapter.channel_messages_url("456"),
+            "https://discord.example.test/api/v10/channels/456/messages"
+        );
     }
 
     #[test]
