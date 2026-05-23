@@ -22,6 +22,8 @@
 //! - Markdown / card rendering for Telegram's `MarkdownV2` /
 //!   inline-keyboard layout.
 
+pub mod cards;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
