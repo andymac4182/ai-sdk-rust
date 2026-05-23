@@ -75,9 +75,9 @@ Hard rules:
    1:1 just like the ai-sdk port does.
 4. The naming-conventions checker (`scripts/check-naming-conventions.sh`)
    applies to every crate and file you add. If you need to mirror an upstream
-   package that uses a banned token (e.g. `utils`, `shared`), add a documented
-   exception inside the script alongside the existing ai-sdk exceptions, do
-   not relax the rule globally, and call it out in your slice commit.
+   package whose name contains a banned token, add a documented exception
+   inside the script alongside the existing ai-sdk exceptions, do not relax the
+   rule globally, and call it out in your slice commit.
 5. The workspace `Cargo.toml` `[workspace] members` list is shared. When you
    add a `chat-sdk-*` crate, append to the existing list rather than
    re-ordering or restructuring it. Resolve merge conflicts by union-merging
@@ -221,9 +221,9 @@ intentionally non-portable.
    message routing, command parsing, outgoing send, state read/write, error
    propagation, retries, rate-limit handling, streaming/event sequences,
    middleware ordering, ...).
-10. Ban vague generic naming such as `helpers`, `utils`, `common`, `misc`,
-    `stuff`, `shared`, and similar buckets in source paths, module names,
-    crate names, public APIs, and docs. Prefer precise responsibility names.
+10. Ban vague generic bucket naming in source paths, module names, crate names,
+    public APIs, and docs. Prefer precise responsibility names and treat the
+    naming-conventions checker as the source of truth for the banned-token list.
     The shared `scripts/check-naming-conventions.sh` enforces this; add
     explicit exceptions only when mirroring upstream package names, and
     document each new exception in the script comments.
