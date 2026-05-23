@@ -24,6 +24,7 @@ members = [
     "crates/ai-sdk-perplexity",
     "crates/ai-sdk-revai",
     "crates/chat-sdk-chat",
+    "crates/chat-sdk-adapter-github",
     "crates/chat-sdk-adapter-shared",
     "crates/chat-sdk-adapter-telegram",
     "crates/chat-sdk-state-memory",
