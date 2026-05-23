@@ -79,13 +79,26 @@ impl MessengerAdapterOptions {
 #[derive(Debug, Clone)]
 pub struct MessengerAdapter {
     options: MessengerAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
 }
 
 impl MessengerAdapter {
     /// 1:1 port of upstream
     /// `new MessengerAdapter({ pageAccessToken, verifyToken, graphBase? })`.
     pub fn new(options: MessengerAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+        }
+    }
+
+    /// Override the HTTP client (mostly useful for tests).
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
     }
 
     /// Read the page access token.
@@ -102,12 +115,84 @@ impl MessengerAdapter {
     pub fn graph_base(&self) -> &str {
         self.options.effective_graph_base()
     }
+
+    /// Build the Send API URL for a page. 1:1 with upstream's
+    /// inline `<graph_base>/v22.0/<page_id>/messages` template.
+    fn send_url(&self, page_id: &str) -> String {
+        format!("{}/v22.0/{page_id}/messages", self.graph_base())
+    }
 }
 
 #[async_trait]
 impl Adapter for MessengerAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a text message via the Messenger Send API. 1:1 with
+    /// upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes `messenger:<page_id>:<user_id>`.
+    /// - POSTs JSON `{recipient: {id: user_id}, message: {text}}` to
+    ///   `<graph_base>/v22.0/<page_id>/messages?access_token=<page_token>`.
+    /// - Returns the Send API's `message_id` as the chat-sdk
+    ///   message id.
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!(
+                "thread_id {thread_id:?} is not Messenger-encoded"
+            ))
+        })?;
+
+        // Meta passes the access token as a URL query param rather
+        // than an Authorization header.
+        let url = format!(
+            "{}?access_token={}",
+            self.send_url(&decoded.page_id),
+            self.page_access_token()
+        );
+        let body = serde_json::json!({
+            "recipient": { "id": decoded.user_id },
+            "message": { "text": text },
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let error_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Messenger Send API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {error_msg}"
+            )));
+        }
+
+        json["message_id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                AdapterError::InvalidPayload(
+                    "Messenger Send API response missing message_id".to_string(),
+                )
+            })
     }
 }
 
@@ -228,14 +313,27 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_messenger_thread_ids() {
         let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.post_message("messenger:PAGE:USER", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Messenger-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_send_url_builds_the_upstream_endpoint() {
+        let adapter = MessengerAdapter::new(
+            MessengerAdapterOptions::new("p", "v").with_graph_base("https://graph.example.test"),
+        );
+        assert_eq!(
+            adapter.send_url("PAGE123"),
+            "https://graph.example.test/v22.0/PAGE123/messages"
+        );
     }
 
     #[test]
