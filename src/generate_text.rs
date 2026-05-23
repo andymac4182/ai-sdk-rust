@@ -12173,45 +12173,97 @@ mod tests {
         assert_eq!(secondary.calls.borrow().len(), 1);
     }
 
-    #[test]
-    fn filter_active_tools_filters_high_level_tool_sets_by_name() {
+    fn filter_active_tools_mock_tools() -> Vec<Tool> {
         let input_schema = json!({ "type": "object" })
             .as_object()
             .expect("schema is an object")
             .clone();
-        let tools = vec![
-            Tool::new("weather", input_schema.clone()),
-            dynamic_tool("forecast", input_schema),
-        ];
-        let active_tools = vec!["forecast".to_string()];
-        let no_active_tools = None::<&[String]>;
-        let empty_active_tools = Vec::<String>::new();
+        let city_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let provider_args = json!({ "key": "value" })
+            .as_object()
+            .expect("provider args are an object")
+            .clone();
 
-        let unchanged = filter_active_tools(Some(tools.clone()), no_active_tools)
+        vec![
+            Tool::new("tool1", input_schema.clone()).with_description("Tool 1 description"),
+            Tool::new("tool2", city_schema).with_description("Tool 2 description"),
+            Tool::provider_defined(
+                "providerTool",
+                "provider.tool-id",
+                provider_args,
+                input_schema,
+            ),
+        ]
+    }
+
+    #[test]
+    fn filter_active_tools_should_return_undefined_when_tools_are_not_provided() {
+        let active_tools = vec!["tool1".to_string()];
+
+        let result = filter_active_tools(None, Some(&active_tools));
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn filter_active_tools_should_return_all_tools_when_active_tools_is_not_provided() {
+        let tools = filter_active_tools_mock_tools();
+
+        let result = filter_active_tools(Some(tools.clone()), None::<&[String]>)
             .expect("missing active tools preserve the tool set");
-        assert_eq!(
-            unchanged
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["weather", "forecast"]
-        );
 
-        let filtered = filter_active_tools(Some(tools.clone()), Some(&active_tools))
-            .expect("filtered tools are present");
+        assert_eq!(tool_names(&result), tool_names(&tools));
+        assert!(result[2].is_provider_tool());
+        assert_eq!(result[2].provider_tool_id(), Some("provider.tool-id"));
         assert_eq!(
-            filtered
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["forecast"]
+            result[2]
+                .provider_tool_args()
+                .and_then(|args| args.get("key")),
+            Some(&json!("value"))
         );
-        assert!(filter_active_tools(None, Some(&active_tools)).is_none());
+    }
+
+    #[test]
+    fn filter_active_tools_should_return_no_tools_when_active_tools_is_empty() {
+        let tools = filter_active_tools_mock_tools();
+        let active_tools = Vec::<String>::new();
+
         assert!(
-            filter_active_tools(Some(tools), Some(&empty_active_tools))
+            filter_active_tools(Some(tools), Some(&active_tools))
                 .expect("empty active tools produce an empty tool set")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn filter_active_tools_should_filter_tools_based_on_active_tools() {
+        let tools = filter_active_tools_mock_tools();
+        let active_tools = vec!["tool1".to_string(), "providerTool".to_string()];
+
+        let result = filter_active_tools(Some(tools), Some(&active_tools))
+            .expect("filtered tools are present");
+
+        assert_eq!(tool_names(&result), vec!["tool1", "providerTool"]);
+        assert!(result[1].is_provider_tool());
+        assert_eq!(result[1].provider_tool_id(), Some("provider.tool-id"));
+        assert_eq!(
+            result[1]
+                .provider_tool_args()
+                .and_then(|args| args.get("key")),
+            Some(&json!("value"))
+        );
+    }
+
+    fn tool_names(tools: &[Tool]) -> Vec<&str> {
+        tools.iter().map(|tool| tool.name.as_str()).collect()
     }
 
     #[test]

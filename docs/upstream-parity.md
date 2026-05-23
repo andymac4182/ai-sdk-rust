@@ -592,7 +592,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
-| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/tool-choice/tool-model-output/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
+| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/tool-choice/tool-model-output/filter-active-tools/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
 | Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI-compatible non-language abort request forwarding, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream `get-error-message.test.ts` now has a one-to-one Rust test split for every portable original case, including null/undefined, strings, named/custom errors, custom `toString`, and JSON-like values. The package row remains in progress while v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented in the matching `ai-sdk-provider-utils` crate, including one-to-one `filterNullable`, `removeUndefinedEntries`, complete portable `validateTypes`/`safeValidateTypes`, complete portable `secureJsonParse`, complete portable `parseJSON`/`safeParseJSON`/`isParsableJson`, complete portable `injectJsonInstruction`, exact `mediaTypeToExtension` table rows, complete portable `normalizeHeaders` cases, complete portable `mapReasoningToProvider*` cases, complete portable `resolve` cases, complete portable `createToolNameMapping` cases, complete portable `withUserAgentSuffix`, `getRuntimeEnvironmentUserAgent`, `isUrlSupported`, `validateDownloadUrl`, `downloadBlob`/`DownloadError`, `getFromApi`, `delay`, `executeTool`, `isExecutableTool`, portable `asSchema`/`StandardSchema`, `readResponseWithSizeLimit`, `responseHandler`, `handleFetchError`, `convertAsyncIteratorToReadableStream`, `isJSONSerializable`, `StreamingToolCallTracker`, `serializeModelOptions`, and provider-utils `content-part` type-contract cases, complete portable `createIdGenerator`/`generateId` cases, complete portable `DelayedPromise` cases, portable `isProviderReference` cases, and complete portable `resolveProviderReference` cases plus abort propagation for GET, JSON, form-data, and generic POST request helpers, but exact browser stream/fetch parity and Zod adapter snapshots are incomplete or JavaScript-specific. |
@@ -604,6 +604,15 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `filterActiveTools` parity split the prior
+  grouped Rust coverage into named one-to-one counterparts for every upstream
+  `generate-text/filter-active-tools.test.ts` cases:
+  `filter_active_tools_should_return_undefined_when_tools_are_not_provided`,
+  `filter_active_tools_should_return_all_tools_when_active_tools_is_not_provided`,
+  `filter_active_tools_should_return_no_tools_when_active_tools_is_empty`, and
+  `filter_active_tools_should_filter_tools_based_on_active_tools`. The filtered
+  case includes provider-defined tool preservation with the upstream tool id
+  and args shape.
 - 2026-05-23: `packages/ai` tool model-output parity added public
   `create_tool_model_output` and `ToolModelOutputErrorMode` in
   `src/generate_text.rs`, with named Rust counterparts for all 21 upstream
@@ -3207,6 +3216,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    JSON error modes, custom `toModelOutput`, content output, string and JSON
    fallback output, `undefined`-as-null boundaries, and tool-call/input
    argument forwarding.
+   The upstream `generate-text/filter-active-tools.test.ts` cases now have
+   named Rust counterparts in `filter_active_tools_should_*`, including missing
+   tools, missing active tool list, empty active tool list, and filtering with
+   provider-defined tool preservation.
    The upstream `model/resolve-model.test.ts` current-provider cases now have
    named Rust counterparts in `resolve_*_model_should_*`, covering direct model
    identity, Gateway fallback model-id resolution, explicit default-provider
