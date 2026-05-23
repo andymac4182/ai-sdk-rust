@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -164,6 +165,258 @@ pub fn prepare_retries(options: PrepareRetriesOptions) -> PreparedRetries {
         max_retries,
         retry_options: RetryWithExponentialBackoffOptions::new().with_max_retries(max_retries),
     }
+}
+
+/// Error returned when an async-iterable stream read or cancellation fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AsyncIterableStreamError {
+    message: String,
+}
+
+impl AsyncIterableStreamError {
+    /// Creates an async-iterable stream error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<&str> for AsyncIterableStreamError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<String> for AsyncIterableStreamError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl fmt::Display for AsyncIterableStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AsyncIterableStreamError {}
+
+/// Source consumed by [`AsyncIterableStream`].
+pub trait AsyncIterableStreamSource<T> {
+    /// Source-specific error.
+    type Error: fmt::Display;
+
+    /// Reads the next chunk, returning `None` after the source completes.
+    fn read(&mut self) -> Result<Option<T>, Self::Error>;
+
+    /// Cancels the source when stream consumption exits early.
+    fn cancel(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Vector-backed source for [`create_async_iterable_stream`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VecAsyncIterableStreamSource<T> {
+    chunks: VecDeque<T>,
+    cancelled: bool,
+}
+
+impl<T> VecAsyncIterableStreamSource<T> {
+    /// Creates a vector-backed async-iterable stream source.
+    pub fn new(chunks: Vec<T>) -> Self {
+        Self {
+            chunks: chunks.into(),
+            cancelled: false,
+        }
+    }
+
+    /// Returns whether the source has been cancelled.
+    pub const fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+}
+
+impl<T> AsyncIterableStreamSource<T> for VecAsyncIterableStreamSource<T> {
+    type Error = AsyncIterableStreamError;
+
+    fn read(&mut self) -> Result<Option<T>, Self::Error> {
+        Ok(self.chunks.pop_front())
+    }
+
+    fn cancel(&mut self) -> Result<(), Self::Error> {
+        self.cancelled = true;
+        self.chunks.clear();
+        Ok(())
+    }
+}
+
+/// Rust analogue of upstream `createAsyncIterableStream`.
+///
+/// Upstream combines a Web `ReadableStream` with JavaScript async iteration.
+/// Rust exposes the portable contract through direct reads plus an iterator
+/// facade, while preserving completion, cancellation, and error behavior.
+pub struct AsyncIterableStream<T, Source> {
+    source: Source,
+    finished: bool,
+    pending_cancel_error: Option<String>,
+    _chunk: PhantomData<T>,
+}
+
+impl<T, Source> fmt::Debug for AsyncIterableStream<T, Source>
+where
+    Source: fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AsyncIterableStream")
+            .field("source", &self.source)
+            .field("finished", &self.finished)
+            .field("pending_cancel_error", &self.pending_cancel_error)
+            .finish()
+    }
+}
+
+impl<T, Source> AsyncIterableStream<T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    /// Creates an async-iterable stream from a source.
+    pub fn new(source: Source) -> Self {
+        Self {
+            source,
+            finished: false,
+            pending_cancel_error: None,
+            _chunk: PhantomData,
+        }
+    }
+
+    /// Returns the underlying source.
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
+    /// Reads the next chunk directly from the stream.
+    pub fn read(&mut self) -> Result<Option<T>, AsyncIterableStreamError> {
+        if let Some(message) = self.pending_cancel_error.take() {
+            return Err(AsyncIterableStreamError::new(message));
+        }
+
+        if self.finished {
+            return Ok(None);
+        }
+
+        match self.source.read() {
+            Ok(Some(chunk)) => Ok(Some(chunk)),
+            Ok(None) => {
+                self.finished = true;
+                Ok(None)
+            }
+            Err(error) => {
+                self.finished = true;
+                Err(AsyncIterableStreamError::new(error.to_string()))
+            }
+        }
+    }
+
+    /// Collects all remaining chunks through the readable-stream facade.
+    pub fn collect(&mut self) -> Result<Vec<T>, AsyncIterableStreamError> {
+        let mut chunks = Vec::new();
+
+        while let Some(chunk) = self.read()? {
+            chunks.push(chunk);
+        }
+
+        Ok(chunks)
+    }
+
+    /// Cancels the stream without causing subsequent iteration to error.
+    pub fn cancel(&mut self) -> Result<(), AsyncIterableStreamError> {
+        self.cancel_inner(None)
+    }
+
+    /// Cancels the stream and makes the active iterator observe an error.
+    pub fn cancel_with_reason(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<(), AsyncIterableStreamError> {
+        self.cancel_inner(Some(reason.into()))
+    }
+
+    fn cancel_inner(&mut self, reason: Option<String>) -> Result<(), AsyncIterableStreamError> {
+        if !self.finished {
+            self.source
+                .cancel()
+                .map_err(|error| AsyncIterableStreamError::new(error.to_string()))?;
+            self.finished = true;
+        }
+
+        if let Some(reason) = reason {
+            self.pending_cancel_error = Some(reason);
+        }
+
+        Ok(())
+    }
+
+    /// Creates an async-iteration facade over this stream.
+    pub fn iter(&mut self) -> AsyncIterableStreamIterator<'_, T, Source> {
+        AsyncIterableStreamIterator { stream: self }
+    }
+}
+
+/// Iterator facade returned by [`AsyncIterableStream::iter`].
+pub struct AsyncIterableStreamIterator<'a, T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    stream: &'a mut AsyncIterableStream<T, Source>,
+}
+
+impl<T, Source> AsyncIterableStreamIterator<'_, T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    /// Reads the next async-iterable chunk.
+    pub fn read_next(&mut self) -> Result<Option<T>, AsyncIterableStreamError> {
+        self.stream.read()
+    }
+
+    /// Mirrors async-iterator `return()` for early loop exit.
+    pub fn return_stream(&mut self) -> Result<(), AsyncIterableStreamError> {
+        self.stream.cancel()
+    }
+
+    /// Mirrors async-iterator `throw()` for exceptional loop exit.
+    pub fn throw(
+        &mut self,
+        error: impl Into<AsyncIterableStreamError>,
+    ) -> Result<(), AsyncIterableStreamError> {
+        self.stream.cancel()?;
+        Err(error.into())
+    }
+}
+
+/// Creates an async-iterable stream from vector chunks.
+pub fn create_async_iterable_stream<T>(
+    chunks: Vec<T>,
+) -> AsyncIterableStream<T, VecAsyncIterableStreamSource<T>> {
+    create_async_iterable_stream_from_source(VecAsyncIterableStreamSource::new(chunks))
+}
+
+/// Creates an async-iterable stream from an injected source.
+pub fn create_async_iterable_stream_from_source<T, Source>(
+    source: Source,
+) -> AsyncIterableStream<T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    AsyncIterableStream::new(source)
 }
 
 /// Error returned when a simulated readable stream delay fails.
@@ -1642,10 +1895,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AbortSignalSource, AbortTimeoutOptions, Callback, CallbackResult, DataUrlTextError,
+        AbortSignalSource, AbortTimeoutOptions, AsyncIterableStream, AsyncIterableStreamError,
+        AsyncIterableStreamSource, Callback, CallbackResult, DataUrlTextError,
         InvalidArgumentError, NotifyCallbacks, PrepareRetriesOptions, SerialJobError,
         SerialJobExecutor, ServerResponseWriter, SimulateReadableStreamOptions,
-        WriteToServerResponseOptions, cosine_similarity, fix_json, get_potential_start_index,
+        WriteToServerResponseOptions, cosine_similarity, create_async_iterable_stream,
+        create_async_iterable_stream_from_source, fix_json, get_potential_start_index,
         get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
         merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
         set_abort_timeout, simulate_readable_stream, simulate_readable_stream_with_delay,
@@ -1744,6 +1999,62 @@ mod tests {
             self.events.push("end".to_string());
             Ok(())
         }
+    }
+
+    struct MockAsyncIterableStreamSource<T> {
+        chunks: VecDeque<Result<T, String>>,
+        cancelled: Rc<RefCell<bool>>,
+    }
+
+    impl<T> MockAsyncIterableStreamSource<T> {
+        fn with_entries(entries: impl IntoIterator<Item = Result<T, String>>) -> Self {
+            Self {
+                chunks: entries.into_iter().collect(),
+                cancelled: Rc::new(RefCell::new(false)),
+            }
+        }
+
+        fn with_chunks(chunks: impl IntoIterator<Item = T>) -> Self {
+            Self::with_entries(chunks.into_iter().map(Ok))
+        }
+
+        fn cancelled_handle(&self) -> Rc<RefCell<bool>> {
+            Rc::clone(&self.cancelled)
+        }
+    }
+
+    impl<T> AsyncIterableStreamSource<T> for MockAsyncIterableStreamSource<T> {
+        type Error = String;
+
+        fn read(&mut self) -> Result<Option<T>, Self::Error> {
+            match self.chunks.pop_front() {
+                Some(Ok(chunk)) => Ok(Some(chunk)),
+                Some(Err(error)) => Err(error),
+                None => Ok(None),
+            }
+        }
+
+        fn cancel(&mut self) -> Result<(), Self::Error> {
+            *self.cancelled.borrow_mut() = true;
+            self.chunks.clear();
+            Ok(())
+        }
+    }
+
+    fn collect_async_iterable_stream<T, Source>(
+        stream: &mut AsyncIterableStream<T, Source>,
+    ) -> Result<Vec<T>, AsyncIterableStreamError>
+    where
+        Source: AsyncIterableStreamSource<T>,
+    {
+        let mut iterator = stream.iter();
+        let mut chunks = Vec::new();
+
+        while let Some(chunk) = iterator.read_next()? {
+            chunks.push(chunk);
+        }
+
+        Ok(chunks)
     }
 
     #[derive(Default)]
@@ -2266,6 +2577,172 @@ mod tests {
 
         assert_eq!(prepared.max_retries(), 2);
         assert_eq!(prepared.retry_options().max_retries, 2);
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_read_all_chunks_from_a_non_empty_stream_using_async_iteration()
+     {
+        let mut stream = create_async_iterable_stream(vec!["chunk1", "chunk2", "chunk3"]);
+
+        assert_eq!(
+            collect_async_iterable_stream(&mut stream).unwrap(),
+            vec!["chunk1", "chunk2", "chunk3"]
+        );
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_handle_an_empty_stream_gracefully() {
+        let mut stream = create_async_iterable_stream::<String>(vec![]);
+
+        assert_eq!(
+            collect_async_iterable_stream(&mut stream).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_maintain_readable_stream_functionality() {
+        let mut stream = create_async_iterable_stream(vec!["chunk1", "chunk2", "chunk3"]);
+
+        assert_eq!(
+            stream.collect().unwrap(),
+            vec!["chunk1", "chunk2", "chunk3"]
+        );
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_cancel_stream_on_early_exit_from_for_await_loop() {
+        let source = MockAsyncIterableStreamSource::with_chunks(["chunk1", "chunk2", "chunk3"]);
+        let cancelled = source.cancelled_handle();
+        let mut stream = create_async_iterable_stream_from_source(source);
+
+        let mut iterator = stream.iter();
+        assert_eq!(iterator.read_next().unwrap(), Some("chunk1"));
+        assert_eq!(iterator.read_next().unwrap(), Some("chunk2"));
+        iterator.return_stream().unwrap();
+
+        assert!(*cancelled.borrow());
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_cancel_stream_when_exception_thrown_inside_for_await_loop()
+     {
+        let source = MockAsyncIterableStreamSource::with_chunks(["chunk1", "chunk2", "chunk3"]);
+        let cancelled = source.cancelled_handle();
+        let mut stream = create_async_iterable_stream_from_source(source);
+
+        let mut iterator = stream.iter();
+        assert_eq!(iterator.read_next().unwrap(), Some("chunk1"));
+        assert_eq!(iterator.read_next().unwrap(), Some("chunk2"));
+        let error = iterator.throw("Test error").expect_err("throw rethrows");
+
+        assert_eq!(error.message(), "Test error");
+        assert!(*cancelled.borrow());
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_not_cancel_stream_when_exception_thrown_inside_for_await_loop()
+     {
+        let source = MockAsyncIterableStreamSource::with_chunks(["chunk1", "chunk2", "chunk3"]);
+        let cancelled = source.cancelled_handle();
+        let mut stream = create_async_iterable_stream_from_source(source);
+
+        assert_eq!(
+            collect_async_iterable_stream(&mut stream).unwrap(),
+            vec!["chunk1", "chunk2", "chunk3"]
+        );
+
+        assert!(!*cancelled.borrow());
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_not_allow_iterating_twice_after_breaking() {
+        let mut stream = create_async_iterable_stream(vec!["chunk1", "chunk2", "chunk3"]);
+        let mut collected = Vec::new();
+
+        {
+            let mut iterator = stream.iter();
+            let chunk = iterator
+                .read_next()
+                .unwrap()
+                .expect("first iteration yields one chunk");
+            collected.push(chunk);
+            iterator.return_stream().unwrap();
+        }
+
+        let mut iterator = stream.iter();
+        while let Some(chunk) = iterator.read_next().unwrap() {
+            collected.push(chunk);
+        }
+
+        assert_eq!(collected, vec!["chunk1"]);
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_propagate_errors_from_source_stream_to_async_iterable() {
+        let source = MockAsyncIterableStreamSource::with_entries([
+            Ok("chunk1"),
+            Ok("chunk2"),
+            Err("Stream error".to_string()),
+        ]);
+        let mut stream = create_async_iterable_stream_from_source(source);
+        let mut iterator = stream.iter();
+
+        let collected = vec![
+            iterator.read_next().unwrap().expect("first chunk"),
+            iterator.read_next().unwrap().expect("second chunk"),
+        ];
+        let error = iterator
+            .read_next()
+            .expect_err("source stream error propagates");
+
+        assert_eq!(collected, vec!["chunk1", "chunk2"]);
+        assert_eq!(error.message(), "Stream error");
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_stop_async_iterable_when_stream_is_cancelled() {
+        let mut stream = create_async_iterable_stream(vec!["chunk1", "chunk2", "chunk3"]);
+
+        assert_eq!(stream.read().unwrap(), Some("chunk1"));
+        stream.cancel_with_reason("Test cancellation").unwrap();
+        let error = stream.read().expect_err("cancelled active stream errors");
+
+        assert_eq!(error.message(), "Test cancellation");
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_not_collect_any_chunks_when_iterating_on_already_cancelled_stream()
+     {
+        let mut stream = create_async_iterable_stream(vec!["chunk1", "chunk2", "chunk3"]);
+
+        stream.cancel().unwrap();
+
+        assert_eq!(
+            collect_async_iterable_stream(&mut stream).unwrap(),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn create_async_iterable_stream_should_not_throw_when_return_is_called_after_the_stream_completed()
+     {
+        let input = vec![
+            "chunk1".to_string(),
+            "chunk2".to_string(),
+            "chunk3".to_string(),
+        ];
+        let mut stream = create_async_iterable_stream(input.clone());
+        let mut iterator = stream.iter();
+        let mut output = Vec::new();
+
+        while let Some(chunk) = iterator.read_next().unwrap() {
+            output.push(chunk);
+        }
+
+        assert_eq!(output, input);
+        iterator.return_stream().unwrap();
+        assert_eq!(iterator.read_next().unwrap(), None);
     }
 
     #[test]
