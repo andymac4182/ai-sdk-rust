@@ -15,6 +15,7 @@ use crate::language_model::{
     LanguageModelGenerateResult, LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest,
     LanguageModelResponse, LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{
     ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions, TypeValidationError,
@@ -1032,6 +1033,10 @@ where
     }
 
     let generate_result = do_generate_object_with_retries(model, call_options, max_retries).await;
+    log_warnings(
+        &LogWarningsOptions::new(generate_result.warnings.clone())
+            .with_scope(model.provider(), model.model_id()),
+    );
     let finish_reason = generate_result.finish_reason.unified;
     let usage = generate_result.usage;
     let request = generate_object_request(generate_result.request);
@@ -1562,6 +1567,7 @@ mod tests {
         LanguageModelText, LanguageModelTextPart, LanguageModelUsage, LanguageModelUserContentPart,
         LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -1979,6 +1985,73 @@ mod tests {
         assert_eq!(
             headers.get("user-agent").map(String::as_str),
             Some(format!("ai/{VERSION}").as_str())
+        );
+    }
+
+    #[test]
+    fn generate_object_calls_log_warnings_with_the_correct_warnings() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("Temperature parameter not supported".to_string()),
+            },
+        ];
+        let mut generate_result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        for warning in expected_warnings.clone() {
+            generate_result = generate_result.with_warning(warning);
+        }
+        let model = MockLanguageModel::new().with_generate_result(generate_result);
+        take_log_warning_calls_for_tests();
+
+        let _output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("mock-provider", "mock-model-id")
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present() {
+        let model =
+            MockLanguageModel::new().with_generate_result(LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "{\"answer\":42}",
+                ))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+                object_usage(),
+            ));
+        take_log_warning_calls_for_tests();
+
+        let _output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![LogWarningsOptions::new(Vec::new()).with_scope("mock-provider", "mock-model-id")]
         );
     }
 
