@@ -269,9 +269,7 @@ fn write_json_string(out: &mut String, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chat_sdk_chat::cards::{
-        CardKind, FieldElement, FieldKind, FieldsKind, TextKind,
-    };
+    use chat_sdk_chat::cards::{CardKind, FieldElement, FieldKind, FieldsKind, TextKind};
 
     fn card(title: Option<&str>, subtitle: Option<&str>, children: Vec<CardChild>) -> CardElement {
         CardElement {

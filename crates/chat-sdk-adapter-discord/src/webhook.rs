@@ -77,7 +77,12 @@ mod tests {
 
     fn signing_keypair_from_seed(seed: [u8; 32]) -> (SigningKey, String) {
         let sk = SigningKey::from_bytes(&seed);
-        let public_hex: String = sk.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let public_hex: String = sk
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         (sk, public_hex)
     }
 
@@ -86,7 +91,11 @@ mod tests {
         signed.extend_from_slice(timestamp.as_bytes());
         signed.extend_from_slice(body);
         let signature = sk.sign(&signed);
-        signature.to_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        signature
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     #[test]
@@ -103,7 +112,12 @@ mod tests {
         let (sk, public_hex) = signing_keypair_from_seed([2u8; 32]);
         let ts = "1700000000";
         let sig_hex = sign_request(&sk, ts, b"original");
-        assert!(!verify_discord_signature(b"tampered", &sig_hex, ts, &public_hex));
+        assert!(!verify_discord_signature(
+            b"tampered",
+            &sig_hex,
+            ts,
+            &public_hex
+        ));
     }
 
     #[test]
@@ -111,7 +125,12 @@ mod tests {
         let (sk, public_hex) = signing_keypair_from_seed([3u8; 32]);
         let body = b"x";
         let sig_hex = sign_request(&sk, "1700000000", body);
-        assert!(!verify_discord_signature(body, &sig_hex, "1700000999", &public_hex));
+        assert!(!verify_discord_signature(
+            body,
+            &sig_hex,
+            "1700000999",
+            &public_hex
+        ));
     }
 
     #[test]
@@ -121,14 +140,24 @@ mod tests {
         let ts = "1700000000";
         let body = b"x";
         let sig_hex = sign_request(&sk, ts, body);
-        assert!(!verify_discord_signature(body, &sig_hex, ts, &other_public_hex));
+        assert!(!verify_discord_signature(
+            body,
+            &sig_hex,
+            ts,
+            &other_public_hex
+        ));
     }
 
     #[test]
     fn rejects_non_hex_signature() {
         let (_, public_hex) = signing_keypair_from_seed([6u8; 32]);
         let bad_sig = "z".repeat(128);
-        assert!(!verify_discord_signature(b"x", &bad_sig, "1700000000", &public_hex));
+        assert!(!verify_discord_signature(
+            b"x",
+            &bad_sig,
+            "1700000000",
+            &public_hex
+        ));
     }
 
     #[test]
@@ -136,20 +165,35 @@ mod tests {
         let (_, public_hex) = signing_keypair_from_seed([7u8; 32]);
         // 32 hex chars = 16 bytes, not 64.
         let short = "0".repeat(32);
-        assert!(!verify_discord_signature(b"x", &short, "1700000000", &public_hex));
+        assert!(!verify_discord_signature(
+            b"x",
+            &short,
+            "1700000000",
+            &public_hex
+        ));
     }
 
     #[test]
     fn rejects_non_hex_public_key() {
         let bad_public = "z".repeat(64);
-        assert!(!verify_discord_signature(b"x", &"0".repeat(128), "0", &bad_public));
+        assert!(!verify_discord_signature(
+            b"x",
+            &"0".repeat(128),
+            "0",
+            &bad_public
+        ));
     }
 
     #[test]
     fn rejects_wrong_length_public_key() {
         // 64 hex chars but we need 64 bytes (128 chars).
         let short_pub = "0".repeat(60);
-        assert!(!verify_discord_signature(b"x", &"0".repeat(128), "0", &short_pub));
+        assert!(!verify_discord_signature(
+            b"x",
+            &"0".repeat(128),
+            "0",
+            &short_pub
+        ));
     }
 
     // ---------- helper ----------

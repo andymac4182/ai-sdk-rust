@@ -266,9 +266,26 @@ fn write_node(
     }
 }
 
+/// Push `text` to `out`, escaping markdown-significant characters that
+/// would re-parse as syntax markers if emitted bare. Matches the subset
+/// of upstream remark-stringify's text-escape behavior that
+/// chat-sdk-* adapters rely on for round-tripping (`*`, `_`, `~`,
+/// `` ` ``, `\` and `[` / `]`).
+fn push_escaped_text(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '*' | '_' | '~' | '`' | '\\' | '[' | ']' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+}
+
 fn write_inline(out: &mut String, node: &Node, options: &StringifyMarkdownOptions) {
     match node {
-        Node::Text(t) => out.push_str(&t.value),
+        Node::Text(t) => push_escaped_text(out, &t.value),
         Node::Strong(s) => {
             out.push_str("**");
             for child in &s.children {

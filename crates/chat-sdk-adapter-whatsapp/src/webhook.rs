@@ -102,10 +102,6 @@ mod tests {
     #[test]
     fn verify_whatsapp_signature_rejects_length_mismatch() {
         // Truncated signature shouldn't be valid even if the prefix is right.
-        assert!(!verify_whatsapp_signature(
-            "x",
-            "s",
-            Some("sha256=00")
-        ));
+        assert!(!verify_whatsapp_signature("x", "s", Some("sha256=00")));
     }
 }
