@@ -74,3 +74,37 @@ Slices reviewed: setup (`394a786`, `0f6fab2`, `9843ea8`, `5417c49`), slice 1 inv
 - The brief still implies a single chat package can be one slice; in reality `chat` is going to need 20+ slices (one per source module). Consider adding an explicit slice-budget guidance ("expect 25–30 slices to verify `packages/chat`, ~2–5 per other phase-1 package, ~5–15 per adapter").
 - No automated check verifies that new `chat-sdk-*` source files have a colocated `#[cfg(test)] mod tests` block when there is a matching upstream `*.test.ts`. A future refinement could add a script that asserts this.
 - The opensrc cache path `~/.opensrc/repos/github.com/vercel/chat/main` may go stale across sessions. The brief should mention `npx opensrc fetch github:vercel/chat` (not just `path`) to refresh it.
+
+### 2026-05-23 — slices 7..12
+
+Slices reviewed: slice 7 Lock primitive (`13dc8b1`), slice 8 concurrency/Author/UserInfo (`4555418`), slice 9 DurationString/TranscriptsConfig (`9e28f3f`), slice 10 adapter-shared crate + errors (`9768f5a`), slice 11 naming-check exceptions follow-up (`b5bf035`), slice 12 ChannelInfo/ListThreadsOptions (`4cba962`).
+
+**What the brief got wrong or left out**
+
+- **The merge-back validation block is not atomic with the push.** Slice 10's merge protocol used `cargo fmt --check && naming-check && cargo test && push`, but my shell wrapper put the push outside the `&& ` chain. The naming check failed (introduced `\`adapter-utils\`` etc. references), yet the push still landed on main. The ai-sdk session noticed and corrected my naming docs in commit `edd036b "Fix chat adapter naming docs"`, briefly crossing the ownership boundary. Slice 11 fixed it with proper script exceptions; slice 12 onward used a guarded `if ! ( … ); then echo VALIDATION FAILED; exit 1; fi` block before push. The brief should mandate this guard explicitly.
+- **The "shared, additive only" boundary on shared files isn't strong enough to prevent edits to chat-sdk-owned files when a validation failure on main blocks the ai-sdk session too.** Pragmatically that's the right call (a broken `main` blocks both sessions), but the brief should name this pattern: "if the *other* session's broken state is blocking your validation, fix the minimum required to unblock and document the cross-boundary edit in `goal-refinements.md`." Treat that as a recovery event, not the default mode.
+- **The ledger row is a high-conflict line.** Slice 12 hit a merge conflict between origin/main (with the ai-sdk session's small edit to my chat-sdk row) and my newer slice 12 update. Manual resolution in favor of the most recent slice-update is the right answer because subsequent slices include the prior content. The brief should call this out: "if `docs/chat/upstream-parity.md` conflicts on a chat-sdk row during rebase, prefer your branch's version — the ledger row is overwritten wholesale by each slice that touches that package."
+- **`serde_json::Map<String, Value>` is required for upstream `Record<string, unknown>` metadata fields.** I bumped `chat-sdk-chat`'s `serde_json` from a dev-dependency to a runtime dependency in slice 12. The brief should mention this expected dep promotion so future slices don't try to invent their own opaque-JSON wrapper.
+- **`types.ts` layering works.** Six layers landed without `cards`/`message`/`channel` being touched. The recipe: scan `types.ts` for interfaces whose imports are exclusively (a) primitive TS types or (b) already-ported chat-sdk-chat types. Port those. Bump the estimate by ~2% per layer. The brief's slice 4 plan didn't anticipate how productive this approach is.
+- **`adapter-shared/buffer-utils.ts` is borderline-JS-only.** Buffer/ArrayBuffer/Blob conversions are JS runtime types; the Rust equivalent is just `Vec<u8>` with no `Buffer.from()` distinction. Document this as "trivial port + most upstream tests degenerate to identity" if/when buffer-utils lands.
+
+**Stale or misleading guidance**
+
+- The brief's Merge-Back Protocol still shows the lock-acquire loop separate from the push. Combine them into a single guarded shell block — see "Edits applied".
+- The brief lists `packages/adapter-shared` as Phase-1 dependency-free, but `buffer-utils.ts` depends on `card-utils.ts`'s `PlatformName` (a string-union type that could be extracted independently). Document the dependency.
+- The brief doesn't mention that upstream test counts in the ledger should be tracked as "test files" vs "test cases" separately. Slice 1 conflated them. Going forward each row's `Evidence` cell tracks both.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`:
+  - **Atomic merge gate** added to the Serialized Merge-Back Protocol: wrap merge+validate inside `if ! ( set -e; ... ); then echo VALIDATION FAILED; exit 1; fi` so `git push origin main` is unreachable when any validation step fails.
+  - **Cross-boundary fix-up rule** added: if main is broken in a way that blocks the *other* session's validation, the unblocking session may make the minimum cross-boundary edit needed, but must record it in the next refinement entry.
+  - **Ledger conflict resolution** documented: prefer your branch's slice-row when `docs/chat/upstream-parity.md` rebase-conflicts on a chat-sdk-owned row.
+  - **serde_json runtime dep** noted as the canonical Rust mirror of upstream `Record<string, unknown>` shapes.
+- `scripts/codex-goal-chat/goal-condition.md`: stable; no change needed.
+
+**Open refinements deferred**
+
+- A pre-push git hook on the main checkout could enforce naming + clippy + workspace-test atomically, removing the foot-gun entirely. Worth a slice once both sessions agree on the contract.
+- The progress-table generator currently aborts hard when `package-progress-estimates.tsv` mentions a package that is not `in-progress` — useful, but means a slice that flips a row from `in-progress` to `verified` must edit both files in lock-step. A future refinement could relax this.
+- Cross-session merge conflicts on the ledger row would be eliminated by splitting each package row into its own file under `docs/chat/packages/<name>.md` and stitching them via the generator. Not urgent yet (only one conflict so far).
