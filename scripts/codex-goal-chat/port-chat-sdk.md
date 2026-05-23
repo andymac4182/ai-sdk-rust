@@ -648,3 +648,59 @@ Two recurring failure modes:
 
 Both of these have caused validation-bypass incidents (see
 `docs/chat/goal-refinements.md` slices 80, 91, 108).
+
+## Additive-helper ceiling (added slice 114)
+
+Slices 99-113 followed an "additive pure helper" pattern that
+bumps `chat`'s percentage 1% per slice. This is real progress —
+the helpers shrink the future trait-extension slice's surface —
+but the chat percentage in `package-progress.md` is now an
+unreliable proxy for "how complete is the chat class itself."
+
+Hard cap: do not bump the chat row above 92% on additive
+helpers alone. Anything above 92% requires a real upstream-class
+port (TranscriptsApiImpl, ThreadHistoryCache, CallbackUrlImpl,
+or the bigger Channel/Thread/Chat classes) and that work needs
+the Adapter / StateAdapter trait extension.
+
+When the additive-helper surface is exhausted, the next move is
+the trait extension. See "Phase 1.5 trait-extension session"
+below.
+
+## Phase 1.5 trait-extension session (added slice 114)
+
+The single highest-leverage remaining work is extending the
+placeholder `chat::types::Adapter` and `chat::types::StateAdapter`
+traits in `crates/chat-sdk-chat/src/types.rs` (currently both
+empty). This unblocks 5 consumer modules at once:
+
+- `callback_url`: stateful `processCardCallbackUrls`,
+  `resolveCallbackUrl`, `postToCallbackUrl` paths (12 deferred
+  upstream test cases).
+- `transcripts`: `TranscriptsApiImpl` class (append / list /
+  delete / count).
+- `thread_history`: `ThreadHistoryCache` class (append /
+  get_messages).
+- `postable_object`: `post_postable_object` dispatch helper.
+- `message`: the `subject` async getter (5 deferred upstream
+  test cases).
+
+Plan:
+
+1. Add `async-trait` to `chat-sdk-chat`'s `Cargo.toml`.
+2. Extend `StateAdapter` with the 5-method subset the consumer
+   modules need: `get`, `set`, `delete`, `append_to_list`,
+   `get_list`. Skip locks/queues/subscriptions — those go in a
+   later slice once the production state backends are written.
+3. Extend `Adapter` with the 4-method subset PostableObject
+   dispatch needs: `post_message`, `post_object`,
+   `fetch_subject`, `parse_message`.
+4. Implement the new trait methods on `MemoryStateAdapter` via
+   `async-trait`-wrapped sync delegation (the in-memory backend
+   has no real I/O so its trait impl is `async fn x() { sync_x() }`).
+5. Land each consumer-module slice in turn, mapping its
+   previously-deferred upstream test cases.
+
+This is a multi-slice session (5-10 slices) and should not be
+attempted mid-additive-helper-streak. Start a fresh dedicated
+session.
