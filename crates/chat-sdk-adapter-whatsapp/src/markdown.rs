@@ -202,8 +202,9 @@ fn upgrade_single_to_double(text: &str, marker: char, double: &str) -> String {
             } else {
                 '\0'
             };
-            // Skip if part of a double marker.
-            if prev == marker || next == marker {
+            // Skip if part of a double marker or escaped with backslash.
+            // 1:1 with upstream's `(?<![\\*])` / `(?<![\\~])` lookbehind.
+            if prev == marker || prev == '\\' || next == marker {
                 out.push(chars[i]);
                 i += 1;
                 continue;
@@ -347,9 +348,9 @@ mod tests {
     fn should_convert_standard_italic_to_whatsapp_underscore_italic() {
         use chat_sdk_chat::markdown::emphasis;
         let c = WhatsAppFormatConverter::new();
-        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Emphasis(
-            emphasis(vec![Node::Text(text("italic"))]),
-        )]))]));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![
+            Node::Emphasis(emphasis(vec![Node::Text(text("italic"))])),
+        ]))]));
         assert_eq!(c.from_ast(&ast), "_italic_");
     }
 
@@ -423,6 +424,67 @@ mod tests {
         assert!(result.contains("hello"));
     }
 
+    // ---------- additional upstream cases (slice 207) ----------
+
+    #[test]
+    fn should_preserve_escaped_asterisks_and_tildes_as_literals() {
+        let c = WhatsAppFormatConverter::new();
+        let ast = c.to_ast("a \\* b and c \\~ d").unwrap();
+        let result = c.from_ast(&ast);
+        assert!(result.contains("\\*"), "got: {result}");
+        assert!(result.contains("\\~"), "got: {result}");
+    }
+
+    #[test]
+    fn should_handle_headings_with_mixed_text_and_bold() {
+        let c = WhatsAppFormatConverter::new();
+        let result = c
+            .render_postable_markdown("# The Honest Answer: **It Depends!** 🤷\u{200d}♂️")
+            .unwrap();
+        assert!(
+            result.contains("*The Honest Answer: It Depends! 🤷\u{200d}♂️*"),
+            "got: {result}"
+        );
+        assert!(!result.contains("**"), "got: {result}");
+    }
+
+    #[test]
+    fn should_convert_tables_to_code_blocks() {
+        let c = WhatsAppFormatConverter::new();
+        let ast = c.to_ast("| A | B |\n| --- | --- |\n| 1 | 2 |").unwrap();
+        let result = c.from_ast(&ast);
+        assert!(result.contains("```"), "got: {result}");
+    }
+
+    #[test]
+    fn should_correctly_convert_a_complex_ai_style_markdown_response() {
+        let c = WhatsAppFormatConverter::new();
+        let markdown = [
+            "# The Answer: **It Depends!**",
+            "",
+            "There's no universal *better* choice.",
+            "",
+            "## **Choose React if:**",
+            "- Building **large-scale** apps",
+            "- Need the biggest *ecosystem*",
+            "- **Examples:** Facebook, Netflix",
+            "",
+            "## **Choose Vue if:**",
+            "- Want *faster* learning curve",
+            "- Prefer ~~complex~~ cleaner templates",
+            "",
+            "---",
+            "",
+            "## Real Talk:",
+            "**All three are excellent.** Learn *React* first!",
+        ]
+        .join("\n");
+
+        let result = c.render_postable_markdown(&markdown).unwrap();
+        let expected = "*The Answer: It Depends!*\n\nThere's no universal _better_ choice.\n\n*Choose React if:*\n\n- Building *large-scale* apps\n- Need the biggest _ecosystem_\n- *Examples:* Facebook, Netflix\n\n*Choose Vue if:*\n\n- Want _faster_ learning curve\n- Prefer ~complex~ cleaner templates\n\n━━━\n\n*Real Talk:*\n\n*All three are excellent.* Learn _React_ first!";
+        assert_eq!(result, expected, "got: {result}");
+    }
+
     // ---------- helper-function additive tests ----------
 
     #[test]
@@ -437,10 +499,7 @@ mod tests {
 
     #[test]
     fn from_whatsapp_format_does_not_cross_newlines() {
-        assert_eq!(
-            from_whatsapp_format("*line1\nline2*"),
-            "*line1\nline2*"
-        );
+        assert_eq!(from_whatsapp_format("*line1\nline2*"), "*line1\nline2*");
     }
 
     #[test]
