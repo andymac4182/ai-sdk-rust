@@ -24,7 +24,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 86% | In progress | core SDK package | Crate + colocated tests across 13 modules: errors 17 + logger 13 + chat_singleton 5 + emoji 42/42 (1:1) + markdown... |
+| `@chat-sdk/chat` | 87% | In progress | core SDK package | Crate + colocated tests across 13 modules: errors 17 + logger 13 + chat_singleton 5 + emoji 42/42 (1:1) + markdown... |
 
 ## Not Started
 
