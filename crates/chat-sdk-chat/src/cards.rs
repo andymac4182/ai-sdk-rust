@@ -1199,4 +1199,50 @@ mod tests {
             }
         }
     }
+
+    // ---------- slice 100: 4 more 1:1 cards.test.ts cases ----------
+
+    #[test]
+    fn card_creates_an_empty_card_when_no_options_given() {
+        let c = card(CardOptions::default());
+        assert_eq!(c.kind, CardKind::Card);
+        assert!(c.title.is_none());
+        assert!(c.subtitle.is_none());
+        assert!(c.image_url.is_none());
+        assert!(c.children.is_empty());
+    }
+
+    #[test]
+    fn link_button_carries_url_label_and_optional_style() {
+        let elem = link_button(LinkButtonOptions {
+            label: "Visit Docs".to_string(),
+            url: "https://example.com/docs".to_string(),
+            style: Some(ButtonStyle::Primary),
+        });
+        assert_eq!(elem.label, "Visit Docs");
+        assert_eq!(elem.url, "https://example.com/docs");
+        assert_eq!(elem.style, Some(ButtonStyle::Primary));
+        assert_eq!(elem.kind, LinkButtonKind::LinkButton);
+    }
+
+    #[test]
+    fn actions_with_mixed_button_and_link_button_round_trips() {
+        let elem = actions(vec![
+            button(ButtonOptions {
+                id: "save".to_string(),
+                label: "Save".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            link_button(LinkButtonOptions {
+                label: "Open".to_string(),
+                url: "https://example.com".to_string(),
+                style: None,
+            })
+            .into(),
+        ]);
+        assert_eq!(elem.children.len(), 2);
+        assert!(matches!(elem.children[0], ActionsChild::Button(_)));
+        assert!(matches!(elem.children[1], ActionsChild::LinkButton(_)));
+    }
 }
