@@ -3,7 +3,7 @@
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages.
 chat	99	Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete.
-adapter-telegram	10	Crate scaffold (slice 130). 13 tests. HTTP I/O deferred.
+adapter-telegram	15	Slice 130 scaffold + slice 145 post_message HTTP layer via chat-sdk-adapter-shared::runtime::reqwest. 14 colocated tests. Reference impl for the other 8 adapter post_message ports.
 adapter-github	10	Crate scaffold (slice 131). 13 tests. HTTP I/O deferred.
 adapter-messenger	10	Crate scaffold (slice 132). 11 tests. HTTP I/O deferred.
 adapter-whatsapp	10	Crate scaffold (slice 133). 11 tests. HTTP I/O deferred.
@@ -14,4 +14,4 @@ adapter-teams	10	Crate scaffold (slice 138) rsplit Bot Framework conv ids. 12 te
 adapter-slack	10	Crate scaffold (slice 139) w/ is_dm/is_group predicates. 14 tests. Web API + Socket Mode deferred.
 state-redis	10	Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up deferred.
 state-ioredis	10	Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter. 11 tests. redis-rs cluster client deferred.
-state-pg	10	Crate scaffold (slice 142): PgStateAdapter impl StateAdapter (NotConnected placeholder). PgStateAdapterOptions + state_table()/lists_table() helpers. 10 tests. tokio-postgres/sqlx wire-up + schema migrations + pg_try_advisory_lock deferred.
+state-pg	10	Crate scaffold (slice 142): PgStateAdapter impl StateAdapter. 10 tests. tokio-postgres/sqlx wire-up deferred.
