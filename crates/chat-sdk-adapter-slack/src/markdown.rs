@@ -9,7 +9,11 @@
 
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use chat_sdk_chat::markdown::{
-    Node, ParseMarkdownError, parse_markdown, stringify_markdown, to_plain_text,
+    Node, ParseMarkdownError, default_node_to_text, from_ast_with_node_converter,
+    get_node_children, is_blockquote_node, is_code_node, is_delete_node, is_emphasis_node,
+    is_inline_code_node, is_link_node, is_list_node, is_paragraph_node, is_strong_node,
+    is_table_node, is_text_node, parse_markdown, render_list, stringify_markdown, table_to_ascii,
+    to_plain_text,
 };
 use chat_sdk_chat::types::AdapterPostableMessage;
 
@@ -140,6 +144,48 @@ impl SlackFormatConverter {
         finalize_plain(raw)
     }
 
+    /// Render an mdast tree to Slack's legacy mrkdwn text. 1:1 port of
+    /// upstream `private astToMrkdwn(ast)` which calls
+    /// `fromAstWithNodeConverter` with `nodeToMrkdwn` as the per-node
+    /// converter.
+    fn ast_to_mrkdwn(&self, ast: &Node) -> String {
+        from_ast_with_node_converter(ast, &|n| node_to_mrkdwn(n))
+    }
+
+    /// Build text for Slack `response_url` payloads. 1:1 port of upstream
+    /// `toResponseUrlText(message)`:
+    ///
+    /// - `string` / `{ raw }` -> `finalize_plain(text)` (same as plain
+    ///   `toSlackPayload`)
+    /// - `{ markdown }` -> parse + `ast_to_mrkdwn` + emoji placeholders
+    /// - `{ ast }` -> `ast_to_mrkdwn` + emoji placeholders
+    ///
+    /// Slack rejects `markdown_text` on `response_url` (returns
+    /// `no_text`), so markdown / AST messages are rendered to Slack's
+    /// legacy mrkdwn format for this surface.
+    pub fn to_response_url_text(&self, message: &AdapterPostableMessage) -> String {
+        match message {
+            AdapterPostableMessage::Text(s) => finalize_plain(s),
+            AdapterPostableMessage::Raw(r) => finalize_plain(&r.raw),
+            AdapterPostableMessage::Markdown(m) => {
+                let ast = match parse_markdown(&m.markdown) {
+                    Ok(node) => node,
+                    Err(_) => return finalize_plain(&m.markdown),
+                };
+                let mrkdwn = self.ast_to_mrkdwn(&ast);
+                convert_emoji_placeholders(&mrkdwn, PlaceholderPlatform::Slack, None)
+            }
+            AdapterPostableMessage::Ast(a) => {
+                let root = Node::Root(a.ast.clone());
+                let mrkdwn = self.ast_to_mrkdwn(&root);
+                convert_emoji_placeholders(&mrkdwn, PlaceholderPlatform::Slack, None)
+            }
+            AdapterPostableMessage::Card(_) | AdapterPostableMessage::CardElement(_) => {
+                String::new()
+            }
+        }
+    }
+
     /// Build the Slack API payload fields for a message. 1:1 port of
     /// upstream `toSlackPayload(message)`:
     ///
@@ -171,6 +217,93 @@ impl SlackFormatConverter {
             }
         }
     }
+}
+
+/// 1:1 port of upstream private `nodeToMrkdwn(node)`: renders a single
+/// mdast node to Slack's legacy mrkdwn format. Used by `astToMrkdwn`
+/// (and thus `toResponseUrlText`).
+fn node_to_mrkdwn(node: &Node) -> String {
+    if is_paragraph_node(node) {
+        return get_node_children(node)
+            .iter()
+            .map(node_to_mrkdwn)
+            .collect::<Vec<_>>()
+            .concat();
+    }
+    if is_text_node(node) {
+        if let Node::Text(t) = node {
+            return rewrite_bare_mentions(&t.value);
+        }
+    }
+    if is_strong_node(node) {
+        let content: String = get_node_children(node)
+            .iter()
+            .map(node_to_mrkdwn)
+            .collect::<Vec<_>>()
+            .concat();
+        return format!("*{content}*");
+    }
+    if is_emphasis_node(node) {
+        let content: String = get_node_children(node)
+            .iter()
+            .map(node_to_mrkdwn)
+            .collect::<Vec<_>>()
+            .concat();
+        return format!("_{content}_");
+    }
+    if is_delete_node(node) {
+        let content: String = get_node_children(node)
+            .iter()
+            .map(node_to_mrkdwn)
+            .collect::<Vec<_>>()
+            .concat();
+        return format!("~{content}~");
+    }
+    if is_inline_code_node(node) {
+        if let Node::InlineCode(c) = node {
+            return format!("`{}`", c.value);
+        }
+    }
+    if is_code_node(node) {
+        if let Node::Code(c) = node {
+            let lang = c.lang.as_deref().unwrap_or("");
+            return format!("```{lang}\n{}\n```", c.value);
+        }
+    }
+    if is_link_node(node) {
+        if let Node::Link(l) = node {
+            let link_text: String = get_node_children(node)
+                .iter()
+                .map(node_to_mrkdwn)
+                .collect::<Vec<_>>()
+                .concat();
+            return format!("<{}|{link_text}>", l.url);
+        }
+    }
+    if is_blockquote_node(node) {
+        return get_node_children(node)
+            .iter()
+            .map(|child| format!("> {}", node_to_mrkdwn(child)))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if is_list_node(node) {
+        if let Node::List(l) = node {
+            return render_list(l, 0, &|child| node_to_mrkdwn(child), "•");
+        }
+    }
+    if matches!(node, Node::Break(_)) {
+        return "\n".into();
+    }
+    if matches!(node, Node::ThematicBreak(_)) {
+        return "---".into();
+    }
+    if is_table_node(node) {
+        if let Node::Table(t) = node {
+            return format!("```\n{}\n```", table_to_ascii(t));
+        }
+    }
+    default_node_to_text(node, &|child| node_to_mrkdwn(child))
 }
 
 /// Finalize a Slack message text. 1:1 with upstream's private
@@ -294,6 +427,30 @@ mod tests {
     #[test]
     fn finalize_markdown_helper_collapses_bold_and_rewrites_mentions() {
         assert_eq!(finalize_markdown("**bold** @U12345"), "*bold* <@U12345>");
+    }
+
+    // ---------- toResponseUrlText, 2 upstream cases ----------
+
+    #[test]
+    fn to_response_url_text_renders_markdown_to_slack_mrkdwn_text() {
+        let msg = AdapterPostableMessage::Markdown(PostableMarkdown {
+            markdown: "**Bold** and [link](https://example.com)".into(),
+            attachments: None,
+            files: None,
+        });
+        let result = converter().to_response_url_text(&msg);
+        assert_eq!(result, "*Bold* and <https://example.com|link>");
+    }
+
+    #[test]
+    fn to_response_url_text_renders_markdown_tables_as_ascii_code_blocks() {
+        let msg = AdapterPostableMessage::Markdown(PostableMarkdown {
+            markdown: "| A | B |\n|---|---|\n| 1 | 2 |".into(),
+            attachments: None,
+            files: None,
+        });
+        let result = converter().to_response_url_text(&msg);
+        assert!(result.contains("```\n"), "got: {result}");
     }
 
     // ---------- toSlackPayload (routing), 5 upstream cases ----------
