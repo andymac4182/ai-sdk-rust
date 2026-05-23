@@ -165,8 +165,11 @@ impl CallbackUrlStore {
         Ok(encode_callback_value(&token))
     }
 
-    /// Look up the URL behind a callback `button.value`. 1:1 port of
-    /// upstream `resolveCallbackUrl(value)`. Returns `None` when:
+    /// Legacy resolve. See module-level [`resolve_callback_url`] for
+    /// the upstream-matching `{url, original_value}` shape.
+    /// passthrough — kept for the simpler `state.set(token, url-string)`
+    /// shape used by some callers.) Use [`resolve_callback_url`] for
+    /// the upstream-matching `{url, original_value}` shape.
     /// - `value` is `None`,
     /// - `value` doesn't carry the [`CALLBACK_TOKEN_PREFIX`],
     /// - the token is unknown / expired in the state backend, or
@@ -184,6 +187,160 @@ impl CallbackUrlStore {
             .await?
             .and_then(|v| v.as_str().map(str::to_owned)))
     }
+}
+
+/// Stored callback metadata. 1:1 with upstream
+/// `interface StoredCallback { url: string; originalValue?: string }`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredCallback {
+    pub url: String,
+    #[serde(
+        rename = "originalValue",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub original_value: Option<String>,
+}
+
+/// Process a [`CardElement`]: replace any button's `callback_url`
+/// with a fresh `__cb:<token>` value and store the URL plus original
+/// value in `state` under `chat:callback:<token>`. 1:1 port of
+/// upstream `processCardCallbackUrls(card, stateAdapter)`. Returns
+/// the card unchanged (by value-equality) when no buttons carry a
+/// callback URL.
+pub async fn process_card_callback_urls(
+    card: &crate::cards::CardElement,
+    state: &dyn StateAdapter,
+) -> StateResult<crate::cards::CardElement> {
+    if !has_callback_buttons(&card.children) {
+        return Ok(card.clone());
+    }
+    let children = process_children(&card.children, state).await?;
+    Ok(crate::cards::CardElement {
+        title: card.title.clone(),
+        subtitle: card.subtitle.clone(),
+        image_url: card.image_url.clone(),
+        kind: card.kind,
+        children,
+    })
+}
+
+/// Resolve a callback token back to its stored [`StoredCallback`].
+/// 1:1 port of upstream `resolveCallbackUrl(token, stateAdapter)`.
+/// Supports both the modern `{url, originalValue}` object shape and
+/// the legacy plain-string format (`stored: string` -> `{url: stored}`).
+pub async fn resolve_callback_url(
+    token: &str,
+    state: &dyn StateAdapter,
+) -> StateResult<Option<StoredCallback>> {
+    let key = callback_cache_key(token);
+    let Some(stored) = state.get(&key).await? else {
+        return Ok(None);
+    };
+    if let Some(url) = stored.as_str() {
+        return Ok(Some(StoredCallback {
+            url: url.to_string(),
+            original_value: None,
+        }));
+    }
+    Ok(serde_json::from_value::<StoredCallback>(stored).ok())
+}
+
+fn has_callback_buttons(children: &[crate::cards::CardChild]) -> bool {
+    for child in children {
+        match child {
+            crate::cards::CardChild::Actions(a) => {
+                for el in &a.children {
+                    if let crate::cards::ActionsChild::Button(b) = el
+                        && b.callback_url
+                            .as_deref()
+                            .filter(|u| !u.is_empty())
+                            .is_some()
+                    {
+                        return true;
+                    }
+                }
+            }
+            crate::cards::CardChild::Section(s) => {
+                if has_callback_buttons(&s.children) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+async fn process_children(
+    children: &[crate::cards::CardChild],
+    state: &dyn StateAdapter,
+) -> StateResult<Vec<crate::cards::CardChild>> {
+    let mut result = Vec::with_capacity(children.len());
+    for child in children {
+        match child {
+            crate::cards::CardChild::Actions(a) => {
+                let processed = process_actions_element(a, state).await?;
+                result.push(crate::cards::CardChild::Actions(processed));
+            }
+            crate::cards::CardChild::Section(s) => {
+                let processed_children = Box::pin(process_children(&s.children, state)).await?;
+                result.push(crate::cards::CardChild::Section(
+                    crate::cards::SectionElement {
+                        children: processed_children,
+                        kind: s.kind,
+                    },
+                ));
+            }
+            other => result.push(other.clone()),
+        }
+    }
+    Ok(result)
+}
+
+async fn process_actions_element(
+    actions: &crate::cards::ActionsElement,
+    state: &dyn StateAdapter,
+) -> StateResult<crate::cards::ActionsElement> {
+    let mut processed_children = Vec::with_capacity(actions.children.len());
+    for child in &actions.children {
+        match child {
+            crate::cards::ActionsChild::Button(b)
+                if b.callback_url
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .is_some() =>
+            {
+                let token = generate_callback_token();
+                let stored = StoredCallback {
+                    url: b.callback_url.clone().unwrap_or_default(),
+                    original_value: b.value.clone(),
+                };
+                let value = serde_json::to_value(&stored)
+                    .map_err(|e| crate::types::StateAdapterError::Io(Box::new(e)))?;
+                state
+                    .set(&callback_cache_key(&token), value, Some(CALLBACK_TTL_MS))
+                    .await?;
+                processed_children.push(crate::cards::ActionsChild::Button(
+                    crate::cards::ButtonElement {
+                        action_type: b.action_type,
+                        callback_url: None,
+                        disabled: b.disabled,
+                        id: b.id.clone(),
+                        label: b.label.clone(),
+                        style: b.style,
+                        kind: b.kind,
+                        value: Some(encode_callback_value(&token)),
+                    },
+                ));
+            }
+            other => processed_children.push(other.clone()),
+        }
+    }
+    Ok(crate::cards::ActionsElement {
+        children: processed_children,
+        kind: actions.kind,
+    })
 }
 
 #[cfg(test)]
@@ -393,5 +550,271 @@ mod tests {
             block_on(store.resolve(Some(&b))).unwrap().as_deref(),
             Some("https://example.com/b")
         );
+    }
+
+    // ---------- processCardCallbackUrls + resolveCallbackUrl (9 upstream cases) ----------
+
+    use crate::cards::{
+        ActionsChild, ActionsElement, ActionsKind, ButtonElement, ButtonKind, CardChild,
+        CardElement, CardKind, SectionElement, SectionKind, TextElement, TextKind,
+    };
+
+    fn card(title: Option<&str>, children: Vec<CardChild>) -> CardElement {
+        CardElement {
+            title: title.map(str::to_owned),
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children,
+        }
+    }
+
+    fn button_with_callback(id: &str, label: &str, callback_url: &str) -> ActionsChild {
+        ActionsChild::Button(ButtonElement {
+            action_type: None,
+            callback_url: Some(callback_url.to_string()),
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style: None,
+            kind: ButtonKind::Button,
+            value: None,
+        })
+    }
+
+    fn button_plain(id: &str, label: &str, value: Option<&str>) -> ActionsChild {
+        ActionsChild::Button(ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style: None,
+            kind: ButtonKind::Button,
+            value: value.map(str::to_owned),
+        })
+    }
+
+    fn extract_first_button_value(card: &CardElement) -> Option<String> {
+        for child in &card.children {
+            if let CardChild::Actions(a) = child {
+                if let Some(ActionsChild::Button(b)) = a.children.first() {
+                    return b.value.clone();
+                }
+            }
+            if let CardChild::Section(s) = child {
+                let nested = CardElement {
+                    title: None,
+                    subtitle: None,
+                    image_url: None,
+                    kind: CardKind::Card,
+                    children: s.children.clone(),
+                };
+                if let Some(v) = extract_first_button_value(&nested) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn process_returns_card_unchanged_when_no_buttons_have_callback_url() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let c = card(
+            Some("Test"),
+            vec![
+                CardChild::Text(TextElement {
+                    content: "Hello".to_string(),
+                    style: None,
+                    kind: TextKind::Text,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_plain("btn", "Click", None)],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        let result = block_on(process_card_callback_urls(&c, state.as_ref())).unwrap();
+        assert_eq!(result, c);
+    }
+
+    #[test]
+    fn process_encodes_callback_url_into_button_value_and_stores_in_state() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let c = card(
+            Some("Test"),
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![button_with_callback(
+                    "approve",
+                    "Approve",
+                    "https://example.com/webhook/123",
+                )],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = block_on(process_card_callback_urls(&c, state.as_ref())).unwrap();
+        let v = extract_first_button_value(&result).expect("button value");
+        assert!(is_callback_value(&v), "got: {v}");
+        let token = decode_callback_value(Some(&v)).callback_token.unwrap();
+        let resolved = block_on(resolve_callback_url(&token, state.as_ref()))
+            .unwrap()
+            .expect("resolved");
+        assert_eq!(resolved.url, "https://example.com/webhook/123");
+    }
+
+    #[test]
+    fn process_stores_original_value_in_state_alongside_callback_url() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let c = card(
+            Some("Test"),
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Button(ButtonElement {
+                    action_type: None,
+                    callback_url: Some("https://hook.example.com".to_string()),
+                    disabled: None,
+                    id: "btn".to_string(),
+                    label: "Go".to_string(),
+                    style: None,
+                    kind: ButtonKind::Button,
+                    value: Some("item-99".to_string()),
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = block_on(process_card_callback_urls(&c, state.as_ref())).unwrap();
+        let v = extract_first_button_value(&result).expect("button value");
+        let token = decode_callback_value(Some(&v)).callback_token.unwrap();
+        let resolved = block_on(resolve_callback_url(&token, state.as_ref()))
+            .unwrap()
+            .expect("resolved");
+        assert_eq!(resolved.url, "https://hook.example.com");
+        assert_eq!(resolved.original_value.as_deref(), Some("item-99"));
+    }
+
+    #[test]
+    fn process_only_processes_buttons_with_callback_url_leaves_others_untouched() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let c = card(
+            Some("Test"),
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    button_plain("normal", "Normal", Some("keep")),
+                    button_with_callback("callback", "Callback", "https://example.com"),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = block_on(process_card_callback_urls(&c, state.as_ref())).unwrap();
+        let actions = result
+            .children
+            .iter()
+            .find_map(|c| match c {
+                CardChild::Actions(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+        let normal = match &actions.children[0] {
+            ActionsChild::Button(b) => b,
+            _ => panic!(),
+        };
+        let cb = match &actions.children[1] {
+            ActionsChild::Button(b) => b,
+            _ => panic!(),
+        };
+        assert_eq!(normal.value.as_deref(), Some("keep"));
+        assert!(
+            cb.value
+                .as_deref()
+                .is_some_and(|v| v.starts_with(CALLBACK_TOKEN_PREFIX)),
+            "got: {:?}",
+            cb.value
+        );
+    }
+
+    #[test]
+    fn process_processes_buttons_nested_inside_sections() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let c = card(
+            Some("Test"),
+            vec![CardChild::Section(SectionElement {
+                children: vec![
+                    CardChild::Text(TextElement {
+                        content: "Nested".to_string(),
+                        style: None,
+                        kind: TextKind::Text,
+                    }),
+                    CardChild::Actions(ActionsElement {
+                        children: vec![button_with_callback(
+                            "nested-btn",
+                            "Go",
+                            "https://example.com/nested",
+                        )],
+                        kind: ActionsKind::Actions,
+                    }),
+                ],
+                kind: SectionKind::Section,
+            })],
+        );
+        let result = block_on(process_card_callback_urls(&c, state.as_ref())).unwrap();
+        let v = extract_first_button_value(&result).expect("nested button value");
+        let token = decode_callback_value(Some(&v)).callback_token.unwrap();
+        let resolved = block_on(resolve_callback_url(&token, state.as_ref()))
+            .unwrap()
+            .expect("resolved");
+        assert_eq!(resolved.url, "https://example.com/nested");
+    }
+
+    #[test]
+    fn process_does_not_mutate_the_original_card() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let c = card(
+            Some("Test"),
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![button_with_callback("btn", "Go", "https://example.com")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let snapshot = c.clone();
+        let _ = block_on(process_card_callback_urls(&c, state.as_ref())).unwrap();
+        assert_eq!(c, snapshot);
+    }
+
+    #[test]
+    fn resolve_returns_none_for_unknown_token() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let r = block_on(resolve_callback_url("nope", state.as_ref())).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn resolve_returns_stored_callback_with_url_and_original_value() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let value = serde_json::json!({
+            "url": "https://example.com",
+            "originalValue": "v1",
+        });
+        block_on(state.set(&callback_cache_key("tok1"), value, None)).unwrap();
+        let r = block_on(resolve_callback_url("tok1", state.as_ref()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.url, "https://example.com");
+        assert_eq!(r.original_value.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn resolve_handles_legacy_string_format() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        block_on(state.set(
+            &callback_cache_key("tok2"),
+            serde_json::Value::String("https://legacy.example.com".to_string()),
+            None,
+        ))
+        .unwrap();
+        let r = block_on(resolve_callback_url("tok2", state.as_ref()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.url, "https://legacy.example.com");
+        assert!(r.original_value.is_none());
     }
 }
