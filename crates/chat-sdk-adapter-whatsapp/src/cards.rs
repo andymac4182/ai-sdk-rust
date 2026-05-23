@@ -1,17 +1,27 @@
-//! WhatsApp card text/plain-text renderer + callback-data codec.
+//! WhatsApp card renderer (text + interactive) + callback-data codec.
 //!
-//! 1:1 port of the text-fallback and codec subset of
-//! `packages/adapter-whatsapp/src/cards.ts`. The interactive-message
-//! branch (`cardToWhatsApp` returning an interactive button payload)
-//! depends on WhatsApp-specific JSON shapes and is deferred.
-//!
-//! The functions here render a [`CardElement`] as WhatsApp markdown
-//! (`*bold*`, `_italic_`) or plain text, and round-trip
-//! `chat:{a, v?}` JSON-in-string callback ids for interactive replies.
+//! 1:1 port of `packages/adapter-whatsapp/src/cards.ts`. Renders a
+//! [`CardElement`] as WhatsApp markdown text, plain text, or a
+//! [`WhatsAppCardResult`] union (interactive button message or text
+//! fallback) for the WhatsApp Cloud API.
 
 use chat_sdk_chat::cards::{
-    ActionsChild, ActionsElement, CardChild, CardElement, FieldsElement, TextElement, TextStyle,
+    ActionsChild, ActionsElement, ButtonElement, CardChild, CardElement, FieldsElement,
+    TextElement, TextStyle,
 };
+
+/// Maximum number of reply buttons WhatsApp allows. 1:1 with upstream
+/// `MAX_REPLY_BUTTONS = 3`.
+const MAX_REPLY_BUTTONS: usize = 3;
+/// Maximum character length for a WhatsApp button title. 1:1 with
+/// upstream `MAX_BUTTON_TITLE_LENGTH = 20`.
+const MAX_BUTTON_TITLE_LENGTH: usize = 20;
+/// Maximum character length for the WhatsApp body text. 1:1 with
+/// upstream `MAX_BODY_LENGTH = 1024`.
+const MAX_BODY_LENGTH: usize = 1024;
+/// Maximum character length for the WhatsApp header text. 1:1 with
+/// upstream's inline `60` literal in the header builder.
+const MAX_HEADER_LENGTH: usize = 60;
 
 /// Callback-data prefix used to distinguish chat-sdk-encoded
 /// payloads from legacy raw strings. 1:1 with upstream
@@ -86,6 +96,180 @@ pub fn decode_whatsapp_callback_data(data: Option<&str>) -> DecodedWhatsAppCallb
         action_id: data.to_string(),
         value: Some(data.to_string()),
     }
+}
+
+/// Result of converting a [`CardElement`] to a WhatsApp Cloud API
+/// payload. 1:1 port of upstream
+/// `type WhatsAppCardResult = { type: "interactive", interactive: ... }
+/// | { type: "text", text: string }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhatsAppCardResult {
+    /// Interactive reply-button message. Used when the card has
+    /// 1-3 action buttons that fit WhatsApp's constraints.
+    Interactive(WhatsAppInteractiveMessage),
+    /// Plain text fallback. Used when the card has no action buttons
+    /// or only link-buttons (which WhatsApp can't render as replies).
+    Text(String),
+}
+
+/// WhatsApp Cloud API interactive message shape. 1:1 port of
+/// upstream `interface WhatsAppInteractiveMessage`. Only the
+/// `"button"` interactive type is produced by this renderer; list
+/// and product-list interactive types are out of scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppInteractiveMessage {
+    pub interactive_type: String,
+    pub header: Option<WhatsAppInteractiveHeader>,
+    pub body: WhatsAppInteractiveBody,
+    pub action: WhatsAppInteractiveAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppInteractiveHeader {
+    pub header_type: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppInteractiveBody {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppInteractiveAction {
+    pub buttons: Vec<WhatsAppReplyButton>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppReplyButton {
+    pub button_type: String,
+    pub reply: WhatsAppReplyButtonReply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppReplyButtonReply {
+    pub id: String,
+    pub title: String,
+}
+
+/// Convert a [`CardElement`] to a WhatsApp message payload. 1:1 port
+/// of upstream `cardToWhatsApp(card)`. If the card has 1-3 reply
+/// buttons that fit WhatsApp's constraints, returns an interactive
+/// button message; otherwise falls back to plain text via
+/// [`card_to_whatsapp_text`].
+pub fn card_to_whatsapp(card: &CardElement) -> WhatsAppCardResult {
+    let actions = find_actions(&card.children);
+    let action_buttons = actions.and_then(extract_reply_buttons);
+
+    if let Some(buttons) = action_buttons.filter(|b| !b.is_empty()) {
+        let body_text = build_body_text(card);
+        let header = card
+            .title
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|title| WhatsAppInteractiveHeader {
+                header_type: "text".to_string(),
+                text: truncate_chars(title, MAX_HEADER_LENGTH),
+            });
+        let body_source = if body_text.is_empty() {
+            "Please choose an option".to_string()
+        } else {
+            body_text
+        };
+        let body = WhatsAppInteractiveBody {
+            text: truncate_chars(&body_source, MAX_BODY_LENGTH),
+        };
+        let action_buttons: Vec<WhatsAppReplyButton> = buttons
+            .into_iter()
+            .map(|btn| WhatsAppReplyButton {
+                button_type: "reply".to_string(),
+                reply: WhatsAppReplyButtonReply {
+                    id: encode_whatsapp_callback_data(&btn.id, btn.value.as_deref()),
+                    title: truncate_chars(&btn.label, MAX_BUTTON_TITLE_LENGTH),
+                },
+            })
+            .collect();
+        return WhatsAppCardResult::Interactive(WhatsAppInteractiveMessage {
+            interactive_type: "button".to_string(),
+            header,
+            body,
+            action: WhatsAppInteractiveAction {
+                buttons: action_buttons,
+            },
+        });
+    }
+
+    WhatsAppCardResult::Text(card_to_whatsapp_text(card))
+}
+
+/// Find the first [`ActionsElement`] in a list of children,
+/// recursing into [`CardChild::Section`]s. 1:1 port of upstream
+/// `findActions`.
+fn find_actions(children: &[CardChild]) -> Option<&ActionsElement> {
+    for child in children {
+        match child {
+            CardChild::Actions(a) => return Some(a),
+            CardChild::Section(s) => {
+                if let Some(nested) = find_actions(&s.children) {
+                    return Some(nested);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract reply buttons from an [`ActionsElement`], limited to the
+/// first [`MAX_REPLY_BUTTONS`]. 1:1 port of upstream
+/// `extractReplyButtons`: only `"button"` children with a non-empty
+/// `id` are kept (link-buttons / select / radio_select are skipped).
+fn extract_reply_buttons(actions: &ActionsElement) -> Option<Vec<ButtonElement>> {
+    let mut buttons: Vec<ButtonElement> = Vec::new();
+    for child in &actions.children {
+        if let ActionsChild::Button(b) = child
+            && !b.id.is_empty()
+        {
+            buttons.push(b.clone());
+        }
+    }
+    if buttons.is_empty() {
+        return None;
+    }
+    buttons.truncate(MAX_REPLY_BUTTONS);
+    Some(buttons)
+}
+
+/// Build interactive body text from card subtitle + non-actions
+/// children. 1:1 port of upstream `buildBodyText(card)`.
+fn build_body_text(card: &CardElement) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(subtitle) = card.subtitle.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(subtitle.to_string());
+    }
+    for child in &card.children {
+        if matches!(child, CardChild::Actions(_)) {
+            continue;
+        }
+        if let Some(text) = child_to_plain_text(child) {
+            parts.push(text);
+        }
+    }
+    parts.join("\n")
+}
+
+/// Truncate `text` to at most `max_length` chars (counting Unicode
+/// scalars to match JS `string.length` semantics for the BMP).
+/// Appends `…` (U+2026) as an ellipsis. 1:1 port of upstream
+/// `truncate(text, maxLength)`.
+fn truncate_chars(text: &str, max_length: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_length {
+        return text.to_string();
+    }
+    let mut out: String = chars[..max_length - 1].iter().collect();
+    out.push('\u{2026}');
+    out
 }
 
 /// Render a [`CardElement`] as WhatsApp markdown text. 1:1 port of
@@ -588,5 +772,145 @@ mod tests {
             escape_whatsapp(r"hi * _ ~ ` \ test"),
             r"hi \* \_ \~ \` \\ test"
         );
+    }
+
+    // ---------- cardToWhatsApp (5 upstream cases) ----------
+
+    fn button(id: &str, label: &str) -> ActionsChild {
+        ActionsChild::Button(ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style: None,
+            kind: ButtonKind::Button,
+            value: None,
+        })
+    }
+
+    #[test]
+    fn cardtowhatsapp_should_produce_interactive_message_for_card_with_1_to_3_buttons() {
+        let c = card(
+            Some("Choose an action"),
+            None,
+            vec![
+                CardChild::Text(TextElement {
+                    content: "What would you like to do?".to_string(),
+                    style: None,
+                    kind: TextKind::Text,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button("btn_yes", "Yes"), button("btn_no", "No")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        let r = card_to_whatsapp(&c);
+        match r {
+            WhatsAppCardResult::Interactive(m) => {
+                assert_eq!(m.interactive_type, "button");
+                assert_eq!(
+                    m.header.as_ref().map(|h| h.text.as_str()),
+                    Some("Choose an action")
+                );
+                assert_eq!(m.action.buttons.len(), 2);
+                assert_eq!(
+                    m.action.buttons[0].reply.id,
+                    encode_whatsapp_callback_data("btn_yes", None)
+                );
+                assert_eq!(
+                    m.action.buttons[1].reply.id,
+                    encode_whatsapp_callback_data("btn_no", None)
+                );
+            }
+            other => panic!("expected interactive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cardtowhatsapp_should_truncate_to_first_3_buttons_when_more_than_3_are_provided() {
+        let c = card(
+            Some("Too many buttons"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    button("btn_1", "One"),
+                    button("btn_2", "Two"),
+                    button("btn_3", "Three"),
+                    button("btn_4", "Four"),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let r = card_to_whatsapp(&c);
+        match r {
+            WhatsAppCardResult::Interactive(m) => {
+                assert_eq!(m.action.buttons.len(), 3);
+            }
+            other => panic!("expected interactive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cardtowhatsapp_should_fall_back_to_text_for_link_only_buttons() {
+        let c = card(
+            Some("Links only"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::LinkButton(LinkButtonElement {
+                    label: "Visit".to_string(),
+                    style: None,
+                    kind: LinkButtonKind::LinkButton,
+                    url: "https://example.com".to_string(),
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        assert!(matches!(card_to_whatsapp(&c), WhatsAppCardResult::Text(_)));
+    }
+
+    #[test]
+    fn cardtowhatsapp_should_fall_back_to_text_for_cards_without_actions() {
+        let c = card(
+            Some("Info only"),
+            None,
+            vec![CardChild::Text(TextElement {
+                content: "Just some info".to_string(),
+                style: None,
+                kind: TextKind::Text,
+            })],
+        );
+        assert!(matches!(card_to_whatsapp(&c), WhatsAppCardResult::Text(_)));
+    }
+
+    #[test]
+    fn cardtowhatsapp_should_truncate_long_button_titles_to_20_chars() {
+        let c = card(
+            None,
+            None,
+            vec![
+                CardChild::Text(TextElement {
+                    content: "Choose".to_string(),
+                    style: None,
+                    kind: TextKind::Text,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button(
+                        "btn_long",
+                        "This is a very long button title that exceeds the limit",
+                    )],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        let r = card_to_whatsapp(&c);
+        match r {
+            WhatsAppCardResult::Interactive(m) => {
+                let title_len = m.action.buttons[0].reply.title.chars().count();
+                assert!(title_len <= 20, "title too long: {title_len}");
+            }
+            other => panic!("expected interactive, got {other:?}"),
+        }
     }
 }
