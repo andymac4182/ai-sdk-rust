@@ -7,6 +7,7 @@
 //! a new top-level reply, `message_id` is the root activity id.
 
 pub mod errors;
+pub mod markdown;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
