@@ -594,6 +594,35 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Raw-text postable. 1:1 port of upstream `interface PostableRaw`.
+/// Used when the caller wants the platform to render the body without
+/// SDK-side markdown conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostableRaw {
+    /// File/image attachments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+    /// Files to upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileUpload>>,
+    /// Raw text passed through as-is to the platform.
+    pub raw: String,
+}
+
+/// Markdown postable. 1:1 port of upstream `interface PostableMarkdown`.
+/// Markdown body is converted to platform format by the adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostableMarkdown {
+    /// File/image attachments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+    /// Files to upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileUpload>>,
+    /// Markdown text, converted to platform format.
+    pub markdown: String,
+}
+
 /// Media type of an [`Attachment`]. 1:1 port of upstream
 /// `"image" | "file" | "video" | "audio"` literal union on
 /// [`Attachment::kind`].
@@ -1654,6 +1683,70 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn postable_raw_minimum_shape_round_trips_with_only_raw_text() {
+        let postable = PostableRaw {
+            attachments: None,
+            files: None,
+            raw: "hello world".to_string(),
+        };
+        let json = serde_json::to_string(&postable).unwrap();
+        assert_eq!(json, "{\"raw\":\"hello world\"}");
+        let back: PostableRaw = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, postable);
+    }
+
+    #[test]
+    fn postable_raw_full_shape_with_attachments_and_files() {
+        let postable = PostableRaw {
+            attachments: Some(vec![Attachment {
+                data: None,
+                fetch_metadata: None,
+                height: None,
+                mime_type: None,
+                name: None,
+                size: None,
+                kind: AttachmentKind::Image,
+                url: Some("https://example.com/img.png".to_string()),
+                width: None,
+            }]),
+            files: Some(vec![FileUpload {
+                data: FileBytes::from(b"hello"[..].to_vec()),
+                filename: "hello.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+            }]),
+            raw: "raw".to_string(),
+        };
+        let json = serde_json::to_string(&postable).unwrap();
+        assert!(json.contains("\"attachments\":["));
+        assert!(json.contains("\"files\":["));
+        assert!(json.contains("\"raw\":\"raw\""));
+        let back: PostableRaw = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, postable);
+    }
+
+    #[test]
+    fn postable_markdown_distinct_from_postable_raw_on_the_wire() {
+        // Critical for the platform dispatcher: PostableMarkdown emits a
+        // `markdown` key, PostableRaw emits a `raw` key. The two are NOT
+        // interchangeable — adapters branch on which key is present.
+        let md = PostableMarkdown {
+            attachments: None,
+            files: None,
+            markdown: "**hi**".to_string(),
+        };
+        let raw = PostableRaw {
+            attachments: None,
+            files: None,
+            raw: "**hi**".to_string(),
+        };
+        let md_json = serde_json::to_string(&md).unwrap();
+        let raw_json = serde_json::to_string(&raw).unwrap();
+        assert_eq!(md_json, "{\"markdown\":\"**hi**\"}");
+        assert_eq!(raw_json, "{\"raw\":\"**hi**\"}");
+        assert_ne!(md_json, raw_json);
     }
 
     #[test]

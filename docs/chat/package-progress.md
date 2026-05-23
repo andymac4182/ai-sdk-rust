@@ -19,7 +19,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 34% | In progress | core SDK package | Crate + colocated 1:1 tests for errors (17) + logger (13) + chat_singleton (5). Thirteen types layers covering 52... |
+| `@chat-sdk/chat` | 35% | In progress | core SDK package | Crate + colocated 1:1 tests for errors (17) + logger (13) + chat_singleton (5). Fourteen types layers covering 54... |
 | `@chat-sdk/adapter-shared` | 25% | In progress | shared adapter utilities | Crate + idiomatic colocated tests for errors (24 cases 1:1 with packages/adapter-shared/src/errors.test.ts). 1/4... |
 
 ## Not Started
