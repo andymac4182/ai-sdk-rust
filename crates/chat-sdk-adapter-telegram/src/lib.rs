@@ -119,6 +119,26 @@ impl TelegramAdapter {
     fn method_url(&self, method: &str) -> String {
         format!("{}/bot{}/{}", self.base_url(), self.token(), method)
     }
+
+    /// Derive channel id from a Telegram thread id. 1:1 with
+    /// upstream `adapter.channelIdFromThreadId(threadId)` which
+    /// strips any `:<message_thread_id>` suffix and returns
+    /// `telegram:<chat_id>`. Returns `None` when `thread_id` isn't a
+    /// Telegram-encoded value.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(format!("{THREAD_ID_PREFIX}{}", decoded.chat_id))
+    }
+
+    /// Predicate: is the conversation a 1:1 DM? 1:1 with upstream's
+    /// `adapter.isDM(threadId)` which returns `true` when the
+    /// underlying Telegram `chat_id` doesn't start with `-` (the
+    /// Telegram convention for groups/supergroups/channels). Returns
+    /// `None` when `thread_id` isn't a Telegram-encoded value.
+    pub fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(decoded.chat_id >= 0)
+    }
 }
 
 #[async_trait]
@@ -580,6 +600,58 @@ mod tests {
     fn decode_thread_id_returns_none_for_non_integer_chat_ids() {
         assert!(decode_thread_id("telegram:not-an-int").is_none());
         assert!(decode_thread_id("telegram:abc:45").is_none());
+    }
+
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream `adapter.channelIdFromThreadId(threadId)` and
+    // `adapter.isDM(threadId)`. Telegram supports both DMs (positive
+    // chat ids) and groups/supergroups/channels (negative chat ids).
+
+    #[test]
+    fn channel_id_from_thread_id_strips_the_message_thread_suffix() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        // Bare DM thread id passes through unchanged.
+        assert_eq!(
+            adapter.channel_id_from_thread_id("telegram:42").as_deref(),
+            Some("telegram:42")
+        );
+        // Supergroup with topic id collapses to the bare chat id.
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("telegram:-100123:777")
+                .as_deref(),
+            Some("telegram:-100123")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_none_for_non_telegram_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        assert!(adapter.channel_id_from_thread_id("slack:C1:1.0").is_none());
+        assert!(adapter.channel_id_from_thread_id("").is_none());
+    }
+
+    #[test]
+    fn is_dm_is_true_for_positive_chat_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        assert_eq!(adapter.is_dm("telegram:42"), Some(true));
+        assert_eq!(adapter.is_dm("telegram:42:777"), Some(true));
+    }
+
+    #[test]
+    fn is_dm_is_false_for_negative_chat_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        // Telegram convention: groups/supergroups/channels have
+        // negative chat ids.
+        assert_eq!(adapter.is_dm("telegram:-100123"), Some(false));
+        assert_eq!(adapter.is_dm("telegram:-1:5"), Some(false));
+    }
+
+    #[test]
+    fn is_dm_returns_none_for_non_telegram_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        assert_eq!(adapter.is_dm("messenger:USER"), None);
+        assert_eq!(adapter.is_dm(""), None);
     }
 
     #[test]

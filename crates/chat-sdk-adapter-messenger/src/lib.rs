@@ -128,6 +128,20 @@ impl MessengerAdapter {
             Self::GRAPH_API_VERSION
         )
     }
+
+    /// Derive channel id from a Messenger thread id. 1:1 with
+    /// upstream `adapter.channelIdFromThreadId(threadId) -> threadId`.
+    /// On Messenger every conversation is a 1:1 DM, so channel ===
+    /// thread.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> String {
+        thread_id.to_string()
+    }
+
+    /// All Messenger conversations are DMs. 1:1 with upstream's
+    /// `adapter.isDM(_) -> true`.
+    pub fn is_dm(&self, _thread_id: &str) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -409,6 +423,30 @@ mod tests {
     }
 
     // ---------- additive Rust-side coverage ----------
+
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream `adapter.channelIdFromThreadId(_) -> threadId`
+    // and `adapter.isDM(_) -> true`. Messenger is DM-only so both
+    // helpers ignore the thread id structure.
+
+    #[test]
+    fn channel_id_from_thread_id_returns_the_thread_id_unchanged() {
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        assert_eq!(
+            adapter.channel_id_from_thread_id("messenger:USER_123"),
+            "messenger:USER_123"
+        );
+        // The helper is intentionally tolerant — upstream returns the
+        // raw input even for malformed ids.
+        assert_eq!(adapter.channel_id_from_thread_id("raw"), "raw");
+    }
+
+    #[test]
+    fn is_dm_always_returns_true() {
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        assert!(adapter.is_dm("messenger:USER_123"));
+        assert!(adapter.is_dm(""));
+    }
 
     #[test]
     fn is_messenger_thread_id_detects_the_prefix() {
