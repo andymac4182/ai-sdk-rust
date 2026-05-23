@@ -8,6 +8,8 @@
 //! top-level message, `thread_id` is the empty string after the
 //! colon. Space DM mode uses the same encoding with a 1:1 space.
 
+pub mod markdown;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
