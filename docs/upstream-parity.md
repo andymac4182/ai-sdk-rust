@@ -604,6 +604,26 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `resolveToolApproval` remaining portable
+  callback/static/context parity added named Rust counterparts
+  `resolve_tool_approval_resolves_async_status_from_generic_function`,
+  `resolve_tool_approval_passes_tool_call_tools_context_messages_and_runtime_to_generic_function`,
+  `resolve_tool_approval_passes_through_object_status_reason_from_generic_function`,
+  `resolve_tool_approval_passes_same_messages_and_validated_tool_context_to_per_tool_function`,
+  `resolve_tool_approval_passes_tools_context_entry_through_after_schema_validation`,
+  `resolve_tool_approval_normalizes_static_string_before_tool_defined_approval`,
+  `resolve_tool_approval_passes_through_static_object_status_reason`,
+  `resolve_tool_approval_uses_user_defined_callback_before_tool_defined_approval`,
+  `resolve_tool_approval_passes_reason_returned_by_user_defined_callback`,
+  and
+  `resolve_tool_approval_normalizes_string_status_returned_by_user_defined_callback`.
+  Rust now has named value-equivalent coverage for the upstream generic
+  callback option payload, async callback resolution, object-status reasons,
+  static status precedence, per-tool validated context, schema-defaulted
+  context transformation, and per-tool callback reason/string normalization.
+  The upstream JavaScript reference-identity assertions are represented by
+  cloned Rust value-equivalence checks because the Rust callback boundary owns
+  typed values rather than JavaScript object references.
 - 2026-05-23: `packages/ai` `resolveToolApproval` callback
   normalization parity added named Rust counterparts
   `resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable`,
@@ -3539,13 +3559,28 @@ focused tests for each portable behavior before changing rows to `verified`.
    callbacks.
    The same upstream file's callback precedence and normalization cases now
    have named Rust counterparts in
+   `resolve_tool_approval_resolves_async_status_from_generic_function`,
+   `resolve_tool_approval_passes_tool_call_tools_context_messages_and_runtime_to_generic_function`,
+   `resolve_tool_approval_passes_through_object_status_reason_from_generic_function`,
+   `resolve_tool_approval_passes_same_messages_and_validated_tool_context_to_per_tool_function`,
+   `resolve_tool_approval_passes_tools_context_entry_through_after_schema_validation`,
+   `resolve_tool_approval_normalizes_static_string_before_tool_defined_approval`,
+   `resolve_tool_approval_passes_through_static_object_status_reason`,
+   `resolve_tool_approval_uses_user_defined_callback_before_tool_defined_approval`,
+   `resolve_tool_approval_passes_reason_returned_by_user_defined_callback`,
+   `resolve_tool_approval_normalizes_string_status_returned_by_user_defined_callback`,
    `resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable`,
    `resolve_tool_approval_uses_generic_callback_before_tool_defined_approval`,
    `resolve_tool_approval_treats_none_from_per_tool_callback_as_not_applicable`,
    and `resolve_tool_approval_passes_no_tool_context_without_context_schema`,
    proving generic callbacks run before tool-defined approval callbacks,
-   missing callback returns normalize to `not-applicable`, and absent
-   `toolsContext` entries become absent `toolContext` options.
+   async callback results resolve, option payloads and object-status reasons
+   are preserved, static statuses short-circuit tool-defined callbacks,
+   validated/schema-transformed contexts reach per-tool callbacks, missing
+   callback returns normalize to `not-applicable`, and absent `toolsContext`
+   entries become absent `toolContext` options. JavaScript reference-identity
+   checks are documented as Rust value-equivalence at the owned callback
+   boundary.
    The upstream `generate-text/sum-token-counts.test.ts` cases now have named
    Rust counterparts in `sum_token_counts_should_*`. The upstream
    `generate-text/calculate-tokens-per-second.test.ts` portable cases now have

@@ -8979,6 +8979,98 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tool_approval_resolves_async_status_from_generic_function() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(|_options| async {
+                Some(ToolApprovalStatusKind::UserApproval.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_tool_call_tools_context_messages_and_runtime_to_generic_function()
+     {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let prompt = vec![
+            user_message("first"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("second")),
+            ])),
+        ];
+        let tools_context = JsonObject::from_iter([
+            ("weather".to_string(), json!({ "scope": "read" })),
+            ("otherTool".to_string(), json!({ "flag": true })),
+        ]);
+        let runtime_context = JsonObject::from_iter([("traceId".to_string(), json!("trace-1"))]);
+        let seen = Arc::new(Mutex::new(None::<GenericToolApprovalOptions>));
+        let seen_for_callback = Arc::clone(&seen);
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(move |options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    seen.lock().expect("seen lock").replace(options);
+                    Some(ToolApprovalStatusKind::NotApplicable.into())
+                }
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context)
+                .with_runtime_context(&runtime_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::NotApplicable);
+        let seen = seen.lock().expect("seen lock");
+        let options = seen.as_ref().expect("callback captured options");
+        assert_eq!(options.tool_call, tool_call);
+        assert_eq!(options.tools.as_ref().expect("tools passed").len(), 1);
+        assert_eq!(
+            options.tools.as_ref().expect("tools passed")[0].name,
+            "weather"
+        );
+        assert_eq!(options.messages, prompt);
+        assert_eq!(options.tools_context, tools_context);
+        assert_eq!(options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_through_object_status_reason_from_generic_function() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(|_options| async {
+                Some(NormalizedToolApprovalStatus::denied_with_reason("policy block").into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::denied_with_reason("policy block")
+        );
+    }
+
+    #[test]
     fn resolve_tool_approval_uses_generic_callback_before_tool_defined_approval() {
         let tool_call = approval_tool_call("weather");
         let tool_defined_called = Arc::new(AtomicBool::new(false));
@@ -9112,6 +9204,258 @@ mod tests {
                 .tool_context
                 .is_none()
         );
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_same_messages_and_validated_tool_context_to_per_tool_function()
+    {
+        let tool_call = approval_tool_call("weather");
+        let prompt = vec![user_message("step 1"), user_message("step 2")];
+        let runtime_context = JsonObject::new();
+        let context_schema = FlexibleSchema::from(Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        ));
+        let tools =
+            vec![Tool::new("weather", approval_tool_schema()).with_context_schema(context_schema)];
+        let seen = Arc::new(Mutex::new(None::<(JsonValue, SingleToolApprovalOptions)>));
+        let seen_for_callback = Arc::clone(&seen);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |input, options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    seen.lock().expect("seen lock").replace((input, options));
+                    Some(ToolApprovalStatusKind::Approved.into())
+                }
+            },
+        );
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": "secret" }))]);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context)
+                .with_runtime_context(&runtime_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::approved());
+        let seen = seen.lock().expect("seen lock");
+        let (input, options) = seen.as_ref().expect("callback captured options");
+        assert_eq!(input, &json!({ "city": "Berlin" }));
+        assert_eq!(options.tool_call_id, "call-1");
+        assert_eq!(options.messages, prompt);
+        assert_eq!(
+            options.tool_context.as_ref().expect("tool context"),
+            &json!({ "apiKey": "secret" })
+        );
+        assert_eq!(options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_tools_context_entry_through_after_schema_validation() {
+        let tool_call = approval_tool_call("weather");
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" },
+                        "region": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_none() {
+                    return ValidationResult::failure("expected apiKey string");
+                }
+                let mut validated = value.as_object().expect("context is an object").clone();
+                validated
+                    .entry("region".to_string())
+                    .or_insert_with(|| json!("us-east-1"));
+                ValidationResult::success(JsonValue::Object(validated))
+            }),
+        );
+        let tools =
+            vec![Tool::new("weather", approval_tool_schema()).with_context_schema(context_schema)];
+        let seen_context = Arc::new(Mutex::new(None::<JsonValue>));
+        let seen_context_for_callback = Arc::clone(&seen_context);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |_input, options| {
+                let seen_context = Arc::clone(&seen_context_for_callback);
+                async move {
+                    seen_context
+                        .lock()
+                        .expect("seen context lock")
+                        .replace(options.tool_context.expect("validated context"));
+                    Some(ToolApprovalStatusKind::NotApplicable.into())
+                }
+            },
+        );
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": "k" }))]);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_tools_context(&tools_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::NotApplicable);
+        assert_eq!(
+            seen_context
+                .lock()
+                .expect("seen context lock")
+                .as_ref()
+                .expect("context captured"),
+            &json!({
+                "apiKey": "k",
+                "region": "us-east-1"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_normalizes_static_string_before_tool_defined_approval() {
+        let tool_call = approval_tool_call("weather");
+        let tool_defined_called = Arc::new(AtomicBool::new(false));
+        let tool_defined_called_for_callback = Arc::clone(&tool_defined_called);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema()).with_needs_approval_function(
+                move |_input, _options| {
+                    tool_defined_called_for_callback.store(true, Ordering::SeqCst);
+                    ready(true)
+                },
+            ),
+        ];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_status("weather", ToolApprovalStatusKind::Denied);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::denied());
+        assert!(!tool_defined_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_through_static_object_status_reason() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new().with_tool_status(
+            "weather",
+            NormalizedToolApprovalStatus::denied_with_reason("blocked by policy"),
+        );
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::denied_with_reason("blocked by policy")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_uses_user_defined_callback_before_tool_defined_approval() {
+        let tool_call = approval_tool_call("weather");
+        let tool_defined_called = Arc::new(AtomicBool::new(false));
+        let tool_defined_called_for_callback = Arc::clone(&tool_defined_called);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema()).with_needs_approval_function(
+                move |_input, _options| {
+                    tool_defined_called_for_callback.store(true, Ordering::SeqCst);
+                    ready(true)
+                },
+            ),
+        ];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_approval_function("weather", |_input, _options| async {
+                Some(ToolApprovalStatusKind::Approved.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::approved());
+        assert!(!tool_defined_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_reason_returned_by_user_defined_callback() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            |_input, _options| async {
+                Some(
+                    NormalizedToolApprovalStatus::approved_with_reason("trusted internal tool")
+                        .into(),
+                )
+            },
+        );
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::approved_with_reason("trusted internal tool")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_normalizes_string_status_returned_by_user_defined_callback() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_approval_function("weather", |_input, _options| async {
+                Some(ToolApprovalStatusKind::UserApproval.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
     }
 
     #[test]
