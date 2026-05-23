@@ -20,10 +20,10 @@
 //! - [`is_postable_object`] — shape guard that walks a
 //!   [`serde_json::Value`] for the upstream `$$typeof` discriminator.
 //!
-//! **What is deferred:** [`post_postable_object`] (the dispatch helper
-//! that calls into adapter.postObject or falls back to text) requires
-//! the `Adapter` trait to carry concrete async `post_object` and
-//! `post_message` methods. It lands when those methods are added.
+//! [`post_postable_object`] — the dispatch helper that calls into
+//!   `adapter.post_object` or falls back to `adapter.post_message` with
+//!   the object's fallback text, ported in slice 124 after the Phase
+//!   1.5 Adapter trait extension landed.
 
 use crate::types::Adapter;
 
@@ -172,6 +172,76 @@ pub fn postable_envelope_fallback_text(value: &serde_json::Value) -> Option<&str
         .and_then(serde_json::Value::as_str)
 }
 
+/// Errors returned by [`post_postable_object`].
+#[derive(Debug)]
+pub enum PostableDispatchError {
+    /// The supplied value didn't carry the postable
+    /// [`POSTABLE_OBJECT_DISCRIMINATOR`].
+    NotAPostableEnvelope,
+    /// The envelope didn't carry a `kind` discriminator.
+    MissingKind,
+    /// Underlying [`crate::types::AdapterError`] from the adapter's
+    /// `post_object` / `post_message` call.
+    Adapter(crate::types::AdapterError),
+}
+
+impl std::fmt::Display for PostableDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAPostableEnvelope => f.write_str("Value is not a postable envelope"),
+            Self::MissingKind => f.write_str("Postable envelope is missing `kind`"),
+            Self::Adapter(err) => write!(f, "Adapter dispatch failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for PostableDispatchError {}
+
+impl From<crate::types::AdapterError> for PostableDispatchError {
+    fn from(err: crate::types::AdapterError) -> Self {
+        Self::Adapter(err)
+    }
+}
+
+/// Dispatch a postable envelope through an adapter. 1:1 port of upstream
+/// `postPostableObject(adapter, threadId, value): Promise<{ id: string }>`:
+///
+/// 1. Validate that `value` is a postable envelope (carries the
+///    [`POSTABLE_OBJECT_DISCRIMINATOR`]). Returns
+///    [`PostableDispatchError::NotAPostableEnvelope`] when it isn't.
+/// 2. Try `adapter.post_object(thread_id, kind, data)`.
+/// 3. If the adapter returns [`crate::types::AdapterError::Unsupported`]
+///    for `post_object`, fall back to `adapter.post_message(thread_id,
+///    fallback_text)` (matching upstream's `try/catch` + fallback-to-
+///    `postMessage` behavior).
+/// 4. Any other adapter error is propagated unchanged.
+///
+/// Returns the platform-assigned message id.
+pub async fn post_postable_object(
+    adapter: &dyn crate::types::Adapter,
+    thread_id: &str,
+    envelope: &serde_json::Value,
+) -> Result<String, PostableDispatchError> {
+    if !is_postable_object(envelope) {
+        return Err(PostableDispatchError::NotAPostableEnvelope);
+    }
+    let kind = postable_envelope_kind(envelope).ok_or(PostableDispatchError::MissingKind)?;
+    let data = postable_envelope_data(envelope)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    match adapter.post_object(thread_id, kind, data).await {
+        Ok(id) => Ok(id),
+        Err(crate::types::AdapterError::Unsupported("post_object")) => {
+            let fallback = postable_envelope_fallback_text(envelope).unwrap_or("");
+            adapter
+                .post_message(thread_id, fallback)
+                .await
+                .map_err(PostableDispatchError::Adapter)
+        }
+        Err(other) => Err(PostableDispatchError::Adapter(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Additive coverage. Upstream ships no `postable-object.test.ts`;
@@ -262,5 +332,173 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(is_postable_object(&parsed));
         assert_eq!(postable_envelope_kind(&parsed), Some("plan"));
+    }
+
+    // ---------- slice 124: post_postable_object dispatch ----------
+
+    use crate::types::{AdapterError, AdapterResult};
+    use futures_executor::block_on;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct DispatchAdapter {
+        // Records what was sent. Tuples (thread_id, kind, data).
+        post_object_calls: Mutex<Vec<(String, String, serde_json::Value)>>,
+        // Tuples (thread_id, text).
+        post_message_calls: Mutex<Vec<(String, String)>>,
+        // When true, post_object returns Unsupported.
+        post_object_unsupported: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for DispatchAdapter {
+        fn name(&self) -> &str {
+            "dispatch-test"
+        }
+        async fn post_object(
+            &self,
+            thread_id: &str,
+            kind: &str,
+            data: serde_json::Value,
+        ) -> AdapterResult<String> {
+            if self.post_object_unsupported {
+                return Err(AdapterError::Unsupported("post_object"));
+            }
+            self.post_object_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                kind.to_string(),
+                data,
+            ));
+            Ok("obj-id".to_string())
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_message_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            Ok("msg-id".to_string())
+        }
+    }
+
+    #[test]
+    fn post_postable_object_dispatches_to_post_object_for_a_valid_envelope() {
+        let adapter = DispatchAdapter::default();
+        let envelope = postable_envelope("plan", json!({"title": "T"}), "Plan: T");
+        let id = block_on(post_postable_object(&adapter, "T1", &envelope)).unwrap();
+        assert_eq!(id, "obj-id");
+        let calls = adapter.post_object_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "T1");
+        assert_eq!(calls[0].1, "plan");
+        assert_eq!(calls[0].2, json!({"title": "T"}));
+    }
+
+    #[test]
+    fn post_postable_object_falls_back_to_post_message_when_post_object_unsupported() {
+        let adapter = DispatchAdapter {
+            post_object_unsupported: true,
+            ..Default::default()
+        };
+        let envelope = postable_envelope("plan", json!({"x": 1}), "Plan: fallback");
+        let id = block_on(post_postable_object(&adapter, "T1", &envelope)).unwrap();
+        assert_eq!(id, "msg-id");
+        let calls = adapter.post_message_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "T1");
+        assert_eq!(calls[0].1, "Plan: fallback");
+    }
+
+    #[test]
+    fn post_postable_object_returns_not_a_postable_envelope_for_plain_json() {
+        let adapter = DispatchAdapter::default();
+        let err = block_on(post_postable_object(
+            &adapter,
+            "T1",
+            &json!({"kind": "plan", "data": {}}),
+        ));
+        assert!(matches!(
+            err,
+            Err(PostableDispatchError::NotAPostableEnvelope)
+        ));
+    }
+
+    #[test]
+    fn post_postable_object_returns_not_a_postable_envelope_for_non_objects() {
+        let adapter = DispatchAdapter::default();
+        assert!(matches!(
+            block_on(post_postable_object(&adapter, "T1", &json!(null))),
+            Err(PostableDispatchError::NotAPostableEnvelope)
+        ));
+        assert!(matches!(
+            block_on(post_postable_object(&adapter, "T1", &json!("string"))),
+            Err(PostableDispatchError::NotAPostableEnvelope)
+        ));
+    }
+
+    #[test]
+    fn post_postable_object_propagates_other_adapter_errors() {
+        #[derive(Debug)]
+        struct FailingAdapter;
+        #[async_trait::async_trait]
+        impl Adapter for FailingAdapter {
+            fn name(&self) -> &str {
+                "failing"
+            }
+            async fn post_object(
+                &self,
+                _thread_id: &str,
+                _kind: &str,
+                _data: serde_json::Value,
+            ) -> AdapterResult<String> {
+                Err(AdapterError::InvalidPayload("oops".into()))
+            }
+        }
+        let adapter = FailingAdapter;
+        let envelope = postable_envelope("plan", json!({}), "fb");
+        match block_on(post_postable_object(&adapter, "T1", &envelope)) {
+            Err(PostableDispatchError::Adapter(AdapterError::InvalidPayload(msg))) => {
+                assert_eq!(msg, "oops");
+            }
+            other => panic!("expected Adapter(InvalidPayload), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn post_postable_object_handles_envelope_with_empty_fallback_text() {
+        // When post_object is unsupported AND fallbackText is missing,
+        // we fall back with an empty string (matching upstream's
+        // `?? ""` coalescing).
+        let adapter = DispatchAdapter {
+            post_object_unsupported: true,
+            ..Default::default()
+        };
+        let envelope = json!({
+            "$$typeof": POSTABLE_OBJECT_DISCRIMINATOR,
+            "kind": "plan",
+            "data": {}
+        });
+        let id = block_on(post_postable_object(&adapter, "T1", &envelope)).unwrap();
+        assert_eq!(id, "msg-id");
+        let calls = adapter.post_message_calls.lock().unwrap();
+        assert_eq!(calls[0].1, "");
+    }
+
+    #[test]
+    fn post_postable_object_dispatches_for_envelopes_built_via_round_trip() {
+        // Build envelope, serialize to text, parse back, dispatch.
+        let adapter = DispatchAdapter::default();
+        let envelope = postable_envelope("poll", json!({"question": "?"}), "Poll");
+        let text = serde_json::to_string(&envelope).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let id = block_on(post_postable_object(&adapter, "T1", &parsed)).unwrap();
+        assert_eq!(id, "obj-id");
+    }
+
+    #[test]
+    fn postable_dispatch_error_display_includes_context() {
+        let err = PostableDispatchError::NotAPostableEnvelope;
+        assert_eq!(err.to_string(), "Value is not a postable envelope");
+        let err = PostableDispatchError::MissingKind;
+        assert_eq!(err.to_string(), "Postable envelope is missing `kind`");
     }
 }
