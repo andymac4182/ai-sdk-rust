@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 41.6%
-- Portable package average: 29.9%
+- Average estimated completion: 41.9%
+- Portable package average: 30.3%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -25,7 +25,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete. |
-| `@chat-sdk/adapter-slack` | 10% | In progress | adapter package | Crate scaffold (slice 139) w/ is_dm/is_group predicates. 14 tests. Web API + Socket Mode deferred. |
+| `@chat-sdk/adapter-slack` | 15% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message HTTP (chat.postMessage Web API). 15 tests. |
 | `@chat-sdk/adapter-teams` | 10% | In progress | adapter package | Crate scaffold (slice 138) rsplit Bot Framework conv ids. 12 tests. HTTP I/O + Bot Framework auth deferred. |
 | `@chat-sdk/adapter-gchat` | 10% | In progress | adapter package | Crate scaffold (slice 137) w/ empty-thread top-level sentinel. 14 tests. OAuth2 + HTTP I/O deferred. |
 | `@chat-sdk/adapter-discord` | 15% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests. |

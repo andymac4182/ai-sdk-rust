@@ -9,9 +9,9 @@ adapter-messenger	15	Slice 132 scaffold + slice 147 post_message HTTP (Send API)
 adapter-whatsapp	15	Slice 133 scaffold + slice 148 post_message HTTP (Cloud API). 13 tests.
 adapter-discord	15	Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests.
 adapter-linear	15	Slice 136 scaffold + slice 151 post_message HTTP (GraphQL commentCreate). 12 tests.
+adapter-slack	15	Slice 139 scaffold + slice 152 post_message HTTP (chat.postMessage Web API). 15 tests.
 adapter-gchat	10	Crate scaffold (slice 137) w/ empty-thread top-level sentinel. 14 tests. OAuth2 + HTTP I/O deferred.
 adapter-teams	10	Crate scaffold (slice 138) rsplit Bot Framework conv ids. 12 tests. HTTP I/O + Bot Framework auth deferred.
-adapter-slack	10	Crate scaffold (slice 139) w/ is_dm/is_group predicates. 14 tests. Web API + Socket Mode deferred.
 state-redis	10	Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up deferred.
 state-ioredis	10	Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter. 11 tests. redis-rs cluster client deferred.
 state-pg	10	Crate scaffold (slice 142): PgStateAdapter impl StateAdapter. 10 tests. tokio-postgres/sqlx wire-up deferred.
