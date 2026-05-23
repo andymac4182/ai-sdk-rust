@@ -594,6 +594,115 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Status of a streamed task. 1:1 port of upstream
+/// `"pending" | "in_progress" | "complete" | "error"` literal union on
+/// [`TaskUpdateChunk::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Complete,
+    Error,
+}
+
+/// Slack-specific display mode for `task_update` chunks. 1:1 port of upstream
+/// `"timeline" | "plan"` literal union on [`StreamOptions::task_display_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskDisplayMode {
+    Timeline,
+    Plan,
+}
+
+/// Streamed payload emitted by the chat protocol. 1:1 port of upstream
+/// `export type StreamChunk = MarkdownTextChunk | TaskUpdateChunk | PlanUpdateChunk`.
+///
+/// Discriminated by the `type` field on the wire (`"markdown_text"`,
+/// `"task_update"`, `"plan_update"`). Each variant carries its upstream
+/// payload struct unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamChunk {
+    MarkdownText(MarkdownTextChunkData),
+    TaskUpdate(TaskUpdateChunkData),
+    PlanUpdate(PlanUpdateChunkData),
+}
+
+/// Body of a [`StreamChunk::MarkdownText`]. 1:1 port of the non-`type`
+/// fields on upstream `interface MarkdownTextChunk`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkdownTextChunkData {
+    pub text: String,
+}
+
+/// Body of a [`StreamChunk::TaskUpdate`]. 1:1 port of the non-`type`
+/// fields on upstream `interface TaskUpdateChunk`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskUpdateChunkData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    pub status: TaskStatus,
+    pub title: String,
+}
+
+/// Body of a [`StreamChunk::PlanUpdate`]. 1:1 port of the non-`type`
+/// fields on upstream `interface PlanUpdateChunk`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanUpdateChunkData {
+    pub title: String,
+}
+
+/// Options for streaming messages. 1:1 port of upstream
+/// `interface StreamOptions`. Platform-specific fields are passed through to
+/// the adapter; every field is optional.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StreamOptions {
+    /// Slack: the team/workspace ID.
+    #[serde(
+        rename = "recipientTeamId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub recipient_team_id: Option<String>,
+    /// Slack: the user ID to stream to (for AI assistant context).
+    #[serde(
+        rename = "recipientUserId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub recipient_user_id: Option<String>,
+    /// Slack-only Block Kit elements to attach when stopping the stream
+    /// (via `chat.stopStream`). Upstream typed as `unknown[]`; preserved
+    /// here as `Vec<serde_json::Value>` to mirror that opacity.
+    #[serde(
+        rename = "stopBlocks",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stop_blocks: Option<Vec<serde_json::Value>>,
+    /// Slack: controls how `task_update` chunks render —
+    /// [`TaskDisplayMode::Timeline`] (default upstream) or
+    /// [`TaskDisplayMode::Plan`].
+    #[serde(
+        rename = "taskDisplayMode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub task_display_mode: Option<TaskDisplayMode>,
+    /// Minimum interval between updates in ms (default upstream: 1000).
+    /// Used for fallback mode (GChat / Teams).
+    #[serde(
+        rename = "updateIntervalMs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub update_interval_ms: Option<u32>,
+}
+
 /// Adapter trait — the abstraction every chat platform (`slack`, `teams`,
 /// `discord`, …) implements. 1:1 port of upstream `interface Adapter`.
 ///
@@ -1150,6 +1259,120 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn task_status_uses_upstream_snake_case_strings() {
+        for (status, wire) in [
+            (TaskStatus::Pending, "pending"),
+            (TaskStatus::InProgress, "in_progress"),
+            (TaskStatus::Complete, "complete"),
+            (TaskStatus::Error, "error"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn task_display_mode_uses_upstream_lowercase_strings() {
+        assert_eq!(
+            serde_json::to_string(&TaskDisplayMode::Timeline).unwrap(),
+            "\"timeline\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskDisplayMode::Plan).unwrap(),
+            "\"plan\""
+        );
+    }
+
+    #[test]
+    fn stream_chunk_markdown_text_serializes_with_tagged_type() {
+        let chunk = StreamChunk::MarkdownText(MarkdownTextChunkData {
+            text: "hello".to_string(),
+        });
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(json, "{\"type\":\"markdown_text\",\"text\":\"hello\"}");
+        let back: StreamChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, chunk);
+    }
+
+    #[test]
+    fn stream_chunk_task_update_round_trips_full_shape() {
+        let chunk = StreamChunk::TaskUpdate(TaskUpdateChunkData {
+            details: Some("running".to_string()),
+            id: "T1".to_string(),
+            output: Some("done".to_string()),
+            status: TaskStatus::Complete,
+            title: "deploy".to_string(),
+        });
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"type\":\"task_update\""));
+        assert!(json.contains("\"status\":\"complete\""));
+        assert!(json.contains("\"id\":\"T1\""));
+        assert!(json.contains("\"title\":\"deploy\""));
+        let back: StreamChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, chunk);
+    }
+
+    #[test]
+    fn stream_chunk_task_update_omits_absent_optionals() {
+        let chunk = StreamChunk::TaskUpdate(TaskUpdateChunkData {
+            details: None,
+            id: "T2".to_string(),
+            output: None,
+            status: TaskStatus::Pending,
+            title: "warm-up".to_string(),
+        });
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(!json.contains("details"));
+        assert!(!json.contains("output"));
+    }
+
+    #[test]
+    fn stream_chunk_plan_update_serializes_with_only_title_and_tag() {
+        let chunk = StreamChunk::PlanUpdate(PlanUpdateChunkData {
+            title: "rollout".to_string(),
+        });
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(json, "{\"type\":\"plan_update\",\"title\":\"rollout\"}");
+    }
+
+    #[test]
+    fn stream_chunk_untagged_object_fails_to_deserialize() {
+        // Missing the `type` discriminator is a hard error, just like
+        // upstream's tagged TS union would reject it at compile time.
+        let bad = serde_json::from_str::<StreamChunk>("{\"text\":\"hi\"}");
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn stream_options_default_serializes_empty_and_round_trips() {
+        let opts = StreamOptions::default();
+        assert_eq!(serde_json::to_string(&opts).unwrap(), "{}");
+        let back: StreamOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, opts);
+    }
+
+    #[test]
+    fn stream_options_full_shape_uses_upstream_camelcase_and_strings() {
+        let opts = StreamOptions {
+            recipient_team_id: Some("T_TEAM".to_string()),
+            recipient_user_id: Some("U_USER".to_string()),
+            stop_blocks: Some(vec![serde_json::json!({"type": "divider"})]),
+            task_display_mode: Some(TaskDisplayMode::Plan),
+            update_interval_ms: Some(750),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(json.contains("\"recipientTeamId\":\"T_TEAM\""));
+        assert!(json.contains("\"recipientUserId\":\"U_USER\""));
+        assert!(json.contains("\"stopBlocks\":[{\"type\":\"divider\"}]"));
+        assert!(json.contains("\"taskDisplayMode\":\"plan\""));
+        assert!(json.contains("\"updateIntervalMs\":750"));
+        let back: StreamOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, opts);
     }
 
     #[test]
