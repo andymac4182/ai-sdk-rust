@@ -786,3 +786,105 @@ StateAdapter; 8 mapped tests; callback_url 10 -> 18; chat 96%).
   async HTTP/DB client choice first (probably
   `redis-rs`/`bb8-redis` for Redis, `tokio-postgres`/`sqlx`
   for Postgres).
+
+### 2026-05-24 - slices 122..127
+
+**Slices covered**
+
+122 (Phase 1.5 Adapter trait extension: name + 4 async methods +
+AdapterError/AdapterResult; types tests 76 -> 83; chat 97%).
+123 (MessageSubjectResolver on Adapter::fetch_subject; 5 mapped
+upstream cases + 2 additive isolation tests; message tests
+18 -> 25; chat 98%).
+124 (post_postable_object dispatch on Adapter; 8 mapped tests;
+postable_object tests 11 -> 19; chat 99%).
+125 (StateAdapter trait extension: set_if_not_exists + 4 lock
+methods with defaults; types tests 83 -> 89; chat stays at 99%
+- trait surface, not feature).
+126 (Channel class skeleton: new/post/post_object/clone via
+Arc<dyn Adapter>; 7 mapped tests; chat stays at 99%).
+127 (Thread class skeleton: new/post/post_object/subject/clone;
+7 mapped tests; chat stays at 99%).
+
+**What the brief got right (validated)**
+
+- The "trait extension + consumer-class port" pattern keeps
+  paying off. Slices 122-127 ported 4 new consumer surfaces
+  (MessageSubjectResolver, post_postable_object,
+  Channel, Thread) without rewriting anything in earlier modules.
+  Each new consumer class is ~100-200 LOC of wire code + 6-8
+  mapped tests.
+- The "thin wrapper + delegate to trait method" pattern (used
+  by Channel + Thread + ThreadHistoryCache + CallbackUrlStore +
+  TranscriptsApiImpl) holds across every consumer module shipped
+  this session. The constraint that the class struct must be
+  `Clone + Debug` and hold `Arc<dyn Adapter>` + `Arc<dyn
+  StateAdapter>` shrinks decision space cleanly.
+- The 92% additive-helper ceiling codified in slice 114 worked
+  exactly as designed. After hitting it in slice 116, slices
+  117-127 ran on real architectural progress (trait extensions
+  + class ports), and each chat-percentage bump corresponds to
+  a real new surface.
+
+**What the brief got wrong or left out**
+
+- **The chat-percentage scoring has functionally maxed out at
+  99%.** Reaching 100% on chat requires either the Chat class
+  port (the singleton holder + adapter registration + the
+  remaining ~2700 LOC of upstream chat.ts) OR additional
+  Adapter trait methods + their consumer ports for each new
+  method. Open refinement: re-baseline the percent scale once
+  the Chat class lands so the next 100 LOC of progress isn't
+  visually mute.
+- **The "consumer-class port pattern" template from slice 121's
+  port-chat-sdk.md edit predicted ~6-8 mapped tests per slice.**
+  Slices 123-127 each landed exactly 7 mapped tests, validating
+  the prediction. The template is stable practice now.
+- **`Channel` and `Thread` are duplicate scaffolds** — both
+  hold `Arc<dyn Adapter>` + a single thread-id-ish key and
+  delegate post/post_object identically. Upstream keeps them
+  separate because `Channel` exposes channel-only ops
+  (listThreads, fetchInfo) that don't make sense on a thread,
+  and `Thread` exposes thread-only ops (subject, reactions)
+  that don't make sense on a channel. The duplication will
+  resolve as those ops get added — for now the two classes
+  are deliberately near-identical and that's fine.
+
+**Stale or misleading guidance**
+
+- The slice 114 refinement said the trait-extension session
+  was "5-10 slices." It actually took 9 slices (117 + 122 + 125
+  + 118-120 + 123-124), exactly within range. Prediction good.
+- The "Phase 1.5 finalization" deferred item from slice 121
+  pointed to extending Adapter with 4 methods. Slice 122 did
+  exactly that. The deferred item from slices 80/91/97/108/114
+  is now closed; future sessions can move to Phase 2 (adapters)
+  + Phase 3 (state backends) + remaining Chat class work.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending edit
+  in next slice (this entry's "Channel/Thread skeleton pattern"
+  + "Phase 1.5 closed" notes).
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred (Phase 2 / Phase 3)**
+
+- **Phase 2**: scaffold one not-started adapter crate (Slack
+  is the most-tested upstream; Telegram is the smallest at
+  3 test files / 7 src files - probably the best first port).
+  Need to grow the Adapter trait surface as the per-adapter
+  methods come in (the current 4-method subset is the minimum;
+  upstream has ~20 more).
+- **Phase 3**: scaffold one not-started state backend crate
+  (Redis is the most-tested; bb8-redis is the natural Rust
+  client choice). Need an async runtime decision (tokio vs
+  async-std vs smol) — the workspace doesn't currently
+  commit to one and `futures-executor` is only enough for
+  pure tests.
+- **Chat class** (~2700 LOC upstream): the singleton holder
+  that registers adapters by name, owns a transcript store,
+  and exposes the top-level `chat.threadFor(id)` /
+  `chat.channelFor(id)` factories. Should be ported alongside
+  the first Phase-2 adapter so we have a concrete consumer
+  for it.

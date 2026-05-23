@@ -742,3 +742,58 @@ CallbackUrlStore), the pattern crystallized:
 If a slice doesn't fit this template (e.g. needs HTTP or
 non-trivial business logic), split it into multiple slices
 following the model/adapter split rule.
+
+## Phase 1.5 closed (added slice 128)
+
+As of slice 127 the Phase 1.5 trait-extension work is closed.
+Trait surface:
+
+- `chat::types::StateAdapter`: 5 key/value+list methods (get,
+  set, delete, append_to_list, get_list) + set_if_not_exists +
+  4 lock methods (acquire / release / force_release / extend).
+- `chat::types::Adapter`: name + fetch_subject + post_message +
+  post_object + parse_message.
+
+Consumer modules ported on top of those traits:
+
+- `chat::transcripts::TranscriptsApiImpl` (append/list/delete/count).
+- `chat::thread_history::ThreadHistoryCache` (append/get_messages/count).
+- `chat::callback_url::CallbackUrlStore` (issue/resolve).
+- `chat::message::MessageSubjectResolver` (resolve with cache +
+  invalidate).
+- `chat::postable_object::post_postable_object` (dispatch with
+  fallback-to-post_message).
+- `chat::channel::Channel` (post/post_object/clone).
+- `chat::thread::Thread` (post/post_object/subject/clone).
+
+Future Adapter trait methods (open_dm, open_modal,
+fetch_messages, edit_message, delete_message, add_reaction,
+remove_reaction, start_typing, get_channel_info, list_threads,
+get_channel_visibility, parse_message, post_channel_message,
+encode_thread_id, decode_thread_id) will be added per-adapter
+as the Phase-2 adapter crates need them. Each new method:
+
+1. Add the method to the `Adapter` trait with a sensible
+   default (typically `Err(AdapterError::Unsupported(...))`).
+2. Add a corresponding wrapper to `Channel` / `Thread` if the
+   method is channel- or thread-shaped.
+3. Add a default-impl test on a `MinimalAdapter`-like fixture.
+
+## Phase 2 / Phase 3 prep (added slice 128)
+
+The next major work is Phase 2 (adapter packages) and Phase 3
+(state backends). Both need a workspace-level async runtime
+decision. Recommended:
+
+- **Runtime**: `tokio` (most ecosystem, most upstream-equivalent
+  for HTTP servers/clients). Adopt it as a workspace dependency
+  only when the first real adapter or state backend needs it —
+  don't commit pre-emptively.
+- **HTTP client**: `reqwest` (most natural for Slack/Teams/etc
+  HTTPS APIs).
+- **Redis client**: `redis` crate + `bb8-redis` for pooling.
+- **Postgres client**: `tokio-postgres` or `sqlx`.
+
+The first not-started adapter port should be the smallest one
+(Telegram: 7 src files, 3 test files) so the adapter scaffolding
+is small enough to review per-slice.
