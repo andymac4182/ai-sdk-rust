@@ -6,6 +6,8 @@
 //! DM pair to one chat-sdk thread. The thread id encoding is
 //! `whatsapp:<phone_number_id>:<customer_phone>`.
 
+pub mod cards;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
