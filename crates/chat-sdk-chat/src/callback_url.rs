@@ -2,12 +2,16 @@
 //!
 //! 1:1 port (in progress) of `packages/chat/src/callback-url.ts`.
 //!
-//! **What this slice ships:**
+//! **What this module ships (pure helpers; no state or network I/O):**
 //!
 //! - [`CALLBACK_TOKEN_PREFIX`] / [`CALLBACK_CACHE_KEY_PREFIX`] /
 //!   [`CALLBACK_TTL_MS`] constants matching upstream values.
 //! - [`encode_callback_value`] / [`decode_callback_value`] — pure
-//!   token (de)serialization that runs without state or network I/O.
+//!   token (de)serialization (1:1 with upstream).
+//! - [`is_callback_value`] — predicate matching upstream's inline
+//!   `value.startsWith(CALLBACK_TOKEN_PREFIX)` checks.
+//! - [`callback_cache_key`] — formatter matching upstream's inline
+//!   `${CALLBACK_CACHE_KEY_PREFIX}${token}` template.
 //!
 //! **What is deferred:**
 //!
@@ -62,6 +66,21 @@ pub fn decode_callback_value(value: Option<&str>) -> DecodedCallback {
     }
 }
 
+/// Predicate — does this `button.value` carry the callback-URL prefix?
+/// 1:1 with upstream's inline `value.startsWith(CALLBACK_TOKEN_PREFIX)`
+/// checks used by `processCardCallbackUrls` and `resolveCallbackUrl`.
+pub fn is_callback_value(value: &str) -> bool {
+    value.starts_with(CALLBACK_TOKEN_PREFIX)
+}
+
+/// Build the state-store key for a callback token. 1:1 with upstream's
+/// inline `${CALLBACK_CACHE_KEY_PREFIX}${token}` template used by every
+/// callback-URL state path (`resolveCallbackUrl`, `processCardCallbackUrls`,
+/// `postToCallbackUrl`).
+pub fn callback_cache_key(token: &str) -> String {
+    format!("{CALLBACK_CACHE_KEY_PREFIX}{token}")
+}
+
 #[cfg(test)]
 mod tests {
     //! 1:1 port of the `encodeCallbackValue` / `decodeCallbackValue`
@@ -98,5 +117,41 @@ mod tests {
         let encoded = encode_callback_value("round-trip-token");
         let decoded = decode_callback_value(Some(&encoded));
         assert_eq!(decoded.callback_token.as_deref(), Some("round-trip-token"));
+    }
+
+    // ---------- slice 106: additional pure helpers ----------
+
+    #[test]
+    fn is_callback_value_detects_the_prefix() {
+        assert!(is_callback_value("__cb:token"));
+        assert!(is_callback_value("__cb:")); // empty token still has prefix
+    }
+
+    #[test]
+    fn is_callback_value_rejects_values_without_the_prefix() {
+        assert!(!is_callback_value("plain-value"));
+        assert!(!is_callback_value(""));
+        // The prefix is case-sensitive (matching upstream's `startsWith`).
+        assert!(!is_callback_value("__CB:upper"));
+    }
+
+    #[test]
+    fn callback_cache_key_concatenates_prefix_and_token() {
+        assert_eq!(callback_cache_key("abc"), "chat:callback:abc");
+    }
+
+    #[test]
+    fn callback_cache_key_accepts_empty_token() {
+        assert_eq!(callback_cache_key(""), "chat:callback:");
+    }
+
+    #[test]
+    fn encode_callback_value_accepts_empty_token() {
+        // The encoder is a pure prefix concat, so an empty token round
+        // -trips to a value whose decoded token is the empty string.
+        let encoded = encode_callback_value("");
+        assert_eq!(encoded, "__cb:");
+        let decoded = decode_callback_value(Some(&encoded));
+        assert_eq!(decoded.callback_token.as_deref(), Some(""));
     }
 }
