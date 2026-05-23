@@ -1323,3 +1323,94 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
   SET/DEL/LPUSH/LRANGE wiring. state-pg needs `sqlx` or
   `tokio-postgres` + schema migrations + INSERT/SELECT/DELETE.
   Each is ~3-5 slices.
+
+### 2026-05-24 — slices 158..159
+
+**What the brief got wrong or left out**
+
+- **`fetch_subject` is NOT a universal upstream Adapter
+  method.** Verified via `npx opensrc@latest path
+  github:vercel/chat` then grep: only **Linear** implements
+  `fetchSubject`. Upstream `interface Adapter` declares
+  `fetchSubject?(raw: TRawMessage): Promise<MessageSubject |
+  null>` — **optional**, and keyed on the **raw message**
+  (Linear's `comment.issueId`), not a thread id. The Rust
+  trait took `&str thread_id -> Option<String>` because raw
+  messages are generic per-adapter; this signature divergence
+  is a Rust-port simplification, not a 1:1 port. Slices
+  155 (Telegram), 156 (GitHub), 158 (Slack) added
+  `fetch_subject` impls that DO NOT exist in their upstream
+  adapter (Telegram, GitHub, Slack have no `fetchSubject`
+  upstream). Those impls dispatch to platform endpoints
+  (`getChat`, `GET /issues/<n>`, `conversations.info`) that
+  expose channel/thread-name lookup, which is useful but is
+  **Rust-port additive**, not 1:1 with upstream. The
+  per-adapter parity rows are still marked "in-progress" so
+  the additive nature does not falsely claim coverage. The
+  rollout to Messenger / WhatsApp / Discord / Teams / GChat
+  is paused — those adapters don't have `fetchSubject`
+  upstream either, so adding it would deepen the divergence
+  without moving 1:1 parity.
+
+- **The Adapter trait was missing 4 universal upstream
+  methods**: `editMessage`, `deleteMessage`, `addReaction`,
+  `startTyping`. These ARE on every upstream adapter (verified
+  via `grep -n "async editMessage\|async deleteMessage\|async
+  addReaction\|async startTyping"` on each
+  `packages/adapter-*/src/index.ts`). Slice 159 extends the
+  Rust `Adapter` trait with default impls returning
+  `AdapterError::Unsupported`. This unblocks per-adapter
+  rollout that IS 1:1 with upstream.
+
+**Stale or misleading guidance**
+
+- The Session-2 kickoff plan and Adapter-method matrix in the
+  brief implied `fetch_subject` was universal. Update: only
+  Linear implements `fetchSubject` upstream; for the other 8
+  adapters, the trait method exists as a Rust-port convenience
+  with a default `Ok(None)` body. Telegram / GitHub / Slack
+  ports done in slices 155/156/158 are documented in the
+  parity ledger as additive Rust-only HTTP wiring (not 1:1
+  with upstream).
+
+- The "8 adapter methods × 9 adapters = 72 cells" matrix is
+  more accurately "5 universal methods (post_message,
+  edit_message, delete_message, add_reaction, start_typing) ×
+  9 adapters = 45 cells" + Linear-only `fetchSubject` (1
+  cell). post_object and parse_message remain Rust-port
+  shapes (post_object generalises Slack Block Kit / Teams
+  Adaptive Cards / GChat cards; parse_message is the inverse
+  of post_message for webhook payloads).
+
+**Edits applied**
+
+- `crates/chat-sdk-chat/src/types.rs`: Adapter trait gains
+  `edit_message`, `delete_message`, `add_reaction`,
+  `start_typing` with `AdapterError::Unsupported` defaults +
+  4 unit tests on the unconfigured adapter. Total chat tests
+  now 567.
+
+**Open refinements deferred**
+
+- **Adapter-method 1:1 rollout**: implement edit_message
+  (chat.update / Bot Framework activities PUT / Discord
+  PATCH / Telegram editMessageText / Teams update etc.) +
+  delete_message (chat.delete / Telegram deleteMessage /
+  …) + add_reaction (reactions.add / GraphQL
+  commentReactionCreate / …) + start_typing (Slack RTM ping /
+  Telegram sendChatAction / WhatsApp typing indicator) across
+  9 adapters. ~36 slices.
+
+- **Linear-only fetchSubject port**: port the real upstream
+  `fetchSubject` that returns the rich `MessageSubject` (id +
+  title + status + assignee + labels + url + raw). Requires
+  introducing a per-adapter raw-message generic or refining
+  the trait signature. Defer until the rest of the universal
+  methods land.
+
+- **Trait-signature audit**: revisit whether the chat-sdk
+  Rust Adapter trait should be GAT-generic over `RawMessage`
+  to support upstream's `fetchSubject(raw: TRawMessage)` and
+  `parseMessage(raw): Message` shapes more faithfully. The
+  current `serde_json::Value` shim is portable but loses
+  type information.
