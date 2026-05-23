@@ -121,7 +121,7 @@ Per the slice-59 refinement, classify each `packages/chat/src/*.test.ts` by depe
 | `cards.test.ts` | 29/28 (fallback added) | pure | `chat-sdk-chat::cards` |
 | `modals.test.ts` | 25/29 (20/20 portable + 5 additive; 9 JSX-only) | pure (portable subset) | `chat-sdk-chat::modals` |
 | `markdown.test.ts` | 122/122 (1:1 COMPLETE) | pure | `chat-sdk-chat::markdown` |
-| `callback-url.test.ts` | 5/17 portable pure helpers | state (12 remaining cases) | `chat-sdk-chat::callback_url` |
+| `callback-url.test.ts` | 5/17 portable pure helpers + 5 additive (is_callback_value, callback_cache_key, empty-token round-trip) | state (12 remaining cases) | `chat-sdk-chat::callback_url` |
 | `message.test.ts` | 12/19 portable subset (incl. buffer-strip) | adapter (5 subject getter cases) + js-only (2 WORKFLOW_SERIALIZE Symbol cases) | `chat-sdk-chat::message` |
 | `from-full-stream.test.ts` | 16/16 portable 1:1 + 1 additive | pure | `chat-sdk-chat::from_full_stream` |
 | `thread-history.test.ts` | constants + key formatter only | state (all 7 cases) + class (Message instances) | `chat-sdk-chat::thread_history` |
