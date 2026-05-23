@@ -1133,4 +1133,70 @@ mod tests {
             "{\"label\":\"Visit\",\"type\":\"link\",\"url\":\"https://example.com\"}"
         );
     }
+
+    // ---------- slice 99: cards "Card Composition" upstream case ----------
+
+    #[test]
+    fn card_composition_creates_complete_card_with_all_element_types() {
+        let card = card(CardOptions {
+            title: Some("Order #1234".to_string()),
+            subtitle: Some("Processing your order".to_string()),
+            image_url: Some("https://example.com/order.png".to_string()),
+            children: Some(vec![
+                card_text("Thank you for your order!", None).into(),
+                card_link("https://example.com/order/1234", "View order details").into(),
+                divider().into(),
+                fields(vec![field("Order ID", "#1234"), field("Total", "$99.99")]).into(),
+                section(vec![
+                    card_text("Items:", Some(TextStyle::Bold)).into(),
+                    card_text("2x Widget, 1x Gadget", Some(TextStyle::Muted)).into(),
+                ])
+                .into(),
+                divider().into(),
+                actions(vec![
+                    button(ButtonOptions {
+                        id: "track".to_string(),
+                        label: "Track Order".to_string(),
+                        style: Some(ButtonStyle::Primary),
+                        ..Default::default()
+                    })
+                    .into(),
+                    button(ButtonOptions {
+                        id: "cancel".to_string(),
+                        label: "Cancel Order".to_string(),
+                        style: Some(ButtonStyle::Danger),
+                        value: Some("order-1234".to_string()),
+                        ..Default::default()
+                    })
+                    .into(),
+                ])
+                .into(),
+            ]),
+        });
+
+        assert_eq!(card.kind, CardKind::Card);
+        assert_eq!(card.title.as_deref(), Some("Order #1234"));
+        assert_eq!(card.children.len(), 7);
+
+        assert!(matches!(card.children[0], CardChild::Text(_)));
+        assert!(matches!(card.children[1], CardChild::Link(_)));
+        assert!(matches!(card.children[2], CardChild::Divider(_)));
+        assert!(matches!(card.children[3], CardChild::Fields(_)));
+        assert!(matches!(card.children[4], CardChild::Section(_)));
+        assert!(matches!(card.children[5], CardChild::Divider(_)));
+        assert!(matches!(card.children[6], CardChild::Actions(_)));
+
+        if let CardChild::Fields(f) = &card.children[3] {
+            assert_eq!(f.children.len(), 2);
+        }
+        if let CardChild::Actions(a) = &card.children[6] {
+            assert_eq!(a.children.len(), 2);
+            if let ActionsChild::Button(b) = &a.children[0] {
+                assert_eq!(b.id, "track");
+            }
+            if let ActionsChild::Button(b) = &a.children[1] {
+                assert_eq!(b.value.as_deref(), Some("order-1234"));
+            }
+        }
+    }
 }
