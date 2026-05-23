@@ -13,14 +13,15 @@
 //! - [`callback_cache_key`] — formatter matching upstream's inline
 //!   `${CALLBACK_CACHE_KEY_PREFIX}${token}` template.
 //!
-//! **What is deferred:**
+//! [`CallbackUrlStore`] — the state-bound `resolveCallbackUrl` /
+//! token-issue surface, ported in slice 120 after the Phase 1.5
+//! StateAdapter trait extension.
 //!
-//! - `processCardCallbackUrls`, `resolveCallbackUrl`,
-//!   `postToCallbackUrl` — these require the `StateAdapter` trait to
-//!   carry concrete async `get`/`set` methods (currently the trait is
-//!   the empty placeholder defined in [`crate::types::StateAdapter`])
-//!   and an HTTP client. They land in a follow-up slice once
-//!   `StateAdapter` is extended and a default HTTP client is wired in.
+//! **What is still deferred:**
+//!
+//! - `postToCallbackUrl` — requires an HTTP client. Lands once a
+//!   default HTTP client wires into the workspace (likely `reqwest`
+//!   or `ureq`).
 
 /// Token prefix that marks a `button.value` as a callback-URL handle.
 /// 1:1 port of upstream `const CALLBACK_TOKEN_PREFIX = "__cb:"`.
@@ -79,6 +80,110 @@ pub fn is_callback_value(value: &str) -> bool {
 /// `postToCallbackUrl`).
 pub fn callback_cache_key(token: &str) -> String {
     format!("{CALLBACK_CACHE_KEY_PREFIX}{token}")
+}
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::types::{StateAdapter, StateResult};
+
+/// State-bound callback-URL token store. 1:1 port of upstream's
+/// `processCardCallbackUrls` / `resolveCallbackUrl` state path (the
+/// `postToCallbackUrl` HTTP path is deferred until a default HTTP
+/// client lands).
+///
+/// Wraps an [`Arc<dyn StateAdapter>`] and offers:
+/// - [`Self::issue`] — generate a fresh token, store the URL under it,
+///   and return the encoded `button.value`.
+/// - [`Self::resolve`] — look up the URL behind a previously-issued
+///   `button.value`.
+#[derive(Clone)]
+pub struct CallbackUrlStore {
+    state: Arc<dyn StateAdapter>,
+    ttl_ms: u64,
+}
+
+impl std::fmt::Debug for CallbackUrlStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallbackUrlStore")
+            .field("state", &self.state)
+            .field("ttl_ms", &self.ttl_ms)
+            .finish()
+    }
+}
+
+fn generate_callback_token() -> String {
+    // Uniqueness within a single SDK instance is sufficient; an
+    // atomic counter + timestamp gives that without a uuid dep
+    // (same pattern as transcripts::generate_id).
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("cb-{t:016x}-{n:016x}")
+}
+
+impl CallbackUrlStore {
+    /// 1:1 port of upstream's implicit constructor at
+    /// `processCardCallbackUrls` callsites. TTL defaults to
+    /// [`CALLBACK_TTL_MS`].
+    pub fn new(state: Arc<dyn StateAdapter>) -> Self {
+        Self {
+            state,
+            ttl_ms: CALLBACK_TTL_MS,
+        }
+    }
+
+    /// Override the TTL. Mirrors upstream's `options.ttlMs` override
+    /// (used by tests + adapters that want shorter retention).
+    pub fn with_ttl_ms(mut self, ttl_ms: u64) -> Self {
+        self.ttl_ms = ttl_ms;
+        self
+    }
+
+    /// Effective TTL applied to stored callback URLs.
+    pub fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
+    }
+
+    /// Issue a fresh callback token for `url`, store the mapping in
+    /// the state backend (TTL = [`Self::ttl_ms`]), and return the
+    /// encoded `button.value` that should ship on the card. 1:1 with
+    /// the token-issue portion of upstream `processCardCallbackUrls`.
+    pub async fn issue(&self, url: &str) -> StateResult<String> {
+        let token = generate_callback_token();
+        let key = callback_cache_key(&token);
+        self.state
+            .set(
+                &key,
+                serde_json::Value::String(url.to_string()),
+                Some(self.ttl_ms),
+            )
+            .await?;
+        Ok(encode_callback_value(&token))
+    }
+
+    /// Look up the URL behind a callback `button.value`. 1:1 port of
+    /// upstream `resolveCallbackUrl(value)`. Returns `None` when:
+    /// - `value` is `None`,
+    /// - `value` doesn't carry the [`CALLBACK_TOKEN_PREFIX`],
+    /// - the token is unknown / expired in the state backend, or
+    /// - the stored value isn't a JSON string (shouldn't happen for
+    ///   tokens we issued, but we silently drop other shapes the way
+    ///   upstream does).
+    pub async fn resolve(&self, value: Option<&str>) -> StateResult<Option<String>> {
+        let Some(token) = decode_callback_value(value).callback_token else {
+            return Ok(None);
+        };
+        let key = callback_cache_key(&token);
+        Ok(self
+            .state
+            .get(&key)
+            .await?
+            .and_then(|v| v.as_str().map(str::to_owned)))
+    }
 }
 
 #[cfg(test)]
@@ -153,5 +258,140 @@ mod tests {
         assert_eq!(encoded, "__cb:");
         let decoded = decode_callback_value(Some(&encoded));
         assert_eq!(decoded.callback_token.as_deref(), Some(""));
+    }
+
+    // ---------- slice 120: CallbackUrlStore class ----------
+
+    use crate::types::{StateAdapter, StateAdapterError, StateResult};
+    use futures_executor::block_on;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct MockState {
+        kv: Mutex<HashMap<String, serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for MockState {
+        async fn get(&self, key: &str) -> StateResult<Option<serde_json::Value>> {
+            let kv = self
+                .kv
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            Ok(kv.get(key).cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            let mut kv = self
+                .kv
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            kv.insert(key.to_string(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> StateResult<()> {
+            let mut kv = self
+                .kv
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            kv.remove(key);
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn callback_url_store_issue_returns_an_encoded_value() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        let value = block_on(store.issue("https://example.com/cb")).unwrap();
+        assert!(is_callback_value(&value));
+        assert!(value.starts_with(CALLBACK_TOKEN_PREFIX));
+    }
+
+    #[test]
+    fn callback_url_store_resolve_returns_the_stored_url() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        let value = block_on(store.issue("https://example.com/cb")).unwrap();
+        let resolved = block_on(store.resolve(Some(&value))).unwrap();
+        assert_eq!(resolved.as_deref(), Some("https://example.com/cb"));
+    }
+
+    #[test]
+    fn callback_url_store_resolve_returns_none_for_none_input() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        let resolved = block_on(store.resolve(None)).unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn callback_url_store_resolve_returns_none_for_plain_values() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        let resolved = block_on(store.resolve(Some("not-a-callback-value"))).unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn callback_url_store_resolve_returns_none_for_unknown_tokens() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        let fake = encode_callback_value("never-issued");
+        let resolved = block_on(store.resolve(Some(&fake))).unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn callback_url_store_default_ttl_matches_upstream_constant() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        assert_eq!(store.ttl_ms(), CALLBACK_TTL_MS);
+    }
+
+    #[test]
+    fn callback_url_store_with_ttl_ms_overrides_the_default() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state).with_ttl_ms(60_000);
+        assert_eq!(store.ttl_ms(), 60_000);
+    }
+
+    #[test]
+    fn callback_url_store_issue_produces_unique_tokens_for_separate_urls() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let store = CallbackUrlStore::new(state);
+        let a = block_on(store.issue("https://example.com/a")).unwrap();
+        let b = block_on(store.issue("https://example.com/b")).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            block_on(store.resolve(Some(&a))).unwrap().as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(
+            block_on(store.resolve(Some(&b))).unwrap().as_deref(),
+            Some("https://example.com/b")
+        );
     }
 }
