@@ -785,6 +785,22 @@ pub struct Attachment {
     pub width: Option<u32>,
 }
 
+impl Attachment {
+    /// Return a copy with the inline binary payload removed. 1:1 with
+    /// the behavior of upstream `Message.toJSON()`'s attachment-strip:
+    /// preserves every other field (URL, mime type, fetch_metadata, …)
+    /// so the receiver can rehydrate the data through the adapter's
+    /// `fetchData` path. The Rust port has no `fetchData` callback (it
+    /// will live on the platform adapter trait), so only `data` needs
+    /// clearing.
+    pub fn without_inline_data(&self) -> Self {
+        Self {
+            data: None,
+            ..self.clone()
+        }
+    }
+}
+
 /// Link unfurl metadata. 1:1 port of the data shape of upstream
 /// `interface LinkPreview`.
 ///
