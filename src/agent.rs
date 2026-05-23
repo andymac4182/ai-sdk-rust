@@ -15,10 +15,11 @@ use crate::generate_text::{
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    LanguageModel, LanguageModelCallOptions, LanguageModelReasoningEffort,
-    LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelToolChoice,
+    LanguageModel, LanguageModelAbortSignal, LanguageModelCallOptions,
+    LanguageModelReasoningEffort, LanguageModelResponseFormat, LanguageModelStreamPart,
+    LanguageModelToolChoice,
 };
-use crate::prompt::{Instructions, Prompt, PromptInput};
+use crate::prompt::{Instructions, Prompt, PromptInput, TimeoutConfiguration};
 use crate::provider::{InvalidPromptError, ProviderOptions};
 use crate::provider_utils::ExperimentalSandbox;
 use crate::stream_text::{StreamTextOptions, StreamTextResult, stream_text};
@@ -31,8 +32,7 @@ pub const TOOL_LOOP_AGENT_VERSION: &str = "agent-v1";
 ///
 /// This ports the portable core of upstream `ToolLoopAgent`: shared settings,
 /// call preparation, default twenty-step tool loops, non-streaming generation,
-/// and streaming generation. JavaScript-only abort signal and timeout handling
-/// remain intentionally outside the Rust surface.
+/// streaming generation, and Rust-native abort/timeout request controls.
 pub struct ToolLoopAgent<'a, M: LanguageModel + ?Sized> {
     settings: ToolLoopAgentSettings<'a, M>,
 }
@@ -147,6 +147,8 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
             telemetry: options
                 .telemetry
                 .or_else(|| self.settings.telemetry.clone()),
+            abort_signal: options.abort_signal,
+            timeout: options.timeout,
             max_steps: options.max_steps.or(self.settings.max_steps).unwrap_or(20),
             stop_conditions: if options.stop_conditions.is_empty() {
                 self.settings.stop_conditions.clone()
@@ -657,6 +659,8 @@ pub struct ToolLoopAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
     pub on_finish: Option<GenerateTextOnFinish<'a>>,
     pub telemetry: Option<TelemetryOptions>,
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+    pub timeout: Option<TimeoutConfiguration>,
     pub max_steps: Option<usize>,
     pub stop_conditions: Vec<StopCondition>,
     pub include: Option<GenerateTextInclude>,
@@ -685,6 +689,8 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            abort_signal: None,
+            timeout: None,
             max_steps: None,
             stop_conditions: Vec::new(),
             include: None,
@@ -860,6 +866,18 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
         self
     }
 
+    /// Sets a per-call abort signal.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets a per-call timeout configuration.
+    pub fn with_timeout(mut self, timeout: impl Into<TimeoutConfiguration>) -> Self {
+        self.timeout = Some(timeout.into());
+        self
+    }
+
     /// Sets per-call maximum model-call steps.
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = Some(max_steps.max(1));
@@ -918,6 +936,8 @@ pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
     pub on_finish: Option<GenerateTextOnFinish<'a>>,
     pub telemetry: Option<TelemetryOptions>,
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+    pub timeout: Option<TimeoutConfiguration>,
     pub max_steps: usize,
     pub stop_conditions: Vec<StopCondition>,
     pub include: Option<GenerateTextInclude>,
@@ -1024,6 +1044,10 @@ fn apply_generate_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.on_step_finish = prepared.on_step_finish;
     options.on_finish = prepared.on_finish;
     options.telemetry = prepared.telemetry;
+    if let Some(abort_signal) = prepared.abort_signal {
+        options.call_options.abort_signal = Some(abort_signal);
+    }
+    options.timeout = prepared.timeout;
     options.max_steps = prepared.max_steps.max(1);
     options.stop_conditions = prepared.stop_conditions;
     if let Some(include) = prepared.include {
@@ -1053,6 +1077,10 @@ fn apply_stream_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.on_step_finish = prepared.on_step_finish;
     options.on_finish = prepared.on_finish;
     options.telemetry = prepared.telemetry;
+    if let Some(abort_signal) = prepared.abort_signal {
+        options = options.with_abort_signal(abort_signal);
+    }
+    options.timeout = prepared.timeout;
     options.max_steps = prepared.max_steps.max(1);
     options.stop_conditions = prepared.stop_conditions;
     options
@@ -1199,18 +1227,21 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
     use serde_json::json;
 
     use super::*;
     use crate::language_model::{
-        FinishReason, LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
-        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResult,
-        LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+        FinishReason, LanguageModelAbortController, LanguageModelAbortSignal, LanguageModelContent,
+        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamFinish,
+        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
         LanguageModelToolCall, LanguageModelUsage,
     };
     use crate::mock_models::MockLanguageModel;
+    use crate::prompt::TimeoutConfigurationOptions;
     use crate::provider_utils::Tool;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -1261,6 +1292,38 @@ mod tests {
             },
             LanguageModelUsage::default(),
         )
+    }
+
+    fn stream_text_result(text: &str) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", text)),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                LanguageModelUsage::default(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+            )),
+        ])
+    }
+
+    fn stream_tool_call_result() -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                "call-weather",
+                "weather",
+                r#"{"city":"Brisbane"}"#,
+            )),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                LanguageModelUsage::default(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::ToolCalls,
+                    raw: Some("tool-calls".to_string()),
+                },
+            )),
+        ])
     }
 
     #[test]
@@ -1337,6 +1400,57 @@ mod tests {
                 .expect("provider options")
             )
         );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_abort_signal_to_generate_text() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello").with_abort_signal(abort_signal.clone());
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let calls = model.generate_calls();
+        let captured_signal = calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("generate_text receives abort signal");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_timeout_to_tool_execution() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([tool_call_result(), text_result("done")]);
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_tool(
+            Tool::new("weather", object_schema()).with_execute(move |_input, options| {
+                let received_signal = Arc::clone(&received_signal_for_closure);
+                async move {
+                    *received_signal.lock().expect("signal lock") = options.abort_signal;
+                    Ok(json!({ "forecast": "sunny" }))
+                }
+            }),
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("What is the weather?").with_timeout(
+                TimeoutConfigurationOptions::new().with_tool_timeout("weather", 10_000),
+            );
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "done");
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool timeout creates abort signal");
+        assert!(!captured_signal.is_aborted());
     }
 
     #[test]
@@ -1439,19 +1553,7 @@ mod tests {
 
     #[test]
     fn tool_loop_agent_stream_delegates_to_stream_text() {
-        let model =
-            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
-                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
-                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
-                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
-                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
-                    LanguageModelUsage::default(),
-                    LanguageModelFinishReason {
-                        unified: FinishReason::Stop,
-                        raw: Some("stop".to_string()),
-                    },
-                )),
-            ]));
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
         let agent = ToolLoopAgent::new(
             ToolLoopAgentSettings::new(&model)
                 .with_model_settings(ToolLoopAgentModelSettings::new().with_temperature(0.4)),
@@ -1465,20 +1567,59 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_stream_passes_abort_signal_to_stream_text() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello").with_abort_signal(abort_signal.clone());
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        let calls = model.stream_calls();
+        let captured_signal = calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("stream_text receives abort signal");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_passes_timeout_to_tool_execution() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_tool_call_result(), stream_text_result("done")]);
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_tool(
+            Tool::new("weather", object_schema()).with_execute(move |_input, options| {
+                let received_signal = Arc::clone(&received_signal_for_closure);
+                async move {
+                    *received_signal.lock().expect("signal lock") = options.abort_signal;
+                    Ok(json!({ "forecast": "sunny" }))
+                }
+            }),
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("What is the weather?").with_timeout(
+                TimeoutConfigurationOptions::new().with_tool_timeout("weather", 10_000),
+            );
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "done");
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool timeout creates abort signal");
+        assert!(!captured_signal.is_aborted());
+    }
+
+    #[test]
     fn tool_loop_agent_merges_stream_finish_callbacks_in_order() {
-        let model =
-            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
-                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
-                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
-                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
-                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
-                    LanguageModelUsage::default(),
-                    LanguageModelFinishReason {
-                        unified: FinishReason::Stop,
-                        raw: Some("stop".to_string()),
-                    },
-                )),
-            ]));
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
         let calls = Rc::new(RefCell::new(Vec::new()));
         let settings_calls = Rc::clone(&calls);
         let call_calls = Rc::clone(&calls);
