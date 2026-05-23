@@ -392,11 +392,12 @@ git -C "$main_repo" status --short
 If the main checkout is dirty, stop and report. Do not stash, reset, or
 overwrite it.
 
-Merge and push:
+Merge and push (atomic — push only runs if every check passes):
 
 ```sh
-git -C "$main_repo" merge --no-ff "$branch" -m "Merge chat-sdk parity slice"
-(
+if ! (
+  set -e
+  git -C "$main_repo" merge --no-ff "$branch" -m "Merge chat-sdk parity slice"
   cd "$main_repo"
   cargo fmt --all --check
   cargo clippy --all-targets --all-features -- -D warnings
@@ -407,17 +408,37 @@ git -C "$main_repo" merge --no-ff "$branch" -m "Merge chat-sdk parity slice"
     --output docs/chat/package-progress.md \
     --title "Chat SDK Rust Package Progress"
   cargo test --workspace --all-features
-)
+); then
+  echo "VALIDATION FAILED on main, refusing to push"
+  exit 1
+fi
 git -C "$main_repo" push origin main
 ```
 
-If merge conflicts occur, abort the merge in the main checkout, release the
-lock, resolve the conflict in your worktree by rebasing on latest
-`origin/main`, rerun validation, recommit if needed, and then retry the
-merge-back protocol. Do not push a broken `main`. If a conflict is in a file
-owned by the ai-sdk session, that means you violated the ownership table
-above — back out your edit and find a non-conflicting way to land the same
-chat-sdk behavior.
+The `if ! ( set -e; … )` wrapper is non-negotiable: an earlier iteration of
+the protocol had a plain `&&` chain followed by a separate `git push`, which
+let a naming-check failure ship to `origin/main` (slice 10 of this port).
+Always guard the push with this block.
+
+**Ledger row conflicts on rebase.** Each slice that touches a chat-sdk
+package overwrites that package's whole row in `docs/chat/upstream-parity.md`
+(test counts, evidence, basis, estimate). If a rebase hits a conflict on
+that row, prefer your branch's version — subsequent slices include the
+prior content. Conflicts on rows owned by the *other* session (any
+non-`chat-sdk-*` row in `docs/upstream-parity.md`, or any
+`scripts/codex-goal/*` file) mean you violated the ownership table — back
+out the edit and find a non-conflicting way to land the same chat-sdk
+behavior.
+
+**Cross-boundary fix-up rule.** If `main` is broken in a way that blocks
+the *other* session's validation (e.g. chat-sdk pushed a naming-check
+failure that the ai-sdk session now hits during its own merge-back), the
+unblocking session may make the minimum cross-boundary edit needed to
+restore green `main`. This is a recovery event, not the default mode — it
+MUST be recorded in the next entry of `docs/chat/goal-refinements.md` (or
+`docs/goal-refinements.md`, when the ai-sdk session writes one) so the
+boundary crossing is visible and the underlying foot-gun is fixed by the
+owning session within one slice.
 
 After a successful push, release the lock and continue from your worktree:
 
