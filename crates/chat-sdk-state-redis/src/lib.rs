@@ -107,6 +107,30 @@ impl RedisStateAdapter {
     }
 }
 
+/// Generate a unique lock/sub token. 1:1 port of upstream's
+/// private `generateToken()`:
+/// `redis_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`.
+/// Returns `redis_<unix-ms>_<13-char-base36-lowercased>`.
+///
+/// Exposed at module scope (rather than private as upstream) so the
+/// suffix shape can be unit-tested without driving through
+/// `acquireLock`/`subscribe` which require a live Redis connection.
+pub fn generate_token() -> String {
+    use rand::Rng;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // Match upstream's `.toString(36).substring(2, 15)` which yields
+    // 13 lowercase base36 characters (0-9 + a-z).
+    const BASE36: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::thread_rng();
+    let suffix: String = (0..13)
+        .map(|_| BASE36[rng.gen_range(0..BASE36.len())] as char)
+        .collect();
+    format!("redis_{now_ms}_{suffix}")
+}
+
 #[async_trait]
 impl StateAdapter for RedisStateAdapter {
     async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
@@ -149,6 +173,42 @@ impl StateAdapter for RedisStateAdapter {
 mod tests {
     use super::*;
     use futures_executor::block_on;
+
+    // ---------- generate_token (additive) ----------
+    // No standalone upstream tests; the helper is exercised through
+    // `acquireLock` and friends. The Rust suite locks in the shape
+    // (prefix, base36 suffix length, lowercase, uniqueness).
+
+    #[test]
+    fn generate_token_has_redis_prefix_and_two_underscores() {
+        let t = generate_token();
+        assert!(t.starts_with("redis_"), "got: {t}");
+        // `redis_<ms>_<13chars>` -> exactly 2 underscores.
+        assert_eq!(t.matches('_').count(), 2, "got: {t}");
+    }
+
+    #[test]
+    fn generate_token_suffix_is_thirteen_lowercase_base36_chars() {
+        let t = generate_token();
+        let suffix = t.rsplit('_').next().expect("suffix");
+        assert_eq!(suffix.len(), 13, "got: {t}");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+            "non-base36 char in suffix: {suffix}"
+        );
+    }
+
+    #[test]
+    fn generate_token_produces_unique_values_across_calls() {
+        // Upstream relies on Date.now()+Math.random() for uniqueness;
+        // the Rust port uses SystemTime+rand. 1000 consecutive calls
+        // should all be unique (timestamp collisions are tolerated by
+        // the random suffix).
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            assert!(seen.insert(generate_token()));
+        }
+    }
 
     #[test]
     fn options_new_uses_default_url_and_prefix() {
