@@ -2093,3 +2093,115 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
   for cardToTeams. Discord uses Embed + Action Row JSON for
   cardToDiscord. Each is a substantial slice (~150-200 LOC +
   ~30-40 test cases).
+
+### 2026-05-24 - slices 202..206
+
+Slices reviewed: 202 Slack toPlainText 5 cases, 203 SlackTextPayload +
+to_slack_payload + 7 mentions cases + corrected finalize (BARE_MENTION_REGEX
++ emoji placeholders), 204 5 toSlackPayload routing cases + re-exported
+AlignKind, 205 nodeToMrkdwn walker + 2 toResponseUrlText cases (Slack
+markdown.test.ts now 26/26), 206 DiscordFormatConverter (Discord
+markdown.test.ts 41/41).
+
+**What the brief got wrong or left out**
+
+- **Two distinct Slack bare-mention regexes**, easy to confuse. Upstream
+  has both `linkBareSlackMentions` (`/(?<![<\w])@([UW][A-Z0-9]+)/g` -
+  only Slack ID shapes) in `format/index.ts` AND `BARE_MENTION_REGEX`
+  (`/(?<![<\w])@(\w+)/g` - any word chars) in `markdown.ts`. Each is
+  used in a different code path: format-helpers use the strict one,
+  finalize uses the permissive one. Slice 203 initially used the strict
+  helper for both paths and the 3 `@george` cases failed; the fix was
+  porting a separate `rewrite_bare_mentions` private helper. Brief
+  should call out: when porting a Slack helper, check whether upstream
+  defines a *different* regex in a sibling file before reusing the
+  existing helper.
+- **`finalize` also applies `convertEmojiPlaceholders`.** I missed this
+  initially because the existing `render_postable_string` test didn't
+  exercise emoji placeholders. Brief should add: "any port of a
+  finalize/normalize/render path must verify that *every* upstream
+  pipeline step is reproduced - not just the obvious ones the existing
+  tests cover. Cross-reference with upstream's full `this.finalize`
+  body, not just the test expectations."
+- **AST construction from Rust tests requires `AlignKind` for tables.**
+  The `markdown` crate's `Table.align` is `Vec<AlignKind>`, not the
+  upstream-style `Array<null | "left" | "right" | "center">`. Slice 204
+  re-exported `AlignKind` from `chat_sdk_chat::markdown` so downstream
+  adapters can build table AST in tests without depending on the
+  `markdown` crate directly. Brief should note: when porting AST-input
+  tests, prefer re-exports through `chat_sdk_chat::markdown` over
+  per-adapter `markdown` crate dependencies.
+- **Discord port confirmed `node_to_*_markdown` walker pattern as
+  template.** Discord's `nodeToDiscordMarkdown` and Slack's
+  `nodeToMrkdwn` (slice 205) share the *exact same dispatch shape* -
+  paragraph/text/strong/emphasis/delete/inline-code/code/link/
+  blockquote/list/break/thematicBreak/table/default. Per-adapter
+  differences are limited to: text-node rewrite (mentions / emoji), the
+  strong/emphasis/delete syntax markers (`**`/`*`/`~~` for Discord;
+  `*`/`_`/`~` for Slack), the link syntax (`[text](url)` for Discord;
+  `<url|text>` for Slack), and the list bullet (`-` for Discord; `•`
+  for Slack). The remaining adapters (Linear/GitHub/GChat/Messenger/
+  WhatsApp/Telegram) should be ported via the same template once they
+  need a renderPostable / response-url path. Brief should add a
+  "Markdown walker template" section pointing at slice 205 + 206.
+- **`AdapterPostableMessage::Card / CardElement` fall-through choice.**
+  Both Slack's `to_slack_payload` and Discord's `render_postable`
+  return an empty payload for the Card variants - upstream sends
+  cards via a *different* method (`toSlackBlocks` / Discord embeds)
+  and these enums don't reach the text-rendering method. Brief should
+  note: text-rendering methods that take `AdapterPostableMessage` must
+  decide explicitly for Card/CardElement - return empty string and
+  document, do not panic.
+
+**Stale or misleading guidance**
+
+- Brief's queue ordering should now flag "renderPostable / response-url
+  port" as a *cheap* slice once `chat_sdk_chat::markdown` walker helpers
+  exist (slice 198 added them). Discord ported 41/41 upstream cases in a
+  single slice (206) because all the walker primitives were already in
+  place. The remaining adapters (Linear/GitHub/Messenger/WhatsApp/Telegram
+  /GChat) that don't yet have full renderPostable can follow the same
+  pattern.
+- The previous refinement (2026-05-23, slices 167..186) flagged
+  "BaseFormatConverter in chat-sdk-chat" as deferred. It's still
+  deferred, but slice 198 already landed the *helpers* (`render_list`,
+  `default_node_to_text`, `from_ast_with_node_converter`). The class
+  wrapper itself is the only remaining piece - the helpers do the
+  work today. Brief should make this distinction explicit so a future
+  loop doesn't re-litigate the deferred work.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- (No edits to `scripts/codex-goal-chat/port-chat-sdk.md` or
+  `goal-condition.md` were strictly required this round - the prior
+  guidance still holds. The new entry documents the lessons for the
+  next refinement cycle to fold in.)
+
+**Open refinements deferred**
+
+- **`BaseFormatConverter` trait in chat-sdk-chat.** The helpers
+  (`render_list`, `default_node_to_text`, `from_ast_with_node_converter`)
+  landed in slice 198. The trait/abstract-class wrapper still hasn't.
+  Per-adapter converters duplicate the `extract_plain_text` /
+  `from_ast` body. Lifting these into a trait with default methods
+  would let each adapter only override the platform-specific
+  `node_to_*_markdown` walker. Deferred because the duplication is
+  cheap (~10 lines per adapter) and the trait would need careful
+  generic-or-trait-object design.
+- **Lift the markdown walker template into a shared helper.** All
+  9 adapters will eventually need essentially the same dispatch shape.
+  A `chat_sdk_chat::markdown::walk_to_text(node, dispatcher)` helper
+  that takes a `&dyn Fn(&Node) -> Option<String>` (returning Some for
+  handled variants, None for fallthrough to default) could replace the
+  ~80-line walker in each adapter with a ~30-line dispatcher closure.
+  Deferred until 3+ adapters have ported the walker.
+- **Slack's remaining 9 unported test files.** markdown.test.ts is
+  done (26/26 after slice 205). Cards (36 cases), full webhook
+  (~150 cases), modals (21 of 33 remaining), and full api.test.ts
+  (12 of 13) remain. Largest single remaining piece is
+  cards.test.ts requiring the Slack Block Kit cards renderer.
+- **State-backend client wire-up.** Still all 10%, still deferred -
+  this is the largest contiguous chunk of unported work for the
+  whole port. Considering whether to use `bb8` or `deadpool` for
+  connection pooling; no decision yet.
