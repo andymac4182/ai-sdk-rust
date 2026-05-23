@@ -1309,6 +1309,54 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     ) -> AdapterResult<crate::message::Message> {
         Err(AdapterError::Unsupported("parse_message"))
     }
+
+    /// Edit an existing message. 1:1 with upstream
+    /// `editMessage(threadId, messageId, message): Promise<RawMessage>`.
+    /// Returns the platform-assigned id of the edited message (most
+    /// platforms reuse the original id; Slack returns the same `ts`,
+    /// Discord/Telegram return the same message_id, etc.).
+    async fn edit_message(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _text: &str,
+    ) -> AdapterResult<String> {
+        Err(AdapterError::Unsupported("edit_message"))
+    }
+
+    /// Delete an existing message. 1:1 with upstream
+    /// `deleteMessage(threadId, messageId): Promise<void>`. Returns
+    /// `()` on success; the platform's "already deleted" / "not found"
+    /// responses surface as `AdapterError::InvalidPayload`.
+    async fn delete_message(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+    ) -> AdapterResult<()> {
+        Err(AdapterError::Unsupported("delete_message"))
+    }
+
+    /// Add an emoji reaction to a message. 1:1 with upstream
+    /// `addReaction(threadId, messageId, emoji): Promise<void>`. The
+    /// `emoji` parameter is the platform-native short-name (e.g.
+    /// `"thumbsup"` for Slack, the literal `"👍"` glyph for Discord).
+    async fn add_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> AdapterResult<()> {
+        Err(AdapterError::Unsupported("add_reaction"))
+    }
+
+    /// Signal the human user that the bot is composing a reply. 1:1
+    /// with upstream `startTyping(threadId, status?): Promise<void>`.
+    /// `status` is an optional platform-specific status line (e.g.
+    /// Slack's "is typing…" footer). Adapters that don't expose a
+    /// typing indicator return Ok(()) silently.
+    async fn start_typing(&self, _thread_id: &str, _status: Option<&str>) -> AdapterResult<()> {
+        Err(AdapterError::Unsupported("start_typing"))
+    }
 }
 
 /// Errors returned by [`Adapter`] methods. Mirrors upstream's
@@ -2917,6 +2965,46 @@ mod tests {
         match block_on(a.parse_message(serde_json::json!({}))) {
             Err(AdapterError::Unsupported("parse_message")) => {}
             other => panic!("expected Unsupported(parse_message), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_default_edit_message_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.edit_message("t1", "m1", "hi")) {
+            Err(AdapterError::Unsupported("edit_message")) => {}
+            other => panic!("expected Unsupported(edit_message), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_default_delete_message_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.delete_message("t1", "m1")) {
+            Err(AdapterError::Unsupported("delete_message")) => {}
+            other => panic!("expected Unsupported(delete_message), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_default_add_reaction_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.add_reaction("t1", "m1", "thumbsup")) {
+            Err(AdapterError::Unsupported("add_reaction")) => {}
+            other => panic!("expected Unsupported(add_reaction), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_default_start_typing_returns_unsupported() {
+        let a = UnconfiguredAdapter;
+        match block_on(a.start_typing("t1", None)) {
+            Err(AdapterError::Unsupported("start_typing")) => {}
+            other => panic!("expected Unsupported(start_typing), got {other:?}"),
+        }
+        match block_on(a.start_typing("t1", Some("thinking…"))) {
+            Err(AdapterError::Unsupported("start_typing")) => {}
+            other => panic!("expected Unsupported(start_typing), got {other:?}"),
         }
     }
 
