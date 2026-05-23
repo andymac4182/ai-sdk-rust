@@ -604,6 +604,10 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `parseToolCall` helper parity added named
+  counterparts for provider-executed dynamic calls, provider metadata, empty
+  inputs, unavailable tool errors, runtime dynamic flags, title propagation,
+  tool metadata propagation, and provider/tool metadata separation.
 - 2026-05-23: `packages/ai` `parseToolCall` input-schema validation
   parity added Rust-side tool input validation for the common JSON Schema
   object/property/required/type shapes used by first-phase tool schemas, plus
@@ -3383,14 +3387,29 @@ focused tests for each portable behavior before changing rows to `verified`.
    portable assistant, tool-message, provider-executed, approval, metadata,
    file/reasoning/custom, empty-text, empty-content, and invalid tool-input
    cases.
-   The upstream `generate-text/parse-tool-call.test.ts` input-schema validation
-   slice now has named Rust counterparts in
+   The upstream `generate-text/parse-tool-call.test.ts` validation, no-tool,
+   provider-metadata, dynamic-tool, title, and tool-metadata slices now have
+   named Rust counterparts in
    `parse_tool_call_should_successfully_parse_a_valid_tool_call`,
+   `parse_tool_call_should_successfully_parse_a_valid_provider_executed_dynamic_tool_call`,
+   `parse_tool_call_should_successfully_parse_a_valid_tool_call_with_provider_metadata`,
+   `parse_tool_call_should_successfully_process_empty_tool_calls_for_tools_that_have_no_input_schema`,
+   `parse_tool_call_should_successfully_process_empty_object_tool_calls_for_tools_that_have_no_input_schema`,
+   `parse_tool_call_should_throw_no_such_tool_error_when_tools_is_null`,
+   `parse_tool_call_should_throw_no_such_tool_error_when_tool_is_not_found`,
    `parse_tool_call_should_throw_invalid_tool_input_error_when_args_are_invalid`,
+   `parse_tool_call_should_set_dynamic_to_true_for_dynamic_tools`,
+   `parse_tool_call_should_include_title_in_parsed_dynamic_tool_call`,
+   `parse_tool_call_should_include_title_in_parsed_static_tool_call`,
+   `parse_tool_call_should_include_title_in_invalid_tool_call`,
+   `parse_tool_call_should_propagate_tool_metadata_onto_a_parsed_dynamic_tool_call`,
+   `parse_tool_call_should_propagate_tool_metadata_onto_a_parsed_static_tool_call`,
+   `parse_tool_call_should_keep_tool_metadata_separate_from_model_supplied_provider_metadata`,
+   `parse_tool_call_should_propagate_tool_metadata_onto_an_invalid_tool_call`,
    `parse_tool_call_repair_should_invoke_repair_tool_when_input_schema_validation_fails`,
    and `generate_text_marks_schema_invalid_tool_input_before_execution`;
-   remaining `parseToolCall` title/metadata/no-tool and full repair edge cases
-   are still tracked for follow-up mapping.
+   remaining `parseToolCall` input-refinement and full repair edge cases are
+   still tracked for follow-up mapping.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error
