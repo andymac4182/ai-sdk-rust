@@ -151,6 +151,14 @@ The ledger must include:
    `docs/chat/package-progress-estimates.tsv`. Keep estimates conservative
    and update the row for any package touched by a slice. These are estimates
    only for `in-progress` package rows; the generator forces `verified` and
+   `js-only-documented` rows to 100% and `not-started` rows to 0%. **Editing
+   the TSV requires literal tab characters** — heredocs and the `Write` tool
+   may convert tabs to spaces, which makes the progress-table generator fail
+   with an opaque `undefined method [] for nil` Ruby error. Write the TSV
+   via `printf '%s\t%s\t%s\n' "$pkg" "$pct" "$basis" >> docs/chat/package-progress-estimates.tsv`
+   (or similar `printf` with explicit `\t`), then verify with
+   `awk '{ gsub(/\t/, "<TAB>"); print }' docs/chat/package-progress-estimates.tsv`.
+   The generator forces `verified` and
    `js-only-documented` rows to 100% and `not-started` rows to 0%.
 
 After updating package status or estimates, run:
@@ -188,10 +196,26 @@ intentionally non-portable.
 
 1. Preserve Rust 2024 style, serde shapes, builder helpers, error/result
    style, and public exports.
-2. Align JSON boundaries with upstream contracts while omitting
+2. **Colocate tests with the code they exercise.** Each `chat-sdk-*` source
+   file `src/<module>.rs` must end in a
+   `#[cfg(test)] mod tests { use super::*; ... }` block containing every
+   `#[test]` ported from the matching upstream `*.test.ts`. The
+   `crates/<crate>/tests/` directory is reserved for genuine cross-crate
+   integration tests that exercise only the public API. This matches the
+   ai-sdk-rust workspace style — see `crates/ai-sdk-*/src/*.rs::tests` —
+   and was raised explicitly by the user during slice 2 of this port.
+3. Align JSON boundaries with upstream contracts while omitting
    JavaScript-only concepts (e.g. AbortSignal, Promise) where the Rust
    equivalent differs.
-3. Add focused serialization/deserialization and behavior tests for every new
+4. **Port `packages/chat/src/types.ts` in layers, not in one slice.**
+   Upstream `types.ts` is 2,549 lines and transitively imports from
+   `cards`, `channel`, `message`, `modals`, `postable-object`, `thread`,
+   and `jsx-runtime`. Land the standalone leaf types first (already
+   shipped in slice 4), then the emoji layer (slice 5), then one layer
+   per dependency module as that module lands. Each layer's slice
+   extends `crates/chat-sdk-chat/src/types.rs` with the next batch of
+   types it unblocks; do not block on porting `types.ts` whole.
+5. Add focused serialization/deserialization and behavior tests for every new
    public contract.
 4. Port EVERY portable test from the original upstream TypeScript package
    into Rust before marking that package row `verified`. This is a hard
@@ -280,7 +304,7 @@ scripts/package-progress-table.sh \
   --estimates docs/chat/package-progress-estimates.tsv \
   --output docs/chat/package-progress.md \
   --title "Chat SDK Rust Package Progress"
-cargo test --all-features
+cargo test --workspace --all-features
 ```
 
 If an optional integration test is added, make it opt-in and documented. It
@@ -334,6 +358,16 @@ cleanup_lock() {
 trap cleanup_lock EXIT
 ```
 
+**Stale-lock recovery.** If `mkdir` fails repeatedly and the lock path
+exists as a *regular file* rather than a directory
+(`ls -lad /tmp/ai-sdk-rust-main-merge.lock` showing `-rw-…` instead of
+`drwx…`), the lock was leaked by a previous crashed process. Verify the
+lock's mtime is older than the most recent `origin/main` commit, then
+`rm /tmp/ai-sdk-rust-main-merge.lock` and retry `mkdir`. Observed once
+during slice 3 of this port — the ai-sdk session had been merging right
+through the leaked lock because `mkdir` was failing for it too and it
+had its own recovery path, leaving the chat session stuck.
+
 While holding the lock:
 
 ```sh
@@ -348,7 +382,7 @@ scripts/package-progress-table.sh \
   --estimates docs/chat/package-progress-estimates.tsv \
   --output docs/chat/package-progress.md \
   --title "Chat SDK Rust Package Progress"
-cargo test --all-features
+cargo test --workspace --all-features
 
 git -C "$main_repo" checkout main
 git -C "$main_repo" pull --ff-only origin main
@@ -372,7 +406,7 @@ git -C "$main_repo" merge --no-ff "$branch" -m "Merge chat-sdk parity slice"
     --estimates docs/chat/package-progress-estimates.tsv \
     --output docs/chat/package-progress.md \
     --title "Chat SDK Rust Package Progress"
-  cargo test --all-features
+  cargo test --workspace --all-features
 )
 git -C "$main_repo" push origin main
 ```
