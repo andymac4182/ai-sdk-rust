@@ -110,10 +110,11 @@ impl WhatsappAdapter {
     }
 
     /// Build the Cloud API send URL. 1:1 with upstream's inline
-    /// `<graph_base>/v22.0/<phone_number_id>/messages` template.
+    /// `<graph_base>/<DEFAULT_API_VERSION>/<phone_number_id>/messages`
+    /// template.
     fn send_url(&self) -> String {
         format!(
-            "{}/v22.0/{}/messages",
+            "{}/{DEFAULT_API_VERSION}/{}/messages",
             self.graph_base(),
             self.options.phone_number_id
         )
@@ -164,7 +165,7 @@ impl Adapter for WhatsappAdapter {
     /// - POSTs JSON
     ///   `{messaging_product: "whatsapp", to: <customer_phone>,
     ///   type: "text", text: {body: <text>}}` to
-    ///   `<graph_base>/v22.0/<phone_number_id>/messages`.
+    ///   `<graph_base>/<DEFAULT_API_VERSION>/<phone_number_id>/messages`.
     /// - Auth via `Authorization: Bearer <access_token>` header.
     /// - Returns the first element of `messages[*].id` (Cloud
     ///   API's envelope).
@@ -326,6 +327,14 @@ impl Adapter for WhatsappAdapter {
         Ok(())
     }
 }
+
+/// Default Meta Graph API version the adapter targets. 1:1 with
+/// upstream's private `DEFAULT_API_VERSION = "v21.0"`. Used by
+/// `send_url()` to compose `<graph_base>/<version>/<phone-number>/
+/// messages`. Exposed at module scope (rather than private as
+/// upstream) so callers + tests can reference the canonical
+/// version string without re-declaring it.
+pub const DEFAULT_API_VERSION: &str = "v21.0";
 
 /// Maximum message length the WhatsApp Cloud API accepts in a single
 /// send. 1:1 with upstream's `WHATSAPP_MESSAGE_LIMIT = 4096`.
@@ -744,6 +753,15 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn default_api_version_matches_upstream() {
+        // 1:1 with upstream's private `DEFAULT_API_VERSION = "v21.0"`.
+        // The Rust port previously hardcoded `v22.0` in send_url;
+        // slice 257 aligned the version with upstream.
+        assert_eq!(DEFAULT_API_VERSION, "v21.0");
+    }
+
+    #[test]
     fn adapter_send_url_builds_the_upstream_endpoint() {
         let adapter = WhatsappAdapter::new(
             WhatsappAdapterOptions::new("PNID123", "a", "v")
@@ -751,7 +769,7 @@ mod tests {
         );
         assert_eq!(
             adapter.send_url(),
-            "https://graph.example.test/v22.0/PNID123/messages"
+            "https://graph.example.test/v21.0/PNID123/messages"
         );
     }
 
