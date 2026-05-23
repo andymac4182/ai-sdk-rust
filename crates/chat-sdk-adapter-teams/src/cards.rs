@@ -15,6 +15,17 @@ use chat_sdk_chat::cards::CardElement;
 /// upstream `export const AUTO_SUBMIT_ACTION_ID = "__auto_submit"`.
 pub const AUTO_SUBMIT_ACTION_ID: &str = "__auto_submit";
 
+/// Adaptive Card JSON schema URL emitted by `cardToAdaptiveCard`.
+/// 1:1 with upstream's private
+/// `ADAPTIVE_CARD_SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"`.
+/// Exposed at module scope (rather than private as upstream) so
+/// the schema URL can be referenced + asserted without re-declaring.
+pub const ADAPTIVE_CARD_SCHEMA: &str = "http://adaptivecards.io/schemas/adaptive-card.json";
+
+/// Adaptive Card version emitted by `cardToAdaptiveCard`. 1:1
+/// with upstream's private `ADAPTIVE_CARD_VERSION = "1.4"`.
+pub const ADAPTIVE_CARD_VERSION: &str = "1.4";
+
 /// Render a [`CardElement`] as Teams markdown fallback text. 1:1
 /// port of upstream `cardToFallbackText(card)`: delegates to the
 /// shared helper with `boldFormat: "**"`, `lineBreak: "\n\n"`, and
@@ -128,6 +139,19 @@ mod tests {
     fn handles_card_with_only_title() {
         let c = card(Some("Simple Card"), None, vec![]);
         assert_eq!(card_to_fallback_text_teams(&c), "**Simple Card**");
+    }
+
+    #[test]
+    fn adaptive_card_schema_and_version_match_upstream() {
+        // 1:1 with upstream `ADAPTIVE_CARD_SCHEMA = "http://adapt..."`
+        // and `ADAPTIVE_CARD_VERSION = "1.4"`. The Adaptive Card JSON
+        // renderer is deferred; these constants are exposed for any
+        // caller / future renderer that needs them.
+        assert_eq!(
+            ADAPTIVE_CARD_SCHEMA,
+            "http://adaptivecards.io/schemas/adaptive-card.json"
+        );
+        assert_eq!(ADAPTIVE_CARD_VERSION, "1.4");
     }
 
     #[test]
