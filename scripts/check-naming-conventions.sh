@@ -14,6 +14,9 @@ set -euo pipefail
 #   docs for the Rust ProviderReference wrapper.
 # - adapter_shared / adapter-shared / chat-sdk-adapter-shared mirror the
 #   upstream vercel/chat packages/adapter-shared package boundary.
+# - adapter-utils, buffer-utils, card-utils mirror the upstream vercel/chat
+#   packages/adapter-shared submodule filenames (adapter-utils.ts,
+#   buffer-utils.ts, card-utils.ts).
 
 failures=()
 
@@ -48,6 +51,14 @@ allowed_identifier_token() {
   local token="$2"
 
   if [[ "$token" == "utils" && ( "$name" == *provider_utils* || "$name" == *provider-utils* ) ]]; then
+    return 0
+  fi
+
+  if [[ "$token" == "utils" && (
+        "$name" == *adapter_utils* || "$name" == *adapter-utils* ||
+        "$name" == *buffer_utils*  || "$name" == *buffer-utils*  ||
+        "$name" == *card_utils*    || "$name" == *card-utils*
+      ) ]]; then
     return 0
   fi
 
