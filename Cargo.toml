@@ -25,6 +25,7 @@ members = [
     "crates/ai-sdk-revai",
     "crates/chat-sdk-chat",
     "crates/chat-sdk-adapter-discord",
+    "crates/chat-sdk-adapter-gchat",
     "crates/chat-sdk-adapter-github",
     "crates/chat-sdk-adapter-linear",
     "crates/chat-sdk-adapter-messenger",
