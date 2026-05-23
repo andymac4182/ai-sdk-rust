@@ -582,3 +582,28 @@ You are done only when:
 8. The final complete slice is merged to `main` and pushed.
 
 If any ledger item remains `not-started` or `in-progress`, keep working.
+
+## Multi-session reality (added slice 65)
+
+This port is a multi-session effort. The slice 64 reality check
+(documented in `docs/chat/goal-refinements.md` 2026-05-23 entries
+and `docs/chat/upstream-parity.md`'s "Next Unported Work Queue"):
+
+- `packages/chat` alone needs ~200-300 more slices to finish the
+  remaining heavy modules: channel ~600 LOC, thread ~1100 LOC,
+  chat.ts ~2700 LOC, plus markdown stringifier, serialization,
+  transcripts-wiring, streaming-markdown.
+- Each of the 9 Phase-2 adapter packages is a multi-day port
+  effort with platform-specific HTTP/SDK code (Slack RTM + Web
+  API, Teams Bot Framework, Google Chat REST, Discord gateway,
+  Linear GraphQL, GitHub REST/GraphQL, Messenger webhook,
+  Telegram bot API, WhatsApp Cloud API). Roughly 150-300 slices
+  per adapter.
+- 3 Phase-3 state backends (Redis, ioredis, Postgres) each need
+  ~30 slices behind a `StateAdapter` trait extension.
+
+Total realistic slice budget: low thousands of slices spanning
+many sessions. Each session inherits the ledger + per-file triage
+in `docs/chat/upstream-parity.md` as its pick-up point. The Stop
+hook will not be satisfiable inside a single conversation window
+until all of that lands.
