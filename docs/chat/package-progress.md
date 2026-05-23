@@ -3,12 +3,12 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 0.0%
-- Portable package average: 0.0%
+- Average estimated completion: 0.3%
+- Portable package average: 0.3%
 - Closed package rows: 0 / 18
 - Strict portable verified rows: 0 / 18
-- In-progress rows: 0
-- Not-started rows: 18
+- In-progress rows: 1
+- Not-started rows: 17
 
 ## 100% Closed
 
@@ -19,12 +19,12 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
+| `@chat-sdk/chat` | 5% | In progress | core SDK package | Crate skeleton + errors module ported (1/23 upstream test files, 17 test cases). Remaining: types, channel, message,... |
 
 ## Not Started
 
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
-| `@chat-sdk/chat` | 0% | Not started | core SDK package |
 | `@chat-sdk/adapter-shared` | 0% | Not started | shared adapter utilities |
 | `@chat-sdk/tests` | 0% | Not started | test support library |
 | `@chat-sdk/state-memory` | 0% | Not started | state backend (in-memory) |
