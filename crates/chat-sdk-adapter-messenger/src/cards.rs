@@ -19,6 +19,26 @@ use chat_sdk_chat::cards::{
 /// `CALLBACK_DATA_PREFIX = "chat:"`.
 pub const CALLBACK_DATA_PREFIX: &str = "chat:";
 
+/// Maximum number of buttons Messenger allows per template. 1:1
+/// with upstream `MAX_BUTTONS = 3`.
+pub const MAX_BUTTONS: usize = 3;
+
+/// Maximum character length for a button title. 1:1 with upstream
+/// `MAX_BUTTON_TITLE_LENGTH = 20`.
+pub const MAX_BUTTON_TITLE_LENGTH: usize = 20;
+
+/// Maximum character length for subtitle in Generic Template. 1:1
+/// with upstream `MAX_SUBTITLE_LENGTH = 80`.
+pub const MAX_SUBTITLE_LENGTH: usize = 80;
+
+/// Maximum character length for text in Button Template. 1:1 with
+/// upstream `MAX_BUTTON_TEMPLATE_TEXT_LENGTH = 640`.
+pub const MAX_BUTTON_TEMPLATE_TEXT_LENGTH: usize = 640;
+
+/// Maximum character length for title in Generic Template. 1:1
+/// with upstream `MAX_TITLE_LENGTH = 80`.
+pub const MAX_TITLE_LENGTH: usize = 80;
+
 /// Decoded callback payload returned by
 /// [`decode_messenger_callback_data`]. 1:1 with upstream's
 /// `{ actionId, value }` return shape.
@@ -208,6 +228,21 @@ fn write_json_string(out: &mut String, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- Messenger template limit constants ----------
+    // 1:1 with upstream's private `MAX_*` consts in cards.ts.
+    // Exposed at module scope (rather than private as upstream) so
+    // the limits can be referenced + asserted by callers / tests
+    // without re-declaring them.
+
+    #[test]
+    fn messenger_template_limits_match_upstream() {
+        assert_eq!(MAX_BUTTONS, 3);
+        assert_eq!(MAX_BUTTON_TITLE_LENGTH, 20);
+        assert_eq!(MAX_SUBTITLE_LENGTH, 80);
+        assert_eq!(MAX_BUTTON_TEMPLATE_TEXT_LENGTH, 640);
+        assert_eq!(MAX_TITLE_LENGTH, 80);
+    }
 
     // ---------- encodeMessengerCallbackData (3 cases) ----------
 
