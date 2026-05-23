@@ -749,6 +749,28 @@ mod tests {
 
     // ---------- additive Rust-side ----------
 
+    // ---------- import boundary (1 upstream case from format/boundary.test.ts) ----------
+
+    #[test]
+    fn format_import_boundary_does_not_pull_in_chat_or_adapter_shared() {
+        // 1:1 with upstream `packages/adapter-slack/src/format/boundary
+        // .test.ts`. Forbidden strings built via concat! so the test
+        // body doesn't match itself.
+        let source = include_str!("format.rs");
+        let forbidden = [
+            concat!("use ", "chat_sdk_chat::"),
+            concat!("use ", "chat_sdk_adapter_shared::"),
+            concat!("use ", "tokio::"),
+            concat!("use ", "reqwest::"),
+        ];
+        for f in forbidden {
+            assert!(
+                !source.contains(f),
+                "format.rs must not import {f:?} (edge-runtime portable)"
+            );
+        }
+    }
+
     #[test]
     fn slack_id_rejects_lowercase_and_special_chars() {
         assert!(format_slack_user("u123").is_err());
