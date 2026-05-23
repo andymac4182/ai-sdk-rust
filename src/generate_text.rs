@@ -8962,6 +8962,52 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(|_options| async { None });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::NotApplicable);
+    }
+
+    #[test]
+    fn resolve_tool_approval_uses_generic_callback_before_tool_defined_approval() {
+        let tool_call = approval_tool_call("weather");
+        let tool_defined_called = Arc::new(AtomicBool::new(false));
+        let tool_defined_called_for_callback = Arc::clone(&tool_defined_called);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema()).with_needs_approval_function(
+                move |_input, _options| {
+                    tool_defined_called_for_callback.store(true, Ordering::SeqCst);
+                    ready(true)
+                },
+            ),
+        ];
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(|_options| async {
+                Some(ToolApprovalStatusKind::Denied.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::denied());
+        assert!(!tool_defined_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn resolve_tool_approval_uses_per_tool_callback_with_context() {
         let tool_call = approval_tool_call("weather");
         let tools = vec![Tool::new("weather", approval_tool_schema())];
@@ -9010,6 +9056,62 @@ mod tests {
             &json!({ "allow": false })
         );
         assert_eq!(options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_treats_none_from_per_tool_callback_as_not_applicable() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_approval_function("weather", |_input, _options| async { None });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::NotApplicable);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_no_tool_context_without_context_schema() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let seen_options = Arc::new(Mutex::new(None::<SingleToolApprovalOptions>));
+        let seen_options_for_callback = Arc::clone(&seen_options);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |_input, options| {
+                let seen_options = Arc::clone(&seen_options_for_callback);
+                async move {
+                    seen_options
+                        .lock()
+                        .expect("seen options lock")
+                        .replace(options);
+                    Some(ToolApprovalStatusKind::UserApproval.into())
+                }
+            },
+        );
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
+        assert!(
+            seen_options
+                .lock()
+                .expect("seen options lock")
+                .as_ref()
+                .expect("options captured")
+                .tool_context
+                .is_none()
+        );
     }
 
     #[test]
