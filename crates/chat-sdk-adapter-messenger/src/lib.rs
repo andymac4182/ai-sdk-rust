@@ -2,26 +2,18 @@
 //!
 //! 1:1 port (in progress) of `packages/adapter-messenger/src/index.ts`.
 //!
-//! Messenger maps each (page, user) DM pair to one chat-sdk thread.
-//! The thread id encoding is `messenger:<page_id>:<user_id>`.
+//! Messenger maps each user's DM to one chat-sdk thread. The thread
+//! id encoding is `messenger:<recipient_id>` (single colon, matching
+//! upstream's `encodeThreadId({recipientId})` -> `messenger:<id>`).
+//! The page id is implicit in the page access token (Meta's
+//! `/me/messages` endpoint).
 //!
-//! **What this slice ships (slice 132):**
-//!
-//! - Crate skeleton + `Cargo.toml`.
-//! - [`MessengerAdapter`] struct holding page config (page access
-//!   token + verify token + optional Graph API base URL) impl-ing
-//!   the chat-sdk [`chat_sdk_chat::types::Adapter`] trait with
-//!   `name = "messenger"`.
-//! - [`MessengerAdapterOptions`] config struct.
-//! - [`encode_thread_id`] / [`decode_thread_id`] /
-//!   [`is_messenger_thread_id`] — pure helpers for the upstream
-//!   `messenger:<page_id>:<user_id>` wire format.
-//!
-//! **What is deferred:**
-//!
-//! - HTTP I/O against `graph.facebook.com` for the Send API,
-//!   webhook signature verification, persistent menu / quick
-//!   reply rendering.
+//! Slice 173 corrected the wire format: earlier slices used the
+//! non-upstream `messenger:<page_id>:<user_id>` shape and `/v22.0/
+//! <page_id>/messages`. The corrected port matches upstream's
+//! `messenger:<recipient_id>` + `/v22.0/me/messages` and rejects
+//! multi-colon thread ids in `decode_thread_id` (1:1 with upstream
+//! `decodeThreadId` which throws `ValidationError` on multi-colon).
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
@@ -116,10 +108,21 @@ impl MessengerAdapter {
         self.options.effective_graph_base()
     }
 
-    /// Build the Send API URL for a page. 1:1 with upstream's
-    /// inline `<graph_base>/v22.0/<page_id>/messages` template.
-    fn send_url(&self, page_id: &str) -> String {
-        format!("{}/v22.0/{page_id}/messages", self.graph_base())
+    /// Graph API version used in URLs. 1:1 with upstream's
+    /// `apiVersion = "v22.0"` default.
+    pub const GRAPH_API_VERSION: &'static str = "v22.0";
+
+    /// Build the Send API URL. 1:1 with upstream's call to
+    /// `graphApiFetch("me/messages", "POST", body)` which composes
+    /// `<graph_base>/<api_version>/me/messages?access_token=<token>`.
+    /// The page id is implicit in the access token (Meta routes by
+    /// the token rather than a URL-path page id).
+    fn send_url(&self) -> String {
+        format!(
+            "{}/{}/me/messages",
+            self.graph_base(),
+            Self::GRAPH_API_VERSION
+        )
     }
 }
 
@@ -132,9 +135,9 @@ impl Adapter for MessengerAdapter {
     /// Post a text message via the Messenger Send API. 1:1 with
     /// upstream's `adapter.postMessage`:
     ///
-    /// - Decodes `messenger:<page_id>:<user_id>`.
-    /// - POSTs JSON `{recipient: {id: user_id}, message: {text}}` to
-    ///   `<graph_base>/v22.0/<page_id>/messages?access_token=<page_token>`.
+    /// - Decodes `messenger:<recipient_id>`.
+    /// - POSTs JSON `{recipient: {id: recipient_id}, message: {text}}` to
+    ///   `<graph_base>/v22.0/me/messages?access_token=<page_token>`.
     /// - Returns the Send API's `message_id` as the chat-sdk
     ///   message id.
     async fn post_message(
@@ -154,11 +157,11 @@ impl Adapter for MessengerAdapter {
         // than an Authorization header.
         let url = format!(
             "{}?access_token={}",
-            self.send_url(&decoded.page_id),
+            self.send_url(),
             self.page_access_token()
         );
         let body = serde_json::json!({
-            "recipient": { "id": decoded.user_id },
+            "recipient": { "id": decoded.recipient_id },
             "message": { "text": text },
         });
 
@@ -257,11 +260,11 @@ impl Adapter for MessengerAdapter {
 
         let url = format!(
             "{}?access_token={}",
-            self.send_url(&decoded.page_id),
+            self.send_url(),
             self.page_access_token()
         );
         let body = serde_json::json!({
-            "recipient": { "id": decoded.user_id },
+            "recipient": { "id": decoded.recipient_id },
             "sender_action": "typing_on",
         });
 
@@ -288,37 +291,42 @@ impl Adapter for MessengerAdapter {
     }
 }
 
-/// Encode a Messenger thread id. 1:1 with upstream's inline format:
-/// `messenger:<page_id>:<user_id>`.
-pub fn encode_thread_id(page_id: &str, user_id: &str) -> String {
-    format!("{THREAD_ID_PREFIX}{page_id}:{user_id}")
+/// Encode a Messenger thread id. 1:1 with upstream's
+/// `encodeThreadId({recipientId}) -> "messenger:<recipientId>"`
+/// (single colon).
+pub fn encode_thread_id(recipient_id: &str) -> String {
+    format!("{THREAD_ID_PREFIX}{recipient_id}")
 }
 
 /// Components of a decoded Messenger thread id. 1:1 with upstream's
-/// returned object shape from `decodeThreadId(threadId)`.
+/// returned object shape `{recipientId}` from
+/// `decodeThreadId(threadId)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DecodedMessengerThreadId {
-    /// Page identifier.
-    pub page_id: String,
-    /// User identifier (PSID — page-scoped user id).
-    pub user_id: String,
+    /// Recipient (PSID - page-scoped user id) the thread points
+    /// at. Upstream calls this `recipientId`.
+    pub recipient_id: String,
 }
 
 /// Decode a Messenger thread id. 1:1 port of upstream
 /// `decodeThreadId(threadId)`. Returns `None` for any value that
-/// doesn't carry the `messenger:` prefix or lacks both
-/// `page_id` and `user_id` separated by a colon.
+/// doesn't carry the `messenger:` prefix, has an empty recipient,
+/// or contains an extra colon. Upstream throws `ValidationError`
+/// in all those cases; the Rust port returns `None` and lets the
+/// caller (`post_message` etc.) surface it as
+/// `AdapterError::InvalidPayload`.
 pub fn decode_thread_id(thread_id: &str) -> Option<DecodedMessengerThreadId> {
     let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
-    let mut parts = suffix.splitn(2, ':');
-    let page_id = parts.next()?;
-    let user_id = parts.next()?;
-    if page_id.is_empty() || user_id.is_empty() {
+    if suffix.is_empty() {
+        return None;
+    }
+    if suffix.contains(':') {
+        // Upstream's decodeThreadId throws on extra colons:
+        // `messenger:foo:bar` -> ValidationError.
         return None;
     }
     Some(DecodedMessengerThreadId {
-        page_id: page_id.to_string(),
-        user_id: user_id.to_string(),
+        recipient_id: suffix.to_string(),
     })
 }
 
@@ -358,49 +366,59 @@ mod tests {
         );
     }
 
+    // ---------- 4 cases ported from upstream
+    // `packages/adapter-messenger/src/index.test.ts` "thread ID
+    // encoding" describe block ----------
+
     #[test]
-    fn encode_thread_id_builds_the_upstream_format() {
-        assert_eq!(
-            encode_thread_id("PAGE123", "USER456"),
-            "messenger:PAGE123:USER456"
-        );
+    fn encodes_and_decodes_thread_ids() {
+        // Upstream:
+        //   adapter.encodeThreadId({recipientId: "USER_123"})
+        //     === "messenger:USER_123"
+        //   adapter.decodeThreadId("messenger:USER_123")
+        //     === { recipientId: "USER_123" }
+        assert_eq!(encode_thread_id("USER_123"), "messenger:USER_123");
+        let decoded = decode_thread_id("messenger:USER_123").unwrap();
+        assert_eq!(decoded.recipient_id, "USER_123");
     }
 
     #[test]
-    fn decode_thread_id_parses_page_and_user() {
-        let decoded = decode_thread_id("messenger:PAGE123:USER456").unwrap();
-        assert_eq!(decoded.page_id, "PAGE123");
-        assert_eq!(decoded.user_id, "USER456");
+    fn throws_on_invalid_thread_ids() {
+        // Upstream `decodeThreadId` throws ValidationError for
+        // "invalid", "messenger:", and "slack:C123:ts". Rust port
+        // returns None (callers convert to InvalidPayload).
+        assert!(decode_thread_id("invalid").is_none());
+        assert!(decode_thread_id("messenger:").is_none());
+        assert!(decode_thread_id("slack:C123:ts").is_none());
     }
 
     #[test]
-    fn decode_thread_id_returns_none_for_other_prefixes() {
-        assert!(decode_thread_id("slack:C1:1.0").is_none());
-        assert!(decode_thread_id("whatsapp:1:2").is_none());
+    fn rejects_thread_id_with_extra_colons() {
+        // Upstream: decodeThreadId("messenger:foo:bar") throws.
+        assert!(decode_thread_id("messenger:foo:bar").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_thread_id() {
+        // Upstream: decodeThreadId("") throws.
         assert!(decode_thread_id("").is_none());
     }
 
-    #[test]
-    fn decode_thread_id_returns_none_for_missing_page_or_user() {
-        assert!(decode_thread_id("messenger:onlyone").is_none());
-        assert!(decode_thread_id("messenger::USER").is_none());
-        assert!(decode_thread_id("messenger:PAGE:").is_none());
-    }
+    // ---------- additive Rust-side coverage ----------
 
     #[test]
     fn is_messenger_thread_id_detects_the_prefix() {
-        assert!(is_messenger_thread_id("messenger:PAGE:USER"));
+        assert!(is_messenger_thread_id("messenger:USER"));
         assert!(!is_messenger_thread_id("telegram:1"));
         assert!(!is_messenger_thread_id(""));
     }
 
     #[test]
     fn encode_decode_round_trip() {
-        for (p, u) in [("PAGE", "USER"), ("1", "2"), ("with-dashes", "with.dots")] {
-            let encoded = encode_thread_id(p, u);
+        for r in ["USER", "1", "with-dashes", "psid_123_abc"] {
+            let encoded = encode_thread_id(r);
             let decoded = decode_thread_id(&encoded).unwrap();
-            assert_eq!(decoded.page_id, p);
-            assert_eq!(decoded.user_id, u);
+            assert_eq!(decoded.recipient_id, r);
         }
     }
 
@@ -421,7 +439,7 @@ mod tests {
     fn adapter_edit_message_is_unsupported_with_validation_error() {
         let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.edit_message("messenger:PAGE:USER", "msg", "hi"));
+        let err = block_on(adapter.edit_message("messenger:USER", "msg", "hi"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("does not support editing"));
@@ -434,7 +452,7 @@ mod tests {
     fn adapter_delete_message_is_unsupported_with_validation_error() {
         let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.delete_message("messenger:PAGE:USER", "msg"));
+        let err = block_on(adapter.delete_message("messenger:USER", "msg"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("does not support deleting"));
@@ -447,7 +465,7 @@ mod tests {
     fn adapter_add_reaction_is_unsupported_with_validation_error() {
         let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.add_reaction("messenger:PAGE:USER", "msg", "👍"));
+        let err = block_on(adapter.add_reaction("messenger:USER", "msg", "👍"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("does not support reactions"));
@@ -471,12 +489,14 @@ mod tests {
 
     #[test]
     fn adapter_send_url_builds_the_upstream_endpoint() {
+        // 1:1 with upstream graphApiFetch("me/messages", ...):
+        // <graph_base>/<api_version>/me/messages.
         let adapter = MessengerAdapter::new(
             MessengerAdapterOptions::new("p", "v").with_graph_base("https://graph.example.test"),
         );
         assert_eq!(
-            adapter.send_url("PAGE123"),
-            "https://graph.example.test/v22.0/PAGE123/messages"
+            adapter.send_url(),
+            "https://graph.example.test/v22.0/me/messages"
         );
     }
 
