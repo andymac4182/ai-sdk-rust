@@ -168,6 +168,27 @@ pub fn blockquote(children: Vec<Node>) -> Blockquote {
     }
 }
 
+/// Extract plain text from an mdast tree. 1:1 port of upstream
+/// `toPlainText(ast: Root): string`, which calls the
+/// mdast-util-to-string npm helper. The Rust [`markdown`] crate's
+/// `Node::to_string()` performs the same recursive-children-with-
+/// leaf-value-concatenation transform.
+pub fn to_plain_text(ast: &Node) -> String {
+    ast.to_string()
+}
+
+/// Parse a Markdown string and extract its plain text. 1:1 port of upstream
+/// `markdownToPlainText(markdown): string` — `parseMarkdown` then
+/// [`to_plain_text`]. Returns an empty string when the input fails to
+/// parse (mirrors upstream behavior since the upstream `parseMarkdown`
+/// also returns an empty Root on truly empty input).
+pub fn markdown_to_plain_text(input: &str) -> String {
+    match parse_markdown(input) {
+        Ok(ast) => to_plain_text(&ast),
+        Err(_) => String::new(),
+    }
+}
+
 // ============================================================================
 // Type guards — `is_*_node` family
 //
@@ -547,6 +568,42 @@ mod tests {
         // Non-leaf nodes return an empty string per upstream behavior.
         assert_eq!(get_node_value(&make_paragraph()), "");
         assert_eq!(get_node_value(&make_strong()), "");
+    }
+
+    // ------------------------------------------------------------------
+    // to_plain_text / markdown_to_plain_text — slice 28 ports of the
+    // corresponding upstream describe blocks.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn to_plain_text_extracts_text_from_a_root_paragraph_subtree() {
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![
+            Node::Text(text("hello ")),
+            Node::Strong(strong(vec![Node::Text(text("bold"))])),
+            Node::Text(text(" world")),
+        ]))]));
+        assert_eq!(to_plain_text(&ast), "hello bold world");
+    }
+
+    #[test]
+    fn to_plain_text_returns_empty_for_an_empty_root() {
+        let ast = Node::Root(root(vec![]));
+        assert_eq!(to_plain_text(&ast), "");
+    }
+
+    #[test]
+    fn markdown_to_plain_text_parses_and_extracts_in_one_step() {
+        assert_eq!(markdown_to_plain_text("**hello** _world_"), "hello world");
+        assert_eq!(markdown_to_plain_text("plain"), "plain");
+        // GFM strikethrough text is still part of the plain output —
+        // upstream mdastToString does not strip ~~ marks at the AST
+        // level (they're already AST-marker-free in mdast).
+        assert_eq!(markdown_to_plain_text("~~struck~~"), "struck");
+    }
+
+    #[test]
+    fn markdown_to_plain_text_returns_empty_for_empty_input() {
+        assert_eq!(markdown_to_plain_text(""), "");
     }
 
     #[test]
