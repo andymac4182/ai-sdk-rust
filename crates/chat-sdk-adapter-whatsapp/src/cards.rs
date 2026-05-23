@@ -364,6 +364,208 @@ mod tests {
         assert!(result.contains("Key: Value"));
     }
 
+    // ---------- cardToWhatsAppText (10 upstream cases) ----------
+
+    use chat_sdk_chat::cards::{
+        ActionsKind, ButtonElement, ButtonKind, ButtonStyle, DividerElement, DividerKind,
+        ImageElement, ImageKind, LinkButtonElement, LinkButtonKind, SectionElement, SectionKind,
+    };
+
+    fn text_child(content: &str, style: Option<TextStyle>) -> CardChild {
+        CardChild::Text(TextElement {
+            content: content.to_string(),
+            style,
+            kind: TextKind::Text,
+        })
+    }
+
+    #[test]
+    fn cardtotext_should_render_simple_card_with_title() {
+        let c = card(Some("Hello World"), None, vec![]);
+        assert_eq!(card_to_whatsapp_text(&c), "*Hello World*");
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_title_and_subtitle() {
+        let c = card(Some("Order #1234"), Some("Status update"), vec![]);
+        assert_eq!(card_to_whatsapp_text(&c), "*Order #1234*\nStatus update");
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_text_content() {
+        let c = card(
+            Some("Notification"),
+            None,
+            vec![text_child("Your order has been shipped!", None)],
+        );
+        assert_eq!(
+            card_to_whatsapp_text(&c),
+            "*Notification*\n\nYour order has been shipped!"
+        );
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_fields_using_whatsapp_bold() {
+        let c = card(
+            Some("Order Details"),
+            None,
+            vec![CardChild::Fields(FieldsElement {
+                children: vec![
+                    FieldElement {
+                        label: "Order ID".to_string(),
+                        value: "12345".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                    FieldElement {
+                        label: "Status".to_string(),
+                        value: "Shipped".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                ],
+                kind: FieldsKind::Fields,
+            })],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(result.contains("*Order ID:* 12345"), "got: {result}");
+        assert!(result.contains("*Status:* Shipped"), "got: {result}");
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_link_buttons_as_text_with_urls() {
+        let c = card(
+            Some("Actions"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::LinkButton(LinkButtonElement {
+                        label: "Track Order".to_string(),
+                        style: None,
+                        kind: LinkButtonKind::LinkButton,
+                        url: "https://example.com/track".to_string(),
+                    }),
+                    ActionsChild::LinkButton(LinkButtonElement {
+                        label: "Get Help".to_string(),
+                        style: None,
+                        kind: LinkButtonKind::LinkButton,
+                        url: "https://example.com/help".to_string(),
+                    }),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(
+            result.contains("Track Order: https://example.com/track"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("Get Help: https://example.com/help"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_action_buttons_as_bracketed_text() {
+        let c = card(
+            Some("Approve?"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Button(ButtonElement {
+                        action_type: None,
+                        callback_url: None,
+                        disabled: None,
+                        id: "approve".to_string(),
+                        label: "Approve".to_string(),
+                        style: Some(ButtonStyle::Primary),
+                        kind: ButtonKind::Button,
+                        value: None,
+                    }),
+                    ActionsChild::Button(ButtonElement {
+                        action_type: None,
+                        callback_url: None,
+                        disabled: None,
+                        id: "reject".to_string(),
+                        label: "Reject".to_string(),
+                        style: Some(ButtonStyle::Danger),
+                        kind: ButtonKind::Button,
+                        value: None,
+                    }),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(result.contains("[Approve]"), "got: {result}");
+        assert!(result.contains("[Reject]"), "got: {result}");
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_image_url() {
+        let c = card(
+            Some("Image Card"),
+            None,
+            vec![CardChild::Image(ImageElement {
+                url: "https://example.com/image.png".to_string(),
+                alt: Some("Example image".to_string()),
+                kind: ImageKind::Image,
+            })],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(
+            result.contains("Example image: https://example.com/image.png"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_divider() {
+        let c = card(
+            None,
+            None,
+            vec![
+                text_child("Before", None),
+                CardChild::Divider(DividerElement {
+                    kind: DividerKind::Divider,
+                }),
+                text_child("After", None),
+            ],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(result.contains("---"), "got: {result}");
+    }
+
+    #[test]
+    fn cardtotext_should_render_card_with_section() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Section(SectionElement {
+                children: vec![text_child("Section content", None)],
+                kind: SectionKind::Section,
+            })],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(result.contains("Section content"), "got: {result}");
+    }
+
+    #[test]
+    fn cardtotext_should_handle_text_with_different_styles() {
+        let c = card(
+            None,
+            None,
+            vec![
+                text_child("Normal text", None),
+                text_child("Bold text", Some(TextStyle::Bold)),
+                text_child("Muted text", Some(TextStyle::Muted)),
+            ],
+        );
+        let result = card_to_whatsapp_text(&c);
+        assert!(result.contains("Normal text"), "got: {result}");
+        assert!(result.contains("*Bold text*"), "got: {result}");
+        assert!(result.contains("_Muted text_"), "got: {result}");
+    }
+
     // ---------- additive Rust-side coverage ----------
 
     #[test]
