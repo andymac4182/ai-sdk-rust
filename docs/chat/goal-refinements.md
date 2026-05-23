@@ -488,3 +488,96 @@ user_transcript_key), 97 (chat row bumped to 82%).
   trait-extension slice with `async-trait` for dyn safety would
   unblock 5+ chat modules at once and accelerate progress
   measurably.
+
+### 2026-05-24 - slices 103..107
+
+**Slices covered**
+
+103 (cards 4 more 1:1 cases), 104 (chat row bumped to 84%),
+105 (message buffer-strip helper: Attachment::without_inline_data
++ Message::to_serialized_stripped, message 10/19 -> 12/19), 106
+(callback_url additive helpers: is_callback_value +
+callback_cache_key, callback_url tests 5 -> 10), 107 (reviver
+revive_str helper: 1:1 with JSON.parse(text, reviver), chat
+bumped 84% -> 85%; reviver tests 6 -> 10).
+
+**What the brief got right (validated)**
+
+- The "model/adapter split" rule from slices 93-94 keeps paying
+  off. Slice 105 pulled `Attachment::without_inline_data` (pure
+  helper) plus `Message::to_serialized_stripped` (uses it across
+  attachments) without touching the Adapter trait, mirroring
+  upstream Message.toJSON()'s buffer-strip behavior. The
+  remaining 5 subject getter cases stay deferred until trait
+  extension - the line between "ship now" and "defer" remains
+  clean.
+- Pure-helper formatters analogous to user_transcript_key are
+  high-yield: slice 106 added `is_callback_value` and
+  `callback_cache_key` to mirror upstream's inline
+  `value.startsWith(...)` and `${CALLBACK_CACHE_KEY_PREFIX}${token}`
+  patterns. These get pulled out of upstream's inline templates
+  with zero behavioral risk and let the future stateful slice
+  call into a single helper rather than re-inlining the format
+  literal.
+- Combining helpers ("parse + revive in one step", "encode +
+  prefix", etc.) tend to map directly to canonical upstream call
+  sites. Slice 107's `revive_str` is the 1:1 of upstream's
+  canonical `JSON.parse(text, reviver)` and earns its
+  test-count.
+
+**What the brief got wrong or left out**
+
+- **Test-count bumps in `package-progress-estimates.tsv` need
+  the same care as the per-test ledger.** Slice 105 missed
+  bumping the message count in the tsv basis text; slice 107
+  caught both the reviver count AND the percentage. Open
+  refinement: every per-module slice should re-run
+  `scripts/package-progress-table.sh` and verify the basis-text
+  module count matches the actual `cargo test ... | grep` output
+  before the merge-back. Codify as a final-step checklist item
+  in `scripts/codex-goal-chat/port-chat-sdk.md`.
+- **The atomic merge-back protocol works when the main worktree
+  is clean and the lock dir is owned only by the current
+  session.** Slice 105 hit a hang when the bash backgrounded
+  itself and the lock dir stayed held; killing the parent shell
+  recovered. Open refinement: the merge-back command should
+  always foreground; explicitly pass `run_in_background: false`
+  on the Bash call so the harness doesn't decide for us.
+- **Additive pure helpers are still worth shipping in their own
+  slices even when they don't bump the percentage.** Slice 106
+  added 5 callback_url tests but didn't move the percentage
+  (the % math weights upstream-mapped cases more than additive
+  ones). That is fine - the helpers shrink the future stateful
+  slice's surface and make it strictly less complex.
+
+**Stale or misleading guidance**
+
+- Refinement entry on slice 97 said: "use `grep test result`
+  AFTER the && validation succeeds". Slice 105's first attempt
+  did exactly that (test ran before push). The remaining
+  stale-guidance issue: the merge-back command has gotten long
+  enough that the `until mkdir lock; ...; rmdir lock` chain is
+  ~8 piped commands. A `Makefile` target or a helper script
+  would be safer than relying on bash chain hygiene each slice.
+  Open refinement: ship a `scripts/codex-goal-chat/merge-back.sh`
+  that takes the slice number and message, runs the gate, and
+  pushes - then per-slice commits only have to call the script.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending (apply on
+  next dedicated refinement slice).
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- Same single open item as slice 97's entry: the
+  `chat::types::Adapter` / `chat::types::StateAdapter` trait
+  extension is now the only realistic path to bumping chat past
+  ~88%. Recent slices have been hand-picking pure helpers; the
+  pure surface is approaching exhausted. Next refinement cycle
+  should plan the trait-extension slice explicitly (method list,
+  `async-trait` dependency, MemoryStateAdapter trait impl shim)
+  so the next 5 slices can land it across the trait + 4 consumer
+  modules (callback_url, transcripts, thread_history,
+  postable_object).
