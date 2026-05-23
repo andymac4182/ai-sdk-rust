@@ -122,6 +122,25 @@ impl SlackAdapter {
     fn method_url(&self, method: &str) -> String {
         format!("{}/{method}", self.api_base())
     }
+
+    /// Derive channel id from a Slack thread id. 1:1 with upstream
+    /// `adapter.channelIdFromThreadId(threadId)` which decodes the
+    /// thread and returns `slack:<channel>`. Returns `None` when
+    /// `thread_id` isn't a Slack-encoded value.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(format!("{THREAD_ID_PREFIX}{}", decoded.channel_id))
+    }
+
+    /// Predicate: is the conversation a 1:1 DM? 1:1 with upstream's
+    /// `adapter.isDM(threadId)` which decodes and tests
+    /// `channel.startsWith("D")` (Slack convention: DM channel ids
+    /// start with `D`). Returns `None` when `thread_id` isn't a
+    /// Slack-encoded value.
+    pub fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(decoded.channel_id.starts_with('D'))
+    }
 }
 
 #[async_trait]
@@ -671,6 +690,57 @@ mod tests {
         assert!(decode_thread_id("slack:onlyone").is_none());
         assert!(decode_thread_id("slack::1234.5").is_none());
         assert!(decode_thread_id("slack:C123:").is_none());
+    }
+
+    #[test]
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream's `channelIdFromThreadId(threadId)` (returns
+    // `slack:<channel>`) and `isDM(threadId)` (true iff the underlying
+    // Slack channel id starts with `D`).
+
+    #[test]
+    fn channel_id_from_thread_id_strips_the_thread_ts_suffix() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("bot-token", "signing"));
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("slack:C123:1.0")
+                .as_deref(),
+            Some("slack:C123")
+        );
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("slack:DABC:1700000000.000200")
+                .as_deref(),
+            Some("slack:DABC")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_none_for_non_slack_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
+        assert!(adapter.channel_id_from_thread_id("discord:G:C:1").is_none());
+        assert!(adapter.channel_id_from_thread_id("").is_none());
+    }
+
+    #[test]
+    fn is_dm_true_for_d_prefixed_channels() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
+        assert_eq!(adapter.is_dm("slack:DABC:1.0"), Some(true));
+        assert_eq!(adapter.is_dm("slack:D1:1.0"), Some(true));
+    }
+
+    #[test]
+    fn is_dm_false_for_c_and_g_prefixed_channels() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
+        assert_eq!(adapter.is_dm("slack:C123:1.0"), Some(false));
+        assert_eq!(adapter.is_dm("slack:G123:1.0"), Some(false));
+    }
+
+    #[test]
+    fn is_dm_returns_none_for_non_slack_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
+        assert_eq!(adapter.is_dm("discord:G:C"), None);
+        assert_eq!(adapter.is_dm(""), None);
     }
 
     #[test]

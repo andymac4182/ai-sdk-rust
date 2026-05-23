@@ -135,6 +135,22 @@ impl GchatAdapter {
     fn messages_create_url(&self, space_id: &str) -> String {
         format!("{}/spaces/{space_id}/messages", self.api_base())
     }
+
+    /// Derive channel id from a Google Chat thread id. 1:1 with
+    /// upstream `adapter.channelIdFromThreadId(threadId)` which
+    /// decodes and returns `gchat:<spaceName>`. Returns `None` when
+    /// `thread_id` isn't a Google Chat-encoded value.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        let decoded = crate::thread_utils::decode_thread_id(thread_id).ok()?;
+        Some(format!("gchat:{}", decoded.space_name))
+    }
+
+    /// Predicate: is the conversation a 1:1 DM? 1:1 with upstream's
+    /// `adapter.isDM(threadId)` which delegates to `isDMThread` and
+    /// just checks for the `:dm` suffix.
+    pub fn is_dm(&self, thread_id: &str) -> bool {
+        crate::thread_utils::is_dm_thread(thread_id)
+    }
 }
 
 #[async_trait]
@@ -468,6 +484,45 @@ mod tests {
     fn decode_thread_id_returns_none_for_missing_space() {
         assert!(decode_thread_id("gchat:").is_none());
         assert!(decode_thread_id("gchat::BBBB").is_none());
+    }
+
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream's `channelIdFromThreadId(threadId)` (returns
+    // `gchat:<spaceName>`) and `isDM(threadId)` (delegates to
+    // `isDMThread` which checks the `:dm` suffix).
+
+    #[test]
+    fn channel_id_from_thread_id_returns_the_space_name() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("gchat:spaces/ABC123:dGVzdA")
+                .as_deref(),
+            Some("gchat:spaces/ABC123")
+        );
+        // DM thread id: still produces the bare space.
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("gchat:spaces/ABC123:dm")
+                .as_deref(),
+            Some("gchat:spaces/ABC123")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_none_for_non_gchat_ids() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        assert!(adapter.channel_id_from_thread_id("teams:1:2:3").is_none());
+        assert!(adapter.channel_id_from_thread_id("").is_none());
+    }
+
+    #[test]
+    fn is_dm_true_only_for_dm_suffixed_ids() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        assert!(adapter.is_dm("gchat:spaces/ABC123:dm"));
+        assert!(!adapter.is_dm("gchat:spaces/ABC123:dGVzdA"));
+        assert!(!adapter.is_dm("gchat:spaces/ABC123"));
+        assert!(!adapter.is_dm(""));
     }
 
     #[test]
