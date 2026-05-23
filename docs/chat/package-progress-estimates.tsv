@@ -7,7 +7,7 @@ adapter-telegram	15	Slice 130 scaffold + slice 145 post_message HTTP. 14 tests. 
 adapter-github	15	Slice 131 scaffold + slice 146 post_message HTTP (issue/PR comment-create). 14 tests.
 adapter-messenger	15	Slice 132 scaffold + slice 147 post_message HTTP (Send API). 12 tests.
 adapter-whatsapp	15	Slice 133 scaffold + slice 148 post_message HTTP (Cloud API). 13 tests.
-adapter-discord	10	Crate scaffold (slice 134) w/ @me DM sentinel. 13 tests. HTTP I/O deferred.
+adapter-discord	15	Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests.
 adapter-linear	10	Crate scaffold (slice 136). 11 tests. HTTP I/O + GraphQL deferred.
 adapter-gchat	10	Crate scaffold (slice 137) w/ empty-thread top-level sentinel. 14 tests. OAuth2 + HTTP I/O deferred.
 adapter-teams	10	Crate scaffold (slice 138) rsplit Bot Framework conv ids. 12 tests. HTTP I/O + Bot Framework auth deferred.
