@@ -242,6 +242,26 @@ intentionally non-portable.
      by upstream name. The callback graduates to a trait method on the
      placeholder `Adapter` trait when the matching adapter module
      lands. Slice 23's `Attachment` and `LinkPreview` established this.
+   - **Discriminated union recipe.** Port a TypeScript discriminated
+     union (`export type X = A | B | C` where each variant struct
+     carries `type: "literal"`) as a Rust `#[serde(untagged)]` enum
+     wrapping variant structs that each carry a per-struct unit-enum
+     discriminator field (e.g. `ButtonKind::Button` serializing as
+     `"button"`). Serde's untagged matcher disambiguates variants by
+     the existing `type` field — no outer wrapper, JSON shape matches
+     upstream exactly. **Always provide `From<VariantStruct>` impls on
+     the union enum** so call sites can write
+     `actions(vec![button(...).into(), link_button(...).into()])`
+     reading 1:1 with upstream `Actions([Button(...), LinkButton(...)])`.
+     Slices 34's `ActionsChild` and 35's `CardChild` established this.
+   - **Data-shape vs behavior slice split.** When porting a module
+     that mixes "data types + builders" with "a renderer/extractor
+     that walks every variant", ship the data-shape surface first as
+     one cohesive slice (once the unions land), then the behavior in a
+     follow-up slice. The behavior slice gets to iterate every variant
+     exhaustively against the now-stable shape. Slice 30 (`table_to_ascii`
+     ports after the markdown AST in slice 26) and slice 35 (cards
+     data shape) -> deferred `Card.toAscii` (behavior) are canonical.
 6. **Never panic while holding a `std::sync::Mutex` guard you might
    want to reuse.** A panic inside a `lock().expect(...)`-then-`expect`
    chain poisons the mutex for every sibling test that runs in

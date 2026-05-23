@@ -207,3 +207,33 @@ Slices reviewed: slice 26 markdown architectural scaffold (`927a40f`), slice 27 
 
 - Replace the slice-5 refinement entry's "expect 25-30 slices" estimate with the slice-30 recalibration (60-80 slices for `packages/chat`). Will be done in the next brief revision if not before.
 - The Ruby progress-table generator could be patched to call `force_encoding("UTF-8")` and skip non-ASCII gracefully. That's a shared-script edit that needs coordination with the ai-sdk session - defer until both sides agree on the contract.
+
+### 2026-05-23 - slices 32..35
+
+Slices reviewed: slice 32 cards leaf elements (`f1ecdc8`), slice 33 modals leaf interactive elements (`350301e`), slice 34 cards ActionsElement + ActionsChild union (`826ecec`), slice 35 cards SectionElement + CardChild union + CardElement + Card (`ebfdc4d`). (Slice 31 was the last refinement, covering 26-30.)
+
+**What the brief got wrong or left out**
+
+- **Discriminated unions over Rust structs that already carry their own discriminator work cleanly with `#[serde(untagged)]`.** Slices 34 (`ActionsChild`) and 35 (`CardChild`) both use this pattern. Per-struct unit-enum discriminators (e.g. `ButtonKind::Button` -> wire `"button"`, `LinkButtonKind::LinkButton` -> wire `"link-button"`) mean each variant struct already has a unique `type` field, and serde's untagged matcher disambiguates from that without an outer wrapper. The end JSON is identical to upstream's discriminated-union shape. Brief should canonize this as the "ported-from-TS-discriminated-union" recipe: per-struct unit-enum discriminator + `#[serde(untagged)]` parent enum + `From<T>` impls for ergonomic construction.
+- **`From<T>` impls on union enums materially improve call-site readability.** Slice 34 added `From<ButtonElement>` / `From<LinkButtonElement>` / `From<SelectElement>` / `From<RadioSelectElement>` on `ActionsChild`, and slice 35 added all 8 variant impls on `CardChild`. The cost is mechanical (one impl per variant); the payoff is `actions(vec![button(...).into(), link_button(...).into(), ...])` reading exactly like upstream's `Actions([Button(...), LinkButton(...)])`. Brief should require these impls on every untagged union.
+- **Slice 35 closed cards's data-shape surface in one slice.** With the slice-34 pattern proven, the SectionElement + CardChild + CardElement + Card builder + is_card_element bundle landed cleanly as a single ~250-line slice. Lesson: once the union-of-structs recipe is established, follow-up "build the union + root + builder + type-guard" slices are mechanically reproducible and shouldn't be split.
+- **Card.toAscii fallback rendering is a behavior slice, not a data-shape slice.** It belongs after the entire data-shape surface is in place, so the renderer can iterate every variant exhaustively. Deferring it to its own slice (rather than shipping it alongside slice 35) keeps slice 35 reviewable.
+- **The 5-slice refinement cadence catches every meta-pattern shift.** Slice 31's refinement codified the markdown stack; slice 36 codifies the union-of-structs recipe. Without the cadence both would still be tribal knowledge in the brief author's head.
+
+**Stale or misleading guidance**
+
+- The brief's priority 5 (placeholder pattern) covers placeholder traits / placeholder type aliases / data-shape-plus-elided-callback. After slice 34-35 a fourth pattern is canonical: **discriminated unions over already-tagged structs via `#[serde(untagged)]` + `From<T>`**. Add as priority 5(d).
+- The brief's slice-budget estimate from slice 31's refinement said "~60-80 slices to verify `packages/chat`". After slices 32-35 we are at 35 slices and `packages/chat` is at 56%. Recalibrate: 70-100 slices to *verify* (full 1:1 test floor), but the data-shape surface for cards/modals/section/card is *done* in well under that, so the next phase is largely about porting handler/event behavior + the chat-singleton consumer code, plus the deep markdown tail.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`:
+  - **Discriminated union recipe** added as priority 5(d): port a TypeScript discriminated union (`A | B | C` where each carries `type: "x"`) as a Rust `#[serde(untagged)]` enum whose variants are structs that each carry a per-struct unit-enum discriminator (e.g. `ButtonKind::Button` -> `"button"`). Always provide `From<VariantStruct>` impls on the union enum.
+  - **Data-shape vs behavior slice split** added under priority 4 (layered types): when porting an upstream module whose surface is "data types + builders + then a render/extract behavior", ship the data-shape surface FIRST (one cohesive slice once the unions land), then the behavior in a follow-up slice. Mention slice 30 (`table_to_ascii` after the markdown AST) and slice 35 (data shape) -> deferred `Card.toAscii` (behavior) as canonical examples.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- The `markdown` module is 33/122 cases. The remaining cases are mostly `stringify_markdown` (writing the inverse of the parser) which markdown-rs doesn't ship. That's a substantial slice (probably 2-3 of its own) and worth its own architectural-decision pass: either write a hand-rolled stringifier matching upstream's `remark-stringify` rules, or skip `stringify_markdown` and document it as "use upstream remark-stringify via a separate Rust crate when needed by adapter".
+- The `modals` module's `ModalElement` + `ModalChild` union is straightforward now that the `CardChild` pattern is canonical - should ship as one slice mirroring slice 35.
+- `chat-sdk-adapter-shared` is stuck at 25% because its remaining three modules (`adapter-utils`/`buffer-utils`/`card-utils`) all import from `chat`'s `cards.ts`. With slice 35 those imports are now available, so `chat-sdk-adapter-shared` is unblocked too.
