@@ -594,6 +594,71 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Minimal raw-message payload used by adapters that can hand off the
+/// platform-native body opaquely. 1:1 port of upstream
+/// `interface RawMessage<TRawMessage = unknown>`.
+///
+/// The default `TRaw = serde_json::Value` mirrors upstream's
+/// `TRawMessage = unknown`. Concrete adapter ports may substitute a
+/// platform-specific type (`SlackEvent`, `TelegramUpdate`, …) once their
+/// schemas land.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RawMessage<TRaw = serde_json::Value> {
+    pub id: String,
+    pub raw: TRaw,
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// Options accepted by `Transcripts.append`. 1:1 port of upstream
+/// `interface AppendOptions`. `user_key` is mandatory only when appending
+/// an `AppendInput` (i.e. assistant/system role) — the upstream behavior
+/// is documented on the field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppendOptions {
+    /// Required when appending an `AppendInput` (assistant/system role) —
+    /// the SDK has no `Message` instance from which to read the resolved
+    /// key. Ignored when appending a `Message`; the message's own
+    /// `userKey` is used.
+    #[serde(rename = "userKey", default, skip_serializing_if = "Option::is_none")]
+    pub user_key: Option<String>,
+}
+
+/// Query shape for `Transcripts.list`. 1:1 port of upstream `interface ListQuery`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListQuery {
+    /// Newest N kept (still returned in chronological order). Default 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Filter to a subset of adapter names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<String>>,
+    /// Filter to specific roles. Upstream default: all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<TranscriptRole>>,
+    /// Filter to a single thread.
+    #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(rename = "userKey")]
+    pub user_key: String,
+}
+
+/// Target for `Transcripts.delete`. Wipes every stored message under the
+/// given user key. 1:1 port of upstream `interface DeleteTarget`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeleteTarget {
+    #[serde(rename = "userKey")]
+    pub user_key: String,
+}
+
+/// Query shape for `Transcripts.count`. 1:1 port of upstream
+/// `interface CountQuery`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CountQuery {
+    #[serde(rename = "userKey")]
+    pub user_key: String,
+}
+
 /// Display name + identifier pair used for `assignee` / `author` on
 /// [`MessageSubject`]. Matches the inline anonymous TypeScript object
 /// `{ id: string; name: string }` upstream.
@@ -1322,6 +1387,117 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn raw_message_round_trips_with_default_value_payload() {
+        let msg: RawMessage<serde_json::Value> = RawMessage {
+            id: "M1".to_string(),
+            raw: serde_json::json!({ "platform": "slack", "ts": "1.0" }),
+            thread_id: "T1".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"id\":\"M1\""));
+        assert!(json.contains("\"threadId\":\"T1\""));
+        assert!(json.contains("\"raw\":{"));
+        let back: RawMessage<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn raw_message_works_with_a_typed_payload() {
+        // Smoke-test that the generic accepts a concrete typed payload —
+        // future adapter slices will substitute Slack/Teams/etc. types
+        // here in place of `serde_json::Value`.
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        struct SlackBody {
+            channel: String,
+            ts: String,
+        }
+        let msg: RawMessage<SlackBody> = RawMessage {
+            id: "M2".to_string(),
+            raw: SlackBody {
+                channel: "C123".to_string(),
+                ts: "1.0".to_string(),
+            },
+            thread_id: "T2".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: RawMessage<SlackBody> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn append_options_default_serializes_empty() {
+        let opts = AppendOptions::default();
+        assert_eq!(serde_json::to_string(&opts).unwrap(), "{}");
+    }
+
+    #[test]
+    fn append_options_with_user_key_round_trips_camelcase() {
+        let opts = AppendOptions {
+            user_key: Some("user_abc".to_string()),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert_eq!(json, "{\"userKey\":\"user_abc\"}");
+        let back: AppendOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, opts);
+    }
+
+    #[test]
+    fn list_query_required_user_key_with_full_filters() {
+        let query = ListQuery {
+            limit: Some(50),
+            platforms: Some(vec!["slack".to_string(), "teams".to_string()]),
+            roles: Some(vec![TranscriptRole::User, TranscriptRole::Assistant]),
+            thread_id: Some("T_999".to_string()),
+            user_key: "user_x".to_string(),
+        };
+        let json = serde_json::to_string(&query).unwrap();
+        assert!(json.contains("\"limit\":50"));
+        assert!(json.contains("\"platforms\":[\"slack\",\"teams\"]"));
+        assert!(json.contains("\"roles\":[\"user\",\"assistant\"]"));
+        assert!(json.contains("\"threadId\":\"T_999\""));
+        assert!(json.contains("\"userKey\":\"user_x\""));
+        let back: ListQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, query);
+    }
+
+    #[test]
+    fn list_query_minimum_shape_only_emits_user_key() {
+        let query = ListQuery {
+            limit: None,
+            platforms: None,
+            roles: None,
+            thread_id: None,
+            user_key: "user_y".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&query).unwrap(),
+            "{\"userKey\":\"user_y\"}"
+        );
+    }
+
+    #[test]
+    fn delete_target_and_count_query_round_trip_with_camelcase_user_key() {
+        let dt = DeleteTarget {
+            user_key: "user_a".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&dt).unwrap(),
+            "{\"userKey\":\"user_a\"}"
+        );
+        let cq = CountQuery {
+            user_key: "user_b".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&cq).unwrap(),
+            "{\"userKey\":\"user_b\"}"
+        );
+        let back: DeleteTarget = serde_json::from_str("{\"userKey\":\"user_a\"}").unwrap();
+        assert_eq!(back, dt);
+        let back: CountQuery = serde_json::from_str("{\"userKey\":\"user_b\"}").unwrap();
+        assert_eq!(back, cq);
     }
 
     #[test]
