@@ -22,8 +22,11 @@ all = "warn"
 async-trait = "0.1.89"
 chat-sdk-adapter-shared = { path = "../chat-sdk-adapter-shared" }
 chat-sdk-chat = { path = "../chat-sdk-chat" }
+hmac = "0.12"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+sha2 = "0.10"
+subtle = "2.5"
 
 [dev-dependencies]
 base64 = "0.22"
