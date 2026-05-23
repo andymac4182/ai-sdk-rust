@@ -2585,3 +2585,88 @@ module-aliasing test).
   Adaptive Cards, Slack Block Kit, Discord embeds, Messenger
   templates, chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl, adapter
   index.test.ts integration suites) remain blocked on infra work.
+
+### 2026-05-24 - slices 232..236
+
+**Slices covered**
+
+- 232 Telegram `truncate_for_telegram` + `trim_to_markdown_v2_safe_boundary` + `find_unescaped_positions_outside_code` (9 cases).
+- 233 WhatsApp `decode_thread_id` strictness — reject extra colon-separated segments (4 cases).
+- 234 Slack `webhook::get_header` + `get_retry` + `SlackRetry` (6 additive cases).
+- 235 Linear `render_message_to_linear_markdown` + `assert_agent_session_thread` (6 additive cases).
+- 236 Telegram `apply_telegram_entities` + `TelegramMessageEntity` + private `escape_markdown_in_entity` (11 cases).
+
+**What the brief got wrong or left out**
+
+- Many upstream pure-helper functions live as named exports in
+  `index.ts` alongside the adapter class itself (e.g.
+  `applyTelegramEntities`, `splitMessage`). They aren't documented
+  as a separate module in the brief but each is a self-contained
+  port target — landing them gradually closes the small-helper gap
+  even before the adapter-class body lands.
+- The right-to-left, sort-by-offset-desc / length-asc pattern is
+  load-bearing for `applyTelegramEntities`: without it, replacing a
+  shorter inner entity after a longer outer one would shift indices
+  and corrupt subsequent replacements.
+- `trim_to_markdown_v2_safe_boundary` (slice 232) uses
+  character-position arithmetic, not byte-position. The Rust port
+  walks `Vec<char>` and rebuilds the string each iteration. The
+  alternative — bytewise — is wrong for non-ASCII MarkdownV2 because
+  `find_unescaped_positions(_, '`')` returns character indices.
+- WhatsApp's `decode_thread_id` previously used `splitn(2, ':')`
+  which silently accepted extras. Upstream's `split(":")` + exact
+  `parts.length === 2` check is stricter. The Rust port now matches.
+  This is a behavior-changing fix — any callsite that previously
+  passed a malformed thread id and relied on the silent acceptance
+  will now get `None` (and surface `InvalidPayload` to callers).
+
+**Stale or misleading guidance**
+
+- The brief's "deferred until …" comments often outlive their
+  blockers. Specifically, `renderMessageToLinearMarkdown` and
+  `assertAgentSessionThread` were marked as deferred in the slice
+  171 port comment ("depend on card / format infrastructure not yet
+  ported") — but by slice 177 (cards) and slice 216 (thread_id),
+  both helpers were portable. They sat unported for ~20 slices.
+  Future slices should grep deferred-comments against landed
+  modules each refinement cycle.
+- The "1 of 8 trait methods" counts in the per-adapter parity row
+  do not reflect upstream-shape helpers (`channelIdFromThreadId`,
+  `isDM`, `splitMessage`, `applyTelegramEntities`,
+  `cardIdFromThreadId`, etc.). After this batch the gap between
+  "trait methods" and "upstream-shape helpers" has narrowed for
+  several adapters — but the doc still tracks one column. A
+  follow-up refinement could split these two tallies.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **postToCallbackUrl HTTP** (3 cases) — still blocked. Tried
+  adding reqwest + wiremock to chat-sdk-chat in this batch; reverted
+  because wiremock isn't a workspace dep and adding it just for
+  this slice felt heavyweight. The brief still says "blocked on
+  reqwest wire-up decision" — this should escalate to "needs a
+  mock-fetch trait abstraction" because reqwest itself is the easy
+  part; the test surface needs an in-test HTTP server.
+- **Linear's legacy `lib.rs::encode_thread_id(team_key, issue_id)`**
+  still hasn't been migrated to the upstream-shape `LinearThreadId`
+  struct from slice 216. `assertAgentSessionThread` (slice 235)
+  works against the new struct but the adapter's HTTP code still
+  uses the old form.
+- **Teams thread-id schema mismatch** (Rust uses
+  `<conversation_id>:<message_id>`; upstream uses
+  `<base64url(conversation_id)>:<base64url(serviceUrl)>`) — same
+  status, blocking `channelIdFromThreadId` and several other
+  helpers.
+- **Messenger / Telegram `splitMessage`-equivalent for the
+  per-platform limit** — Telegram has `TELEGRAM_MESSAGE_LIMIT` and
+  Messenger has `MESSENGER_MESSAGE_LIMIT` but the chunker is
+  protected/private in upstream. Lower-priority since no
+  user-facing API.
+- All previously-deferred items (Teams Adaptive Cards, Slack Block
+  Kit, Discord embeds, Messenger templates, chat-sdk-chat
+  ChannelImpl/ThreadImpl/ChatImpl, adapter index.test.ts integration
+  suites) remain blocked.

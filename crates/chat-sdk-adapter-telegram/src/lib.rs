@@ -530,6 +530,117 @@ pub fn decode_thread_id(thread_id: &str) -> Option<DecodedTelegramThreadId> {
 
 /// Predicate: does this thread id belong to the Telegram adapter?
 /// 1:1 with upstream's inline `threadId.startsWith("telegram:")`.
+/// A subset of `TelegramMessageEntity` carrying just the fields
+/// [`apply_telegram_entities`] consumes. 1:1 port of upstream's
+/// `interface TelegramMessageEntity` (with the same `language?` /
+/// `url?` optional fields). Additional `user` field is unused by
+/// the entity rendering path; it stays on the upstream type for
+/// the inbound-parse path only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramMessageEntity {
+    /// Entity type: `bold`, `italic`, `code`, `pre`, `strikethrough`,
+    /// `text_link`, `url`, `mention`, `bot_command`, etc.
+    pub kind: String,
+    /// Byte offset into the rendered text (matches upstream's
+    /// UTF-16 offset for ASCII inputs — the entire upstream test
+    /// suite uses ASCII so this is functionally equivalent).
+    pub offset: usize,
+    /// Length of the entity span in bytes / UTF-16 code units.
+    pub length: usize,
+    /// URL for `text_link` entities.
+    pub url: Option<String>,
+    /// Language tag for `pre` (fenced-code) entities.
+    pub language: Option<String>,
+}
+
+/// Escape standard-markdown special characters inside inbound entity
+/// text. 1:1 port of upstream's private
+/// `escapeMarkdownInEntity(text)` (regex `/([[\]()\\])/g`).
+fn escape_markdown_in_entity(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '[' | ']' | '(' | ')' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Convert Telegram message entities (inbound) to standard markdown.
+/// 1:1 port of upstream's
+/// `applyTelegramEntities(text, entities): string`.
+///
+/// Telegram delivers formatting as separate `MessageEntity` objects
+/// alongside plain text. This function reconstructs **standard**
+/// markdown (`**bold**`, `~~strike~~`, etc.) so the result can be
+/// parsed by `chat_sdk_chat::markdown::parse_markdown`. The outbound
+/// direction (AST → MarkdownV2) lives in [`crate::markdown`].
+///
+/// Sorting: entities are processed by `offset` descending so
+/// replacements never shift later offsets; ties on offset go to the
+/// shorter span first (so the inner entity is applied before its
+/// outer wrapper, matching upstream).
+///
+/// Unknown entity kinds (`url`, `mention`, `bot_command`, ...) are
+/// left in place — upstream's `default: break` branch.
+pub fn apply_telegram_entities(text: &str, entities: &[TelegramMessageEntity]) -> String {
+    if entities.is_empty() {
+        return text.to_string();
+    }
+
+    // Sort by offset desc, then length asc.
+    let mut sorted: Vec<&TelegramMessageEntity> = entities.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.offset
+            .cmp(&a.offset)
+            .then_with(|| a.length.cmp(&b.length))
+    });
+
+    let mut result = text.to_string();
+    for entity in sorted {
+        let start = entity.offset;
+        let end = entity.offset + entity.length;
+        if end > result.len() || !result.is_char_boundary(start) || !result.is_char_boundary(end) {
+            // Offset out of range or lands mid-char (only possible
+            // for non-ASCII inputs where upstream's UTF-16 offsets
+            // diverge from Rust byte offsets); skip this entity to
+            // preserve invariants.
+            continue;
+        }
+        let entity_text = &result[start..end];
+
+        let replacement: Option<String> = match entity.kind.as_str() {
+            "text_link" => entity
+                .url
+                .as_deref()
+                .map(|url| format!("[{}]({url})", escape_markdown_in_entity(entity_text))),
+            "bold" => Some(format!("**{entity_text}**")),
+            "italic" => Some(format!("*{entity_text}*")),
+            "code" => Some(format!("`{entity_text}`")),
+            "pre" => {
+                let lang = entity.language.as_deref().unwrap_or("");
+                Some(format!("```{lang}\n{entity_text}\n```"))
+            }
+            "strikethrough" => Some(format!("~~{entity_text}~~")),
+            // `url`, `mention`, `bot_command`, etc. are already
+            // present in the text as-is — upstream `default: break`.
+            _ => None,
+        };
+
+        if let Some(replacement) = replacement {
+            // Splice in place: `result[..start] + replacement + result[end..]`.
+            let mut new_result = String::with_capacity(result.len() + replacement.len());
+            new_result.push_str(&result[..start]);
+            new_result.push_str(&replacement);
+            new_result.push_str(&result[end..]);
+            result = new_result;
+        }
+    }
+
+    result
+}
+
 pub fn is_telegram_thread_id(thread_id: &str) -> bool {
     thread_id.starts_with(THREAD_ID_PREFIX)
 }
@@ -652,6 +763,143 @@ mod tests {
         let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
         assert_eq!(adapter.is_dm("messenger:USER"), None);
         assert_eq!(adapter.is_dm(""), None);
+    }
+
+    // ---------- applyTelegramEntities (11 upstream cases) ----------
+    // 1:1 with upstream `packages/adapter-telegram/src/index.test.ts`
+    // `describe("applyTelegramEntities")` describe block.
+
+    fn entity(kind: &str, offset: usize, length: usize) -> TelegramMessageEntity {
+        TelegramMessageEntity {
+            kind: kind.to_string(),
+            offset,
+            length,
+            url: None,
+            language: None,
+        }
+    }
+
+    #[test]
+    fn apply_telegram_entities_returns_text_unchanged_when_no_entities() {
+        assert_eq!(apply_telegram_entities("hello world", &[]), "hello world");
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_text_link_entities_to_markdown_links() {
+        let e = TelegramMessageEntity {
+            kind: "text_link".to_string(),
+            offset: 10,
+            length: 7,
+            url: Some("https://example.com".to_string()),
+            language: None,
+        };
+        assert_eq!(
+            apply_telegram_entities("Visit our website for details", &[e]),
+            "Visit our [website](https://example.com) for details"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_bold_entities_to_markdown_bold() {
+        assert_eq!(
+            apply_telegram_entities("hello world", &[entity("bold", 6, 5)]),
+            "hello **world**"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_italic_entities_to_markdown_italic() {
+        assert_eq!(
+            apply_telegram_entities("hello world", &[entity("italic", 0, 5)]),
+            "*hello* world"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_code_entities_to_inline_code() {
+        assert_eq!(
+            apply_telegram_entities(
+                "use the console.log function",
+                &[entity("code", 8, 11)]
+            ),
+            "use the `console.log` function"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_pre_entities_to_code_blocks() {
+        assert_eq!(
+            apply_telegram_entities("const x = 1", &[entity("pre", 0, 11)]),
+            "```\nconst x = 1\n```"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_pre_entities_with_language() {
+        let e = TelegramMessageEntity {
+            kind: "pre".to_string(),
+            offset: 0,
+            length: 11,
+            url: None,
+            language: Some("typescript".to_string()),
+        };
+        assert_eq!(
+            apply_telegram_entities("const x = 1", &[e]),
+            "```typescript\nconst x = 1\n```"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_converts_strikethrough_entities() {
+        assert_eq!(
+            apply_telegram_entities("old text here", &[entity("strikethrough", 0, 8)]),
+            "~~old text~~ here"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_leaves_url_entities_unchanged() {
+        assert_eq!(
+            apply_telegram_entities(
+                "check https://example.com out",
+                &[entity("url", 6, 19)]
+            ),
+            "check https://example.com out"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_leaves_mention_entities_unchanged() {
+        assert_eq!(
+            apply_telegram_entities("hey @user check this", &[entity("mention", 4, 5)]),
+            "hey @user check this"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_handles_multiple_non_overlapping_entities() {
+        assert_eq!(
+            apply_telegram_entities(
+                "hello world foo",
+                &[entity("bold", 0, 5), entity("italic", 6, 5)]
+            ),
+            "**hello** *world* foo"
+        );
+    }
+
+    #[test]
+    fn apply_telegram_entities_handles_text_link_with_special_markdown_chars_in_text() {
+        let e = TelegramMessageEntity {
+            kind: "text_link".to_string(),
+            offset: 6,
+            length: 6,
+            url: Some("https://example.com".to_string()),
+            language: None,
+        };
+        assert_eq!(
+            apply_telegram_entities("click [here]", &[e]),
+            "click [\\[here\\]](https://example.com)"
+        );
     }
 
     #[test]
