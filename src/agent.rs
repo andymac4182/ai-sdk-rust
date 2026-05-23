@@ -1224,7 +1224,7 @@ fn merge_on_finish<'a>(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::future::Future;
+    use std::future::{Future, ready};
     use std::pin::Pin;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
@@ -1238,11 +1238,14 @@ mod tests {
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
         LanguageModelGenerateResult, LanguageModelStreamFinish, LanguageModelStreamPart,
         LanguageModelStreamResult, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
-        LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
+        LanguageModelTextPart, LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::TimeoutConfigurationOptions;
-    use crate::provider_utils::Tool;
+    use crate::provider_utils::{
+        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Tool,
+    };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1324,6 +1327,37 @@ mod tests {
                 },
             )),
         ])
+    }
+
+    #[derive(Debug)]
+    struct TestSandbox {
+        description: String,
+    }
+
+    impl TestSandbox {
+        fn new(description: impl Into<String>) -> Self {
+            Self {
+                description: description.into(),
+            }
+        }
+    }
+
+    impl ExperimentalSandbox for TestSandbox {
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn run_command(&self, options: SandboxCommandOptions) -> SandboxRunCommandFuture {
+            Box::pin(ready(
+                SandboxCommandResult::new(0).with_stdout(options.command),
+            ))
+        }
+    }
+
+    fn user_message(text: &str) -> crate::language_model::LanguageModelMessage {
+        crate::language_model::LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
+        ]))
     }
 
     fn generate_call_with_model_settings(
@@ -1501,6 +1535,26 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_generate_forwards_include_request_messages_to_generate_text() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_include(GenerateTextInclude::new().with_request_messages(true)),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        let expected_messages = vec![user_message("test")];
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.messages.as_ref()),
+            Some(&expected_messages)
+        );
+    }
+
+    #[test]
     fn tool_loop_agent_stream_forwards_include_raw_chunks_to_stream_text() {
         let call = stream_call_with_model_settings(
             ToolLoopAgentModelSettings::new().with_include_raw_chunks(true),
@@ -1535,6 +1589,94 @@ mod tests {
                 .expect("provider options")
             )
         );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_sandbox_to_prepare_call() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let recorded_sandbox = Arc::new(Mutex::new(None::<Arc<dyn ExperimentalSandbox>>));
+        let recorded_sandbox_for_prepare_call = Arc::clone(&recorded_sandbox);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_call(
+            move |prepared| {
+                *recorded_sandbox_for_prepare_call
+                    .lock()
+                    .expect("lock sandbox") = prepared.experimental_sandbox.clone();
+                prepared
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello")
+                .with_experimental_sandbox(Arc::clone(&sandbox));
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let recorded_sandbox = recorded_sandbox.lock().expect("lock sandbox");
+        assert!(Arc::ptr_eq(
+            recorded_sandbox
+                .as_ref()
+                .expect("prepare_call sees sandbox"),
+            &sandbox
+        ));
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_prepare_call_can_shape_provider_options() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("prepared"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_call(
+            |prepared| {
+                prepared.with_provider_options(
+                    serde_json::from_value(json!({
+                        "test": { "value": "prepared" }
+                    }))
+                    .expect("provider options"),
+                )
+            },
+        ));
+
+        let result = poll_ready(agent.stream("Hello")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "prepared");
+        assert_eq!(
+            model.stream_calls()[0].provider_options,
+            Some(
+                serde_json::from_value(json!({
+                    "test": { "value": "prepared" }
+                }))
+                .expect("provider options")
+            )
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_passes_sandbox_to_prepare_call() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("reply"));
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let recorded_sandbox = Arc::new(Mutex::new(None::<Arc<dyn ExperimentalSandbox>>));
+        let recorded_sandbox_for_prepare_call = Arc::clone(&recorded_sandbox);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_call(
+            move |prepared| {
+                *recorded_sandbox_for_prepare_call
+                    .lock()
+                    .expect("lock sandbox") = prepared.experimental_sandbox.clone();
+                prepared
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello")
+                .with_experimental_sandbox(Arc::clone(&sandbox));
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "reply");
+        let recorded_sandbox = recorded_sandbox.lock().expect("lock sandbox");
+        assert!(Arc::ptr_eq(
+            recorded_sandbox
+                .as_ref()
+                .expect("prepare_call sees sandbox"),
+            &sandbox
+        ));
     }
 
     #[test]
