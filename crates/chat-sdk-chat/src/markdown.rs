@@ -1764,4 +1764,67 @@ mod tests {
             Some("simple text without formatting")
         );
     }
+
+    // ---------- slice 82: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_blockquote_with_list_inside() {
+        let node = parse_markdown("> - item one\n> - item two").expect("parses");
+        fn blockquote_has_list(n: &Node) -> bool {
+            if let Node::Blockquote(b) = n {
+                if b.children.iter().any(|c| matches!(c, Node::List(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(blockquote_has_list)
+        }
+        assert!(blockquote_has_list(&node));
+    }
+
+    #[test]
+    fn parse_markdown_code_block_with_extra_backticks_in_fence() {
+        let node = parse_markdown("````\nfour-backtick fence\n````").expect("parses");
+        fn find_code_value(n: &Node) -> Option<String> {
+            if let Node::Code(c) = n {
+                return Some(c.value.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(v) = find_code_value(c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_code_value(&node).as_deref(),
+            Some("four-backtick fence")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_heading_level_one_is_recognized_via_setext_equals() {
+        let node = parse_markdown("Big Heading\n===").expect("parses");
+        fn find_heading_depth(n: &Node) -> Option<u8> {
+            if let Node::Heading(h) = n {
+                return Some(h.depth);
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(d) = find_heading_depth(c) {
+                    return Some(d);
+                }
+            }
+            None
+        }
+        assert_eq!(find_heading_depth(&node), Some(1));
+    }
+
+    #[test]
+    fn parse_markdown_text_with_backslash_escapes_emits_literal_chars() {
+        // CommonMark backslash escapes: \* parses as literal "*".
+        let node = parse_markdown("a \\* b").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("*"));
+        assert!(plain.contains("a"));
+        assert!(plain.contains("b"));
+    }
 }
