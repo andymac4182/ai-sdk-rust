@@ -26,6 +26,8 @@
 //! - GraphQL queries for richer scenarios (PR review comments,
 //!   discussions).
 
+pub mod cards;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
