@@ -2173,4 +2173,43 @@ mod tests {
         }
         assert!(blockquote_has_strong(&node));
     }
+
+    // ---------- slice 89: final 3 markdown.test.ts cases (reach 122/122) ----------
+
+    #[test]
+    fn parse_markdown_handles_very_long_paragraph_without_truncation() {
+        let body = "word ".repeat(500);
+        let node = parse_markdown(&body).expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("word "));
+        assert!(plain.len() >= 2500);
+    }
+
+    #[test]
+    fn parse_markdown_text_with_tab_character_preserves_payload() {
+        let node = parse_markdown("col1\tcol2\tcol3").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("col1"));
+        assert!(plain.contains("col2"));
+        assert!(plain.contains("col3"));
+    }
+
+    #[test]
+    fn parse_markdown_full_round_trip_for_complex_document() {
+        let input = "# Title\n\nIntro with **bold** and *italic*.\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n\n> Quote.";
+        let node = parse_markdown(input).expect("parses");
+        let plain = to_plain_text(&node);
+        for token in [
+            "Title",
+            "Intro with",
+            "bold",
+            "italic",
+            "one",
+            "two",
+            "fn main",
+            "Quote",
+        ] {
+            assert!(plain.contains(token), "missing {token}: {plain:?}");
+        }
+    }
 }
