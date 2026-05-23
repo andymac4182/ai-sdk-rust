@@ -604,6 +604,10 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `executeToolCall` basic parity added named
+  counterparts for no-execute tools, successful tool-result shaping,
+  provider/tool metadata propagation on success and error, dynamic result
+  flags, and tool-context schema validation failure.
 - 2026-05-23: `packages/ai` `parseToolCall` helper parity added named
   counterparts for provider-executed dynamic calls, provider metadata, empty
   inputs, unavailable tool errors, runtime dynamic flags, title propagation,
@@ -3419,6 +3423,18 @@ focused tests for each portable behavior before changing rows to `verified`.
    and `generate_text_marks_schema_invalid_tool_input_before_execution`. Exact
    JavaScript `Error` instance identity and Zod snapshot wording remain
    non-portable at Rust's native error type boundary.
+   The upstream `generate-text/execute-tool-call.test.ts` basic execution
+   slice now has named Rust counterparts in
+   `execute_tool_call_should_return_none_when_tool_has_no_execute_function`,
+   `execute_tool_call_should_return_tool_result_with_correct_data`,
+   `execute_tool_call_should_preserve_provider_metadata_from_tool_call_on_success`,
+   `execute_tool_call_should_preserve_tool_metadata_from_tool_call_on_success`,
+   `execute_tool_call_should_preserve_metadata_from_tool_call_on_error`,
+   `execute_tool_call_should_set_dynamic_true_for_dynamic_tools_on_success_and_error`,
+   and
+   `execute_tool_call_should_return_tool_error_when_tool_context_schema_fails_validation`;
+   remaining callback arrays, timeout/abort-signal wiring, telemetry wrapper,
+   and preliminary async-generator result cases stay in the follow-up queue.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error

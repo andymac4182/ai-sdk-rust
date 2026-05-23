@@ -7876,12 +7876,12 @@ mod tests {
         ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
         TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
         calculate_tokens_per_second, collect_tool_approvals, create_tool_model_output,
-        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met, mark_invalid_tool_inputs,
-        mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
-        mark_unavailable_tool_calls, normalize_tool_approval_status, prune_messages,
-        refine_tool_inputs, repair_tool_calls, resolve_tool_approval, response_messages_for_step,
-        step_count_is, sum_token_counts, validate_tool_context,
+        execute_tool_calls, experimental_filter_active_tools, filter_active_tools, generate_text,
+        has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
+        mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
+        mark_tool_call_titles, mark_unavailable_tool_calls, normalize_tool_approval_status,
+        prune_messages, refine_tool_inputs, repair_tool_calls, resolve_tool_approval,
+        response_messages_for_step, step_count_is, sum_token_counts, validate_tool_context,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -7922,7 +7922,7 @@ mod tests {
     use crate::warning::Warning;
     use serde_json::json;
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::sync::{
@@ -11801,6 +11801,235 @@ mod tests {
         assert_eq!(result.tool_results[0].is_error, Some(true));
         assert_eq!(result.tool_results[0].output, json!(error));
         assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    fn execute_tool_call_value_schema() -> crate::json::JsonSchema {
+        json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone()
+    }
+
+    fn execute_tool_call_test_call() -> GenerateTextToolCall {
+        GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "testTool".to_string(),
+            input: json!({ "value": "test" }),
+            title: None,
+            provider_executed: None,
+            dynamic: Some(false),
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        }
+    }
+
+    fn execute_tool_calls_for_test(
+        tools: &[Tool],
+        tool_call: GenerateTextToolCall,
+        tools_context: JsonObject,
+    ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
+        let tool_calls = vec![tool_call];
+        let messages = vec![user_message("test message")];
+
+        poll_ready(execute_tool_calls(
+            "test-telemetry-call-id",
+            tools,
+            &tool_calls,
+            &messages,
+            &tools_context,
+            &BTreeSet::new(),
+            (None, None, None, None),
+        ))
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_none_when_tool_has_no_execute_function() {
+        let tools = vec![Tool::new("testTool", execute_tool_call_value_schema())];
+
+        let (tool_results, tool_execution_ms) =
+            execute_tool_calls_for_test(&tools, execute_tool_call_test_call(), JsonObject::new());
+
+        assert!(tool_results.is_empty());
+        assert!(tool_execution_ms.is_empty());
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_tool_result_with_correct_data() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                |input, _options| async move {
+                    let value = input
+                        .get("value")
+                        .and_then(JsonValue::as_str)
+                        .expect("value is a string");
+                    Ok(json!(format!("{value}-result")))
+                },
+            ),
+        ];
+
+        let (tool_results, tool_execution_ms) =
+            execute_tool_calls_for_test(&tools, execute_tool_call_test_call(), JsonObject::new());
+
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_execution_ms.len(), 1);
+        assert_eq!(tool_results[0].tool_call_id, "call-1");
+        assert_eq!(tool_results[0].tool_name, "testTool");
+        assert_eq!(tool_results[0].input, json!({ "value": "test" }));
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(tool_results[0].dynamic, Some(false));
+        assert_eq!(tool_results[0].is_error, None);
+    }
+
+    #[test]
+    fn execute_tool_call_should_preserve_provider_metadata_from_tool_call_on_success() {
+        let provider_metadata = test_provider_metadata("custom", json!({ "key": "value" }));
+        let mut tool_call = execute_tool_call_test_call();
+        tool_call.provider_metadata = Some(provider_metadata.clone());
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test(&tools, tool_call, JsonObject::new());
+
+        assert_eq!(tool_results[0].provider_metadata, Some(provider_metadata));
+    }
+
+    #[test]
+    fn execute_tool_call_should_preserve_tool_metadata_from_tool_call_on_success() {
+        let tool_metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let mut tool_call = execute_tool_call_test_call();
+        tool_call.tool_metadata = Some(tool_metadata.clone());
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test(&tools, tool_call, JsonObject::new());
+
+        assert_eq!(tool_results[0].tool_metadata, Some(tool_metadata));
+    }
+
+    #[test]
+    fn execute_tool_call_should_preserve_metadata_from_tool_call_on_error() {
+        let provider_metadata = test_provider_metadata("custom", json!({ "key": "value" }));
+        let tool_metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let mut tool_call = execute_tool_call_test_call();
+        tool_call.provider_metadata = Some(provider_metadata.clone());
+        tool_call.tool_metadata = Some(tool_metadata.clone());
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                |_input, _options| async move {
+                    Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                        "execution failed",
+                    ))
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test(&tools, tool_call, JsonObject::new());
+
+        assert_eq!(tool_results[0].is_error, Some(true));
+        assert_eq!(tool_results[0].output, json!("execution failed"));
+        assert_eq!(tool_results[0].provider_metadata, Some(provider_metadata));
+        assert_eq!(tool_results[0].tool_metadata, Some(tool_metadata));
+    }
+
+    #[test]
+    fn execute_tool_call_should_set_dynamic_true_for_dynamic_tools_on_success_and_error() {
+        let mut success_call = execute_tool_call_test_call();
+        success_call.dynamic = Some(true);
+        let mut error_call = execute_tool_call_test_call();
+        error_call.dynamic = Some(true);
+        let success_tools = vec![
+            dynamic_tool("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("dynamic-result")) }),
+        ];
+        let error_tools = vec![
+            dynamic_tool("testTool", execute_tool_call_value_schema()).with_execute(
+                |_input, _options| async move {
+                    Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("error"))
+                },
+            ),
+        ];
+
+        let (success_results, _) =
+            execute_tool_calls_for_test(&success_tools, success_call, JsonObject::new());
+        let (error_results, _) =
+            execute_tool_calls_for_test(&error_tools, error_call, JsonObject::new());
+
+        assert_eq!(success_results[0].dynamic, Some(true));
+        assert_eq!(success_results[0].is_error, None);
+        assert_eq!(error_results[0].dynamic, Some(true));
+        assert_eq!(error_results[0].is_error, Some(true));
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_tool_error_when_tool_context_schema_fails_validation() {
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "key1": { "type": "string" }
+                    },
+                    "required": ["key1"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("key1").and_then(JsonValue::as_str).is_some() {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("expected key1 string")
+                }
+            }),
+        );
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_closure = Arc::clone(&executed);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_context_schema(context_schema)
+                .with_execute(move |_input, _options| {
+                    let executed = Arc::clone(&executed_for_closure);
+                    async move {
+                        executed.store(true, Ordering::SeqCst);
+                        Ok(json!("should not execute"))
+                    }
+                }),
+        ];
+        let tools_context = JsonObject::from_iter([("testTool".to_string(), json!({ "key1": 1 }))]);
+
+        let (tool_results, tool_execution_ms) =
+            execute_tool_calls_for_test(&tools, execute_tool_call_test_call(), tools_context);
+
+        assert!(!executed.load(Ordering::SeqCst));
+        assert!(tool_execution_ms.is_empty());
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_results[0].is_error, Some(true));
+        assert!(
+            tool_results[0]
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("expected key1 string")
+        );
     }
 
     fn warning_logger_text_result(
