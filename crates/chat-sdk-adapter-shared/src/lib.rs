@@ -13,4 +13,5 @@
 pub mod adapter_utils;
 pub mod buffer_utils;
 pub mod card_utils;
+pub mod crypto;
 pub mod errors;
