@@ -63,6 +63,30 @@ pub const DEFAULT_LIST_LIMIT: usize = 50;
 /// contract. The marker is filtered out by `list()` and `count()`.
 pub const TOMBSTONE_MARKER: &str = "__chatSdkTombstone";
 
+/// Shape guard. 1:1 port of upstream
+/// `isTombstone(value: unknown): boolean`. Returns `true` for a JSON
+/// object whose [`TOMBSTONE_MARKER`] field equals `true`.
+pub fn is_tombstone(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .and_then(|obj| obj.get(TOMBSTONE_MARKER))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Build a tombstone payload that [`is_tombstone`] recognizes. 1:1
+/// with upstream's inline `{ [TOMBSTONE_MARKER]: true }` literal used
+/// by `TranscriptsApiImpl.delete()`.
+pub fn tombstone() -> serde_json::Value {
+    serde_json::json!({ TOMBSTONE_MARKER: true })
+}
+
+/// Build the state-store key for a user's transcript list. 1:1 with
+/// upstream's inline `${KEY_PREFIX}${userKey}`.
+pub fn user_transcript_key(user_key: &str) -> String {
+    format!("{KEY_PREFIX}{user_key}")
+}
+
 /// Parse an upstream duration into milliseconds. 1:1 port of upstream
 /// `parseDuration(value): number | undefined`.
 ///
@@ -148,5 +172,42 @@ mod tests {
         assert_eq!(DEFAULT_MAX_PER_USER, 200);
         assert_eq!(DEFAULT_LIST_LIMIT, 50);
         assert_eq!(TOMBSTONE_MARKER, "__chatSdkTombstone");
+    }
+
+    // ---------- slice 96: tombstone + user_transcript_key helpers ----------
+
+    #[test]
+    fn is_tombstone_accepts_a_well_formed_tombstone() {
+        let value = tombstone();
+        assert!(is_tombstone(&value));
+    }
+
+    #[test]
+    fn is_tombstone_rejects_objects_without_the_marker() {
+        let value = serde_json::json!({"foo": "bar"});
+        assert!(!is_tombstone(&value));
+    }
+
+    #[test]
+    fn is_tombstone_rejects_non_object_values() {
+        assert!(!is_tombstone(&serde_json::json!(null)));
+        assert!(!is_tombstone(&serde_json::json!("string")));
+        assert!(!is_tombstone(&serde_json::json!(42)));
+        assert!(!is_tombstone(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn is_tombstone_requires_marker_value_true() {
+        // Marker present but value is false / not-bool.
+        let value = serde_json::json!({"__chatSdkTombstone": false});
+        assert!(!is_tombstone(&value));
+        let value = serde_json::json!({"__chatSdkTombstone": "yes"});
+        assert!(!is_tombstone(&value));
+    }
+
+    #[test]
+    fn user_transcript_key_concatenates_prefix_and_user_key() {
+        assert_eq!(user_transcript_key("U123"), "transcripts:user:U123");
+        assert_eq!(user_transcript_key(""), "transcripts:user:");
     }
 }
