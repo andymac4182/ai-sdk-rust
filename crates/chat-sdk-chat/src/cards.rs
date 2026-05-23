@@ -1245,4 +1245,34 @@ mod tests {
         assert!(matches!(elem.children[0], ActionsChild::Button(_)));
         assert!(matches!(elem.children[1], ActionsChild::LinkButton(_)));
     }
+
+    // ---------- slice 101: 3 more 1:1 cards.test.ts cases ----------
+
+    #[test]
+    fn actions_creates_empty_actions_container_when_children_empty() {
+        let elem = actions(vec![]);
+        assert_eq!(elem.kind, ActionsKind::Actions);
+        assert!(elem.children.is_empty());
+    }
+
+    #[test]
+    fn fields_creates_fields_container_with_provided_children() {
+        let elem = fields(vec![field("Name", "Alice"), field("Role", "Admin")]);
+        assert_eq!(elem.kind, FieldsKind::Fields);
+        assert_eq!(elem.children.len(), 2);
+        assert_eq!(elem.children[0].label, "Name");
+        assert_eq!(elem.children[0].value, "Alice");
+        assert_eq!(elem.children[1].label, "Role");
+        assert_eq!(elem.children[1].value, "Admin");
+    }
+
+    #[test]
+    fn is_card_element_returns_true_for_card_kind_value() {
+        let c = card(CardOptions {
+            title: Some("T".to_string()),
+            ..Default::default()
+        });
+        let value = serde_json::to_value(&c).unwrap();
+        assert!(is_card_element(&value));
+    }
 }
