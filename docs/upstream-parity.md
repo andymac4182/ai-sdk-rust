@@ -1207,6 +1207,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/generate_object.rs`, mapping upstream
   `callbacks > error handling in callbacks > should not break the generation
   when a callback throws` for synchronous callback failures.
+- 2026-05-23: `generateObject` warning logger parity added
+  `generate_object_calls_log_warnings_with_the_correct_warnings` and
+  `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`
+  in `src/generate_object.rs`, plus scoped warning logger invocation from
+  `generate_object`. These map upstream `should call logWarnings with the
+  correct warnings` and `should call logWarnings with empty array when no
+  warnings are present` by proving the logger receives provider warnings,
+  empty-warning calls, provider id, and model id.
 - 2026-05-22: `streamObject` object-stream schema metadata parity added
   `stream_object_object_stream_uses_schema_name_and_description` in
   `src/stream_object.rs`, mapping upstream `output = "object" >
@@ -3003,7 +3011,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    `embed`, `embedMany`, and `rerank` now have named Rust counterparts.
    The upstream `generateObject` `result.request`, `result.response`,
    `result.providerMetadata`, `options.headers`, and `options.providerOptions`
-   cases now have named Rust counterparts.
+   cases now have named Rust counterparts. The upstream `generateObject`
+   warning logger spy cases now have named Rust counterparts in
+   `generate_object_calls_log_warnings_with_the_correct_warnings` and
+   `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
    array output. The upstream `callback ordering` call-id correlation case now
