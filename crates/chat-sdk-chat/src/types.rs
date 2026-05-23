@@ -38,6 +38,52 @@ pub enum ChannelVisibility {
     Unknown,
 }
 
+/// Adapter-supplied channel descriptor. 1:1 port of upstream
+/// `interface ChannelInfo`. Every field except `id` and `metadata` is
+/// optional and elided from the JSON wire format when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelInfo {
+    /// Visibility scope of the channel (private/workspace/external/unknown).
+    #[serde(
+        rename = "channelVisibility",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_visibility: Option<ChannelVisibility>,
+    /// Platform-specific channel identifier.
+    pub id: String,
+    /// Whether the channel is a 1:1 direct message.
+    #[serde(rename = "isDM", default, skip_serializing_if = "Option::is_none")]
+    pub is_dm: Option<bool>,
+    /// Member count when the platform exposes one.
+    #[serde(
+        rename = "memberCount",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub member_count: Option<u64>,
+    /// Adapter-specific metadata. Mirrors upstream
+    /// `metadata: Record<string, unknown>` exactly — any JSON object.
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Display name of the channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Options for listing threads inside a channel. 1:1 port of upstream
+/// `interface ListThreadsOptions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ListThreadsOptions {
+    /// Adapter-opaque cursor returned by a prior call. `None` starts a
+    /// fresh listing from the most recent thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Upper bound on returned threads. `None` defers to the adapter's
+    /// own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// Scope at which a lock is acquired. 1:1 port of upstream
 /// `export type LockScope = "thread" | "channel"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1038,6 +1084,63 @@ mod tests {
         assert_eq!(serde_json::to_string(&duration).unwrap(), "\"7d\"");
         let parsed: RetentionPolicy = serde_json::from_str("\"7d\"").unwrap();
         assert_eq!(parsed, duration);
+    }
+
+    #[test]
+    fn channel_info_minimum_round_trips() {
+        let info = ChannelInfo {
+            channel_visibility: None,
+            id: "C123".to_string(),
+            is_dm: None,
+            member_count: None,
+            metadata: serde_json::Map::new(),
+            name: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert_eq!(json, "{\"id\":\"C123\",\"metadata\":{}}");
+        let back: ChannelInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, info);
+    }
+
+    #[test]
+    fn channel_info_full_shape_round_trips_with_camelcase() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("platform".to_string(), serde_json::json!("slack"));
+        let info = ChannelInfo {
+            channel_visibility: Some(ChannelVisibility::Workspace),
+            id: "C456".to_string(),
+            is_dm: Some(false),
+            member_count: Some(42),
+            metadata,
+            name: Some("general".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"channelVisibility\":\"workspace\""));
+        assert!(json.contains("\"isDM\":false"));
+        assert!(json.contains("\"memberCount\":42"));
+        assert!(json.contains("\"metadata\":{\"platform\":\"slack\"}"));
+        assert!(json.contains("\"name\":\"general\""));
+        let back: ChannelInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, info);
+    }
+
+    #[test]
+    fn list_threads_options_default_serializes_empty() {
+        let opts = ListThreadsOptions::default();
+        assert_eq!(serde_json::to_string(&opts).unwrap(), "{}");
+    }
+
+    #[test]
+    fn list_threads_options_full_shape_round_trips() {
+        let opts = ListThreadsOptions {
+            cursor: Some("opaque_cursor".to_string()),
+            limit: Some(25),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(json.contains("\"cursor\":\"opaque_cursor\""));
+        assert!(json.contains("\"limit\":25"));
+        let back: ListThreadsOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, opts);
     }
 
     #[test]
