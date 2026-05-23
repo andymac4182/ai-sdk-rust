@@ -1266,11 +1266,100 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {}
 ///
 /// **Layered port.** Upstream `StateAdapter` has ~20 methods covering
 /// connect/disconnect, locks, lists, queues, key/value cache, subscriptions.
-/// Those land here as the matching `state-*` crates are ported. The trait is
-/// intentionally empty today so the singleton and future state-consumer
-/// types can hold a `dyn StateAdapter`. Each state-port slice MUST extend
-/// this trait, never define a new trait.
-pub trait StateAdapter: Send + Sync + std::fmt::Debug {}
+/// Phase 1.5 (slice 117) added the 5-method key/value + list subset that
+/// the chat-sdk consumer modules (`callback_url`, `transcripts`,
+/// `thread_history`, `postable_object`) need; locks / queues /
+/// subscriptions follow when their consumer code lands.
+///
+/// **Async surface.** Methods are `async` because the production state
+/// backends (Redis, ioredis, Postgres) perform real I/O. The in-memory
+/// backend (`crates/chat-sdk-state-memory`) wraps its sync internals in
+/// trivial `async fn` shims so it can satisfy the trait without pulling
+/// in a runtime dependency at the call site. Callers that drive the
+/// trait need an async executor (tokio, smol, async-std, …) the way
+/// upstream consumers need a JS event loop.
+///
+/// Each state-port slice MUST extend this trait, never define a new
+/// trait.
+#[async_trait::async_trait]
+pub trait StateAdapter: Send + Sync + std::fmt::Debug {
+    /// Read a value out of the key/value cache. 1:1 with upstream
+    /// `get<T>(key: string): Promise<T | null>`. Returns `Ok(None)`
+    /// when the key is unset or expired (matching upstream's
+    /// `Promise<T | null>` resolved with `null`).
+    async fn get(&self, key: &str) -> StateResult<Option<serde_json::Value>>;
+
+    /// Write a value to the key/value cache. 1:1 with upstream
+    /// `set<T>(key, value, options?): Promise<void>`. `ttl_ms` mirrors
+    /// upstream's `options.ttlMs`; `None` means "no expiry" (matching
+    /// upstream's `ttlMs ?? null` behavior).
+    async fn set(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        ttl_ms: Option<u64>,
+    ) -> StateResult<()>;
+
+    /// Delete a key from the cache. 1:1 with upstream
+    /// `delete(key): Promise<void>`. A no-op when the key is absent
+    /// (matches upstream's silent absence handling).
+    async fn delete(&self, key: &str) -> StateResult<()>;
+
+    /// Append a value to a list. 1:1 with upstream
+    /// `appendToList<T>(key, value, options?): Promise<void>`.
+    /// `max_length` caps the list (oldest entries drop when exceeded);
+    /// `ttl_ms` matches upstream's optional `options.ttlMs`.
+    async fn append_to_list(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        max_length: Option<usize>,
+        ttl_ms: Option<u64>,
+    ) -> StateResult<()>;
+
+    /// Read a list. 1:1 with upstream
+    /// `getList<T>(key, options?): Promise<T[]>`. Returns an empty
+    /// vector when the list is unset or expired. `limit` matches
+    /// upstream's optional `options.limit`.
+    async fn get_list(
+        &self,
+        key: &str,
+        limit: Option<usize>,
+    ) -> StateResult<Vec<serde_json::Value>>;
+}
+
+/// Errors returned by [`StateAdapter`] method calls. Mirrors upstream's
+/// `throw new Error(...)` posture: every method can fail if the backend
+/// is disconnected or hits an I/O error. The Rust port surfaces these
+/// through `Result` rather than panicking.
+///
+/// Production state backends (Redis, Postgres) will return
+/// [`StateAdapterError::Io`] with the underlying error wrapped.
+#[derive(Debug)]
+pub enum StateAdapterError {
+    /// The backend is not in a usable state (e.g. `connect()` was
+    /// never called, or a previous `disconnect()` torched the
+    /// connection pool). 1:1 with upstream's `"not connected"` throw.
+    NotConnected,
+    /// Underlying I/O or serialization error from a production state
+    /// backend.
+    Io(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Display for StateAdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConnected => f.write_str("StateAdapter is not connected"),
+            Self::Io(err) => write!(f, "StateAdapter I/O error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for StateAdapterError {}
+
+/// Convenience alias for the `Result` shape every [`StateAdapter`]
+/// method returns.
+pub type StateResult<T> = Result<T, StateAdapterError>;
 
 /// Metadata fields carried alongside the body of a [`crate::message::Message`].
 /// 1:1 port of upstream `interface MessageMetadata`.

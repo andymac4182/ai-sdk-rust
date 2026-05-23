@@ -19,6 +19,7 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+async-trait = "0.1.89"
 chat-sdk-chat = { path = "../chat-sdk-chat" }
 rand = "0.8"
 serde_json = "1.0.149"
