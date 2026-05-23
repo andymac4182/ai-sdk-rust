@@ -23,6 +23,7 @@
 //!   inline-keyboard layout.
 
 pub mod cards;
+pub mod markdown;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
