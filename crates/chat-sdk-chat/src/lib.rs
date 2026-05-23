@@ -24,6 +24,7 @@ pub mod modals;
 pub mod plan;
 pub mod postable_object;
 pub mod reviver;
+pub mod thread;
 pub mod thread_history;
 pub mod transcripts;
 pub mod types;
