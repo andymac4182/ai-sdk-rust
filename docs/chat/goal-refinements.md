@@ -581,3 +581,105 @@ bumped 84% -> 85%; reviver tests 6 -> 10).
   so the next 5 slices can land it across the trait + 4 consumer
   modules (callback_url, transcripts, thread_history,
   postable_object).
+
+### 2026-05-24 - slices 109..113
+
+**Slices covered**
+
+109 (postable_object envelope builder + accessors: 4 helpers,
+postable_object tests 4 -> 11, chat 86%), 110 (transcripts
+predicate + inverse helper, transcripts tests 14 -> 18, chat
+87%), 111 (thread_history predicate + inverse + default-applied
+getters, thread_history tests 4 -> 13, chat 88%), 112 (plan
+pure accessor helpers: task_by_id, completed_task_count,
+is_terminal, plan tests 21 -> 27, chat 89%), 113 (message pure
+accessor helpers: has_attachments, attachment_count, link_count,
+is_edited, mentions_bot, user_key_or; message tests 12 -> 18,
+chat 90%).
+
+**What the brief got right (validated)**
+
+- The "prefix predicate + inverse helper + default-applied
+  getters" pattern from slice 106 generalizes cleanly across
+  every state-store-keyed module. Applying it to transcripts
+  (slice 110) and thread_history (slice 111) added 4 helpers +
+  9 tests each with zero behavioral risk and produced the same
+  shape of test coverage (predicate true / predicate false /
+  inverse strips / inverse rejects / round-trip).
+- Pure model-side accessor methods continue to be high-yield.
+  Adding task_by_id / completed_task_count / is_terminal to
+  Plan (slice 112) and has_attachments / mentions_bot / etc to
+  Message (slice 113) mirrors upstream's inline expressions at
+  adapter callsites and shrinks the future adapter-bound slice.
+  These methods are ~5-10 lines each, 100% covered by 1-2 unit
+  tests, and zero risk.
+- The test-count hygiene rule codified in slice 108's port-chat-
+  sdk.md edit caught the slice 105 omission pattern: every
+  slice in 109-113 correctly bumped the tsv basis text and
+  regenerated package-progress.md. Discipline holds.
+
+**What the brief got wrong or left out**
+
+- **Diminishing returns on additive helpers are starting to
+  show.** Each slice this cycle bumped chat by 1%, but the
+  inline-expression-mining ceiling is approaching. Modules
+  recently extended: callback_url, message, reviver,
+  postable_object, transcripts, thread_history, plan. The
+  remaining pure-helper surface is limited to maybe 3-4 more
+  similar slices before everything left needs the Adapter /
+  StateAdapter trait extension. Open refinement: codify a
+  "trait-extension prep" slice that ships before the next 5
+  helper slices to plan the actual trait surface (method list,
+  async-trait dependency commitment, MemoryStateAdapter shim).
+- **The "11/21 portable upstream test files mapped" counter in
+  the tsv basis text has been stuck for ~10 slices.** That's
+  because additive accessor helpers don't add upstream-mapped
+  test files. The counter only moves when a NEW upstream
+  *.test.ts file gets its first portable case ported. Open
+  refinement: distinguish "portable-files-touched" from
+  "additive-helpers-added" in the progress basis so readers
+  can see which kind of progress each slice represents.
+- **Bumping chat by 1% per slice indefinitely is not
+  sustainable.** The brief's percentage scoring weights things
+  in a way that the next 10 slices could theoretically push
+  chat to 100% on additive helpers alone. The Done condition
+  is more strict — every package verified or js-only-documented
+  — so chat at 100% by additive padding wouldn't satisfy it
+  anyway. Open refinement: cap the additive-helper bump at
+  some explicit ceiling (e.g. 92%) so future readers don't
+  think the chat row at 99% means the chat class itself is
+  done.
+
+**Stale or misleading guidance**
+
+- The slice 108 refinement said "the pure surface is
+  approaching exhausted." Slices 109-113 found another ~30
+  pure helpers across 5 modules, so that prediction was off
+  by a wide margin. Lesson for future refinement entries: the
+  per-module surface is bigger than it looks from a quick
+  scan; checking each module systematically (impl block by
+  impl block) reveals more pure helpers than greppling
+  for "pub fn ".
+- The slice 108 "trait-extension prep slice" deferred item is
+  still deferred. Open refinement: this is the same item that
+  has been documented across slices 80, 91, 97, 108. The
+  consistent deferral signals it's a multi-slice undertaking,
+  not a single slice. Concrete next step: a single dedicated
+  session that spans 5-10 slices specifically on the trait
+  extension. The brief should canonize this as the next
+  "Phase 1.5" milestone.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending (apply on
+  next dedicated refinement slice).
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- Phase 1.5 (single dedicated session): extend
+  `chat::types::Adapter` + `chat::types::StateAdapter` traits
+  via `async-trait`, impl on MemoryStateAdapter, unblock 5
+  consumer modules (callback_url, transcripts class,
+  thread_history class, postable_object dispatch, message
+  subject getter). Same item as slices 80/91/97/108.
