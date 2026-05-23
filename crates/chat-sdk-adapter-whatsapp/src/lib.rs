@@ -132,6 +132,13 @@ impl WhatsappAdapter {
     pub fn is_dm(&self, _thread_id: &str) -> bool {
         true
     }
+
+    /// Render formatted content to WhatsApp markdown. 1:1 with
+    /// upstream `adapter.renderFormatted(content)` which delegates
+    /// to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::WhatsAppFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -588,6 +595,21 @@ mod tests {
         let text = "x".repeat(10000);
         let result = split_message(&text);
         assert_eq!(result.join(""), text);
+    }
+
+    // ---------- renderFormatted (1 upstream case) ----------
+    // 1:1 with upstream `WhatsAppAdapter > renderFormatted >
+    // should render markdown from AST`.
+
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("PNID", "a", "v"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
     }
 
     #[test]

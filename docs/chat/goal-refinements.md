@@ -2670,3 +2670,90 @@ module-aliasing test).
   Kit, Discord embeds, Messenger templates, chat-sdk-chat
   ChannelImpl/ThreadImpl/ChatImpl, adapter index.test.ts integration
   suites) remain blocked.
+
+### 2026-05-24 - slices 237..241
+
+**Slices covered**
+
+- 237 Teams `src/thread_id.rs` — `TeamsThreadId` struct +
+  `encode_thread_id` (base64url-encoded conversation id +
+  serviceUrl) + `decode_thread_id` + `is_dm_thread` (7 cases).
+- 238 Discord `DecodedDiscordThreadId.thread_id: Option<String>`
+  optional sub-thread field; switched `decode_thread_id` from
+  `splitn(2, ':')` to `split(':')` so the 4th colon-segment is
+  captured instead of silently glued to channel_id (2 cases).
+- 239 Linear `channel_id_from_thread_id` + `is_dm` adapter-instance
+  helpers using the upstream-shape `thread_id::decode_thread_id`
+  (handles all 4 wire formats) (3 cases).
+- 240 GitHub `channel_id_from_thread_id` reworked to walk colon
+  segments directly so the 5-segment review-comment thread id
+  collapses to the same channel id as the 3-segment PR-level
+  thread id (2 cases).
+- 241 WhatsApp `render_formatted(&Node) -> String` 1:1 with
+  upstream `adapter.renderFormatted(content)` (1 case).
+
+**What the brief got wrong or left out**
+
+- Several adapters silently allowed extra-segment thread ids
+  because the Rust port used `splitn(N, ':')` (Discord, WhatsApp).
+  Both have been tightened in this and prior batches. Future
+  thread-id ports should default to `split(':')` + exact-length
+  check rather than the lossy `splitn` form.
+- The `channelIdFromThreadId` helpers cannot always delegate to
+  `decode_thread_id` because upstream's `decodeThreadId` may
+  reject formats that `channelIdFromThreadId` still needs to
+  collapse (e.g. GitHub's review-comment thread shape). The Rust
+  port now walks colon segments directly when that mismatch
+  arises.
+- Teams thread-id schema is base64url-encoded
+  conversation-id + serviceUrl. The legacy
+  `lib.rs::encode_thread_id(conversation_id, message_id)` form is
+  not upstream's wire shape and its callsites in the HTTP code
+  still use the old form. Slice 237 introduces the
+  upstream-shape `thread_id.rs` module that coexists with the
+  legacy form; migration is the next slice when Teams is
+  touched.
+- WhatsApp's `renderFormatted` exists on the adapter even though
+  the format converter offers `fromAst` directly. Adapters expose
+  some thin wrappers to keep the adapter trait surface complete;
+  these wrappers should be ported alongside the trait methods to
+  keep parity.
+
+**Stale or misleading guidance**
+
+- Per-adapter "trait methods covered: N/8" still doesn't account
+  for the growing set of upstream-shape helpers
+  (`channelIdFromThreadId`, `isDM`, `openDM`, `splitMessage`,
+  `applyTelegramEntities`, `renderFormatted`,
+  `cardIdFromThreadId`). After slices 227..241 the per-adapter
+  documentation should switch to two columns: "trait methods"
+  vs "upstream-shape helpers". Until then the percentage
+  estimate undercounts these landed helpers.
+- The brief's "Done condition" wording asks for `verified` or
+  `js-only-documented` on every package row. The bar for
+  "verified" is currently every portable upstream test ported.
+  Several rows are 2-3 large remaining surfaces away (Slack Block
+  Kit ~34, Discord embeds ~31, Teams Adaptive Cards ~26,
+  Messenger templates ~50, chat ChannelImpl/ThreadImpl/ChatImpl
+  ~470). Marking any row `verified` before those land would
+  violate the brief's "every portable upstream test/case must
+  have a matching Rust test" hard rule.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Linear's legacy `lib.rs::encode_thread_id(team_key, issue_id)`
+  callsites** still use the wrong wire format. Migration to the
+  slice-216 `LinearThreadId` struct would let `decode_thread_id`
+  be removed and the channelId helper (slice 239) simplify.
+- **Teams's `lib.rs::encode_thread_id(conv_id, msg_id)`
+  callsites** still use the legacy form even though the
+  upstream-shape `thread_id.rs` module exists (slice 237).
+  Migration would let the channelId helper land for Teams too.
+- All previously-deferred items (Slack Block Kit, Discord
+  embeds, Messenger templates, Teams Adaptive Cards, chat
+  ChannelImpl/ThreadImpl/ChatImpl, adapter index.test.ts
+  integration suites, `postToCallbackUrl` HTTP) remain blocked.
