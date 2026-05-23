@@ -604,6 +604,21 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/openai` Files upload parity added `OpenAIFiles`
+  and `ProviderWithFiles` support plus named Rust counterparts for the portable
+  upstream `src/files/openai-files.test.ts` cases:
+  `openai_files_should_send_correct_multipart_request_with_purpose`,
+  `openai_files_should_return_provider_reference_with_openai_key`,
+  `openai_files_should_return_provider_metadata_from_response`,
+  `openai_files_should_default_purpose_to_assistants_when_not_provided`,
+  `openai_files_should_pass_expires_after_when_provided`,
+  `openai_files_should_pass_auth_headers`,
+  `openai_files_should_handle_base64_string_data`, and
+  `openai_files_should_set_specification_version_and_provider`. Rust now maps
+  OpenAI `/files` upload request shaping through multipart form data, default
+  `purpose: assistants`, provider `expiresAfter` to `expires_after`,
+  OpenAI auth headers, base64 data conversion, provider references, provider
+  metadata, and provider-v4 files identity.
 - 2026-05-23: `packages/ai` `smoothStream` portable edge-case parity
   added named Rust counterparts for the remaining portable upstream
   `generate-text/smooth-stream.test.ts` cases:
@@ -3518,11 +3533,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    reasoning/provider-option `it.each` matrices, and confirmed the
    package-owned `ai-sdk-open-responses` crate's 523 tests include named Rust
    counterparts for every portable current Responses case. Continue
-   `packages/openai` from non-Responses surfaces such as files, skills, speech,
+   `packages/openai` from remaining non-Responses surfaces such as skills, speech,
    transcription, images, and non-Responses error mappings.
    The upstream `openai-error.test.ts` non-Responses schema case now has the
    named Rust counterpart
    `openai_error_data_schema_should_parse_openrouter_resource_exhausted_error`.
+   The portable upstream `files/openai-files.test.ts` upload cases now have
+   named Rust counterparts under `openai_files_should_*`.
 5. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
    expanding to unrelated providers. Continue choosing from `packages/ai`,

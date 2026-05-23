@@ -1,10 +1,15 @@
+use std::collections::BTreeMap;
 use std::env;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_data::{FileDataContent, ProviderReference};
+use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 use crate::headers::Headers;
-use crate::json::JsonValue;
+use crate::json::{JsonObject, JsonValue};
 use crate::open_responses::{
     OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
 };
@@ -13,8 +18,13 @@ use crate::openai_compatible::{
     OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
     OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
 };
-use crate::provider::{NoSuchModelError, Provider};
-use crate::provider_utils::without_trailing_slash;
+use crate::provider::{NoSuchModelError, Provider, ProviderMetadata, ProviderWithFiles};
+use crate::provider_utils::{
+    FetchErrorInfo, FormData, FormDataInputValue, FormDataValue, HandledFetchError,
+    PostFormDataToApiOptions, ProviderApiResponseHandlerError, ResponseHandlerResult,
+    convert_base64_to_bytes, convert_to_form_data, create_json_response_handler,
+    post_form_data_to_api, without_trailing_slash,
+};
 
 /// Default base URL for upstream `@ai-sdk/openai` API calls.
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -49,6 +59,74 @@ pub struct OpenAIErrorDetails {
     /// Provider-specific string or numeric error code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<JsonValue>,
+}
+
+/// Response returned by OpenAI's `/files` upload endpoint.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIFileResponse {
+    /// OpenAI file identifier.
+    pub id: String,
+
+    /// OpenAI object discriminator.
+    pub object: String,
+
+    /// File size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+
+    /// Unix creation timestamp.
+    #[serde(
+        default,
+        rename = "created_at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub created_at: Option<u64>,
+
+    /// Server filename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
+    /// OpenAI upload purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+
+    /// OpenAI processing status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+
+    /// Optional expiry timestamp.
+    #[serde(
+        default,
+        rename = "expires_at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expires_at: Option<u64>,
+}
+
+/// OpenAI files upload interface.
+#[derive(Clone)]
+pub struct OpenAIFiles {
+    provider: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+}
+
+impl OpenAIFiles {
+    fn new(
+        provider: impl Into<String>,
+        base_url: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            base_url: base_url.into(),
+            headers,
+            transport,
+        }
+    }
 }
 
 /// Settings for the upstream OpenAI provider.
@@ -247,25 +325,27 @@ impl OpenAIProvider {
         self.image(model_id)
     }
 
+    /// Creates the OpenAI files upload interface.
+    pub fn files(&self) -> OpenAIFiles {
+        let provider_name = openai_provider_name(&self.settings);
+        OpenAIFiles::new(
+            format!("{provider_name}.files"),
+            openai_base_url(&self.settings),
+            openai_headers(&self.settings),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_openai_files_transport),
+        )
+    }
+
     fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
         let provider_name = openai_provider_name(&self.settings);
         let mut settings =
             OpenAICompatibleProviderSettings::new(provider_name, openai_base_url(&self.settings))
                 .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION));
 
-        if let Some(api_key) = openai_api_key(self.settings.api_key.as_ref()) {
-            settings = settings.with_api_key(api_key);
-        }
-
-        if let Some(organization) = non_empty_optional_setting(self.settings.organization.clone()) {
-            settings = settings.with_header("OpenAI-Organization", organization);
-        }
-
-        if let Some(project) = non_empty_optional_setting(self.settings.project.clone()) {
-            settings = settings.with_header("OpenAI-Project", project);
-        }
-
-        for (name, value) in &self.settings.headers {
+        for (name, value) in openai_headers(&self.settings) {
             settings = settings.with_header(name.clone(), value.clone());
         }
 
@@ -287,19 +367,7 @@ impl OpenAIProvider {
         .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION))
         .with_file_id_prefix("file-");
 
-        if let Some(api_key) = openai_api_key(self.settings.api_key.as_ref()) {
-            settings = settings.with_api_key(api_key);
-        }
-
-        if let Some(organization) = non_empty_optional_setting(self.settings.organization.clone()) {
-            settings = settings.with_header("OpenAI-Organization", organization);
-        }
-
-        if let Some(project) = non_empty_optional_setting(self.settings.project.clone()) {
-            settings = settings.with_header("OpenAI-Project", project);
-        }
-
-        for (name, value) in &self.settings.headers {
+        for (name, value) in openai_headers(&self.settings) {
             settings = settings.with_header(name.clone(), value.clone());
         }
 
@@ -337,6 +405,42 @@ impl Provider for OpenAIProvider {
     }
 }
 
+impl ProviderWithFiles for OpenAIProvider {
+    type Files = OpenAIFiles;
+
+    fn files(&self) -> Self::Files {
+        OpenAIProvider::files(self)
+    }
+}
+
+impl Files for OpenAIFiles {
+    type UploadFileFuture<'a>
+        = Pin<Box<dyn Future<Output = FilesUploadFileResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn upload_file(&self, options: FilesUploadFileCallOptions) -> Self::UploadFileFuture<'_> {
+        let provider = self.provider.clone();
+        let base_url = self.base_url.clone();
+        let headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+
+        Box::pin(async move {
+            let filename = options.filename.clone();
+            let media_type = options.media_type.clone();
+            let response = upload_openai_file(provider, base_url, headers, transport, options)
+                .await
+                .expect("OpenAI file upload failed");
+
+            openai_file_upload_result(response, media_type, filename)
+        })
+    }
+}
+
 /// Creates an OpenAI provider with explicit settings.
 pub fn create_openai(settings: OpenAIProviderSettings) -> OpenAIProvider {
     OpenAIProvider::from_settings(settings)
@@ -366,8 +470,200 @@ fn openai_api_key(explicit_api_key: Option<&String>) -> Option<String> {
         .or_else(|| non_empty_optional_setting(env::var("OPENAI_API_KEY").ok()))
 }
 
+fn openai_headers(settings: &OpenAIProviderSettings) -> Headers {
+    let mut headers = Headers::new();
+
+    if let Some(api_key) = openai_api_key(settings.api_key.as_ref()) {
+        headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
+    }
+
+    if let Some(organization) = non_empty_optional_setting(settings.organization.clone()) {
+        headers.insert("OpenAI-Organization".to_string(), organization);
+    }
+
+    if let Some(project) = non_empty_optional_setting(settings.project.clone()) {
+        headers.insert("OpenAI-Project".to_string(), project);
+    }
+
+    for (name, value) in &settings.headers {
+        headers.insert(name.clone(), value.clone());
+    }
+
+    headers.insert(
+        "user-agent".to_string(),
+        format!("ai-sdk/openai/{}", crate::VERSION),
+    );
+    headers
+}
+
 fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
+}
+
+fn default_openai_files_transport() -> OpenAICompatibleTransport {
+    Arc::new(|_| {
+        Box::pin(std::future::ready(Err(FetchErrorInfo::new(
+            "multipart form data requires an injected OpenAI transport",
+        ))))
+    })
+}
+
+async fn upload_openai_file(
+    provider: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    options: FilesUploadFileCallOptions,
+) -> Result<OpenAIFileResponse, HandledFetchError> {
+    let form_data = openai_file_upload_form_data(&options);
+    let response = post_form_data_to_api(
+        PostFormDataToApiOptions::new(format!("{base_url}/files"), form_data)
+            .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value)))),
+        move |request| transport(request),
+        |request, response| {
+            create_json_response_handler::<OpenAIFileResponse, _, _>(
+                response.json_response_handler_options(request),
+                |value| serde_json::from_value(value.clone()),
+            )
+            .map_err(ProviderApiResponseHandlerError::from)
+        },
+        move |request, response| Ok(openai_failed_response_handler(&provider, request, response)),
+    )
+    .await?;
+
+    Ok(response.value)
+}
+
+fn openai_file_upload_form_data(options: &FilesUploadFileCallOptions) -> FormData {
+    let openai_options = options
+        .provider_options
+        .as_ref()
+        .and_then(|options| options.get("openai"));
+    let purpose = openai_options
+        .and_then(|options| options.get("purpose"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or("assistants")
+        .to_string();
+
+    let expires_after = openai_options
+        .and_then(|options| options.get("expiresAfter"))
+        .and_then(|value| match value {
+            JsonValue::Number(number) => Some(number.to_string()),
+            JsonValue::String(value) => Some(value.clone()),
+            _ => None,
+        });
+
+    let file_bytes = match &options.data {
+        FilesUploadFileData::Data { data } => openai_file_upload_data_bytes(data),
+        FilesUploadFileData::Text { text } => text.as_bytes().to_vec(),
+    };
+
+    let form_data = convert_to_form_data(
+        [
+            (
+                "file".to_string(),
+                Some(FormDataInputValue::bytes(file_bytes)),
+            ),
+            (
+                "purpose".to_string(),
+                Some(FormDataInputValue::text(purpose)),
+            ),
+            (
+                "expires_after".to_string(),
+                expires_after.map(FormDataInputValue::text),
+            ),
+        ],
+        Default::default(),
+    );
+
+    if let Some(filename) = &options.filename {
+        let mut form_data = form_data;
+        form_data.append("filename", FormDataValue::text(filename.clone()));
+        form_data
+    } else {
+        form_data
+    }
+}
+
+fn openai_file_upload_data_bytes(data: &FileDataContent) -> Vec<u8> {
+    match data {
+        FileDataContent::Bytes(bytes) => bytes.clone(),
+        FileDataContent::Base64(base64) => {
+            convert_base64_to_bytes(base64).unwrap_or_else(|_| base64.as_bytes().to_vec())
+        }
+    }
+}
+
+fn openai_failed_response_handler(
+    provider: &str,
+    request: &crate::provider_utils::ProviderApiRequest,
+    response: &crate::provider_utils::ProviderApiResponse,
+) -> ResponseHandlerResult<crate::provider::ApiCallError> {
+    let message = response
+        .text_body()
+        .and_then(|body| {
+            create_json_response_handler::<OpenAIErrorData, _, _>(
+                response.json_response_handler_options(request),
+                |value| serde_json::from_value(value.clone()),
+            )
+            .ok()
+            .map(|parsed| parsed.value.error.message)
+            .or_else(|| Some(body.to_string()))
+        })
+        .unwrap_or_else(|| response.status_text.clone());
+    let error = crate::provider::ApiCallError::new(
+        message,
+        request.url.clone(),
+        request.request_body_values.clone(),
+    )
+    .with_status_code(response.status_code)
+    .with_response_headers(response.headers.clone())
+    .with_data(JsonValue::Object(JsonObject::from_iter([(
+        provider.to_string(),
+        JsonValue::String(response.status_text.clone()),
+    )])));
+
+    ResponseHandlerResult::new(error).with_response_headers(response.headers.clone())
+}
+
+fn openai_file_upload_result(
+    response: OpenAIFileResponse,
+    media_type: String,
+    fallback_filename: Option<String>,
+) -> FilesUploadFileResult {
+    let provider_reference =
+        ProviderReference::try_from(BTreeMap::from([("openai".to_string(), response.id)]))
+            .expect("OpenAI provider reference is valid");
+    let mut metadata = JsonObject::new();
+
+    if let Some(filename) = &response.filename {
+        metadata.insert("filename".to_string(), JsonValue::String(filename.clone()));
+    }
+    if let Some(purpose) = &response.purpose {
+        metadata.insert("purpose".to_string(), JsonValue::String(purpose.clone()));
+    }
+    if let Some(bytes) = response.bytes {
+        metadata.insert("bytes".to_string(), JsonValue::from(bytes));
+    }
+    if let Some(created_at) = response.created_at {
+        metadata.insert("createdAt".to_string(), JsonValue::from(created_at));
+    }
+    if let Some(status) = &response.status {
+        metadata.insert("status".to_string(), JsonValue::String(status.clone()));
+    }
+    if let Some(expires_at) = response.expires_at {
+        metadata.insert("expiresAt".to_string(), JsonValue::from(expires_at));
+    }
+
+    let mut result = FilesUploadFileResult::new(provider_reference)
+        .with_media_type(media_type)
+        .with_provider_metadata(ProviderMetadata::from([("openai".to_string(), metadata)]));
+
+    if let Some(filename) = response.filename.or(fallback_filename) {
+        result = result.with_filename(filename);
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -377,7 +673,8 @@ mod tests {
         create_openai,
     };
     use crate::embed::{EmbedManyOptions, embed_many};
-    use crate::file_data::{FileData, FileDataContent};
+    use crate::file_data::{FileData, FileDataContent, ProviderReference};
+    use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileData};
     use crate::generate_image::{GenerateImageOptions, GenerateImagePrompt, generate_image};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
@@ -388,10 +685,10 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderOptions};
+    use crate::provider::{Provider, ProviderOptions, ProviderWithFiles, SpecificationVersion};
     use crate::provider_utils::{
-        ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
-        ProviderApiResponse, Schema, safe_parse_json_with_schema,
+        FormDataValue, ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, Schema, safe_parse_json_with_schema,
     };
     use serde_json::{Map, json};
     use std::future::Future;
@@ -932,6 +1229,247 @@ mod tests {
     }
 
     #[test]
+    fn openai_files_should_send_correct_multipart_request_with_purpose() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_files_test_provider(Arc::clone(&captured_requests));
+        let files = provider.files();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "purpose": "fine-tune"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            files.upload_file(
+                FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::text("training row"),
+                    "text/plain",
+                )
+                .with_filename("training.jsonl")
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        let request = captured_openai_files_request(&captured_requests);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.openai.test/v1/files");
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("file"),
+            Some(&FormDataValue::bytes(b"training row".to_vec()))
+        );
+        assert_eq!(
+            form_data.get("purpose"),
+            Some(&FormDataValue::text("fine-tune"))
+        );
+        assert_eq!(
+            form_data.get("filename"),
+            Some(&FormDataValue::text("training.jsonl"))
+        );
+    }
+
+    #[test]
+    fn openai_files_should_return_provider_reference_with_openai_key() {
+        let provider = openai_files_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let result = poll_ready(
+            provider
+                .files()
+                .upload_file(FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::text("file content"),
+                    "text/plain",
+                )),
+        );
+
+        assert_eq!(
+            result.provider_reference,
+            ProviderReference::try_from(std::collections::BTreeMap::from([(
+                "openai".to_string(),
+                "file-openai-upload".to_string()
+            )]))
+            .expect("provider reference is valid")
+        );
+    }
+
+    #[test]
+    fn openai_files_should_return_provider_metadata_from_response() {
+        let provider = openai_files_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let result = poll_ready(
+            provider
+                .files()
+                .upload_file(FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::text("file content"),
+                    "text/plain",
+                )),
+        );
+
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai")),
+            Some(
+                &json!({
+                    "filename": "uploaded.jsonl",
+                    "purpose": "assistants",
+                    "bytes": 12,
+                    "createdAt": 1711115037,
+                    "status": "processed",
+                    "expiresAt": 1711125037
+                })
+                .as_object()
+                .expect("metadata is an object")
+                .clone()
+            )
+        );
+        assert_eq!(result.filename.as_deref(), Some("uploaded.jsonl"));
+        assert_eq!(result.media_type.as_deref(), Some("text/plain"));
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_files_should_default_purpose_to_assistants_when_not_provided() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_files_test_provider(Arc::clone(&captured_requests));
+
+        let _result = poll_ready(
+            provider
+                .files()
+                .upload_file(FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::text("file content"),
+                    "text/plain",
+                )),
+        );
+
+        let request = captured_openai_files_request(&captured_requests);
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("purpose"),
+            Some(&FormDataValue::text("assistants"))
+        );
+    }
+
+    #[test]
+    fn openai_files_should_pass_expires_after_when_provided() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_files_test_provider(Arc::clone(&captured_requests));
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "expiresAfter": 3600
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            provider.files().upload_file(
+                FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::text("file content"),
+                    "text/plain",
+                )
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        let request = captured_openai_files_request(&captured_requests);
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("expires_after"),
+            Some(&FormDataValue::text("3600"))
+        );
+    }
+
+    #[test]
+    fn openai_files_should_pass_auth_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_files_test_provider(Arc::clone(&captured_requests));
+
+        let _result = poll_ready(
+            provider
+                .files()
+                .upload_file(FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::text("file content"),
+                    "text/plain",
+                )),
+        );
+
+        let request = captured_openai_files_request(&captured_requests);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("org_test")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("proj_test")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai/0.1.0"))
+        );
+    }
+
+    #[test]
+    fn openai_files_should_handle_base64_string_data() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_files_test_provider(Arc::clone(&captured_requests));
+
+        let _result = poll_ready(
+            provider
+                .files()
+                .upload_file(FilesUploadFileCallOptions::new(
+                    FilesUploadFileData::data(FileDataContent::Base64(
+                        "aGVsbG8gd29ybGQ=".to_string(),
+                    )),
+                    "text/plain",
+                )),
+        );
+
+        let request = captured_openai_files_request(&captured_requests);
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("file"),
+            Some(&FormDataValue::bytes(b"hello world".to_vec()))
+        );
+    }
+
+    #[test]
+    fn openai_files_should_set_specification_version_and_provider() {
+        let provider = openai_files_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let files = ProviderWithFiles::files(&provider);
+
+        assert_eq!(files.specification_version(), SpecificationVersion::V4);
+        assert_eq!(files.provider(), "openai.files");
+    }
+
+    #[test]
     fn openai_provider_uses_default_base_url_name_override_and_provider_trait() {
         let provider = OpenAIProvider::new().with_name("custom-openai");
 
@@ -988,6 +1526,53 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn openai_files_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "file-openai-upload",
+                        "object": "file",
+                        "filename": "uploaded.jsonl",
+                        "purpose": "assistants",
+                        "bytes": 12,
+                        "created_at": 1711115037,
+                        "status": "processed",
+                        "expires_at": 1711125037
+                    })
+                    .to_string(),
+                ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_organization("org_test")
+            .with_project("proj_test")
+            .with_header("custom-header", "value")
+            .with_transport(transport)
+    }
+
+    fn captured_openai_files_request(
+        captured_requests: &Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .first()
+            .cloned()
+            .expect("request is captured")
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
