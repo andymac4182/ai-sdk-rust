@@ -419,6 +419,189 @@ where
     AsyncIterableStream::new(source)
 }
 
+/// Error returned when a stitchable stream operation fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StitchableStreamError {
+    message: String,
+}
+
+impl StitchableStreamError {
+    /// Creates a stitchable stream error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for StitchableStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StitchableStreamError {}
+
+/// Read result returned by [`StitchableStream::read`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StitchableStreamRead<T> {
+    /// No chunk is currently available because the outer stream is still open.
+    Pending,
+
+    /// One chunk was read from the current inner stream.
+    Chunk(T),
+
+    /// The outer stream is closed and all inner streams are exhausted.
+    Done,
+}
+
+/// Rust analogue of upstream `createStitchableStream`.
+pub struct StitchableStream<T, Source> {
+    inner_streams: VecDeque<Source>,
+    closed: bool,
+    _chunk: PhantomData<T>,
+}
+
+impl<T, Source> fmt::Debug for StitchableStream<T, Source>
+where
+    Source: fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StitchableStream")
+            .field("inner_stream_count", &self.inner_streams.len())
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, Source> Default for StitchableStream<T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, Source> StitchableStream<T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    /// Creates an empty stitchable stream.
+    pub fn new() -> Self {
+        Self {
+            inner_streams: VecDeque::new(),
+            closed: false,
+            _chunk: PhantomData,
+        }
+    }
+
+    /// Adds an inner stream to the read queue.
+    pub fn add_stream(&mut self, inner_stream: Source) -> Result<(), StitchableStreamError> {
+        if self.closed {
+            return Err(StitchableStreamError::new(
+                "Cannot add inner stream: outer stream is closed",
+            ));
+        }
+
+        self.inner_streams.push_back(inner_stream);
+        Ok(())
+    }
+
+    /// Gracefully closes the outer stream after queued inner streams finish.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    /// Cancels all inner streams and closes the outer stream immediately.
+    pub fn terminate(&mut self) -> Result<(), StitchableStreamError> {
+        self.closed = true;
+        self.cancel_all_inner_streams()
+    }
+
+    /// Cancels the outer stream and all queued inner streams.
+    pub fn cancel(&mut self) -> Result<(), StitchableStreamError> {
+        self.closed = true;
+        self.cancel_all_inner_streams()
+    }
+
+    /// Reads one value, reports `Pending` when still open with no inner stream,
+    /// and reports `Done` once closed and drained.
+    pub fn read(&mut self) -> Result<StitchableStreamRead<T>, StitchableStreamError> {
+        loop {
+            let Some(inner_stream) = self.inner_streams.front_mut() else {
+                return if self.closed {
+                    Ok(StitchableStreamRead::Done)
+                } else {
+                    Ok(StitchableStreamRead::Pending)
+                };
+            };
+
+            match inner_stream.read() {
+                Ok(Some(chunk)) => return Ok(StitchableStreamRead::Chunk(chunk)),
+                Ok(None) => {
+                    self.inner_streams.pop_front();
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = self.terminate();
+                    return Err(StitchableStreamError::new(message));
+                }
+            }
+        }
+    }
+
+    /// Collects all currently readable chunks until the stream is done or pending.
+    pub fn collect(&mut self) -> Result<Vec<T>, StitchableStreamError> {
+        let mut chunks = Vec::new();
+
+        while let StitchableStreamRead::Chunk(chunk) = self.read()? {
+            chunks.push(chunk);
+        }
+
+        Ok(chunks)
+    }
+
+    fn cancel_all_inner_streams(&mut self) -> Result<(), StitchableStreamError> {
+        let mut first_error = None;
+
+        while let Some(mut inner_stream) = self.inner_streams.pop_front() {
+            if let Err(error) = inner_stream.cancel()
+                && first_error.is_none()
+            {
+                first_error = Some(error.to_string());
+            }
+        }
+
+        if let Some(error) = first_error {
+            return Err(StitchableStreamError::new(error));
+        }
+
+        Ok(())
+    }
+}
+
+impl<T> StitchableStream<T, VecAsyncIterableStreamSource<T>> {
+    /// Adds vector chunks as one inner stream.
+    pub fn add_chunks(&mut self, chunks: Vec<T>) -> Result<(), StitchableStreamError> {
+        self.add_stream(VecAsyncIterableStreamSource::new(chunks))
+    }
+}
+
+/// Creates a stitchable stream.
+pub fn create_stitchable_stream<T, Source>() -> StitchableStream<T, Source>
+where
+    Source: AsyncIterableStreamSource<T>,
+{
+    StitchableStream::new()
+}
+
 /// Error returned when a simulated readable stream delay fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SimulateReadableStreamError {
@@ -1898,13 +2081,14 @@ mod tests {
         AbortSignalSource, AbortTimeoutOptions, AsyncIterableStream, AsyncIterableStreamError,
         AsyncIterableStreamSource, Callback, CallbackResult, DataUrlTextError,
         InvalidArgumentError, NotifyCallbacks, PrepareRetriesOptions, SerialJobError,
-        SerialJobExecutor, ServerResponseWriter, SimulateReadableStreamOptions,
-        WriteToServerResponseOptions, cosine_similarity, create_async_iterable_stream,
-        create_async_iterable_stream_from_source, fix_json, get_potential_start_index,
-        get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
-        merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
-        set_abort_timeout, simulate_readable_stream, simulate_readable_stream_with_delay,
-        split_array, write_to_server_response,
+        SerialJobExecutor, ServerResponseWriter, SimulateReadableStreamOptions, StitchableStream,
+        StitchableStreamRead, VecAsyncIterableStreamSource, WriteToServerResponseOptions,
+        cosine_similarity, create_async_iterable_stream, create_async_iterable_stream_from_source,
+        create_stitchable_stream, fix_json, get_potential_start_index, get_text_from_data_url,
+        is_deep_equal_data, merge_abort_signals, merge_callbacks, merge_objects, notify,
+        parse_partial_json, prepare_headers, prepare_retries, set_abort_timeout,
+        simulate_readable_stream, simulate_readable_stream_with_delay, split_array,
+        write_to_server_response,
     };
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -2055,6 +2239,14 @@ mod tests {
         }
 
         Ok(chunks)
+    }
+
+    fn stitchable_stream<T>() -> StitchableStream<T, VecAsyncIterableStreamSource<T>> {
+        create_stitchable_stream()
+    }
+
+    fn vec_inner_stream<T>(chunks: Vec<T>) -> VecAsyncIterableStreamSource<T> {
+        VecAsyncIterableStreamSource::new(chunks)
     }
 
     #[derive(Default)]
@@ -2743,6 +2935,196 @@ mod tests {
         assert_eq!(output, input);
         iterator.return_stream().unwrap();
         assert_eq!(iterator.read_next().unwrap(), None);
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_return_no_stream_when_immediately_closed() {
+        let mut stream = stitchable_stream::<i32>();
+
+        stream.close();
+
+        assert_eq!(stream.collect().unwrap(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_return_all_values_from_a_single_inner_stream() {
+        let mut stream = stitchable_stream();
+
+        stream.add_chunks(vec![1, 2, 3]).unwrap();
+        stream.close();
+
+        assert_eq!(stream.collect().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_return_all_values_from_2_inner_streams() {
+        let mut stream = stitchable_stream();
+
+        stream.add_chunks(vec![1, 2, 3]).unwrap();
+        stream.add_chunks(vec![4, 5, 6]).unwrap();
+        stream.close();
+
+        assert_eq!(stream.collect().unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_return_all_values_from_3_inner_streams() {
+        let mut stream = stitchable_stream();
+
+        stream.add_chunks(vec![1, 2, 3]).unwrap();
+        stream.add_chunks(vec![4, 5, 6]).unwrap();
+        stream.add_chunks(vec![7, 8, 9]).unwrap();
+        stream.close();
+
+        assert_eq!(stream.collect().unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_handle_empty_inner_streams() {
+        let mut stream = stitchable_stream();
+
+        stream.add_chunks(Vec::<i32>::new()).unwrap();
+        stream.add_chunks(vec![1, 2]).unwrap();
+        stream.add_chunks(Vec::<i32>::new()).unwrap();
+        stream.add_chunks(vec![3, 4]).unwrap();
+        stream.close();
+
+        assert_eq!(stream.collect().unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_handle_reading_a_single_value_before_it_is_added() {
+        let mut stream = stitchable_stream();
+
+        assert_eq!(stream.read().unwrap(), StitchableStreamRead::Pending);
+
+        stream.add_chunks(vec![42]).unwrap();
+        stream.close();
+
+        assert_eq!(stream.read().unwrap(), StitchableStreamRead::Chunk(42));
+        assert_eq!(stream.read().unwrap(), StitchableStreamRead::Done);
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_return_all_values_from_2_inner_streams_when_reads_start_before_they_are_added()
+     {
+        let mut stream = stitchable_stream();
+
+        assert_eq!(stream.read().unwrap(), StitchableStreamRead::Pending);
+
+        stream.add_chunks(vec![1, 2, 3]).unwrap();
+        stream.add_chunks(vec![4, 5]).unwrap();
+        stream.close();
+
+        assert_eq!(
+            [
+                stream.read().unwrap(),
+                stream.read().unwrap(),
+                stream.read().unwrap(),
+                stream.read().unwrap(),
+                stream.read().unwrap(),
+                stream.read().unwrap(),
+            ],
+            [
+                StitchableStreamRead::Chunk(1),
+                StitchableStreamRead::Chunk(2),
+                StitchableStreamRead::Chunk(3),
+                StitchableStreamRead::Chunk(4),
+                StitchableStreamRead::Chunk(5),
+                StitchableStreamRead::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_handle_errors_from_inner_streams() {
+        let mut stream: StitchableStream<&str, MockAsyncIterableStreamSource<&str>> =
+            create_stitchable_stream();
+
+        stream
+            .add_stream(MockAsyncIterableStreamSource::with_chunks(["1", "2"]))
+            .unwrap();
+        stream
+            .add_stream(MockAsyncIterableStreamSource::with_entries([Err(
+                "Test error".to_string(),
+            )]))
+            .unwrap();
+        stream
+            .add_stream(MockAsyncIterableStreamSource::with_chunks(["3", "4"]))
+            .unwrap();
+        stream.close();
+
+        let error = stream.collect().expect_err("inner stream error propagates");
+
+        assert_eq!(error.message(), "Test error");
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_cancel_all_inner_streams_when_cancelled() {
+        let first = MockAsyncIterableStreamSource::with_chunks([1, 2]);
+        let first_cancelled = first.cancelled_handle();
+        let second = MockAsyncIterableStreamSource::with_chunks([3, 4]);
+        let second_cancelled = second.cancelled_handle();
+        let mut stream: StitchableStream<i32, MockAsyncIterableStreamSource<i32>> =
+            create_stitchable_stream();
+
+        stream.add_stream(first).unwrap();
+        stream.add_stream(second).unwrap();
+        stream.cancel().unwrap();
+
+        assert!(*first_cancelled.borrow());
+        assert!(*second_cancelled.borrow());
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_throw_an_error_when_adding_a_stream_after_closing() {
+        let mut stream = stitchable_stream();
+
+        stream.close();
+        let error = stream
+            .add_stream(vec_inner_stream(vec![1, 2]))
+            .expect_err("closed stream rejects new inner stream");
+
+        assert_eq!(
+            error.message(),
+            "Cannot add inner stream: outer stream is closed"
+        );
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_immediately_close_the_stream_and_cancel_all_inner_streams() {
+        let first = MockAsyncIterableStreamSource::with_chunks([1, 2]);
+        let first_cancelled = first.cancelled_handle();
+        let second = MockAsyncIterableStreamSource::with_chunks([3, 4]);
+        let second_cancelled = second.cancelled_handle();
+        let mut stream: StitchableStream<i32, MockAsyncIterableStreamSource<i32>> =
+            create_stitchable_stream();
+
+        stream.add_stream(first).unwrap();
+        stream.add_stream(second).unwrap();
+        let first_read = stream.read().unwrap();
+
+        stream.terminate().unwrap();
+
+        assert_eq!(first_read, StitchableStreamRead::Chunk(1));
+        assert_eq!(stream.read().unwrap(), StitchableStreamRead::Done);
+        assert!(*first_cancelled.borrow());
+        assert!(*second_cancelled.borrow());
+    }
+
+    #[test]
+    fn create_stitchable_stream_should_throw_an_error_when_adding_a_stream_after_terminating() {
+        let mut stream = stitchable_stream();
+
+        stream.terminate().unwrap();
+        let error = stream
+            .add_stream(vec_inner_stream(vec![1, 2]))
+            .expect_err("terminated stream rejects new inner stream");
+
+        assert_eq!(
+            error.message(),
+            "Cannot add inner stream: outer stream is closed"
+        );
     }
 
     #[test]
