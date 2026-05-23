@@ -1539,4 +1539,53 @@ mod tests {
         let align = find_table_align(&node).expect("table parses");
         assert_eq!(align.len(), 2);
     }
+
+    // ---------- slice 76: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_strong_with_underscore_syntax_equals_asterisks() {
+        let a = parse_markdown("__bold__").expect("parses");
+        let b = parse_markdown("**bold**").expect("parses");
+        assert_eq!(to_plain_text(&a), to_plain_text(&b));
+        assert_eq!(to_plain_text(&a), "bold");
+    }
+
+    #[test]
+    fn parse_markdown_emphasis_with_underscore_syntax_equals_asterisks() {
+        let a = parse_markdown("_italic_").expect("parses");
+        let b = parse_markdown("*italic*").expect("parses");
+        assert_eq!(to_plain_text(&a), to_plain_text(&b));
+        assert_eq!(to_plain_text(&a), "italic");
+    }
+
+    #[test]
+    fn parse_markdown_link_url_with_query_string_survives_parsing() {
+        let node = parse_markdown("[search](https://example.com/?q=rust)").expect("parses");
+        fn find_link_url(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return Some(l.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_link_url(&node).as_deref(),
+            Some("https://example.com/?q=rust")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_strikethrough_inside_paragraph_preserves_neighbors() {
+        let node = parse_markdown("before ~~middle~~ after").expect("parses");
+        let plain = to_plain_text(&node);
+        assert_eq!(plain, "before middle after");
+        fn has_delete(n: &Node) -> bool {
+            matches!(n, Node::Delete(_)) || get_node_children(n).iter().any(has_delete)
+        }
+        assert!(has_delete(&node));
+    }
 }
