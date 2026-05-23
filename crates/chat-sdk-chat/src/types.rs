@@ -594,6 +594,19 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Options for `Postable::post_ephemeral`. 1:1 port of upstream
+/// `interface PostEphemeralOptions`.
+///
+/// `fallback_to_dm` controls behavior on platforms where native ephemeral
+/// messages aren't supported (e.g. Discord):
+/// - `true` — fall back to sending a DM to the user.
+/// - `false` — return `None` from `post_ephemeral`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PostEphemeralOptions {
+    #[serde(rename = "fallbackToDM")]
+    pub fallback_to_dm: bool,
+}
+
 /// Context passed to the upstream `lockScope` resolver function on
 /// [`ChatConfig`]. 1:1 port of upstream `interface LockScopeContext`.
 ///
@@ -1485,6 +1498,26 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn post_ephemeral_options_round_trips_camelcase_field() {
+        let yes = PostEphemeralOptions {
+            fallback_to_dm: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&yes).unwrap(),
+            "{\"fallbackToDM\":true}"
+        );
+        let no = PostEphemeralOptions {
+            fallback_to_dm: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&no).unwrap(),
+            "{\"fallbackToDM\":false}"
+        );
+        let back: PostEphemeralOptions = serde_json::from_str("{\"fallbackToDM\":true}").unwrap();
+        assert_eq!(back, yes);
     }
 
     #[test]
