@@ -12,6 +12,7 @@
 
 pub mod callback_url;
 pub mod cards;
+pub mod channel;
 pub mod chat_singleton;
 pub mod emoji;
 pub mod errors;
