@@ -162,7 +162,10 @@ fn render_child(child: &CardChild) -> Vec<String> {
             }
         }
         CardChild::Divider(_) => vec!["---".to_string()],
-        _ => vec![],
+        // Link and Table are intentionally not rendered in WhatsApp's
+        // text-fallback mode. 1:1 with upstream `default: return []`
+        // in `cards.ts renderChild(child)`.
+        CardChild::Link(_) | CardChild::Table(_) => vec![],
     }
 }
 
@@ -221,7 +224,12 @@ fn child_to_plain_text(child: &CardChild) -> Option<String> {
                 Some(pieces.join("\n"))
             }
         }
-        _ => None,
+        // Image / Divider / Link / Table contribute no plain text.
+        // 1:1 with upstream `default: return null` in `cards.ts
+        // childToPlainText(child)`.
+        CardChild::Image(_) | CardChild::Divider(_) | CardChild::Link(_) | CardChild::Table(_) => {
+            None
+        }
     }
 }
 
