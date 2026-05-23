@@ -7693,7 +7693,7 @@ mod tests {
         PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls,
         ReasoningFileOutput, ReasoningOutput, ResolveToolApprovalOptions,
         SingleToolApprovalOptions, StaticToolCall, StaticToolError, StaticToolOutputDenied,
-        StaticToolResult, StopCondition, ToolApprovalConfiguration, ToolApprovalRequestOutput,
+        StaticToolResult, ToolApprovalConfiguration, ToolApprovalRequestOutput,
         ToolApprovalResponseOutput, ToolApprovalStatus, ToolApprovalStatusKind,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
         ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
@@ -7824,24 +7824,69 @@ mod tests {
     }
 
     #[test]
-    fn stop_conditions_match_upstream_builtin_predicates() {
+    fn is_step_count_should_return_true_when_the_step_count_matches_exactly() {
         let empty = stop_condition_step(&[]);
-        let final_answer = stop_condition_step(&["finalAnswer"]);
         let weather = stop_condition_step(&["weather"]);
 
-        assert!(is_step_count(2).is_met(&[empty.clone(), weather.clone()]));
+        assert!(is_step_count(2).is_met(&[empty, weather]));
+    }
+
+    #[test]
+    fn is_step_count_should_return_false_when_the_step_count_does_not_match_exactly() {
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
+        let final_answer = stop_condition_step(&["finalAnswer"]);
+
         assert!(!is_step_count(2).is_met(std::slice::from_ref(&empty)));
-        assert!(!is_step_count(2).is_met(&[empty.clone(), weather.clone(), final_answer.clone(),]));
+        assert!(!is_step_count(2).is_met(&[empty, weather, final_answer]));
+    }
+
+    #[test]
+    fn is_loop_finished_should_always_return_false() {
+        let empty = stop_condition_step(&[]);
+
         assert!(!is_loop_finished().is_met(&[]));
         assert!(!is_loop_finished().is_met(std::slice::from_ref(&empty)));
+    }
 
-        let stop_on_final_answer = has_tool_call(["finalAnswer"]);
-        assert!(stop_on_final_answer.is_met(&[empty.clone(), final_answer.clone()]));
-        assert!(!stop_on_final_answer.is_met(&[final_answer, empty.clone()]));
-        assert!(!stop_on_final_answer.is_met(&[]));
+    #[test]
+    fn has_tool_call_should_return_true_when_the_last_step_contains_the_specified_tool_call() {
+        let empty = stop_condition_step(&[]);
+        let final_answer = stop_condition_step(&["finalAnswer"]);
 
-        assert!(has_tool_call(["search", "weather"]).is_met(std::slice::from_ref(&weather)));
-        assert!(!has_tool_call(["search", "finalAnswer"]).is_met(&[empty]));
+        assert!(has_tool_call(["finalAnswer"]).is_met(&[empty, final_answer]));
+    }
+
+    #[test]
+    fn has_tool_call_should_return_false_when_the_specified_tool_call_only_appears_in_earlier_steps()
+     {
+        let empty = stop_condition_step(&[]);
+        let final_answer = stop_condition_step(&["finalAnswer"]);
+
+        assert!(!has_tool_call(["finalAnswer"]).is_met(&[final_answer, empty]));
+    }
+
+    #[test]
+    fn has_tool_call_should_return_true_when_the_last_step_contains_any_tool_call_from_the_provided_tool_names()
+     {
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
+
+        assert!(has_tool_call(["search", "weather"]).is_met(&[empty, weather]));
+    }
+
+    #[test]
+    fn has_tool_call_should_return_false_when_the_last_step_does_not_contain_any_tool_call_from_the_provided_tool_names()
+     {
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
+
+        assert!(!has_tool_call(["search", "finalAnswer"]).is_met(&[empty, weather]));
+    }
+
+    #[test]
+    fn has_tool_call_should_return_false_when_there_are_no_steps() {
+        assert!(!has_tool_call(["finalAnswer"]).is_met(&[]));
     }
 
     #[test]
@@ -7854,23 +7899,24 @@ mod tests {
     }
 
     #[test]
-    fn is_stop_condition_met_matches_any_condition_behavior() {
-        let steps = [stop_condition_step(&[]), stop_condition_step(&["weather"])];
+    fn is_stop_condition_met_should_return_true_when_any_stop_condition_returns_true() {
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
 
         assert!(is_stop_condition_met(
             &[is_loop_finished(), is_step_count(2)],
-            &steps
+            &[empty, weather],
         ));
-        assert!(is_stop_condition_met(
-            &[is_loop_finished(), has_tool_call(["weather"])],
-            &steps
-        ));
+    }
+
+    #[test]
+    fn is_stop_condition_met_should_return_false_when_all_stop_conditions_return_false() {
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
+
         assert!(!is_stop_condition_met(
-            &[
-                StopCondition::LoopFinished,
-                StopCondition::HasToolCall(vec!["finalAnswer".to_string()])
-            ],
-            &steps
+            &[is_loop_finished(), has_tool_call(["finalAnswer"])],
+            &[empty, weather],
         ));
     }
 
