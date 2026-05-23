@@ -2500,3 +2500,88 @@ module-aliasing test).
 - **chat-sdk-chat `ChannelImpl` / `ThreadImpl` / `ChatImpl` /
   `serialization` / `streaming-markdown`** - blocked on the same
   infrastructure (~470 cases combined).
+
+### 2026-05-24 - slices 227..231
+
+**Slices covered**
+
+- 227 Discord `encode_discord_custom_id` / `decode_discord_custom_id` (`\n`-delimited codec + 100-char `ValidationError`).
+- 228 Messenger / WhatsApp / Telegram `channel_id_from_thread_id` + `is_dm` adapter-instance helpers.
+- 229 GitHub `channel_id_from_thread_id` + `is_dm` helpers (channel = `github:<owner>/<repo>`, isDM always false).
+- 230 Discord / Slack / GChat `channel_id_from_thread_id` + `is_dm` helpers.
+- 231 WhatsApp `WHATSAPP_MESSAGE_LIMIT` + `split_message(text)` chunker (8 upstream cases).
+
+**What the brief got wrong or left out**
+
+- `channelIdFromThreadId` and `isDM` are present on every upstream
+  `*Adapter` class but are not part of the chat-sdk `Adapter` trait.
+  They live as plain inherent methods. The Rust port follows that
+  shape: each adapter struct gets its own `channel_id_from_thread_id`
+  / `is_dm` inherent method, returning `Option<…>` when the input
+  isn't recognized. This is documented in the brief implicitly via
+  the "preserve upstream surface area beyond the trait" rule but
+  needs to be called out explicitly so future slices don't try to
+  shoe-horn them onto `chat_sdk_chat::types::Adapter`.
+- Each platform's `isDM` semantics are platform-specific and not
+  derivable from the trait:
+  - Messenger / WhatsApp: DM-only, always `true`.
+  - GitHub: never DM, always `false`.
+  - Telegram: positive `chat_id` → DM, negative → group/channel.
+  - Discord: `guild_id == "@me"` → DM.
+  - Slack: channel id starts with `D` → DM.
+  - GChat: `:dm` suffix → DM (delegates to `is_dm_thread`).
+- WhatsApp `splitMessage` lives at module scope in upstream and is
+  re-exported on the adapter; the Rust port matches by exporting
+  `split_message(text)` from `chat_sdk_adapter_whatsapp` and (in a
+  follow-up slice) re-exporting it on `WhatsappAdapter`. The "early
+  break" guard (`break_index < limit/2`) is load-bearing: without it
+  a paragraph break at position 1000 would create a tiny 1000-char
+  chunk followed by an over-length remainder.
+- Discord `custom_id` is `\n`-delimited (single LF) — not `:` like
+  Telegram's analogue. The 100-char limit is the Discord API limit,
+  not an upstream invention.
+
+**Stale or misleading guidance**
+
+- The brief's "adapter methods covered: 5/8" / "6/8" counts ignore
+  upstream-shape helpers (`channelIdFromThreadId`, `isDM`, `openDM`,
+  `splitMessage`). With slices 227..231 closing the channelId/isDM
+  gap for 7 of 9 adapters, the docs should switch from
+  "N/8 trait methods" to a separate tally of "trait methods" vs
+  "upstream-shape helpers".
+- Linear's `lib.rs::encode_thread_id(team_key, issue_id)` predates
+  the upstream-shaped `LinearThreadId` from slice 216 and is still
+  the form used by the adapter's HTTP code. Migration is deferred
+  but should be the next slice when Linear is touched again — until
+  it lands, `channel_id_from_thread_id` for Linear cannot be a 1:1
+  port (the legacy form has no comment/agent-session encoding).
+- Teams `lib.rs::encode_thread_id(conversation_id, message_id)` is
+  not the upstream format (upstream uses base64url-encoded conv id +
+  serviceUrl). `channel_id_from_thread_id` for Teams is deferred
+  until the thread-id schema migrates.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Linear `channel_id_from_thread_id` + `is_dm`** - blocked on
+  migrating the legacy `encode_thread_id(team_key, issue_id)` form
+  to the upstream-shaped `LinearThreadId`. Touches every HTTP
+  callsite in `lib.rs`.
+- **Teams `channel_id_from_thread_id` + `is_dm`** - blocked on the
+  same kind of thread-id migration (upstream uses base64url-encoded
+  conversation id + service URL, current Rust uses
+  `<conversation_id>:<message_id>`).
+- **Messenger / Telegram `splitMessage`-equivalent** - each platform
+  has a different limit (2000 for Messenger, 4096 for Telegram).
+  Two small follow-up slices; not bundled because the test surface
+  for each is independent.
+- **Slack `getChannelVisibility`** - needs the `_externalChannels`
+  HashSet on the adapter to track Slack Connect membership; tied to
+  the larger SlackAdapter state-machine port.
+- All previously-deferred items (postToCallbackUrl HTTP, Teams
+  Adaptive Cards, Slack Block Kit, Discord embeds, Messenger
+  templates, chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl, adapter
+  index.test.ts integration suites) remain blocked on infra work.
