@@ -108,6 +108,36 @@ Tracked here as they are confirmed. Each entry must cite the upstream file and t
 | `packages/integration-tests/**` (Vitest live + replay suite) | ~15k LOC Vitest-orchestrated cross-package suite: live HTTP scenarios against Slack/Discord/Teams/GChat/Messenger/Telegram/WhatsApp APIs, HAR-style replay snapshots under `fixtures/` and `emulator/`, and MDX documentation tests. The whole suite is Node-only test orchestration around Vitest `vi.fn()` and fetch interception. Rust adopters write their own integration tests inside each crate's `tests/` directory (cargo's standard integration-tests location) against the Rust adapter implementations. The upstream scenarios stay as a reference for assertions; the recorded fixtures may be reusable byte-for-byte when Rust adapters land. |
 | `examples/telegram-chat/**` (JSX-authored Telegram bot example) | 8 source files including `src/menu.tsx` and `src/demos/cards.tsx` that author cards via JSX - a TypeScript/React-only DSL with no Rust counterpart. When `chat-sdk-adapter-telegram` lands in Rust, the canonical example will use Rust-idiomatic builder code (`card(CardOptions { ... })`) rather than JSX. The upstream `.tsx` files are not a literal port target. |
 
+## Chat Package Test-File Triage
+
+Per the slice-59 refinement, classify each `packages/chat/src/*.test.ts` by dependency to make future slice planning mechanical. `pure` = no external deps; `state` = needs `StateAdapter` trait extension; `adapter` = needs `Adapter` trait extension; `class` = needs `Message`/`Channel`/`Thread` class ports; `stream` = needs async stream infra; `js-only` = JSX runtime or other framework-bound.
+
+| Test file | Status | Triage | Rust crate location |
+| --- | --- | --- | --- |
+| `errors.test.ts` | 1:1 (17/17) | pure | `chat-sdk-chat::errors` |
+| `logger.test.ts` | 1:1 (13/13) | pure | `chat-sdk-chat::logger` |
+| `chat-singleton.test.ts` | 1:1 (5/5) | pure | `chat-sdk-chat::chat_singleton` |
+| `emoji.test.ts` | 1:1 (42/42) | pure | `chat-sdk-chat::emoji` |
+| `cards.test.ts` | 29/28 (fallback added) | pure | `chat-sdk-chat::cards` |
+| `modals.test.ts` | 25/29 (20/20 portable + 5 additive; 9 JSX-only) | pure (portable subset) | `chat-sdk-chat::modals` |
+| `markdown.test.ts` | 33/122 partial | pure (remaining cases mostly stringify_markdown which needs a hand-rolled stringifier) | `chat-sdk-chat::markdown` |
+| `callback-url.test.ts` | 5/17 portable pure helpers | state (12 remaining cases) | `chat-sdk-chat::callback_url` |
+| `message.test.ts` | 10/19 portable subset | adapter (5 subject getter cases) + js-only (2 WORKFLOW_SERIALIZE Symbol cases) | `chat-sdk-chat::message` |
+| `from-full-stream.test.ts` | 16/16 portable 1:1 + 1 additive | pure | `chat-sdk-chat::from_full_stream` |
+| `thread-history.test.ts` | constants + key formatter only | state (all 7 cases) + class (Message instances) | `chat-sdk-chat::thread_history` |
+| `transcripts.test.ts` | parseDuration + constants additive | state + class (Message/Postable) | `chat-sdk-chat::transcripts` |
+| `transcripts-wiring.test.ts` | not started | state + adapter (Chat-instance wiring) | n/a |
+| `channel.test.ts` | not started | class (Channel) + adapter | n/a |
+| `chat.test.ts` | not started | class (Chat singleton + ChatInstance) + adapter | n/a |
+| `thread.test.ts` | not started | class (Thread) + adapter + state | n/a |
+| `serialization.test.ts` | not started | class (all serialized types) | n/a |
+| `streaming-markdown.test.ts` | not started | external (depends on `remend` npm package; needs a Rust streaming markdown renderer or skip) | n/a |
+| `jsx-react.test.tsx` | js-only | js-only (JSX runtime) | n/a |
+| `jsx-runtime.test.ts` | js-only | js-only (JSX runtime) | n/a |
+| `jsx-runtime.test.tsx` | js-only | js-only (JSX runtime) | n/a |
+
+Pick-up priority: complete `markdown` (stringify_markdown), then port `Channel`/`Thread`/`Chat` classes (unlocks 4 unstarted test files), then extend the `StateAdapter` and `Adapter` traits (unlocks every state-bound and adapter-bound deferred case across the chat package).
+
 ## Test-Case Parity Map
 
 Populated as each upstream test file is mapped to Rust. Format: one row per upstream test/case.
