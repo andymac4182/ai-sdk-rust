@@ -6,11 +6,11 @@ Run:
 
 ```sh
 scripts/package-progress-table.sh \
-  --ledger docs/upstream-parity-chat.md \
-  --estimates docs/package-progress-estimates-chat.tsv \
-  --output docs/package-progress-chat.md
+  --ledger docs/chat/upstream-parity.md \
+  --estimates docs/chat/package-progress-estimates.tsv \
+  --output docs/chat/package-progress.md
 ```
 
-once `docs/upstream-parity-chat.md` has its **Package And Provider Inventory**
+once `docs/chat/upstream-parity.md` has its **Package And Provider Inventory**
 section populated. Until then the generator will refuse to run, which is the
 intended bootstrap behavior.

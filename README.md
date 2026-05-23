@@ -10,11 +10,11 @@ This repo also hosts a parallel port of the Vercel **Chat SDK**
 ([`vercel/chat`](https://github.com/vercel/chat)) under `crates/chat-sdk-*`,
 driven by its own Codex `/goal` session — see
 [`scripts/codex-goal-chat/`](scripts/codex-goal-chat/) and
-[`docs/upstream-parity-chat.md`](docs/upstream-parity-chat.md). The two `/goal`
+[`docs/chat/upstream-parity.md`](docs/chat/upstream-parity.md). The two `/goal`
 sessions are designed to run concurrently, with file ownership partitioned by
-prefix (`ai-sdk-*` vs `chat-sdk-*`, `upstream-parity.md` vs
-`upstream-parity-chat.md`) and a shared merge lock to serialize pushes to
-`main`.
+crate prefix (`ai-sdk-*` vs `chat-sdk-*`) and per-port doc folders
+(`docs/` flat for ai-sdk, `docs/chat/` for chat-sdk), and a shared merge lock
+to serialize pushes to `main`.
 
 ## Development
 
@@ -108,10 +108,9 @@ This creates a worktree under
 `/Users/andrewmcclenaghan/dev/andymac4182/ai-sdk-rust-chat-worktrees`, copies
 the compact `/goal` condition to your clipboard, and starts Codex pointing at
 [`scripts/codex-goal-chat/port-chat-sdk.md`](scripts/codex-goal-chat/port-chat-sdk.md).
-The chat session is constrained to `crates/chat-sdk-*` plus the
-`*-chat.md`/`*-chat.tsv` doc family, and shares the same
-`/tmp/ai-sdk-rust-main-merge.lock` so the two sessions serialize their pushes
-to `main`.
+The chat session is constrained to `crates/chat-sdk-*` plus `docs/chat/`, and
+shares the same `/tmp/ai-sdk-rust-main-merge.lock` so the two sessions
+serialize their pushes to `main`.
 
 ## GNHF Codex Runner
 

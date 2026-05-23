@@ -55,7 +55,7 @@ on the same `main` branch. Your contract with that session is:
 | `docs/upstream-parity.md`, `docs/package-progress.md`, `docs/package-progress-estimates.tsv` | ai-sdk session |
 | `scripts/codex-goal/`, `scripts/run-codex-goal-port.sh`, `scripts/run-gnhf-port.sh`, `scripts/gnhf-codex-xhigh.sh` | ai-sdk session |
 | `crates/chat-sdk-*` (you create these) | chat session (you) |
-| `docs/upstream-parity-chat.md`, `docs/package-progress-chat.md`, `docs/package-progress-estimates-chat.tsv`, `docs/goal-refinements-chat.md` | chat session (you) |
+| `docs/chat/upstream-parity.md`, `docs/chat/package-progress.md`, `docs/chat/package-progress-estimates.tsv`, `docs/chat/goal-refinements.md` | chat session (you) |
 | `scripts/codex-goal-chat/`, `scripts/run-codex-goal-chat-port.sh` | chat session (you) |
 | Workspace `[workspace]` `members` list in root `Cargo.toml`, `Cargo.lock` | shared, additive edits only |
 | `scripts/package-progress-table.sh`, `scripts/check-naming-conventions.sh`, `scripts/check-otel-loopback.sh` | shared, additive edits only |
@@ -121,7 +121,7 @@ tests. The acceptable state is
 
 ## Required Parity Ledger
 
-First action: create or update `docs/upstream-parity-chat.md`.
+First action: create or update `docs/chat/upstream-parity.md`.
 
 The ledger must include:
 
@@ -148,7 +148,7 @@ The ledger must include:
    `chat-sdk-*` crate or an explicit JavaScript-only/non-portable
    justification.
 8. Package-level progress estimates in
-   `docs/package-progress-estimates-chat.tsv`. Keep estimates conservative
+   `docs/chat/package-progress-estimates.tsv`. Keep estimates conservative
    and update the row for any package touched by a slice. These are estimates
    only for `in-progress` package rows; the generator forces `verified` and
    `js-only-documented` rows to 100% and `not-started` rows to 0%.
@@ -157,9 +157,9 @@ After updating package status or estimates, run:
 
 ```sh
 scripts/package-progress-table.sh \
-  --ledger docs/upstream-parity-chat.md \
-  --estimates docs/package-progress-estimates-chat.tsv \
-  --output docs/package-progress-chat.md
+  --ledger docs/chat/upstream-parity.md \
+  --estimates docs/chat/package-progress-estimates.tsv \
+  --output docs/chat/package-progress.md
 ```
 
 Use that generated table when reporting migration progress.
@@ -245,7 +245,7 @@ correct it.
 After every 5 successful merge-back cycles (i.e. every 5 times you complete
 the Work Loop and push `main`), do a brief-refinement pass:
 
-1. Read `docs/goal-refinements-chat.md`. Append a new dated entry capturing:
+1. Read `docs/chat/goal-refinements.md`. Append a new dated entry capturing:
    - What you learned in the last 5 slices that the current brief does not
      reflect (upstream package boundaries that don't match the assumed
      adapter set, test conventions that differ from `vercel/ai`, transport
@@ -275,9 +275,9 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 scripts/check-naming-conventions.sh
 scripts/package-progress-table.sh \
-  --ledger docs/upstream-parity-chat.md \
-  --estimates docs/package-progress-estimates-chat.tsv \
-  --output docs/package-progress-chat.md
+  --ledger docs/chat/upstream-parity.md \
+  --estimates docs/chat/package-progress-estimates.tsv \
+  --output docs/chat/package-progress.md
 cargo test --all-features
 ```
 
@@ -290,14 +290,14 @@ absent.
 Repeat this loop until the goal is complete or you hit a real blocker:
 
 1. Pull the latest `main` into your worktree branch (rebase).
-2. Re-scan or consult `docs/upstream-parity-chat.md`.
+2. Re-scan or consult `docs/chat/upstream-parity.md`.
 3. Pick the highest-value unported or unverified upstream package/API/adapter
    from the first-phase queue (core/shared) until that queue is closed. Then
    move to standalone adapters.
 4. Implement it under `crates/chat-sdk-<name>` with tests and docs/examples
    where useful. Never edit `crates/ai-sdk-*`.
-5. Update `docs/upstream-parity-chat.md` with status, evidence, and next
-   queue. Update `docs/package-progress-estimates-chat.tsv` for any touched
+5. Update `docs/chat/upstream-parity.md` with status, evidence, and next
+   queue. Update `docs/chat/package-progress-estimates.tsv` for any touched
    `in-progress` package, then run the chat progress-table generator above.
 6. Run validation.
 7. Commit the slice.
@@ -342,9 +342,9 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 scripts/check-naming-conventions.sh
 scripts/package-progress-table.sh \
-  --ledger docs/upstream-parity-chat.md \
-  --estimates docs/package-progress-estimates-chat.tsv \
-  --output docs/package-progress-chat.md
+  --ledger docs/chat/upstream-parity.md \
+  --estimates docs/chat/package-progress-estimates.tsv \
+  --output docs/chat/package-progress.md
 cargo test --all-features
 
 git -C "$main_repo" checkout main
@@ -365,9 +365,9 @@ git -C "$main_repo" merge --no-ff "$branch" -m "Merge chat-sdk parity slice"
   cargo clippy --all-targets --all-features -- -D warnings
   scripts/check-naming-conventions.sh
   scripts/package-progress-table.sh \
-    --ledger docs/upstream-parity-chat.md \
-    --estimates docs/package-progress-estimates-chat.tsv \
-    --output docs/package-progress-chat.md
+    --ledger docs/chat/upstream-parity.md \
+    --estimates docs/chat/package-progress-estimates.tsv \
+    --output docs/chat/package-progress.md
   cargo test --all-features
 )
 git -C "$main_repo" push origin main
@@ -395,7 +395,7 @@ git rebase origin/main
 
 You are done only when:
 
-1. `docs/upstream-parity-chat.md` lists every upstream `vercel/chat` package,
+1. `docs/chat/upstream-parity.md` lists every upstream `vercel/chat` package,
    adapter, public API, example, testable behavior, and feature.
 2. Every ledger item is `verified` or `js-only-documented`.
 3. The chat-sdk progress-table command reports 100% completion for every

@@ -40,10 +40,10 @@ sessions safely in parallel:
 | Branch prefix | `goal/ai-sdk-port-…` | `goal/chat-sdk-port-…` |
 | tmux session | `ai_sdk_rust_goal_…` | `chat_sdk_rust_goal_…` |
 | Crate prefix | `ai-sdk-*` | `chat-sdk-*` |
-| Ledger | `docs/upstream-parity.md` | `docs/upstream-parity-chat.md` |
-| Progress table | `docs/package-progress.md` | `docs/package-progress-chat.md` |
-| Estimates TSV | `docs/package-progress-estimates.tsv` | `docs/package-progress-estimates-chat.tsv` |
-| Refinement log | n/a | `docs/goal-refinements-chat.md` |
+| Ledger | `docs/upstream-parity.md` | `docs/chat/upstream-parity.md` |
+| Progress table | `docs/package-progress.md` | `docs/chat/package-progress.md` |
+| Estimates TSV | `docs/package-progress-estimates.tsv` | `docs/chat/package-progress-estimates.tsv` |
+| Refinement log | n/a | `docs/chat/goal-refinements.md` |
 | Upstream fetch | `npx opensrc@latest path github:vercel/ai` | `npx opensrc@latest path github:vercel/chat` |
 
 **Both sessions share the same merge lock** (`/tmp/ai-sdk-rust-main-merge.lock`)
@@ -59,7 +59,7 @@ restage future `crates/chat-sdk-*`.
 ## Self-refining loop
 
 After every 5 successful merge-back cycles the agent appends an entry to
-`docs/goal-refinements-chat.md` summarizing what it learned (upstream surprises,
+`docs/chat/goal-refinements.md` summarizing what it learned (upstream surprises,
 recurring blockers, mismatches between brief and reality). It then tightens
 [`port-chat-sdk.md`](port-chat-sdk.md) and [`goal-condition.md`](goal-condition.md)
 so the next session starts from a sharpened spec.
@@ -77,7 +77,7 @@ Regenerated, not hand-maintained:
 
 ```sh
 scripts/package-progress-table.sh \
-  --ledger docs/upstream-parity-chat.md \
-  --estimates docs/package-progress-estimates-chat.tsv \
-  --output docs/package-progress-chat.md
+  --ledger docs/chat/upstream-parity.md \
+  --estimates docs/chat/package-progress-estimates.tsv \
+  --output docs/chat/package-progress.md
 ```

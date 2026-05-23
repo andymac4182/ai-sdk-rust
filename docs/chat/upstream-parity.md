@@ -1,8 +1,8 @@
 # Vercel Chat SDK Rust Parity Ledger
 
-_This ledger tracks the Rust port of [`vercel/chat`](https://github.com/vercel/chat) and is maintained by the `/goal` session driven from [`scripts/codex-goal-chat/`](../scripts/codex-goal-chat/)._
+_This ledger tracks the Rust port of [`vercel/chat`](https://github.com/vercel/chat) and is maintained by the `/goal` session driven from [`scripts/codex-goal-chat/`](../../scripts/codex-goal-chat/)._
 
-> Sibling project: the AI SDK port lives in [`docs/upstream-parity.md`](upstream-parity.md). That ledger is owned by a different `/goal` session — do not edit it from a chat-sdk slice.
+> Sibling project: the AI SDK port lives in [`docs/upstream-parity.md`](../upstream-parity.md). That ledger is owned by a different `/goal` session — do not edit it from a chat-sdk slice.
 
 ## Upstream Source
 
@@ -27,7 +27,7 @@ EVERY portable original upstream TypeScript test/case must exist as an equivalen
 
 ## Package And Provider Inventory
 
-_To be populated on the first slice using `npx opensrc@latest path github:vercel/chat`. Required row format (matches [`scripts/package-progress-table.sh`](../scripts/package-progress-table.sh)):_
+_To be populated on the first slice using `npx opensrc@latest path github:vercel/chat`. Required row format (matches [`scripts/package-progress-table.sh`](../../scripts/package-progress-table.sh)):_
 
 ```
 | `packages/<dir>` (`<display>`) | <kind> | <status> | <rust_path> | <evidence> | <notes> |
@@ -41,7 +41,7 @@ running the progress-table generator.
 1. Run the first upstream scan: `npx opensrc@latest path github:vercel/chat`.
 2. Record upstream commit SHA and date in **Upstream Source** above.
 3. Populate **Package And Provider Inventory** with one row per upstream `packages/*` directory.
-4. Seed `docs/package-progress-estimates-chat.tsv` with conservative `in-progress` rows for any package the first slice touches.
+4. Seed `docs/chat/package-progress-estimates.tsv` with conservative `in-progress` rows for any package the first slice touches.
 5. Identify the core/shared first-phase queue (the upstream `chat` package plus transport/state/types/test-support packages) and order them ahead of any adapter slices.
 
 ## Test-Case Parity Map

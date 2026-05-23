@@ -1,9 +1,9 @@
 # Chat SDK Goal Refinements
 
 This is an append-only log of refinements to the chat-sdk Codex `/goal` brief
-([`scripts/codex-goal-chat/port-chat-sdk.md`](../scripts/codex-goal-chat/port-chat-sdk.md))
+([`scripts/codex-goal-chat/port-chat-sdk.md`](../../scripts/codex-goal-chat/port-chat-sdk.md))
 and condition file
-([`scripts/codex-goal-chat/goal-condition.md`](../scripts/codex-goal-chat/goal-condition.md)).
+([`scripts/codex-goal-chat/goal-condition.md`](../../scripts/codex-goal-chat/goal-condition.md)).
 
 The brief mandates a refinement pass after every 5 successful merge-back
 cycles. Each entry below should capture:

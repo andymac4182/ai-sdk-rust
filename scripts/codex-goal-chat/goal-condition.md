@@ -17,18 +17,18 @@ touch `crates/ai-sdk-*` or any other unrelated tree.
 
 Use `npx opensrc@latest path github:vercel/chat` (or `npx opensrc fetch
 github:vercel/chat`) as the upstream source of truth. First build/update
-`docs/upstream-parity-chat.md`: record upstream commit/package inventory, every
+`docs/chat/upstream-parity.md`: record upstream commit/package inventory, every
 adapter package, every core/helper/library package, public APIs, examples,
 tests, and feature status. Do not mark the goal complete while any ledger row
 is unported, unverified, or undocumented. Re-scan upstream often. Maintain
-`docs/package-progress-estimates-chat.tsv` for every package you touch while it
+`docs/chat/package-progress-estimates.tsv` for every package you touch while it
 remains `in-progress`, then run
 
 ```sh
 scripts/package-progress-table.sh \
-  --ledger docs/upstream-parity-chat.md \
-  --estimates docs/package-progress-estimates-chat.tsv \
-  --output docs/package-progress-chat.md
+  --ledger docs/chat/upstream-parity.md \
+  --estimates docs/chat/package-progress-estimates.tsv \
+  --output docs/chat/package-progress.md
 ```
 
 and use that generated table for progress reporting. Do not hand-maintain
@@ -60,10 +60,10 @@ Coexistence with the ai-sdk port (CRITICAL):
   same repo. It owns `crates/ai-sdk-*`, `docs/upstream-parity.md`,
   `docs/package-progress.md`, `docs/package-progress-estimates.tsv`, and
   `scripts/codex-goal/`. NEVER touch those.
-- The chat port owns `crates/chat-sdk-*`, `docs/upstream-parity-chat.md`,
-  `docs/package-progress-chat.md`,
-  `docs/package-progress-estimates-chat.tsv`,
-  `docs/goal-refinements-chat.md`, and `scripts/codex-goal-chat/`. The ai-sdk
+- The chat port owns `crates/chat-sdk-*`, `docs/chat/upstream-parity.md`,
+  `docs/chat/package-progress.md`,
+  `docs/chat/package-progress-estimates.tsv`,
+  `docs/chat/goal-refinements.md`, and `scripts/codex-goal-chat/`. The ai-sdk
   agent has been told to leave those alone.
 - Shared files (the workspace root `Cargo.toml`, `Cargo.lock`, `scripts/`
   shared utilities, top-level `README.md`, and CI configs) may be edited but
@@ -74,7 +74,7 @@ Coexistence with the ai-sdk port (CRITICAL):
   the full brief before merging to main.
 
 Self-refining loop: after every 5 successful merge-back cycles, append a
-refinement entry to `docs/goal-refinements-chat.md` summarizing what you
+refinement entry to `docs/chat/goal-refinements.md` summarizing what you
 learned (upstream surprises, recurring blockers, mismatches between brief and
 reality). Then update `scripts/codex-goal-chat/port-chat-sdk.md` and this
 `goal-condition.md` so the next session benefits from the refinement. Treat
