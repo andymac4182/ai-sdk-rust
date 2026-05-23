@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 40.5%
-- Portable package average: 28.6%
+- Average estimated completion: 40.8%
+- Portable package average: 28.9%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -31,7 +31,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-discord` | 10% | In progress | adapter package | Crate scaffold (slice 134) w/ @me DM sentinel. 13 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-linear` | 10% | In progress | adapter package | Crate scaffold (slice 136). 11 tests. HTTP I/O + GraphQL deferred. |
 | `@chat-sdk/adapter-github` | 15% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message HTTP (issue/PR comment-create). 14 tests. |
-| `@chat-sdk/adapter-messenger` | 10% | In progress | adapter package | Crate scaffold (slice 132). 11 tests. HTTP I/O deferred. |
+| `@chat-sdk/adapter-messenger` | 15% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message HTTP (Send API). 12 tests. |
 | `@chat-sdk/adapter-telegram` | 15% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message HTTP. 14 tests. Reference impl. |
 | `@chat-sdk/adapter-whatsapp` | 10% | In progress | adapter package | Crate scaffold (slice 133). 11 tests. HTTP I/O deferred. |
 | `@chat-sdk/state-redis` | 10% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up... |

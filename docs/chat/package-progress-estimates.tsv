@@ -5,7 +5,7 @@
 chat	99	Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete.
 adapter-telegram	15	Slice 130 scaffold + slice 145 post_message HTTP. 14 tests. Reference impl.
 adapter-github	15	Slice 131 scaffold + slice 146 post_message HTTP (issue/PR comment-create). 14 tests.
-adapter-messenger	10	Crate scaffold (slice 132). 11 tests. HTTP I/O deferred.
+adapter-messenger	15	Slice 132 scaffold + slice 147 post_message HTTP (Send API). 12 tests.
 adapter-whatsapp	10	Crate scaffold (slice 133). 11 tests. HTTP I/O deferred.
 adapter-discord	10	Crate scaffold (slice 134) w/ @me DM sentinel. 13 tests. HTTP I/O deferred.
 adapter-linear	10	Crate scaffold (slice 136). 11 tests. HTTP I/O + GraphQL deferred.
