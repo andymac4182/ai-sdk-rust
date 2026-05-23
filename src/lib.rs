@@ -473,10 +473,13 @@ pub use util::{
     CallbackFuture, CallbackResult, CallbackSettleFuture, DataUrlTextError,
     InvalidArgumentError as AiInvalidArgumentError, NotifyCallbacks, NotifyFuture,
     ParsePartialJsonResult, ParsePartialJsonState, PrepareRetriesOptions, PreparedRetries,
-    SerialJobError, SerialJobExecutor, SerialJobHandle, SerialJobResult, SplitArrayError,
-    cosine_similarity, fix_json, get_potential_start_index, get_text_from_data_url,
-    is_deep_equal_data, merge_abort_signals, merge_callbacks, merge_objects, notify,
-    parse_partial_json, prepare_headers, prepare_retries, set_abort_timeout, split_array,
+    SerialJobError, SerialJobExecutor, SerialJobHandle, SerialJobResult,
+    SimulateReadableStreamDelayFunction, SimulateReadableStreamError,
+    SimulateReadableStreamOptions, SimulateReadableStreamResult, SimulatedReadableStream,
+    SplitArrayError, cosine_similarity, fix_json, get_potential_start_index,
+    get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
+    merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries, set_abort_timeout,
+    simulate_readable_stream, simulate_readable_stream_with_delay, split_array,
 };
 pub use vercel::{
     DEFAULT_VERCEL_BASE_URL, VercelProvider, VercelProviderSettings, create_vercel, vercel,

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -163,6 +164,178 @@ pub fn prepare_retries(options: PrepareRetriesOptions) -> PreparedRetries {
         max_retries,
         retry_options: RetryWithExponentialBackoffOptions::new().with_max_retries(max_retries),
     }
+}
+
+/// Error returned when a simulated readable stream delay fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SimulateReadableStreamError {
+    message: String,
+}
+
+impl SimulateReadableStreamError {
+    /// Creates a simulated stream error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for SimulateReadableStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SimulateReadableStreamError {}
+
+/// Result returned by a simulated readable stream delay hook.
+pub type SimulateReadableStreamResult = Result<(), SimulateReadableStreamError>;
+
+/// Delay function accepted by [`simulate_readable_stream_with_delay`].
+pub type SimulateReadableStreamDelayFunction<'a> =
+    dyn FnMut(Option<u64>) -> SimulateReadableStreamResult + 'a;
+
+/// Options accepted by [`simulate_readable_stream`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SimulateReadableStreamOptions<T> {
+    chunks: Vec<T>,
+    initial_delay_in_ms: Option<u64>,
+    chunk_delay_in_ms: Option<u64>,
+}
+
+impl<T> SimulateReadableStreamOptions<T> {
+    /// Creates options with upstream defaults: zero-millisecond initial and chunk delays.
+    pub fn new(chunks: Vec<T>) -> Self {
+        Self {
+            chunks,
+            initial_delay_in_ms: Some(0),
+            chunk_delay_in_ms: Some(0),
+        }
+    }
+
+    /// Sets the initial delay before the first chunk.
+    pub fn with_initial_delay_in_ms(mut self, delay_in_ms: u64) -> Self {
+        self.initial_delay_in_ms = Some(delay_in_ms);
+        self
+    }
+
+    /// Sets the inter-chunk delay after the first chunk.
+    pub fn with_chunk_delay_in_ms(mut self, delay_in_ms: u64) -> Self {
+        self.chunk_delay_in_ms = Some(delay_in_ms);
+        self
+    }
+
+    /// Mirrors upstream `initialDelayInMs: null`.
+    pub fn without_initial_delay(mut self) -> Self {
+        self.initial_delay_in_ms = None;
+        self
+    }
+
+    /// Mirrors upstream `chunkDelayInMs: null`.
+    pub fn without_chunk_delay(mut self) -> Self {
+        self.chunk_delay_in_ms = None;
+        self
+    }
+}
+
+/// Readable-stream style chunk simulator for deterministic tests and fixtures.
+///
+/// Upstream returns a Web `ReadableStream`. Rust exposes the portable pull
+/// contract directly through [`SimulatedReadableStream::read`] and
+/// [`SimulatedReadableStream::collect`], preserving chunk order and the
+/// `null` versus zero-delay distinction through `Option<u64>`.
+pub struct SimulatedReadableStream<'a, T> {
+    chunks: VecDeque<T>,
+    emitted_chunks: usize,
+    initial_delay_in_ms: Option<u64>,
+    chunk_delay_in_ms: Option<u64>,
+    delay: Box<SimulateReadableStreamDelayFunction<'a>>,
+}
+
+impl<T> fmt::Debug for SimulatedReadableStream<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulatedReadableStream")
+            .field("remaining_chunks", &self.chunks.len())
+            .field("emitted_chunks", &self.emitted_chunks)
+            .field("initial_delay_in_ms", &self.initial_delay_in_ms)
+            .field("chunk_delay_in_ms", &self.chunk_delay_in_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, T> SimulatedReadableStream<'a, T> {
+    fn new(
+        options: SimulateReadableStreamOptions<T>,
+        delay: impl FnMut(Option<u64>) -> SimulateReadableStreamResult + 'a,
+    ) -> Self {
+        Self {
+            chunks: options.chunks.into(),
+            emitted_chunks: 0,
+            initial_delay_in_ms: options.initial_delay_in_ms,
+            chunk_delay_in_ms: options.chunk_delay_in_ms,
+            delay: Box::new(delay),
+        }
+    }
+
+    /// Reads the next chunk, returning `None` once the stream is closed.
+    pub fn read(&mut self) -> Result<Option<T>, SimulateReadableStreamError> {
+        let Some(chunk) = self.chunks.pop_front() else {
+            return Ok(None);
+        };
+
+        let delay_in_ms = if self.emitted_chunks == 0 {
+            self.initial_delay_in_ms
+        } else {
+            self.chunk_delay_in_ms
+        };
+        (self.delay)(delay_in_ms)?;
+        self.emitted_chunks += 1;
+
+        Ok(Some(chunk))
+    }
+
+    /// Collects all remaining chunks from the stream.
+    pub fn collect(mut self) -> Result<Vec<T>, SimulateReadableStreamError> {
+        let mut chunks = Vec::new();
+
+        while let Some(chunk) = self.read()? {
+            chunks.push(chunk);
+        }
+
+        Ok(chunks)
+    }
+}
+
+/// Creates a simulated readable stream using the default sleep-based delay hook.
+pub fn simulate_readable_stream<T>(
+    options: SimulateReadableStreamOptions<T>,
+) -> SimulatedReadableStream<'static, T> {
+    simulate_readable_stream_with_delay(options, default_simulate_readable_stream_delay)
+}
+
+/// Creates a simulated readable stream with an injected delay hook.
+pub fn simulate_readable_stream_with_delay<'a, T>(
+    options: SimulateReadableStreamOptions<T>,
+    delay: impl FnMut(Option<u64>) -> SimulateReadableStreamResult + 'a,
+) -> SimulatedReadableStream<'a, T> {
+    SimulatedReadableStream::new(options, delay)
+}
+
+fn default_simulate_readable_stream_delay(
+    delay_in_ms: Option<u64>,
+) -> SimulateReadableStreamResult {
+    if let Some(delay_in_ms) = delay_in_ms {
+        thread::sleep(Duration::from_millis(delay_in_ms));
+    }
+
+    Ok(())
 }
 
 /// Result returned by a high-level callback utility.
@@ -1367,10 +1540,11 @@ mod tests {
     use super::{
         AbortSignalSource, AbortTimeoutOptions, Callback, CallbackResult, DataUrlTextError,
         InvalidArgumentError, NotifyCallbacks, PrepareRetriesOptions, SerialJobError,
-        SerialJobExecutor, cosine_similarity, fix_json, get_potential_start_index,
-        get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
-        merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
-        set_abort_timeout, split_array,
+        SerialJobExecutor, SimulateReadableStreamOptions, cosine_similarity, fix_json,
+        get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_abort_signals,
+        merge_callbacks, merge_objects, notify, parse_partial_json, prepare_headers,
+        prepare_retries, set_abort_timeout, simulate_readable_stream,
+        simulate_readable_stream_with_delay, split_array,
     };
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -1929,6 +2103,127 @@ mod tests {
 
         assert_eq!(prepared.max_retries(), 2);
         assert_eq!(prepared.retry_options().max_retries, 2);
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_create_a_readable_stream_with_provided_values() {
+        let stream = simulate_readable_stream(SimulateReadableStreamOptions::new(vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ]));
+
+        assert_eq!(
+            stream.collect().unwrap(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_respect_the_chunk_delay_in_ms_setting() {
+        let mut delay_values = Vec::new();
+        let chunks = {
+            let stream = simulate_readable_stream_with_delay(
+                SimulateReadableStreamOptions::new(vec![1, 2, 3])
+                    .with_initial_delay_in_ms(500)
+                    .with_chunk_delay_in_ms(100),
+                |delay_in_ms| {
+                    delay_values.push(delay_in_ms);
+                    Ok(())
+                },
+            );
+            stream.collect().unwrap()
+        };
+
+        assert_eq!(chunks, vec![1, 2, 3]);
+        assert_eq!(delay_values, vec![Some(500), Some(100), Some(100)]);
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_handle_empty_values_array() {
+        let mut stream =
+            simulate_readable_stream(SimulateReadableStreamOptions::<i32>::new(vec![]));
+
+        assert_eq!(stream.read().unwrap(), None);
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_handle_different_types_of_values() {
+        let chunks = vec![
+            serde_json::json!({ "id": 1, "text": "hello" }),
+            serde_json::json!({ "id": 2, "text": "world" }),
+        ];
+        let stream = simulate_readable_stream(SimulateReadableStreamOptions::new(chunks));
+
+        assert_eq!(
+            stream.collect().unwrap(),
+            vec![
+                serde_json::json!({ "id": 1, "text": "hello" }),
+                serde_json::json!({ "id": 2, "text": "world" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_skip_all_delays_when_both_delay_settings_are_null() {
+        let mut delay_values = Vec::new();
+        let chunks = {
+            let stream = simulate_readable_stream_with_delay(
+                SimulateReadableStreamOptions::new(vec![1, 2, 3])
+                    .without_initial_delay()
+                    .without_chunk_delay(),
+                |delay_in_ms| {
+                    delay_values.push(delay_in_ms);
+                    Ok(())
+                },
+            );
+            stream.collect().unwrap()
+        };
+
+        assert_eq!(chunks, vec![1, 2, 3]);
+        assert_eq!(delay_values, vec![None, None, None]);
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_apply_chunk_delays_but_skip_initial_delay_when_initial_delay_in_ms_is_null()
+     {
+        let mut delay_values = Vec::new();
+        let chunks = {
+            let stream = simulate_readable_stream_with_delay(
+                SimulateReadableStreamOptions::new(vec![1, 2, 3])
+                    .without_initial_delay()
+                    .with_chunk_delay_in_ms(100),
+                |delay_in_ms| {
+                    delay_values.push(delay_in_ms);
+                    Ok(())
+                },
+            );
+            stream.collect().unwrap()
+        };
+
+        assert_eq!(chunks, vec![1, 2, 3]);
+        assert_eq!(delay_values, vec![None, Some(100), Some(100)]);
+    }
+
+    #[test]
+    fn simulate_readable_stream_should_apply_initial_delay_but_skip_chunk_delays_when_chunk_delay_in_ms_is_null()
+     {
+        let mut delay_values = Vec::new();
+        let chunks = {
+            let stream = simulate_readable_stream_with_delay(
+                SimulateReadableStreamOptions::new(vec![1, 2, 3])
+                    .with_initial_delay_in_ms(500)
+                    .without_chunk_delay(),
+                |delay_in_ms| {
+                    delay_values.push(delay_in_ms);
+                    Ok(())
+                },
+            );
+            stream.collect().unwrap()
+        };
+
+        assert_eq!(chunks, vec![1, 2, 3]);
+        assert_eq!(delay_values, vec![Some(500), None, None]);
     }
 
     #[test]
