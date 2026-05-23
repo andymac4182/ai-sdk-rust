@@ -159,7 +159,8 @@ After updating package status or estimates, run:
 scripts/package-progress-table.sh \
   --ledger docs/chat/upstream-parity.md \
   --estimates docs/chat/package-progress-estimates.tsv \
-  --output docs/chat/package-progress.md
+  --output docs/chat/package-progress.md \
+  --title "Chat SDK Rust Package Progress"
 ```
 
 Use that generated table when reporting migration progress.
@@ -277,7 +278,8 @@ scripts/check-naming-conventions.sh
 scripts/package-progress-table.sh \
   --ledger docs/chat/upstream-parity.md \
   --estimates docs/chat/package-progress-estimates.tsv \
-  --output docs/chat/package-progress.md
+  --output docs/chat/package-progress.md \
+  --title "Chat SDK Rust Package Progress"
 cargo test --all-features
 ```
 
@@ -344,7 +346,8 @@ scripts/check-naming-conventions.sh
 scripts/package-progress-table.sh \
   --ledger docs/chat/upstream-parity.md \
   --estimates docs/chat/package-progress-estimates.tsv \
-  --output docs/chat/package-progress.md
+  --output docs/chat/package-progress.md \
+  --title "Chat SDK Rust Package Progress"
 cargo test --all-features
 
 git -C "$main_repo" checkout main
@@ -367,7 +370,8 @@ git -C "$main_repo" merge --no-ff "$branch" -m "Merge chat-sdk parity slice"
   scripts/package-progress-table.sh \
     --ledger docs/chat/upstream-parity.md \
     --estimates docs/chat/package-progress-estimates.tsv \
-    --output docs/chat/package-progress.md
+    --output docs/chat/package-progress.md \
+    --title "Chat SDK Rust Package Progress"
   cargo test --all-features
 )
 git -C "$main_repo" push origin main

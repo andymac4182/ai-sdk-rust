@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Enforce the repo convention from scripts/codex-goal/port-ai-sdk.md:
-# avoid vague bucket names in source paths, modules, crate names, public APIs,
-# and documented identifiers.
+# Enforce the repo convention from scripts/codex-goal/port-ai-sdk.md and
+# scripts/codex-goal-chat/port-chat-sdk.md: avoid vague bucket names in source
+# paths, modules, crate names, public APIs, and documented identifiers.
 #
 # Explicit upstream-mirroring exceptions:
 # - provider_utils and ai-sdk-provider-utils mirror the upstream
@@ -12,6 +12,8 @@ set -euo pipefail
 #   exposed by this crate.
 # - SharedV4ProviderReference is an upstream provider-v4 type name mentioned in
 #   docs for the Rust ProviderReference wrapper.
+# - adapter_shared / adapter-shared / chat-sdk-adapter-shared mirror the
+#   upstream vercel/chat packages/adapter-shared package boundary.
 
 failures=()
 
@@ -54,6 +56,10 @@ allowed_identifier_token() {
   fi
 
   if [[ "$token" == "shared" && "$name" == SharedV4ProviderReference ]]; then
+    return 0
+  fi
+
+  if [[ "$token" == "shared" && ( "$name" == *adapter_shared* || "$name" == *adapter-shared* ) ]]; then
     return 0
   fi
 
@@ -111,7 +117,7 @@ done < <(git ls-files 'Cargo.toml' '*/Cargo.toml')
 
 while IFS= read -r path; do
   case "$path" in
-    scripts/codex-goal/* | scripts/run-gnhf-port.sh)
+    scripts/codex-goal/* | scripts/codex-goal-chat/* | scripts/run-gnhf-port.sh)
       continue
       ;;
   esac
@@ -136,7 +142,7 @@ done < <(git ls-files '*.rs')
 
 while IFS= read -r path; do
   case "$path" in
-    scripts/codex-goal/* | scripts/run-gnhf-port.sh)
+    scripts/codex-goal/* | scripts/codex-goal-chat/* | scripts/run-gnhf-port.sh)
       continue
       ;;
   esac
