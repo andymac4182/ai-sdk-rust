@@ -66,8 +66,8 @@ Two-phase gate, enforced strictly:
 
 | Item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `apps/docs` | documentation site | not-started | none | none | Next.js documentation site. Almost certainly `js-only-documented`; confirm in slice and document. |
-| `examples/nextjs-chat` | Next.js example | not-started | none | none | Web UI example using `adapter-web`. Likely `js-only-documented`. |
+| `apps/docs` | documentation site | js-only-documented | n/a | rationale below | Next.js documentation site (`next.config.ts`, React `app/`, `components/`, MDX `content/`). Whole-app surface is Next.js + React rendering, not portable to Rust. The user-facing content (`content/*.mdx`) is portable as plain markdown if the docs are rebuilt under a Rust static-site generator, but that is intentionally out of scope — Rust adopters consume the same MDX upstream renders. See JavaScript-only Exceptions table for the formal entry. |
+| `examples/nextjs-chat` | Next.js example | js-only-documented | n/a | rationale below | Next.js web UI example built on `adapter-web`'s browser chat protocol. Both the example and `adapter-web`'s React/DOM portions are Next.js/React-only; the example has no portable Rust counterpart. The protocol/server half of adapter-web stays in scope (see the `adapter-web` row above). |
 | `examples/telegram-chat` | runnable example | not-started | none | none | Telegram bot example. Portable target — port to a Rust example crate once `chat-sdk-adapter-telegram` exists. |
 | `skills/chat` | Anthropic skill spec | not-started | none | none | `SKILL.md` Markdown skill spec. Carry the spec into the Rust docs tree verbatim; mark `js-only-documented` if the skill consumes JS-only APIs. |
 | `scripts/` (upstream) | build/release tooling | not-started | none | none | Repo-local pnpm/turbo/changeset scripts. Classify case-by-case; most are tooling-only and `js-only-documented`. |
@@ -92,6 +92,8 @@ Tracked here as they are confirmed. Each entry must cite the upstream file and t
 | Upstream surface | Reason |
 | --- | --- |
 | `packages/chat/src/jsx-runtime.ts`, `jsx-runtime.test.ts`, `jsx-runtime.test.tsx`, `jsx-react.test.tsx`, `jsx-dev-runtime` export | JSX runtime is a TypeScript/React-only authoring surface; Rust has no equivalent template compiler binding. Card/modal data shapes ARE portable (see `cards.ts`, `modals.ts`) — only the JSX authoring layer is excluded. |
+| `apps/docs/**` (Next.js documentation site) | Whole-app surface: `next.config.ts`, React `app/`, hooks, components, MDX rendering pipeline. Not portable to Rust. The MDX content under `apps/docs/content/` is portable as raw markdown if reused under a Rust SSG, but that is intentionally out of scope — Rust adopters consume the same upstream-rendered docs. |
+| `examples/nextjs-chat/**` (Next.js web chat example) | Browser-only React app built on `adapter-web`. Not portable as a Rust example. The protocol/server half of `adapter-web` itself remains in scope and is classified per-subfile during the `adapter-web` slice. |
 
 ## Test-Case Parity Map
 
