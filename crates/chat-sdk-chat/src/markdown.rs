@@ -1408,4 +1408,77 @@ mod tests {
         }
         assert_eq!(find_inline_code(&node).as_deref(), Some("npm install"));
     }
+
+    // ---------- slice 74: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_nested_blockquotes_preserve_depth() {
+        let node = parse_markdown("> outer\n>\n> > inner").expect("parses");
+        fn count_blockquotes(n: &Node) -> usize {
+            let self_count = if matches!(n, Node::Blockquote(_)) {
+                1
+            } else {
+                0
+            };
+            self_count
+                + get_node_children(n)
+                    .iter()
+                    .map(count_blockquotes)
+                    .sum::<usize>()
+        }
+        assert!(count_blockquotes(&node) >= 2);
+    }
+
+    #[test]
+    fn parse_markdown_heading_with_inline_code_preserves_both() {
+        let node = parse_markdown("# `code` heading").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("code"));
+        assert!(plain.contains("heading"));
+        fn has_inline_code_under_heading(n: &Node) -> bool {
+            if let Node::Heading(h) = n {
+                if h.children.iter().any(|c| matches!(c, Node::InlineCode(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n)
+                .iter()
+                .any(has_inline_code_under_heading)
+        }
+        assert!(has_inline_code_under_heading(&node));
+    }
+
+    #[test]
+    fn parse_markdown_paragraph_with_multiple_inline_styles() {
+        let node = parse_markdown("This is *italic*, this is **bold**, and `this is code`.")
+            .expect("parses");
+        let plain = to_plain_text(&node);
+        for piece in ["italic", "bold", "this is code"] {
+            assert!(plain.contains(piece), "missing {piece}: {plain:?}");
+        }
+    }
+
+    #[test]
+    fn parse_markdown_link_inside_emphasis_works() {
+        let node = parse_markdown("*see [the docs](https://example.com)*").expect("parses");
+        fn find_link_url_under_emphasis(n: &Node) -> Option<String> {
+            if let Node::Emphasis(e) = n {
+                for c in &e.children {
+                    if let Node::Link(l) = c {
+                        return Some(l.url.clone());
+                    }
+                }
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url_under_emphasis(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_link_url_under_emphasis(&node).as_deref(),
+            Some("https://example.com")
+        );
+    }
 }
