@@ -328,3 +328,52 @@ Slices reviewed: 50 (chat::message portable subset), 51 (modals empty-options pa
 
 - The chat ledger row is at 74% with 11 chat modules now portable-mapped. The remaining 9 unmapped test files (channel, chat, from-full-stream, serialization, streaming-markdown, thread-history, thread, transcripts-wiring, transcripts) need either real ports (channel, chat, thread are structurally massive) or trait extension (transcripts.test.ts maps to TranscriptsApiImpl which is Adapter-bound). Brief should add a per-test-file triage column: pure / state-bound / adapter-bound / class-bound, so future slice planning is mechanical.
 - Phase-2 adapter packages cannot reasonably reach verified within this `/goal` session's budget. Each adapter is 7-24 src files of platform-specific HTTP/SDK code (Slack RTM/Web API, Teams Bot Framework, Google Chat REST, Discord gateway, Linear GraphQL, GitHub REST/GraphQL, Messenger webhook, Telegram bot API, WhatsApp Cloud API). Reality check: each adapter is its own multi-day port effort. They will land across many subsequent sessions, not this one.
+
+### 2026-05-23 - slice 78 critical: validation-gate-bypass incident
+
+Slice 78 introduced a compile error in
+parse_markdown_code_block_without_language_has_none_lang (a
+get_node_children temp-lifetime issue). The atomic-validation-gate
+caught the failure locally — but the `git push` step still ran,
+landing the broken commit on main as `4f696bf`. Slice 79 fixed it
+within minutes (`89b9b77`), but the bypass is a structural flaw in
+the merge protocol that future sessions MUST fix:
+
+**Root cause.** The brief's atomic-merge-gate recipe in
+`scripts/codex-goal-chat/port-chat-sdk.md` documents
+`if ! ( set -e; <validation>; ); then exit 1; fi`. When this is
+used inside a one-liner chain
+`merge && if ! (...); then exit 1; fi && push`,
+the `exit 1` inside the if-block only exits the SUBSHELL containing
+the validation, not the outer one-liner. Bash treats the if as
+having exit code 0 (the if-block matched), so the `&&` chain
+continues to the push.
+
+**Fix.** Restructure the merge-back protocol so push is OUTSIDE the
+&&-chain that runs validation, and gate it on an explicit `$?`
+check. Equivalent to:
+
+```bash
+merge_back() {
+  cargo fmt --all --check || return 1
+  bash scripts/check-naming-conventions.sh || return 1
+  cargo clippy --all-targets --all-features -- -D warnings || return 1
+  cargo test --workspace --all-features || return 1
+}
+merge_back && git push origin main && rmdir /tmp/...
+```
+
+The `&&` operator propagates failures correctly when EACH gate is a
+direct command return value, not a wrapped if-block.
+
+Brief should canonize: the merge-back protocol uses straight-line
+&&-chains of individual gate commands, NOT wrapped if-blocks. Add
+a one-line shell sanity test to ensure a deliberate `false` inside
+the gate stops the push (regression test for this incident).
+
+**Open refinement** (deferred):
+
+- Add a CI hook that runs validation gates BEFORE accepting a
+  merge to main, so even if the local shell script has a logic
+  flaw, the bad commit can't ship to origin. The current protocol
+  relies entirely on the developer's local validation succeeding.
