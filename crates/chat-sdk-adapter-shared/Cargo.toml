@@ -1,0 +1,21 @@
+[package]
+name = "chat-sdk-adapter-shared"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust port of the Vercel Chat SDK `adapter-shared` package (shared utilities used by every chat adapter)."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "chat_sdk_adapter_shared"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
