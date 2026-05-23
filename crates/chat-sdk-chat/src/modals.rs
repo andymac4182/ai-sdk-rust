@@ -391,7 +391,16 @@ pub struct SelectOptions {
 }
 
 /// 1:1 port of upstream `Select(options): SelectElement`.
+///
+/// **Validation:** panics when `options.options` is empty, matching
+/// upstream's `if (!options.options.length) throw new Error("Select
+/// requires at least one option")`. An empty select is structurally
+/// invalid; adapter renderers assume at least one option.
 pub fn select(options: SelectOptions) -> SelectElement {
+    assert!(
+        !options.options.is_empty(),
+        "Select requires at least one option"
+    );
     SelectElement {
         id: options.id,
         initial_option: options.initial_option,
@@ -454,7 +463,16 @@ pub struct RadioSelectOptions {
 }
 
 /// 1:1 port of upstream `RadioSelect(options): RadioSelectElement`.
+///
+/// **Validation:** panics when `options.options` is empty, matching
+/// upstream's `if (!options.options.length) throw new Error("RadioSelect
+/// requires at least one option")`. A radio group with zero options
+/// is structurally invalid.
 pub fn radio_select(options: RadioSelectOptions) -> RadioSelectElement {
+    assert!(
+        !options.options.is_empty(),
+        "RadioSelect requires at least one option"
+    );
     RadioSelectElement {
         id: options.id,
         initial_option: options.initial_option,
@@ -612,7 +630,7 @@ mod tests {
             serde_json::to_value(select(SelectOptions {
                 id: "s".to_string(),
                 label: "S".to_string(),
-                options: vec![],
+                options: vec![select_option("a", "a", None)],
                 ..Default::default()
             }))
             .unwrap(),
@@ -758,5 +776,187 @@ mod tests {
         assert!(json.contains("\"type\":\"radio_select\""));
         assert!(json.contains("\"initialOption\":\"open\""));
         assert!(json.contains("\"value\":\"open\""));
+    }
+
+    // ---------- additional 1:1 cases (slice 51) ----------
+
+    #[test]
+    fn modal_builder_accepts_children() {
+        let m = modal(ModalOptions {
+            callback_id: "m1".to_string(),
+            title: "T".to_string(),
+            children: Some(vec![
+                text_input(TextInputOptions {
+                    id: "name".to_string(),
+                    label: "Name".to_string(),
+                    ..Default::default()
+                })
+                .into(),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(m.children.len(), 1);
+        assert!(matches!(m.children[0], ModalChild::TextInput(_)));
+    }
+
+    #[test]
+    fn text_input_builder_accepts_optional_fields() {
+        let elem = text_input(TextInputOptions {
+            id: "bio".to_string(),
+            label: "Bio".to_string(),
+            placeholder: Some("Tell us about yourself".to_string()),
+            initial_value: Some("Hi".to_string()),
+            multiline: Some(true),
+            optional: Some(true),
+            max_length: Some(500),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"placeholder\":\"Tell us about yourself\""));
+        assert!(json.contains("\"initialValue\":\"Hi\""));
+        assert!(json.contains("\"multiline\":true"));
+        assert!(json.contains("\"optional\":true"));
+        assert!(json.contains("\"maxLength\":500"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Select requires at least one option")]
+    fn select_builder_panics_on_empty_options() {
+        select(SelectOptions {
+            id: "s1".to_string(),
+            label: "Pick".to_string(),
+            options: vec![],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn select_builder_accepts_optional_fields() {
+        let elem = select(SelectOptions {
+            id: "s1".to_string(),
+            label: "Pick".to_string(),
+            placeholder: Some("Choose".to_string()),
+            initial_option: Some("a".to_string()),
+            optional: Some(true),
+            options: vec![select_option("a", "a", None)],
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"placeholder\":\"Choose\""));
+        assert!(json.contains("\"initialOption\":\"a\""));
+        assert!(json.contains("\"optional\":true"));
+    }
+
+    #[test]
+    fn external_select_builder_accepts_optional_fields() {
+        let elem = external_select(ExternalSelectOptions {
+            id: "es1".to_string(),
+            label: "Search".to_string(),
+            placeholder: Some("Type to search".to_string()),
+            initial_option: Some(select_option("Initial", "init", None)),
+            min_query_length: Some(3),
+            optional: Some(false),
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"placeholder\":\"Type to search\""));
+        assert!(json.contains("\"minQueryLength\":3"));
+        assert!(json.contains("\"initialOption\""));
+    }
+
+    #[test]
+    fn select_option_with_label_and_value_only_omits_description() {
+        let opt = select_option("Yes", "yes", None);
+        let json = serde_json::to_string(&opt).unwrap();
+        assert_eq!(json, "{\"label\":\"Yes\",\"value\":\"yes\"}");
+    }
+
+    #[test]
+    fn select_option_with_description_includes_it() {
+        let opt = select_option("Yes", "yes", Some("Confirm".to_string()));
+        let json = serde_json::to_string(&opt).unwrap();
+        assert!(json.contains("\"description\":\"Confirm\""));
+    }
+
+    #[test]
+    #[should_panic(expected = "RadioSelect requires at least one option")]
+    fn radio_select_builder_panics_on_empty_options() {
+        radio_select(RadioSelectOptions {
+            id: "r1".to_string(),
+            label: "Choose".to_string(),
+            options: vec![],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn is_modal_element_returns_true_for_modal_elements() {
+        let m = modal(ModalOptions {
+            callback_id: "m1".to_string(),
+            title: "T".to_string(),
+            ..Default::default()
+        });
+        let value = serde_json::to_value(&m).unwrap();
+        assert!(is_modal_element(&value));
+    }
+
+    #[test]
+    fn is_modal_element_returns_false_for_non_modal_objects() {
+        assert!(!is_modal_element(&serde_json::json!({"type": "text"})));
+        assert!(!is_modal_element(&serde_json::json!({})));
+        assert!(!is_modal_element(&serde_json::json!("not-an-object")));
+        assert!(!is_modal_element(&serde_json::json!(null)));
+    }
+
+    #[test]
+    fn filter_modal_children_keeps_every_valid_modal_child_type() {
+        let input = vec![
+            serde_json::to_value(text_input(TextInputOptions {
+                id: "a".to_string(),
+                label: "A".to_string(),
+                ..Default::default()
+            }))
+            .unwrap(),
+            serde_json::to_value(select(SelectOptions {
+                id: "b".to_string(),
+                label: "B".to_string(),
+                options: vec![select_option("x", "x", None)],
+                ..Default::default()
+            }))
+            .unwrap(),
+            serde_json::to_value(external_select(ExternalSelectOptions {
+                id: "c".to_string(),
+                label: "C".to_string(),
+                ..Default::default()
+            }))
+            .unwrap(),
+            serde_json::to_value(radio_select(RadioSelectOptions {
+                id: "d".to_string(),
+                label: "D".to_string(),
+                options: vec![select_option("y", "y", None)],
+                ..Default::default()
+            }))
+            .unwrap(),
+        ];
+        let (kept, dropped) = filter_modal_children(&input);
+        assert_eq!(kept.len(), 4);
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn filter_modal_children_drops_non_object_items() {
+        let valid = serde_json::to_value(text_input(TextInputOptions {
+            id: "a".to_string(),
+            label: "A".to_string(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let input = vec![
+            serde_json::json!("string"),
+            serde_json::json!(42),
+            serde_json::json!(null),
+            valid,
+        ];
+        let (kept, dropped) = filter_modal_children(&input);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(dropped, 3);
     }
 }
