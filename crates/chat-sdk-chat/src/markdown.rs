@@ -1481,4 +1481,62 @@ mod tests {
             Some("https://example.com")
         );
     }
+
+    // ---------- slice 75: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_gfm_task_list_item_extracts_checked_state() {
+        let node = parse_markdown("- [x] done\n- [ ] todo").expect("parses");
+        fn find_first_list_item_checked(n: &Node) -> Option<bool> {
+            if let Node::ListItem(li) = n {
+                return li.checked;
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(b) = find_first_list_item_checked(c) {
+                    return Some(b);
+                }
+            }
+            None
+        }
+        assert_eq!(find_first_list_item_checked(&node), Some(true));
+    }
+
+    #[test]
+    fn parse_markdown_paragraph_only_input_produces_single_paragraph_child() {
+        let node = parse_markdown("hello world").expect("parses");
+        let root = match node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        assert_eq!(root.children.len(), 1);
+        assert!(matches!(root.children[0], Node::Paragraph(_)));
+    }
+
+    #[test]
+    fn parse_markdown_link_with_empty_label_still_produces_link_node() {
+        let node = parse_markdown("[](https://example.com)").expect("parses");
+        fn has_link(n: &Node) -> bool {
+            matches!(n, Node::Link(_)) || get_node_children(n).iter().any(has_link)
+        }
+        assert!(has_link(&node));
+    }
+
+    #[test]
+    fn parse_markdown_table_cell_alignment_propagates_to_table_node() {
+        let input = "| left | right |\n| :--- | ---: |\n| a | b |";
+        let node = parse_markdown(input).expect("parses");
+        fn find_table_align(n: &Node) -> Option<Vec<markdown::mdast::AlignKind>> {
+            if let Node::Table(t) = n {
+                return Some(t.align.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(a) = find_table_align(c) {
+                    return Some(a);
+                }
+            }
+            None
+        }
+        let align = find_table_align(&node).expect("table parses");
+        assert_eq!(align.len(), 2);
+    }
 }
