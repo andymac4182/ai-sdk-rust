@@ -1,5 +1,11 @@
+use std::fmt;
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::headers::Headers;
@@ -99,6 +105,275 @@ impl std::fmt::Display for InvalidArgumentError {
 }
 
 impl std::error::Error for InvalidArgumentError {}
+
+/// Result returned by a high-level callback utility.
+pub type CallbackResult = Result<(), String>;
+
+/// Future returned by a high-level callback utility.
+pub type CallbackFuture<'a> = Pin<Box<dyn Future<Output = CallbackResult> + 'a>>;
+
+/// Function signature accepted by [`Callback`].
+pub type CallbackFunction<'a, Event> = dyn Fn(Event) -> CallbackFuture<'a> + 'a;
+
+/// Upstream-style callback wrapper used by [`merge_callbacks`] and [`notify`].
+#[derive(Clone)]
+pub struct Callback<'a, Event> {
+    callback: Rc<CallbackFunction<'a, Event>>,
+}
+
+impl<'a, Event> Callback<'a, Event> {
+    /// Creates a callback whose future can resolve successfully or with an ignored error.
+    pub fn new<F, Fut>(callback: F) -> Self
+    where
+        F: Fn(Event) -> Fut + 'a,
+        Fut: Future<Output = CallbackResult> + 'a,
+    {
+        Self {
+            callback: Rc::new(move |event| Box::pin(callback(event))),
+        }
+    }
+
+    /// Creates an infallible callback.
+    pub fn infallible<F, Fut>(callback: F) -> Self
+    where
+        F: Fn(Event) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self::new(move |event| {
+            let future = callback(event);
+            async move {
+                future.await;
+                Ok(())
+            }
+        })
+    }
+
+    /// Runs the callback and returns its original result.
+    pub fn run(&self, event: Event) -> CallbackFuture<'a> {
+        (self.callback)(event)
+    }
+
+    fn settle(&self, event: Event) -> CallbackFuture<'a> {
+        match catch_unwind(AssertUnwindSafe(|| self.run(event))) {
+            Ok(future) => Box::pin(SettledCallbackFuture::new(future)),
+            Err(_) => Box::pin(async { Ok(()) }),
+        }
+    }
+}
+
+impl<Event> fmt::Debug for Callback<'_, Event> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Callback").finish_non_exhaustive()
+    }
+}
+
+struct SettledCallbackFuture<'a> {
+    future: Option<CallbackFuture<'a>>,
+}
+
+impl<'a> SettledCallbackFuture<'a> {
+    fn new(future: CallbackFuture<'a>) -> Self {
+        Self {
+            future: Some(future),
+        }
+    }
+}
+
+impl Unpin for SettledCallbackFuture<'_> {}
+
+impl Future for SettledCallbackFuture<'_> {
+    type Output = CallbackResult;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let Some(future) = this.future.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+
+        match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
+            Ok(Poll::Ready(_)) | Err(_) => {
+                this.future = None;
+                Poll::Ready(Ok(()))
+            }
+            Ok(Poll::Pending) => Poll::Pending,
+        }
+    }
+}
+
+/// Future that waits for callbacks to settle while ignoring failures.
+pub struct CallbackSettleFuture<'a> {
+    futures: Vec<Option<CallbackFuture<'a>>>,
+}
+
+impl<'a> CallbackSettleFuture<'a> {
+    fn new(futures: Vec<CallbackFuture<'a>>) -> Self {
+        Self {
+            futures: futures.into_iter().map(Some).collect(),
+        }
+    }
+}
+
+impl Unpin for CallbackSettleFuture<'_> {}
+
+impl Future for CallbackSettleFuture<'_> {
+    type Output = CallbackResult;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut pending = false;
+
+        for future in &mut this.futures {
+            let Some(callback_future) = future.as_mut() else {
+                continue;
+            };
+
+            match catch_unwind(AssertUnwindSafe(|| callback_future.as_mut().poll(context))) {
+                Ok(Poll::Ready(_)) | Err(_) => {
+                    *future = None;
+                }
+                Ok(Poll::Pending) => {
+                    pending = true;
+                }
+            }
+        }
+
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
+
+/// Callback list accepted by [`notify`].
+#[derive(Clone)]
+pub struct NotifyCallbacks<'a, Event> {
+    callbacks: Vec<Option<Callback<'a, Event>>>,
+}
+
+impl<'a, Event> NotifyCallbacks<'a, Event> {
+    /// Creates an empty callback list.
+    pub fn none() -> Self {
+        Self {
+            callbacks: Vec::new(),
+        }
+    }
+
+    /// Creates a callback list with one optional callback.
+    pub fn one(callback: Option<Callback<'a, Event>>) -> Self {
+        Self {
+            callbacks: vec![callback],
+        }
+    }
+
+    /// Creates a callback list from callbacks that are all present.
+    pub fn many(callbacks: impl IntoIterator<Item = Callback<'a, Event>>) -> Self {
+        Self {
+            callbacks: callbacks.into_iter().map(Some).collect(),
+        }
+    }
+
+    /// Creates a callback list from optional callbacks.
+    pub fn many_optional(callbacks: impl IntoIterator<Item = Option<Callback<'a, Event>>>) -> Self {
+        Self {
+            callbacks: callbacks.into_iter().collect(),
+        }
+    }
+}
+
+impl<Event> fmt::Debug for NotifyCallbacks<'_, Event> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NotifyCallbacks")
+            .field("len", &self.callbacks.len())
+            .finish()
+    }
+}
+
+impl<'a, Event> From<Callback<'a, Event>> for NotifyCallbacks<'a, Event> {
+    fn from(callback: Callback<'a, Event>) -> Self {
+        Self::one(Some(callback))
+    }
+}
+
+impl<'a, Event> From<Option<Callback<'a, Event>>> for NotifyCallbacks<'a, Event> {
+    fn from(callback: Option<Callback<'a, Event>>) -> Self {
+        Self::one(callback)
+    }
+}
+
+impl<'a, Event> From<Vec<Callback<'a, Event>>> for NotifyCallbacks<'a, Event> {
+    fn from(callbacks: Vec<Callback<'a, Event>>) -> Self {
+        Self::many(callbacks)
+    }
+}
+
+impl<'a, Event> From<Vec<Option<Callback<'a, Event>>>> for NotifyCallbacks<'a, Event> {
+    fn from(callbacks: Vec<Option<Callback<'a, Event>>>) -> Self {
+        Self::many_optional(callbacks)
+    }
+}
+
+/// Future returned by [`notify`].
+pub struct NotifyFuture<'a> {
+    inner: CallbackSettleFuture<'a>,
+}
+
+impl Unpin for NotifyFuture<'_> {}
+
+impl Future for NotifyFuture<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.get_mut().inner).poll(context) {
+            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Creates a callback that invokes all provided callbacks and waits for settlement.
+///
+/// Missing callbacks are skipped, and callback errors or panics are ignored.
+pub fn merge_callbacks<'a, Event, I>(callbacks: I) -> Callback<'a, Event>
+where
+    Event: Clone + 'a,
+    I: IntoIterator<Item = Option<Callback<'a, Event>>>,
+{
+    let callbacks = Rc::new(callbacks.into_iter().flatten().collect::<Vec<_>>());
+
+    Callback::new(move |event: Event| {
+        let futures = callbacks
+            .iter()
+            .map(|callback| callback.settle(event.clone()))
+            .collect::<Vec<_>>();
+        CallbackSettleFuture::new(futures)
+    })
+}
+
+/// Notifies all callbacks with an event and waits for them to settle.
+///
+/// This mirrors upstream `notify`: callback arrays are supported, missing
+/// callbacks are skipped, and callback errors do not break the caller.
+pub fn notify<'a, Event>(
+    event: Event,
+    callbacks: impl Into<NotifyCallbacks<'a, Event>>,
+) -> NotifyFuture<'a>
+where
+    Event: Clone + 'a,
+{
+    let futures = callbacks
+        .into()
+        .callbacks
+        .into_iter()
+        .flatten()
+        .map(|callback| callback.settle(event.clone()))
+        .collect::<Vec<_>>();
+
+    NotifyFuture {
+        inner: CallbackSettleFuture::new(futures),
+    }
+}
 
 /// Source accepted by [`merge_abort_signals`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -892,15 +1167,23 @@ pub fn get_text_from_data_url(data_url: &str) -> Result<String, DataUrlTextError
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
     use std::time::{Duration, Instant};
 
     use super::{
-        AbortSignalSource, AbortTimeoutOptions, DataUrlTextError, InvalidArgumentError,
-        cosine_similarity, fix_json, get_potential_start_index, get_text_from_data_url,
-        is_deep_equal_data, merge_abort_signals, merge_objects, parse_partial_json,
-        prepare_headers, set_abort_timeout, split_array,
+        AbortSignalSource, AbortTimeoutOptions, Callback, CallbackResult, DataUrlTextError,
+        InvalidArgumentError, NotifyCallbacks, cosine_similarity, fix_json,
+        get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_abort_signals,
+        merge_callbacks, merge_objects, notify, parse_partial_json, prepare_headers,
+        set_abort_timeout, split_array,
     };
     use crate::headers::Headers;
+    use crate::json::JsonValue;
     use crate::language_model::{LanguageModelAbortController, LanguageModelAbortSignal};
 
     fn assert_close(actual: f64, expected: f64) {
@@ -921,6 +1204,533 @@ mod tests {
         }
 
         assert!(signal.is_aborted(), "expected abort signal to be aborted");
+    }
+
+    #[derive(Clone)]
+    struct TestEvent {
+        value: String,
+    }
+
+    impl TestEvent {
+        fn new(value: &str) -> Self {
+            Self {
+                value: value.to_string(),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn test_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
+
+    fn assert_pending<F: Future>(future: Pin<&mut F>) {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            matches!(future.poll(&mut context), Poll::Pending),
+            "future should be pending"
+        );
+    }
+
+    fn poll_callback_ready<F>(future: Pin<&mut F>) -> CallbackResult
+    where
+        F: Future<Output = CallbackResult>,
+    {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        match future.poll(&mut context) {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("future should be ready"),
+        }
+    }
+
+    fn poll_unit_ready<F>(future: Pin<&mut F>)
+    where
+        F: Future<Output = ()>,
+    {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        match future.poll(&mut context) {
+            Poll::Ready(()) => {}
+            Poll::Pending => panic!("future should be ready"),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ManualSignal {
+        state: Rc<RefCell<ManualSignalState>>,
+    }
+
+    #[derive(Default)]
+    struct ManualSignalState {
+        resolved: bool,
+        waker: Option<Waker>,
+    }
+
+    impl ManualSignal {
+        fn new() -> Self {
+            Self {
+                state: Rc::new(RefCell::new(ManualSignalState::default())),
+            }
+        }
+
+        fn resolve(&self) {
+            let mut state = self.state.borrow_mut();
+            state.resolved = true;
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+        }
+
+        fn wait(&self) -> ManualWaitFuture {
+            ManualWaitFuture {
+                signal: self.clone(),
+            }
+        }
+    }
+
+    struct ManualWaitFuture {
+        signal: ManualSignal,
+    }
+
+    impl Future for ManualWaitFuture {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut state = self.signal.state.borrow_mut();
+            if state.resolved {
+                Poll::Ready(())
+            } else {
+                state.waker = Some(context.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn merge_callbacks_should_invoke_callbacks_in_parallel_wait_for_them_to_settle_and_continue_after_errors()
+     {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let first_callback_completed = ManualSignal::new();
+
+        let first_calls = Rc::clone(&calls);
+        let first_signal = first_callback_completed.clone();
+        let first = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&first_calls);
+            let signal = first_signal.clone();
+            async move {
+                calls
+                    .borrow_mut()
+                    .push(format!("first start: {}", event.value));
+                signal.wait().await;
+                calls.borrow_mut().push("first end".to_string());
+            }
+        });
+
+        let second_calls = Rc::clone(&calls);
+        let second = Callback::new(move |_event: TestEvent| {
+            let calls = Rc::clone(&second_calls);
+            async move {
+                calls.borrow_mut().push("second before throw".to_string());
+                Err("callback error".to_string())
+            }
+        });
+
+        let third_calls = Rc::clone(&calls);
+        let third = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&third_calls);
+            async move {
+                calls.borrow_mut().push(format!("third: {}", event.value));
+            }
+        });
+
+        let merged = merge_callbacks([Some(first), None, Some(second), Some(third)]);
+        let mut merged_future = Box::pin(merged.run(TestEvent::new("hello")));
+
+        assert_pending(merged_future.as_mut());
+        calls.borrow_mut().push("after call".to_string());
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "first start: hello",
+                "second before throw",
+                "third: hello",
+                "after call",
+            ]
+        );
+
+        first_callback_completed.resolve();
+        poll_callback_ready(merged_future.as_mut()).expect("callbacks settle");
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "first start: hello",
+                "second before throw",
+                "third: hello",
+                "after call",
+                "first end",
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_callbacks_should_ignore_rejected_callbacks() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+
+        let first_calls = Rc::clone(&calls);
+        let first = Callback::new(move |event: TestEvent| {
+            let calls = Rc::clone(&first_calls);
+            async move {
+                calls
+                    .borrow_mut()
+                    .push(format!("first before reject: {}", event.value));
+                Err("callback error".to_string())
+            }
+        });
+
+        let second_calls = Rc::clone(&calls);
+        let second = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&second_calls);
+            async move {
+                calls.borrow_mut().push(format!("second: {}", event.value));
+            }
+        });
+
+        let merged = merge_callbacks([Some(first), Some(second)]);
+        let mut merged_future = Box::pin(merged.run(TestEvent::new("hello")));
+
+        poll_callback_ready(merged_future.as_mut()).expect("callbacks settle");
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["first before reject: hello", "second: hello"]
+        );
+    }
+
+    #[test]
+    fn merge_callbacks_should_ignore_undefined_callbacks() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let callback_calls = Rc::clone(&calls);
+        let callback = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&callback_calls);
+            async move {
+                calls.borrow_mut().push(event.value);
+            }
+        });
+
+        let merged = merge_callbacks([None, Some(callback), None]);
+        let mut merged_future = Box::pin(merged.run(TestEvent::new("hello")));
+
+        poll_callback_ready(merged_future.as_mut()).expect("callbacks settle");
+
+        assert_eq!(calls.borrow().as_slice(), ["hello"]);
+    }
+
+    #[test]
+    fn notify_should_call_a_single_callback_with_the_event() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let callback_calls = Rc::clone(&calls);
+        let callback = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&callback_calls);
+            async move {
+                calls.borrow_mut().push(event.value);
+            }
+        });
+
+        let mut future = Box::pin(notify(TestEvent::new("hello"), callback));
+        poll_unit_ready(future.as_mut());
+
+        assert_eq!(calls.borrow().as_slice(), ["hello"]);
+    }
+
+    #[test]
+    fn notify_should_call_all_callbacks_when_given_an_array() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let first_calls = Rc::clone(&calls);
+        let first = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&first_calls);
+            async move {
+                calls.borrow_mut().push(format!("first: {}", event.value));
+            }
+        });
+        let second_calls = Rc::clone(&calls);
+        let second = Callback::infallible(move |event: TestEvent| {
+            let calls = Rc::clone(&second_calls);
+            async move {
+                calls.borrow_mut().push(format!("second: {}", event.value));
+            }
+        });
+
+        let mut future = Box::pin(notify(TestEvent::new("hello"), vec![first, second]));
+        poll_unit_ready(future.as_mut());
+
+        assert_eq!(calls.borrow().as_slice(), ["first: hello", "second: hello"]);
+    }
+
+    #[test]
+    fn notify_should_handle_undefined_callbacks() {
+        let mut future = Box::pin(notify(
+            TestEvent::new("hello"),
+            Option::<Callback<'_, TestEvent>>::None,
+        ));
+
+        poll_unit_ready(future.as_mut());
+    }
+
+    #[test]
+    fn notify_should_handle_omitted_callbacks() {
+        let mut future = Box::pin(notify(TestEvent::new("hello"), NotifyCallbacks::none()));
+
+        poll_unit_ready(future.as_mut());
+    }
+
+    #[test]
+    fn notify_should_await_async_callbacks_before_continuing() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let signal = ManualSignal::new();
+        let callback_calls = Rc::clone(&calls);
+        let callback_signal = signal.clone();
+        let callback = Callback::infallible(move |_event: String| {
+            let calls = Rc::clone(&callback_calls);
+            let signal = callback_signal.clone();
+            async move {
+                signal.wait().await;
+                calls.borrow_mut().push("async done".to_string());
+            }
+        });
+
+        let mut future = Box::pin(notify("test".to_string(), callback));
+        assert_pending(future.as_mut());
+
+        signal.resolve();
+        poll_unit_ready(future.as_mut());
+        calls.borrow_mut().push("after notify".to_string());
+
+        assert_eq!(calls.borrow().as_slice(), ["async done", "after notify"]);
+    }
+
+    #[test]
+    fn notify_should_run_async_callbacks_in_parallel_and_await_all_of_them() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let slow_signal = ManualSignal::new();
+        let slow_calls = Rc::clone(&calls);
+        let slow_signal_for_callback = slow_signal.clone();
+        let slow = Callback::infallible(move |_event: String| {
+            let calls = Rc::clone(&slow_calls);
+            let signal = slow_signal_for_callback.clone();
+            async move {
+                calls.borrow_mut().push("slow start".to_string());
+                signal.wait().await;
+                calls.borrow_mut().push("slow end".to_string());
+            }
+        });
+        let fast_calls = Rc::clone(&calls);
+        let fast = Callback::infallible(move |_event: String| {
+            let calls = Rc::clone(&fast_calls);
+            async move {
+                calls.borrow_mut().push("fast start".to_string());
+                calls.borrow_mut().push("fast end".to_string());
+            }
+        });
+
+        let mut future = Box::pin(notify("test".to_string(), vec![slow, fast]));
+
+        assert_pending(future.as_mut());
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["slow start", "fast start", "fast end"]
+        );
+
+        slow_signal.resolve();
+        poll_unit_ready(future.as_mut());
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["slow start", "fast start", "fast end", "slow end"]
+        );
+    }
+
+    #[test]
+    fn notify_should_catch_errors_in_a_single_callback_without_breaking() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let callback_calls = Rc::clone(&calls);
+        let callback = Callback::new(move |_event: String| {
+            let calls = Rc::clone(&callback_calls);
+            async move {
+                calls.borrow_mut().push("before throw".to_string());
+                Err("callback error".to_string())
+            }
+        });
+
+        let mut future = Box::pin(notify("test".to_string(), callback));
+        poll_unit_ready(future.as_mut());
+        calls.borrow_mut().push("after notify".to_string());
+
+        assert_eq!(calls.borrow().as_slice(), ["before throw", "after notify"]);
+    }
+
+    #[test]
+    fn notify_should_catch_errors_in_array_callbacks_and_continue_to_next() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let first_calls = Rc::clone(&calls);
+        let first = Callback::new(move |_event: String| {
+            let calls = Rc::clone(&first_calls);
+            async move {
+                calls.borrow_mut().push("first before throw".to_string());
+                Err("first error".to_string())
+            }
+        });
+        let second_calls = Rc::clone(&calls);
+        let second = Callback::infallible(move |_event: String| {
+            let calls = Rc::clone(&second_calls);
+            async move {
+                calls.borrow_mut().push("second runs".to_string());
+            }
+        });
+
+        let mut future = Box::pin(notify("test".to_string(), vec![first, second]));
+        poll_unit_ready(future.as_mut());
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["first before throw", "second runs"]
+        );
+    }
+
+    #[test]
+    fn notify_should_catch_async_rejection_without_breaking() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let callback_calls = Rc::clone(&calls);
+        let callback = Callback::new(move |_event: String| {
+            let calls = Rc::clone(&callback_calls);
+            async move {
+                calls.borrow_mut().push("async before reject".to_string());
+                Err("async error".to_string())
+            }
+        });
+
+        let mut future = Box::pin(notify("test".to_string(), callback));
+        poll_unit_ready(future.as_mut());
+        calls.borrow_mut().push("after notify".to_string());
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["async before reject", "after notify"]
+        );
+    }
+
+    #[test]
+    fn notify_should_preserve_event_type_through_to_callback() {
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct MyEvent {
+            tool_name: String,
+            input_location: String,
+            step_number: usize,
+        }
+
+        let received = Rc::new(RefCell::new(Vec::<MyEvent>::new()));
+        let callback_received = Rc::clone(&received);
+        let callback = Callback::infallible(move |event: MyEvent| {
+            let received = Rc::clone(&callback_received);
+            async move {
+                received.borrow_mut().push(event);
+            }
+        });
+
+        let event = MyEvent {
+            tool_name: "getWeather".to_string(),
+            input_location: "San Francisco".to_string(),
+            step_number: 2,
+        };
+        let mut future = Box::pin(notify(event.clone(), callback));
+        poll_unit_ready(future.as_mut());
+
+        assert_eq!(received.borrow().as_slice(), [event]);
+    }
+
+    #[test]
+    fn notify_should_work_with_complex_nested_event_types() {
+        #[derive(Clone)]
+        struct Model {
+            provider: String,
+        }
+
+        #[derive(Clone)]
+        struct Step {
+            step_number: usize,
+        }
+
+        #[derive(Clone)]
+        struct ComplexEvent {
+            model: Model,
+            steps: Vec<Step>,
+        }
+
+        let received = Rc::new(RefCell::new(Vec::<JsonValue>::new()));
+        let callback_received = Rc::clone(&received);
+        let callback = Callback::infallible(move |event: ComplexEvent| {
+            let received = Rc::clone(&callback_received);
+            async move {
+                let step_numbers = event
+                    .steps
+                    .iter()
+                    .map(|step| step.step_number)
+                    .collect::<Vec<_>>();
+                received.borrow_mut().push(json!({
+                    "provider": event.model.provider,
+                    "stepNumbers": step_numbers,
+                    "totalSteps": event.steps.len(),
+                }));
+            }
+        });
+
+        let event = ComplexEvent {
+            model: Model {
+                provider: "openai".to_string(),
+            },
+            steps: vec![Step { step_number: 0 }, Step { step_number: 1 }],
+        };
+        let mut future = Box::pin(notify(event, callback));
+        poll_unit_ready(future.as_mut());
+
+        assert_eq!(
+            received.borrow().as_slice(),
+            [json!({
+                "provider": "openai",
+                "stepNumbers": [0, 1],
+                "totalSteps": 2,
+            })]
+        );
+    }
+
+    #[test]
+    fn notify_should_handle_repeated_calls_with_the_same_callback() {
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let callback_events = Rc::clone(&events);
+        let callback = Callback::infallible(move |event: String| {
+            let events = Rc::clone(&callback_events);
+            async move {
+                events.borrow_mut().push(event);
+            }
+        });
+
+        let mut first = Box::pin(notify("first".to_string(), callback.clone()));
+        poll_unit_ready(first.as_mut());
+        let mut second = Box::pin(notify("second".to_string(), callback.clone()));
+        poll_unit_ready(second.as_mut());
+        let mut third = Box::pin(notify("third".to_string(), callback));
+        poll_unit_ready(third.as_mut());
+
+        assert_eq!(events.borrow().as_slice(), ["first", "second", "third"]);
     }
 
     #[test]
