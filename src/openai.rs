@@ -18,13 +18,19 @@ use crate::openai_compatible::{
     OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
     OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
 };
-use crate::provider::{NoSuchModelError, Provider, ProviderMetadata, ProviderWithFiles};
+use crate::provider::{
+    NoSuchModelError, Provider, ProviderMetadata, ProviderWithFiles, ProviderWithSkills,
+};
 use crate::provider_utils::{
     FetchErrorInfo, FormData, FormDataInputValue, FormDataValue, HandledFetchError,
     PostFormDataToApiOptions, ProviderApiResponseHandlerError, ResponseHandlerResult,
     convert_base64_to_bytes, convert_to_form_data, create_json_response_handler,
     post_form_data_to_api, without_trailing_slash,
 };
+use crate::skills::{
+    Skills, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
+};
+use crate::warning::Warning;
 
 /// Default base URL for upstream `@ai-sdk/openai` API calls.
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -104,6 +110,54 @@ pub struct OpenAIFileResponse {
     pub expires_at: Option<u64>,
 }
 
+/// Response returned by OpenAI's `/skills` upload endpoint.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAISkillResponse {
+    /// OpenAI skill identifier.
+    pub id: String,
+
+    /// Skill name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Skill description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Default version identifier.
+    #[serde(
+        default,
+        rename = "default_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_version: Option<String>,
+
+    /// Latest version identifier.
+    #[serde(
+        default,
+        rename = "latest_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub latest_version: Option<String>,
+
+    /// Unix creation timestamp.
+    #[serde(
+        default,
+        rename = "created_at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub created_at: Option<u64>,
+
+    /// Unix update timestamp.
+    #[serde(
+        default,
+        rename = "updated_at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub updated_at: Option<u64>,
+}
+
 /// OpenAI files upload interface.
 #[derive(Clone)]
 pub struct OpenAIFiles {
@@ -114,6 +168,31 @@ pub struct OpenAIFiles {
 }
 
 impl OpenAIFiles {
+    fn new(
+        provider: impl Into<String>,
+        base_url: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            base_url: base_url.into(),
+            headers,
+            transport,
+        }
+    }
+}
+
+/// OpenAI skills upload interface.
+#[derive(Clone)]
+pub struct OpenAISkills {
+    provider: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+}
+
+impl OpenAISkills {
     fn new(
         provider: impl Into<String>,
         base_url: impl Into<String>,
@@ -339,6 +418,20 @@ impl OpenAIProvider {
         )
     }
 
+    /// Creates the OpenAI skills upload interface.
+    pub fn skills(&self) -> OpenAISkills {
+        let provider_name = openai_provider_name(&self.settings);
+        OpenAISkills::new(
+            format!("{provider_name}.skills"),
+            openai_base_url(&self.settings),
+            openai_headers(&self.settings),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_openai_files_transport),
+        )
+    }
+
     fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
         let provider_name = openai_provider_name(&self.settings);
         let mut settings =
@@ -413,6 +506,14 @@ impl ProviderWithFiles for OpenAIProvider {
     }
 }
 
+impl ProviderWithSkills for OpenAIProvider {
+    type Skills = OpenAISkills;
+
+    fn skills(&self) -> Self::Skills {
+        OpenAIProvider::skills(self)
+    }
+}
+
 impl Files for OpenAIFiles {
     type UploadFileFuture<'a>
         = Pin<Box<dyn Future<Output = FilesUploadFileResult> + Send + 'a>>
@@ -437,6 +538,33 @@ impl Files for OpenAIFiles {
                 .expect("OpenAI file upload failed");
 
             openai_file_upload_result(response, media_type, filename)
+        })
+    }
+}
+
+impl Skills for OpenAISkills {
+    type UploadSkillFuture<'a>
+        = Pin<Box<dyn Future<Output = SkillsUploadSkillResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn upload_skill(&self, options: SkillsUploadSkillCallOptions) -> Self::UploadSkillFuture<'_> {
+        let provider = self.provider.clone();
+        let base_url = self.base_url.clone();
+        let headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+
+        Box::pin(async move {
+            let warnings = openai_skill_upload_warnings(&options);
+            let response = upload_openai_skill(provider, base_url, headers, transport, options)
+                .await
+                .expect("OpenAI skill upload failed");
+
+            openai_skill_upload_result(response, warnings)
         })
     }
 }
@@ -594,6 +722,65 @@ fn openai_file_upload_data_bytes(data: &FileDataContent) -> Vec<u8> {
     }
 }
 
+async fn upload_openai_skill(
+    provider: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    options: SkillsUploadSkillCallOptions,
+) -> Result<OpenAISkillResponse, HandledFetchError> {
+    let form_data = openai_skill_upload_form_data(&options);
+    let response = post_form_data_to_api(
+        PostFormDataToApiOptions::new(format!("{base_url}/skills"), form_data)
+            .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value)))),
+        move |request| transport(request),
+        |request, response| {
+            create_json_response_handler::<OpenAISkillResponse, _, _>(
+                response.json_response_handler_options(request),
+                |value| serde_json::from_value(value.clone()),
+            )
+            .map_err(ProviderApiResponseHandlerError::from)
+        },
+        move |request, response| Ok(openai_failed_response_handler(&provider, request, response)),
+    )
+    .await?;
+
+    Ok(response.value)
+}
+
+fn openai_skill_upload_form_data(options: &SkillsUploadSkillCallOptions) -> FormData {
+    let mut form_data = FormData::new();
+
+    for file in &options.files {
+        form_data.append(
+            "files[]",
+            FormDataValue::bytes(openai_skill_file_bytes(&file.data)),
+        );
+    }
+
+    form_data
+}
+
+fn openai_skill_file_bytes(data: &SkillsFileData) -> Vec<u8> {
+    match data {
+        SkillsFileData::Data { data } => openai_file_upload_data_bytes(data),
+        SkillsFileData::Text { text } => text.as_bytes().to_vec(),
+    }
+}
+
+fn openai_skill_upload_warnings(options: &SkillsUploadSkillCallOptions) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+
+    if options.display_title.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "displayTitle".to_string(),
+            details: None,
+        });
+    }
+
+    warnings
+}
+
 fn openai_failed_response_handler(
     provider: &str,
     request: &crate::provider_utils::ProviderApiRequest,
@@ -666,6 +853,47 @@ fn openai_file_upload_result(
     result
 }
 
+fn openai_skill_upload_result(
+    response: OpenAISkillResponse,
+    warnings: Vec<Warning>,
+) -> SkillsUploadSkillResult {
+    let provider_reference =
+        ProviderReference::try_from(BTreeMap::from([("openai".to_string(), response.id)]))
+            .expect("OpenAI skill provider reference is valid");
+    let mut metadata = JsonObject::new();
+
+    if let Some(default_version) = &response.default_version {
+        metadata.insert(
+            "defaultVersion".to_string(),
+            JsonValue::String(default_version.clone()),
+        );
+    }
+    if let Some(created_at) = response.created_at {
+        metadata.insert("createdAt".to_string(), JsonValue::from(created_at));
+    }
+    if let Some(updated_at) = response.updated_at {
+        metadata.insert("updatedAt".to_string(), JsonValue::from(updated_at));
+    }
+
+    let mut result = SkillsUploadSkillResult::new(provider_reference)
+        .with_provider_metadata(ProviderMetadata::from([("openai".to_string(), metadata)]));
+
+    if let Some(name) = response.name {
+        result = result.with_name(name);
+    }
+    if let Some(description) = response.description {
+        result = result.with_description(description);
+    }
+    if let Some(latest_version) = response.latest_version {
+        result = result.with_latest_version(latest_version);
+    }
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -685,11 +913,15 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderOptions, ProviderWithFiles, SpecificationVersion};
+    use crate::provider::{
+        Provider, ProviderOptions, ProviderWithFiles, ProviderWithSkills, SpecificationVersion,
+    };
     use crate::provider_utils::{
         FormDataValue, ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, Schema, safe_parse_json_with_schema,
     };
+    use crate::skills::{Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions};
+    use crate::warning::Warning;
     use serde_json::{Map, json};
     use std::future::Future;
     use std::future::ready;
@@ -1470,6 +1702,166 @@ mod tests {
     }
 
     #[test]
+    fn openai_skills_should_send_files_as_multipart_form_data() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_skills_test_provider(Arc::clone(&captured_requests));
+
+        let _result = poll_ready(provider.skills().upload_skill(openai_skill_upload_options(
+            SkillsFileData::data(FileDataContent::Base64(
+                "Y29uc29sZS5sb2coImhlbGxvIik=".to_string(),
+            )),
+        )));
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.openai.test/v1/skills");
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("files[]"),
+            Some(&FormDataValue::bytes(b"console.log(\"hello\")".to_vec()))
+        );
+    }
+
+    #[test]
+    fn openai_skills_should_pass_authorization_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_skills_test_provider(Arc::clone(&captured_requests));
+
+        let _result = poll_ready(provider.skills().upload_skill(openai_skill_upload_options(
+            SkillsFileData::text("console.log(\"hello\")"),
+        )));
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("org_test")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("proj_test")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn openai_skills_should_map_response_to_provider_reference() {
+        let provider = openai_skills_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let result = poll_ready(provider.skills().upload_skill(openai_skill_upload_options(
+            SkillsFileData::text("console.log(\"hello\")"),
+        )));
+
+        assert_eq!(
+            result.provider_reference,
+            ProviderReference::try_from(std::collections::BTreeMap::from([(
+                "openai".to_string(),
+                "skill_699fc58f408c8191825d8d06ae75fd5c06de7b381a5db7f5".to_string()
+            )]))
+            .expect("provider reference is valid")
+        );
+        assert_eq!(result.name.as_deref(), Some("test-capture-skill"));
+        assert_eq!(
+            result.description.as_deref(),
+            Some("A test skill for fixture capture")
+        );
+        assert_eq!(result.latest_version.as_deref(), Some("1"));
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai")),
+            Some(
+                &json!({
+                    "defaultVersion": "1",
+                    "createdAt": 1772078479_u64
+                })
+                .as_object()
+                .expect("metadata is an object")
+                .clone()
+            )
+        );
+    }
+
+    #[test]
+    fn openai_skills_should_emit_unsupported_warning_for_display_title() {
+        let provider = openai_skills_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let result = poll_ready(
+            provider.skills().upload_skill(
+                openai_skill_upload_options(SkillsFileData::text("console.log(\"hello\")"))
+                    .with_display_title("My Skill"),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "displayTitle".to_string(),
+                details: None
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_skills_should_return_no_warnings_when_display_title_is_not_set() {
+        let provider = openai_skills_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let result = poll_ready(provider.skills().upload_skill(openai_skill_upload_options(
+            SkillsFileData::text("console.log(\"hello\")"),
+        )));
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_skills_should_handle_uint8array_file_content() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_skills_test_provider(Arc::clone(&captured_requests));
+        let result = poll_ready(provider.skills().upload_skill(openai_skill_upload_options(
+            SkillsFileData::data(FileDataContent::Bytes(b"Hello".to_vec())),
+        )));
+
+        let request = captured_openai_request(&captured_requests);
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("files[]"),
+            Some(&FormDataValue::bytes(b"Hello".to_vec()))
+        );
+        assert_eq!(
+            result.provider_reference,
+            ProviderReference::try_from(std::collections::BTreeMap::from([(
+                "openai".to_string(),
+                "skill_699fc58f408c8191825d8d06ae75fd5c06de7b381a5db7f5".to_string()
+            )]))
+            .expect("provider reference is valid")
+        );
+    }
+
+    #[test]
+    fn openai_skills_should_set_specification_version_and_provider() {
+        let provider = openai_skills_test_provider(Arc::new(Mutex::new(Vec::new())));
+        let skills = ProviderWithSkills::skills(&provider);
+
+        assert_eq!(skills.specification_version(), SpecificationVersion::V4);
+        assert_eq!(skills.provider(), "openai.skills");
+    }
+
+    #[test]
     fn openai_provider_uses_default_base_url_name_override_and_provider_trait() {
         let provider = OpenAIProvider::new().with_name("custom-openai");
 
@@ -1564,7 +1956,52 @@ mod tests {
             .with_transport(transport)
     }
 
+    fn openai_skills_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "skill_699fc58f408c8191825d8d06ae75fd5c06de7b381a5db7f5",
+                        "object": "skill",
+                        "name": "test-capture-skill",
+                        "description": "A test skill for fixture capture",
+                        "default_version": "1",
+                        "latest_version": "1",
+                        "created_at": 1772078479_u64
+                    })
+                    .to_string(),
+                ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_organization("org_test")
+            .with_project("proj_test")
+            .with_header("custom-header", "value")
+            .with_transport(transport)
+    }
+
+    fn openai_skill_upload_options(data: SkillsFileData) -> SkillsUploadSkillCallOptions {
+        SkillsUploadSkillCallOptions::new(vec![SkillsFile::new("index.ts", data)])
+    }
+
     fn captured_openai_files_request(
+        captured_requests: &Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_openai_request(captured_requests)
+    }
+
+    fn captured_openai_request(
         captured_requests: &Arc<Mutex<Vec<ProviderApiRequest>>>,
     ) -> ProviderApiRequest {
         captured_requests
