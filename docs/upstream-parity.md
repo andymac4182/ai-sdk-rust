@@ -604,6 +604,11 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `parseToolCall` input-schema validation
+  parity added Rust-side tool input validation for the common JSON Schema
+  object/property/required/type shapes used by first-phase tool schemas, plus
+  named counterparts for valid parsed inputs, invalid schema arguments,
+  validation-failure repair, and pre-execution invalid tool-result generation.
 - 2026-05-23: `packages/ai` `toResponseMessages` parity added 27 named Rust
   counterparts for upstream `generate-text/to-response-messages.test.ts`,
   covering assistant text/custom/reasoning/file parts, provider metadata, tool
@@ -3378,6 +3383,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    portable assistant, tool-message, provider-executed, approval, metadata,
    file/reasoning/custom, empty-text, empty-content, and invalid tool-input
    cases.
+   The upstream `generate-text/parse-tool-call.test.ts` input-schema validation
+   slice now has named Rust counterparts in
+   `parse_tool_call_should_successfully_parse_a_valid_tool_call`,
+   `parse_tool_call_should_throw_invalid_tool_input_error_when_args_are_invalid`,
+   `parse_tool_call_repair_should_invoke_repair_tool_when_input_schema_validation_fails`,
+   and `generate_text_marks_schema_invalid_tool_input_before_execution`;
+   remaining `parseToolCall` title/metadata/no-tool and full repair edge cases
+   are still tracked for follow-up mapping.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error

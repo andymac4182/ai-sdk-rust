@@ -5344,6 +5344,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         step.runtime_context = runtime_context.clone();
         step.tools_context = tools_context.clone();
         mark_unavailable_tool_calls(&mut step.tool_calls, step_call_options.tools.as_deref());
+        mark_invalid_tool_inputs(&mut step.tool_calls, step_call_options.tools.as_deref());
         repair_tool_calls(
             &mut step.tool_calls,
             &provider_content,
@@ -6999,6 +7000,166 @@ pub(crate) fn mark_unavailable_tool_calls(
     }
 }
 
+pub(crate) fn mark_invalid_tool_inputs(
+    tool_calls: &mut [GenerateTextToolCall],
+    available_tools: Option<&[LanguageModelTool]>,
+) {
+    for tool_call in tool_calls {
+        if tool_call.invalid == Some(true) {
+            continue;
+        }
+
+        let Some(input_schema) =
+            language_model_tool_input_schema(&tool_call.tool_name, available_tools)
+        else {
+            continue;
+        };
+
+        match validate_tool_input_value(
+            &tool_call.tool_name,
+            &tool_call.input.to_string(),
+            &tool_call.input,
+            input_schema,
+        ) {
+            Ok(validated_input) => {
+                tool_call.input = validated_input;
+            }
+            Err(error) => {
+                tool_call.dynamic = Some(true);
+                tool_call.invalid = Some(true);
+                tool_call.error = Some(
+                    InvalidToolInputError::new(
+                        &tool_call.tool_name,
+                        tool_call.input.to_string(),
+                        error,
+                    )
+                    .to_string(),
+                );
+            }
+        }
+    }
+}
+
+fn language_model_tool_input_schema<'a>(
+    tool_name: &str,
+    available_tools: Option<&'a [LanguageModelTool]>,
+) -> Option<&'a JsonSchema> {
+    available_tools?.iter().find_map(|tool| match tool {
+        LanguageModelTool::Function(function_tool) if function_tool.name == tool_name => {
+            Some(&function_tool.input_schema)
+        }
+        _ => None,
+    })
+}
+
+fn validate_tool_input_value(
+    tool_name: &str,
+    raw_input: &str,
+    input: &JsonValue,
+    input_schema: &JsonSchema,
+) -> Result<JsonValue, InvalidToolInputError> {
+    match json_schema_validation_error(input, input_schema) {
+        Some(cause_message) => Err(InvalidToolInputError::new(
+            tool_name,
+            raw_input,
+            TypeValidationError::with_cause_message(input.clone(), cause_message, None),
+        )),
+        None => Ok(input.clone()),
+    }
+}
+
+fn json_schema_validation_error(value: &JsonValue, schema: &JsonSchema) -> Option<String> {
+    validate_json_schema_node(value, &JsonValue::Object(schema.clone()), "$")
+}
+
+fn validate_json_schema_node(
+    value: &JsonValue,
+    schema_value: &JsonValue,
+    path: &str,
+) -> Option<String> {
+    let JsonValue::Object(schema) = schema_value else {
+        return None;
+    };
+
+    if let Some(expected_type) = schema.get("type").and_then(JsonValue::as_str) {
+        if !json_value_matches_schema_type(value, expected_type) {
+            return Some(format!("{path} expected {expected_type}"));
+        }
+    }
+
+    let validates_object_shape =
+        schema.contains_key("properties") || schema.contains_key("required");
+    if schema.get("type").and_then(JsonValue::as_str) == Some("object") || validates_object_shape {
+        let Some(object) = value.as_object() else {
+            return Some(format!("{path} expected object"));
+        };
+
+        if let Some(required) = schema.get("required").and_then(JsonValue::as_array) {
+            for property in required.iter().filter_map(JsonValue::as_str) {
+                if !object.contains_key(property) {
+                    return Some(format!("{path}.{property} is required"));
+                }
+            }
+        }
+
+        if let Some(JsonValue::Object(properties)) = schema.get("properties") {
+            for (property, property_schema) in properties {
+                if let Some(property_value) = object.get(property) {
+                    if let Some(error) = validate_json_schema_node(
+                        property_value,
+                        property_schema,
+                        &format!("{path}.{property}"),
+                    ) {
+                        return Some(error);
+                    }
+                }
+            }
+
+            if schema
+                .get("additionalProperties")
+                .and_then(JsonValue::as_bool)
+                == Some(false)
+            {
+                for property in object.keys() {
+                    if !properties.contains_key(property) {
+                        return Some(format!("{path}.{property} is not allowed"));
+                    }
+                }
+            }
+        }
+    }
+
+    if schema.get("type").and_then(JsonValue::as_str) == Some("array") {
+        let Some(array) = value.as_array() else {
+            return Some(format!("{path} expected array"));
+        };
+        if let Some(items_schema) = schema.get("items") {
+            for (index, item) in array.iter().enumerate() {
+                if let Some(error) =
+                    validate_json_schema_node(item, items_schema, &format!("{path}[{index}]"))
+                {
+                    return Some(error);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn json_value_matches_schema_type(value: &JsonValue, expected_type: &str) -> bool {
+    match expected_type {
+        "array" => value.is_array(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "null" => value.is_null(),
+        "number" => value.is_number(),
+        "object" => value.is_object(),
+        "string" => value.is_string(),
+        _ => true,
+    }
+}
+
 pub(crate) async fn repair_tool_calls(
     tool_calls: &mut [GenerateTextToolCall],
     content: &[LanguageModelContent],
@@ -7107,14 +7268,7 @@ fn tool_call_repair_original_error(
         }
     }
 
-    parse_tool_input(&tool_call.input).err().map(|error| {
-        InvalidToolInputError::new(
-            &tool_call.tool_name,
-            &tool_call.input,
-            JsonParseError::new(&tool_call.input, error),
-        )
-        .into()
-    })
+    tool_call_input_error(tool_call, available_tools).map(Into::into)
 }
 
 fn is_provider_executed_dynamic_tool_call(tool_call: &LanguageModelToolCall) -> bool {
@@ -7123,6 +7277,25 @@ fn is_provider_executed_dynamic_tool_call(tool_call: &LanguageModelToolCall) -> 
 
 fn available_tool_names(available_tools: Option<&[LanguageModelTool]>) -> Option<Vec<String>> {
     available_tools.map(|tools| tools.iter().map(language_model_tool_name).collect())
+}
+
+fn tool_call_input_error(
+    tool_call: &LanguageModelToolCall,
+    available_tools: Option<&[LanguageModelTool]>,
+) -> Option<InvalidToolInputError> {
+    let input = match parse_tool_input(&tool_call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return Some(InvalidToolInputError::new(
+                &tool_call.tool_name,
+                &tool_call.input,
+                JsonParseError::new(&tool_call.input, error),
+            ));
+        }
+    };
+
+    let input_schema = language_model_tool_input_schema(&tool_call.tool_name, available_tools)?;
+    validate_tool_input_value(&tool_call.tool_name, &tool_call.input, &input, input_schema).err()
 }
 
 pub(crate) async fn refine_tool_inputs(
@@ -7704,8 +7877,9 @@ mod tests {
         UnsupportedModelVersionError, calculate_tokens_per_second, collect_tool_approvals,
         create_tool_model_output, experimental_filter_active_tools, filter_active_tools,
         generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        normalize_tool_approval_status, prune_messages, resolve_tool_approval,
-        response_messages_for_step, step_count_is, sum_token_counts, validate_tool_context,
+        mark_invalid_tool_inputs, normalize_tool_approval_status, prune_messages,
+        resolve_tool_approval, response_messages_for_step, step_count_is, sum_token_counts,
+        validate_tool_context,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -10824,6 +10998,190 @@ mod tests {
                 )])
             )]
         );
+    }
+
+    #[test]
+    fn parse_tool_call_should_successfully_parse_a_valid_tool_call() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call(
+                "123",
+                "testTool",
+                json!({
+                    "param1": "test",
+                    "param2": 42
+                }),
+            ),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+
+        mark_invalid_tool_inputs(&mut tool_calls, Some(&available_tools));
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, "123");
+        assert_eq!(tool_calls[0].tool_name, "testTool");
+        assert_eq!(
+            tool_calls[0].input,
+            json!({
+                "param1": "test",
+                "param2": 42
+            })
+        );
+        assert_eq!(tool_calls[0].invalid, None);
+        assert_eq!(tool_calls[0].error, None);
+    }
+
+    #[test]
+    fn parse_tool_call_should_throw_invalid_tool_input_error_when_args_are_invalid() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("123", "testTool", json!({ "param1": "test" })),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+
+        mark_invalid_tool_inputs(&mut tool_calls, Some(&available_tools));
+
+        assert_eq!(tool_calls[0].input, json!({ "param1": "test" }));
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        let error = tool_calls[0].error.as_deref().expect("error is present");
+        assert!(error.contains("Invalid input for tool testTool"));
+        assert!(error.contains("param2"));
+    }
+
+    #[test]
+    fn parse_tool_call_repair_should_invoke_repair_tool_when_input_schema_validation_fails() {
+        let model = ToolLoopLanguageModel::with_tool_call("weather", r#"{"city":42}"#);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_call_repair(move |options| {
+                    let repair_options = Arc::clone(&repair_options_for_closure);
+                    async move {
+                        repair_options
+                            .lock()
+                            .expect("repair options lock")
+                            .push(options);
+                        Ok::<Option<LanguageModelToolCall>, String>(Some(
+                            LanguageModelToolCall::new(
+                                "call-1",
+                                "weather",
+                                r#"{"city":"Brisbane"}"#,
+                            ),
+                        ))
+                    }
+                })
+                .with_max_steps(2),
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert_eq!(repair_options[0].tool_call.input, r#"{"city":42}"#);
+        assert!(matches!(
+            &repair_options[0].error,
+            ToolCallRepairOriginalError::InvalidToolInput(error)
+                if error.tool_name() == "weather"
+                    && error.tool_input() == r#"{"city":42}"#
+                    && error.cause_message().contains("city")
+        ));
+        drop(repair_options);
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_calls[0].invalid, None);
+        assert_eq!(result.tool_results[0].output["city"], "Brisbane");
+    }
+
+    #[test]
+    fn generate_text_marks_schema_invalid_tool_input_before_execution() {
+        let model = ToolLoopLanguageModel::with_tool_call("weather", r#"{"city":42}"#);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_closure = Arc::clone(&executed);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let executed = Arc::clone(&executed_for_closure);
+                        async move {
+                            executed.store(true, Ordering::SeqCst);
+                            Ok(json!("should not execute"))
+                        }
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_calls[0].input, json!({ "city": 42 }));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(result.tool_calls[0].invalid, Some(true));
+        let error = result.tool_calls[0]
+            .error
+            .as_deref()
+            .expect("tool call error is present");
+        assert!(error.contains("Invalid input for tool weather"));
+        assert!(error.contains("city"));
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(result.tool_results[0].output, json!(error));
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
 
     fn warning_logger_text_result(
