@@ -594,6 +594,104 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Context passed to the upstream `lockScope` resolver function on
+/// [`ChatConfig`]. 1:1 port of upstream `interface LockScopeContext`.
+///
+/// `adapter` is the active adapter; the placeholder trait shipped in slice
+/// 14 lets this type compile before the per-adapter implementations land.
+#[derive(Clone)]
+pub struct LockScopeContext {
+    /// The active adapter dispatching the message. Held as
+    /// `Arc<dyn Adapter>` so the context can outlive a borrow.
+    pub adapter: std::sync::Arc<dyn Adapter>,
+    /// Platform-specific channel identifier.
+    pub channel_id: String,
+    /// Whether the originating channel is a direct message.
+    pub is_dm: bool,
+    /// Platform-specific thread identifier.
+    pub thread_id: String,
+}
+
+impl std::fmt::Debug for LockScopeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LockScopeContext")
+            // The adapter trait already requires Debug, but render it as
+            // a placeholder so the formatted output is stable across
+            // adapter implementations.
+            .field("adapter", &"<dyn Adapter>")
+            .field("channel_id", &self.channel_id)
+            .field("is_dm", &self.is_dm)
+            .field("thread_id", &self.thread_id)
+            .finish()
+    }
+}
+
+/// Binary payload accompanying a [`FileUpload`]. 1:1 port adaptation of
+/// upstream `data: Buffer | Blob | ArrayBuffer`.
+///
+/// JavaScript exposes three runtime types that all hold raw bytes; Rust
+/// has exactly one canonical byte container, [`Vec<u8>`]. The port collapses
+/// the three into a single newtype so the upstream API surface remains
+/// honest about "this is the file body" without inventing a sham
+/// Buffer/Blob/ArrayBuffer distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FileBytes(pub Vec<u8>);
+
+impl From<Vec<u8>> for FileBytes {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&[u8]> for FileBytes {
+    fn from(value: &[u8]) -> Self {
+        Self(value.to_vec())
+    }
+}
+
+impl std::ops::Deref for FileBytes {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// File attachment to upload with a message. 1:1 port of upstream
+/// `interface FileUpload`. The `data: Buffer | Blob | ArrayBuffer` union is
+/// collapsed into [`FileBytes`] — see the adaptation note on that type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileUpload {
+    /// Binary data. Upstream accepts Buffer/Blob/ArrayBuffer; all three
+    /// are functionally identical byte containers and collapse to one
+    /// [`FileBytes`] / [`Vec<u8>`] in Rust.
+    pub data: FileBytes,
+    /// Filename.
+    pub filename: String,
+    /// MIME type. Optional upstream — adapters infer from the filename
+    /// when omitted.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// Options for fetching messages from a thread. 1:1 port of upstream
+/// `interface FetchOptions`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct FetchOptions {
+    /// Pagination cursor returned by a prior `FetchResult` (`nextCursor`
+    /// on the upstream side).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Direction. Upstream default: [`FetchDirection::Backward`]. Messages
+    /// within each returned page are always in chronological order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<FetchDirection>,
+    /// Maximum number of messages to fetch. Upstream default varies by
+    /// adapter (50–100); leaving `None` defers to the adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// Minimal raw-message payload used by adapters that can hand off the
 /// platform-native body opaquely. 1:1 port of upstream
 /// `interface RawMessage<TRawMessage = unknown>`.
@@ -1387,6 +1485,97 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn lock_scope_context_holds_arc_dyn_adapter_and_renders_stable_debug() {
+        // Mock adapter with no methods (Adapter is an empty placeholder
+        // trait today — see types.rs module docs).
+        #[derive(Debug)]
+        struct MockAdapter;
+        impl Adapter for MockAdapter {}
+
+        let ctx = LockScopeContext {
+            adapter: std::sync::Arc::new(MockAdapter) as std::sync::Arc<dyn Adapter>,
+            channel_id: "C1".to_string(),
+            is_dm: false,
+            thread_id: "T1".to_string(),
+        };
+        let dbg = format!("{ctx:?}");
+        // Debug rendering stays stable regardless of which adapter is
+        // plugged in — slice 14's placeholder trait does not commit us
+        // to a specific Debug impl.
+        assert!(dbg.contains("LockScopeContext"));
+        assert!(dbg.contains("adapter: \"<dyn Adapter>\""));
+        assert!(dbg.contains("channel_id: \"C1\""));
+        assert!(dbg.contains("is_dm: false"));
+        assert!(dbg.contains("thread_id: \"T1\""));
+    }
+
+    #[test]
+    fn file_bytes_serializes_transparently_as_byte_array() {
+        // serde encodes Vec<u8> as a JSON number array by default; serde's
+        // `transparent` representation preserves that so FileBytes is
+        // wire-compatible with a raw byte array.
+        let bytes = FileBytes::from(vec![0x68u8, 0x69]); // "hi"
+        let json = serde_json::to_string(&bytes).unwrap();
+        assert_eq!(json, "[104,105]");
+        let back: FileBytes = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn file_bytes_derefs_to_byte_slice_and_constructs_from_slice() {
+        let bytes = FileBytes::from(&b"hello"[..]);
+        assert_eq!(&*bytes, b"hello");
+        assert_eq!(bytes.0.len(), 5);
+    }
+
+    #[test]
+    fn file_upload_round_trips_with_optional_mime_type() {
+        let upload = FileUpload {
+            data: FileBytes::from(vec![1, 2, 3]),
+            filename: "report.pdf".to_string(),
+            mime_type: Some("application/pdf".to_string()),
+        };
+        let json = serde_json::to_string(&upload).unwrap();
+        assert!(json.contains("\"filename\":\"report.pdf\""));
+        assert!(json.contains("\"mimeType\":\"application/pdf\""));
+        assert!(json.contains("\"data\":[1,2,3]"));
+        let back: FileUpload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, upload);
+    }
+
+    #[test]
+    fn file_upload_omits_mime_type_when_absent() {
+        let upload = FileUpload {
+            data: FileBytes::from(vec![]),
+            filename: "blank.bin".to_string(),
+            mime_type: None,
+        };
+        let json = serde_json::to_string(&upload).unwrap();
+        assert!(!json.contains("mimeType"));
+    }
+
+    #[test]
+    fn fetch_options_default_serializes_empty() {
+        let opts = FetchOptions::default();
+        assert_eq!(serde_json::to_string(&opts).unwrap(), "{}");
+    }
+
+    #[test]
+    fn fetch_options_full_shape_round_trips() {
+        let opts = FetchOptions {
+            cursor: Some("opaque_cursor".to_string()),
+            direction: Some(FetchDirection::Forward),
+            limit: Some(75),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(json.contains("\"cursor\":\"opaque_cursor\""));
+        assert!(json.contains("\"direction\":\"forward\""));
+        assert!(json.contains("\"limit\":75"));
+        let back: FetchOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, opts);
     }
 
     #[test]
