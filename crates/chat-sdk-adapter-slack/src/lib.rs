@@ -189,6 +189,63 @@ impl Adapter for SlackAdapter {
             AdapterError::InvalidPayload("Slack chat.postMessage response missing ts".to_string())
         })
     }
+
+    /// Fetch a Slack channel's name via `conversations.info`. 1:1
+    /// with upstream's `adapter.fetchSubject`:
+    ///
+    /// - Decodes `slack:<channel_id>:<thread_ts>` (we only need
+    ///   the channel_id; the thread_ts is ignored here).
+    /// - POSTs `{channel: channel_id}` to
+    ///   `<api_base>/conversations.info` with bearer auth.
+    /// - Slack returns `{ok: bool, channel: {name, ...}, error?}`.
+    /// - Returns `Some(channel.name)` for public/private channels
+    ///   and `None` for DMs (which have no `name` field —
+    ///   Slack returns `{user: <user_id>}` instead).
+    async fn fetch_subject(
+        &self,
+        thread_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<Option<String>> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("conversations.info");
+        let body = serde_json::json!({ "channel": decoded.channel_id });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack conversations.info: {error_code}"
+            )));
+        }
+
+        // DM channels carry no `name`; everything else does.
+        Ok(json["channel"]["name"].as_str().map(str::to_owned))
+    }
 }
 
 /// Encode a Slack thread id. 1:1 with upstream's inline format:
@@ -345,6 +402,19 @@ mod tests {
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.post_message("teams:CONV:MSG", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_fetch_subject_rejects_non_slack_thread_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.fetch_subject("teams:CONV:MSG"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("not Slack-encoded"));

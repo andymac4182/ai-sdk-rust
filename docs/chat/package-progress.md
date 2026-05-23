@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 42.8%
-- Portable package average: 31.3%
+- Average estimated completion: 42.9%
+- Portable package average: 31.5%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -25,7 +25,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete. |
-| `@chat-sdk/adapter-slack` | 15% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message HTTP (chat.postMessage Web API). 15 tests. |
+| `@chat-sdk/adapter-slack` | 18% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject HTTP (conversations.info). 16 tests. 2 of 8... |
 | `@chat-sdk/adapter-teams` | 15% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message HTTP (Bot Framework activities + pre-minted bearer). 15 tests. |
 | `@chat-sdk/adapter-gchat` | 15% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message HTTP (messages.create + pre-minted bearer + thread-reply option). 17 tests. |
 | `@chat-sdk/adapter-discord` | 15% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests. |
