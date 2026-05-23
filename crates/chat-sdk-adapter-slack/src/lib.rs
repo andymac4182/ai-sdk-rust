@@ -67,13 +67,26 @@ impl SlackAdapterOptions {
 #[derive(Debug, Clone)]
 pub struct SlackAdapter {
     options: SlackAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
 }
 
 impl SlackAdapter {
     /// 1:1 port of upstream
     /// `new SlackAdapter({ botToken, signingSecret, appToken?, apiBase? })`.
     pub fn new(options: SlackAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+        }
+    }
+
+    /// Override the HTTP client.
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
     }
 
     /// Read the bot OAuth token.
@@ -95,12 +108,86 @@ impl SlackAdapter {
     pub fn api_base(&self) -> &str {
         self.options.effective_api_base()
     }
+
+    /// Build a URL for a Slack Web API method. 1:1 with upstream's
+    /// inline `${apiBase}/${method}` template.
+    fn method_url(&self, method: &str) -> String {
+        format!("{}/{method}", self.api_base())
+    }
 }
 
 #[async_trait]
 impl Adapter for SlackAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a text message via Slack's `chat.postMessage` Web API.
+    /// 1:1 with upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes `slack:<channel_id>:<thread_ts>`.
+    /// - POSTs JSON `{channel, text, thread_ts}` to
+    ///   `<api_base>/chat.postMessage` with
+    ///   `Authorization: Bearer <bot_token>` and
+    ///   `Content-Type: application/json`.
+    /// - Slack returns `{ok: bool, ts, channel, error?}`. We
+    ///   surface `!ok` as `AdapterError::InvalidPayload` with the
+    ///   `error` field (Slack uses a snake_case error code like
+    ///   `channel_not_found`).
+    /// - Returns the new message's `ts` (Slack's per-channel
+    ///   timestamp serves as the message id).
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("chat.postMessage");
+        let body = serde_json::json!({
+            "channel": decoded.channel_id,
+            "text": text,
+            "thread_ts": decoded.thread_ts,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+
+        // Slack returns 200 even for application-level failures;
+        // the `ok` field discriminates.
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack chat.postMessage: {error_code}"
+            )));
+        }
+
+        json["ts"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload("Slack chat.postMessage response missing ts".to_string())
+        })
     }
 }
 
@@ -254,14 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_slack_thread_ids() {
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.post_message("slack:C0123:1234.5", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        let err = block_on(adapter.post_message("teams:CONV:MSG", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_method_url_combines_api_base_and_method() {
+        let adapter = SlackAdapter::new(
+            SlackAdapterOptions::new("xoxb", "s").with_api_base("https://slack.example.test/api"),
+        );
+        assert_eq!(
+            adapter.method_url("chat.postMessage"),
+            "https://slack.example.test/api/chat.postMessage"
+        );
     }
 
     #[test]
