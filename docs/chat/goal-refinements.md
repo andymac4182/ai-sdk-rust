@@ -1517,3 +1517,113 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
 - **Slack Socket Mode + signature verification**: a sizeable
   chunk of slack adapter's TS source. Maps to a websocket
   client + HMAC-SHA256 verifier.
+
+### 2026-05-24 — slices 169..172
+
+**What the brief got wrong or left out**
+
+- **The Done condition is gated on the test floor, not just
+  method coverage.** Even after slices 158-168 wired all 5
+  universal Adapter methods across all 9 adapters, the upstream
+  ledger still lists 11 test files for `adapter-slack`, 6 for
+  `adapter-teams`, 6 for `adapter-gchat`, 11 colocated test
+  files in upstream `index.test.ts` (87 cases for Telegram
+  alone). Method-implementation parity != test-floor parity.
+  Future sessions must port every `it("...", () => {...})`
+  case from each upstream `*.test.ts` into the matching Rust
+  crate to satisfy the "every portable upstream test/case
+  must have a matching Rust test" hard rule. The brief's
+  matrix should track per-test-file completion, not just
+  per-method.
+
+- **Several upstream files are pure-helper re-export modules
+  that can be ported in a single slice each.** Slices 170-172
+  found three such files:
+  - `packages/adapter-slack/src/crypto.ts` (14 tests): pure
+    re-export from `@chat-adapter/shared`; the Rust port is a
+    `pub use` from `chat_sdk_adapter_shared::crypto`. All 14
+    tests trivially mirror the upstream cases.
+  - `packages/adapter-linear/src/utils.ts` (3 tests): two
+    pure helpers (`getUserNameFromProfileUrl`,
+    `calculateExpiry`) with no upstream dependency. The Rust
+    port writes a regex-free `str::find` matcher to avoid
+    pulling in the `regex` crate.
+  - `packages/adapter-teams/src/errors.ts` (12 tests): pure
+    error-shape-dispatch function with no I/O. Maps a JSON-ish
+    Teams SDK error onto `AdapterError` variants in
+    `chat_sdk_adapter_shared::errors`.
+  These three slices added 33 ported test cases across 3
+  crates, bumping adapter-slack to 42%, adapter-linear to
+  32%, adapter-teams to 35%.
+
+- **The Rust trait `post_object` only matches one upstream
+  adapter (Slack).** Slice 169 added a partial port (the
+  unknown-kind fallback + plan-fallback-text branch); the
+  other 8 adapters keep the default `Ok(Unsupported)` because
+  upstream doesn't expose `postObject` on them. The matrix's
+  `post_object` column should show `n/a` for 8 of 9 adapters.
+
+**Stale or misleading guidance**
+
+- The brief's matrix tracked progress at "X/72 cells filled"
+  granularity. The accurate framing is:
+  - **Method-level cells**: 45 universal (5 methods × 9
+    adapters) all filled; 1 Linear-specific (real
+    fetchSubject) still pending; 3 Rust-additive (fetch_subject
+    on Telegram/GitHub/Slack) shipped; `post_object` and
+    `parse_message` columns are mostly upstream-not-implemented.
+  - **Test-file-level cells**: 9 adapters × ~3-11 upstream
+    `*.test.ts` files = ~50+ test files. Currently 3 of those
+    are fully ported (slack crypto, linear utils, teams
+    errors). The rest range from "partial" (cases mapped at
+    method-port time) to "untouched".
+
+**Edits applied**
+
+- `crates/chat-sdk-adapter-slack/src/crypto.rs`: 14 ported
+  upstream tests + re-export module (slice 170).
+- `crates/chat-sdk-adapter-slack/Cargo.toml`: dev-deps
+  `base64 = "0.22"` + `rand = "0.8"` (slice 170).
+- `crates/chat-sdk-adapter-linear/src/utils.rs`: 3 upstream +
+  4 additive tests + 2 helpers (slice 171).
+- `crates/chat-sdk-adapter-teams/src/errors.rs`: 12 ported
+  upstream tests + `handle_teams_error` dispatcher (slice 172).
+- `crates/chat-sdk-adapter-slack/src/lib.rs`: slice 169
+  `post_object` partial impl + `render_plan_fallback_text` pub
+  helper + 4 tests (text-fallback rejection, plan-payload
+  validation, fallback-text layout, default-title fallback).
+
+**Open refinements deferred**
+
+- **Test-floor port** is the dominant remaining work. Rough
+  inventory (upstream test cases not yet ported to a Rust
+  `mod tests`):
+  - adapter-slack: cards (36) + markdown (31) + modals (33) +
+    index (~150). Estimated 10+ slices.
+  - adapter-linear: cards (~) + markdown (~) + index (~).
+  - adapter-teams: cards (~) + graph-api (~) + index (~) +
+    markdown (~) + modals (~).
+  - adapter-gchat: 6 test files.
+  - adapter-discord: 4 test files.
+  - adapter-github: cards (12) + markdown (23) + index (~).
+  - adapter-telegram: cards (~) + markdown (~) + index (87).
+  - adapter-messenger: 3 test files.
+  - adapter-whatsapp: 3 test files.
+  - chat: many test files still partial.
+  Single-pass effort to hit 100% across all packages is on
+  the order of 100+ slices.
+
+- **State-backend client wire-up** (state-redis, state-ioredis,
+  state-pg): still at 10% NotConnected placeholder. Adding
+  `redis = { features = ["tokio-comp"] }` + connection
+  management pulls in significant integration-test
+  infrastructure (real Redis, mock layer, or docker-compose
+  test fixture). Defer until the test-floor pass shows a
+  remaining-work outline that justifies the dependency lift.
+
+- **Linear real `fetchSubject`** (1 cell): port the rich
+  `MessageSubject` shape via Linear GraphQL.
+
+- **Token-mint helpers in `chat-sdk-adapter-shared`**: for
+  Teams (`login.microsoftonline.com`) and GChat
+  (`oauth2.googleapis.com` with service-account JWT).
