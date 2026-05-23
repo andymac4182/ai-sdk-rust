@@ -91,6 +91,16 @@ impl LinearAdapter {
 /// Lifted out as a `const` so tests can lock the wire shape.
 pub const COMMENT_CREATE_MUTATION: &str = "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success, comment { id } } }";
 
+/// GraphQL mutation for `commentUpdate` (used by `edit_message`).
+pub const COMMENT_UPDATE_MUTATION: &str = "mutation UpdateComment($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success, comment { id } } }";
+
+/// GraphQL mutation for `commentDelete` (used by `delete_message`).
+pub const COMMENT_DELETE_MUTATION: &str =
+    "mutation DeleteComment($id: String!) { commentDelete(id: $id) { success } }";
+
+/// GraphQL mutation for `reactionCreate` (used by `add_reaction`).
+pub const REACTION_CREATE_MUTATION: &str = "mutation CreateReaction($commentId: String!, $emoji: String!) { reactionCreate(input: { commentId: $commentId, emoji: $emoji }) { success } }";
+
 #[async_trait]
 impl Adapter for LinearAdapter {
     fn name(&self) -> &str {
@@ -178,6 +188,173 @@ impl Adapter for LinearAdapter {
                     "Linear commentCreate response missing comment.id".to_string(),
                 )
             })
+    }
+
+    /// Edit a Linear comment via the `commentUpdate` GraphQL
+    /// mutation. 1:1 with the comment-path of upstream's
+    /// `adapter.editMessage` (agent-session activities are
+    /// append-only upstream — that branch is deferred).
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let _decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Linear-encoded"))
+        })?;
+
+        let payload = serde_json::json!({
+            "query": COMMENT_UPDATE_MUTATION,
+            "variables": {
+                "id": message_id,
+                "body": text,
+            }
+        });
+
+        let json = self.linear_graphql_call(&payload).await?;
+
+        if !json["data"]["commentUpdate"]["success"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            return Err(AdapterError::InvalidPayload(
+                "Linear commentUpdate returned success=false".to_string(),
+            ));
+        }
+
+        json["data"]["commentUpdate"]["comment"]["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                AdapterError::InvalidPayload(
+                    "Linear commentUpdate response missing comment.id".to_string(),
+                )
+            })
+    }
+
+    /// Delete a Linear comment via the `commentDelete` GraphQL
+    /// mutation. 1:1 with the comment-path of upstream's
+    /// `adapter.deleteMessage`.
+    async fn delete_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let _decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Linear-encoded"))
+        })?;
+
+        let payload = serde_json::json!({
+            "query": COMMENT_DELETE_MUTATION,
+            "variables": { "id": message_id }
+        });
+
+        let json = self.linear_graphql_call(&payload).await?;
+
+        if !json["data"]["commentDelete"]["success"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            return Err(AdapterError::InvalidPayload(
+                "Linear commentDelete returned success=false".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Add an emoji reaction via `reactionCreate` GraphQL mutation.
+    /// 1:1 with upstream's `adapter.addReaction`.
+    async fn add_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let _decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Linear-encoded"))
+        })?;
+
+        let payload = serde_json::json!({
+            "query": REACTION_CREATE_MUTATION,
+            "variables": {
+                "commentId": message_id,
+                "emoji": emoji,
+            }
+        });
+
+        let json = self.linear_graphql_call(&payload).await?;
+
+        if !json["data"]["reactionCreate"]["success"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            return Err(AdapterError::InvalidPayload(
+                "Linear reactionCreate returned success=false".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Linear has no typing indicator for comments. The agent
+    /// session path (createAgentActivity with Thought type) is
+    /// deferred. 1:1 with upstream's no-op for the comment thread
+    /// case.
+    async fn start_typing(
+        &self,
+        _thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        Ok(())
+    }
+}
+
+impl LinearAdapter {
+    /// Internal helper for issuing GraphQL mutations against
+    /// Linear's API. Centralises the auth + status + GraphQL-error
+    /// envelope handling. Returns the parsed response JSON on
+    /// success.
+    async fn linear_graphql_call(
+        &self,
+        payload: &serde_json::Value,
+    ) -> chat_sdk_chat::types::AdapterResult<serde_json::Value> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let response = self
+            .http
+            .post(self.graphql_url())
+            .header("Authorization", self.api_key())
+            .header("Content-Type", "application/json")
+            .json(payload)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Linear GraphQL request failed"
+            )));
+        }
+
+        if let Some(first_error) = json["errors"][0]["message"].as_str() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "Linear GraphQL error: {first_error}"
+            )));
+        }
+
+        Ok(json)
     }
 }
 
@@ -298,6 +475,74 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_linear_thread_ids() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("k"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("slack:C1:1.0", "msg", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Linear-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_rejects_non_linear_thread_ids() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("k"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("slack:C1:1.0", "msg"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Linear-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_rejects_non_linear_thread_ids() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("k"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("slack:C1:1.0", "msg", ":+1:"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Linear-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_is_a_noop() {
+        // Linear comment threads have no typing indicator; the
+        // agent-session path is deferred.
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("k"));
+        assert!(block_on(adapter.start_typing("anything", None)).is_ok());
+        assert!(block_on(adapter.start_typing("anything", Some("Thinking..."))).is_ok());
+    }
+
+    #[test]
+    fn comment_update_mutation_shape() {
+        assert!(COMMENT_UPDATE_MUTATION.contains("commentUpdate"));
+        assert!(COMMENT_UPDATE_MUTATION.contains("$id: String!"));
+        assert!(COMMENT_UPDATE_MUTATION.contains("$body: String!"));
+    }
+
+    #[test]
+    fn comment_delete_mutation_shape() {
+        assert!(COMMENT_DELETE_MUTATION.contains("commentDelete"));
+        assert!(COMMENT_DELETE_MUTATION.contains("$id: String!"));
+    }
+
+    #[test]
+    fn reaction_create_mutation_shape() {
+        assert!(REACTION_CREATE_MUTATION.contains("reactionCreate"));
+        assert!(REACTION_CREATE_MUTATION.contains("$commentId: String!"));
+        assert!(REACTION_CREATE_MUTATION.contains("$emoji: String!"));
     }
 
     #[test]
