@@ -12,4 +12,5 @@ adapter-linear	10	Crate scaffold (slice 136). 11 tests. HTTP I/O + GraphQL defer
 adapter-gchat	10	Crate scaffold (slice 137) w/ empty-thread top-level sentinel. 14 tests. OAuth2 + HTTP I/O deferred.
 adapter-teams	10	Crate scaffold (slice 138) rsplit Bot Framework conv ids. 12 tests. HTTP I/O + Bot Framework auth deferred.
 adapter-slack	10	Crate scaffold (slice 139) w/ is_dm/is_group predicates. 14 tests. Web API + Socket Mode deferred.
-state-redis	10	Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (5 methods return NotConnected placeholder). RedisStateAdapterOptions + prefixed_key namespace helper. 11 tests. redis-rs + bb8-redis client wire-up + Lua-script locks + pub/sub deferred until workspace runtime commits to tokio.
+state-redis	10	Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up deferred.
+state-ioredis	10	Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs cluster client deferred.

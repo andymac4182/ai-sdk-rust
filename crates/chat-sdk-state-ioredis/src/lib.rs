@@ -1,0 +1,255 @@
+//! `ioredis`-backed Redis state backend for chat-sdk.
+//!
+//! 1:1 port (in progress) of `packages/state-ioredis/src/index.ts`.
+//!
+//! Upstream ships two Redis-flavored backends (`state-redis` and
+//! `state-ioredis`) because the two upstream node clients
+//! (`redis` and `ioredis`) have slightly different connection /
+//! cluster / sentinel semantics. The Rust port collapses both into
+//! the same family — `chat-sdk-state-redis` covers the standard
+//! single-node case, and this `chat-sdk-state-ioredis` crate
+//! covers cluster + sentinel + custom cluster-aware key hashing
+//! scenarios.
+//!
+//! **What this slice ships (slice 141):**
+//!
+//! - Crate skeleton + `Cargo.toml`.
+//! - [`IoredisStateAdapter`] struct holding cluster config (nodes
+//!   + optional sentinel name + namespace prefix).
+//! - [`IoredisStateAdapterOptions`] config struct.
+//! - [`IoredisStateAdapter`] impl-ing
+//!   [`chat_sdk_chat::types::StateAdapter`]. All required methods
+//!   return `Err(StateAdapterError::NotConnected)` until the
+//!   `redis-rs` cluster client lands.
+//!
+//! **What is deferred:**
+//!
+//! - `redis::cluster_async::ClusterClient` + `bb8-redis-cluster`
+//!   pool wire-up. Requires the workspace runtime decision.
+
+use async_trait::async_trait;
+use chat_sdk_chat::types::{StateAdapter, StateAdapterError, StateResult};
+
+/// Default key namespace prefix (matches state-redis).
+pub const DEFAULT_KEY_PREFIX: &str = "chat:";
+
+/// Options for [`IoredisStateAdapter::new`].
+#[derive(Debug, Clone)]
+pub struct IoredisStateAdapterOptions {
+    /// Cluster nodes (`redis://host:port` URLs). At least one
+    /// required; the client discovers the rest of the cluster
+    /// topology from any single seed node.
+    pub nodes: Vec<String>,
+    /// Optional Sentinel master name. When set, [`Self::nodes`] is
+    /// interpreted as Sentinel nodes rather than cluster nodes.
+    pub sentinel_name: Option<String>,
+    /// Optional namespace prefix prepended to every key.
+    pub key_prefix: Option<String>,
+}
+
+impl IoredisStateAdapterOptions {
+    /// Construct options from a single seed node URL.
+    pub fn new(node: impl Into<String>) -> Self {
+        Self {
+            nodes: vec![node.into()],
+            sentinel_name: None,
+            key_prefix: None,
+        }
+    }
+
+    /// Add an additional cluster node.
+    pub fn with_node(mut self, node: impl Into<String>) -> Self {
+        self.nodes.push(node.into());
+        self
+    }
+
+    /// Switch to Sentinel mode by naming the master.
+    pub fn with_sentinel(mut self, sentinel_name: impl Into<String>) -> Self {
+        self.sentinel_name = Some(sentinel_name.into());
+        self
+    }
+
+    /// Override the key prefix.
+    pub fn with_key_prefix(mut self, key_prefix: impl Into<String>) -> Self {
+        self.key_prefix = Some(key_prefix.into());
+        self
+    }
+
+    /// Effective key prefix with default applied.
+    pub fn effective_key_prefix(&self) -> &str {
+        self.key_prefix.as_deref().unwrap_or(DEFAULT_KEY_PREFIX)
+    }
+
+    /// Whether this options struct describes a Sentinel deployment.
+    pub fn is_sentinel(&self) -> bool {
+        self.sentinel_name.is_some()
+    }
+}
+
+/// `ioredis`-backed Redis state backend.
+#[derive(Debug, Clone)]
+pub struct IoredisStateAdapter {
+    options: IoredisStateAdapterOptions,
+}
+
+impl IoredisStateAdapter {
+    /// 1:1 port of upstream
+    /// `new IoredisStateAdapter({ nodes, sentinelName?, keyPrefix? })`.
+    pub fn new(options: IoredisStateAdapterOptions) -> Self {
+        Self { options }
+    }
+
+    /// Read the cluster nodes.
+    pub fn nodes(&self) -> &[String] {
+        &self.options.nodes
+    }
+
+    /// Sentinel master name, if configured.
+    pub fn sentinel_name(&self) -> Option<&str> {
+        self.options.sentinel_name.as_deref()
+    }
+
+    /// Effective key prefix.
+    pub fn key_prefix(&self) -> &str {
+        self.options.effective_key_prefix()
+    }
+
+    /// Apply the namespace prefix to `key`.
+    pub fn prefixed_key(&self, key: &str) -> String {
+        format!("{}{key}", self.key_prefix())
+    }
+}
+
+#[async_trait]
+impl StateAdapter for IoredisStateAdapter {
+    async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+        Err(StateAdapterError::NotConnected)
+    }
+    async fn set(
+        &self,
+        _key: &str,
+        _value: serde_json::Value,
+        _ttl_ms: Option<u64>,
+    ) -> StateResult<()> {
+        Err(StateAdapterError::NotConnected)
+    }
+    async fn delete(&self, _key: &str) -> StateResult<()> {
+        Err(StateAdapterError::NotConnected)
+    }
+    async fn append_to_list(
+        &self,
+        _key: &str,
+        _value: serde_json::Value,
+        _max_length: Option<usize>,
+        _ttl_ms: Option<u64>,
+    ) -> StateResult<()> {
+        Err(StateAdapterError::NotConnected)
+    }
+    async fn get_list(
+        &self,
+        _key: &str,
+        _limit: Option<usize>,
+    ) -> StateResult<Vec<serde_json::Value>> {
+        Err(StateAdapterError::NotConnected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_executor::block_on;
+
+    #[test]
+    fn options_new_stores_a_seed_node() {
+        let opts = IoredisStateAdapterOptions::new("redis://node1:6379");
+        assert_eq!(opts.nodes, vec!["redis://node1:6379".to_string()]);
+        assert!(opts.sentinel_name.is_none());
+        assert_eq!(opts.effective_key_prefix(), DEFAULT_KEY_PREFIX);
+    }
+
+    #[test]
+    fn options_with_node_appends_to_cluster() {
+        let opts =
+            IoredisStateAdapterOptions::new("redis://node1:6379").with_node("redis://node2:6379");
+        assert_eq!(opts.nodes.len(), 2);
+        assert_eq!(opts.nodes[1], "redis://node2:6379");
+    }
+
+    #[test]
+    fn options_with_sentinel_sets_sentinel_mode() {
+        let opts =
+            IoredisStateAdapterOptions::new("redis://sentinel1:26379").with_sentinel("mymaster");
+        assert!(opts.is_sentinel());
+        assert_eq!(opts.sentinel_name.as_deref(), Some("mymaster"));
+    }
+
+    #[test]
+    fn options_with_key_prefix_overrides_the_default() {
+        let opts = IoredisStateAdapterOptions::new("redis://node1:6379").with_key_prefix("ns:");
+        assert_eq!(opts.effective_key_prefix(), "ns:");
+    }
+
+    #[test]
+    fn adapter_accessors_expose_options() {
+        let adapter = IoredisStateAdapter::new(
+            IoredisStateAdapterOptions::new("redis://n1")
+                .with_node("redis://n2")
+                .with_sentinel("mymaster")
+                .with_key_prefix("ns:"),
+        );
+        assert_eq!(adapter.nodes().len(), 2);
+        assert_eq!(adapter.sentinel_name(), Some("mymaster"));
+        assert_eq!(adapter.key_prefix(), "ns:");
+    }
+
+    #[test]
+    fn adapter_prefixed_key_concatenates() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        assert_eq!(adapter.prefixed_key("foo"), "chat:foo");
+    }
+
+    #[test]
+    fn adapter_get_returns_not_connected_until_client_lands() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        match block_on(adapter.get("k")) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_set_returns_not_connected_until_client_lands() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        match block_on(adapter.set("k", serde_json::json!(1), None)) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_returns_not_connected_until_client_lands() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        match block_on(adapter.delete("k")) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_append_to_list_returns_not_connected_until_client_lands() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        match block_on(adapter.append_to_list("k", serde_json::json!(1), None, None)) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_get_list_returns_not_connected_until_client_lands() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        match block_on(adapter.get_list("k", None)) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+}
