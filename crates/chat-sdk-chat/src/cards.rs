@@ -34,6 +34,7 @@
 //! - JSX-side card helpers (`cardChildToFallbackText`, `fromReactElement`,
 //!   `isCardElement` from the JSX runtime — `js-only-documented`).
 
+use crate::modals::{RadioSelectElement, SelectElement};
 use serde::{Deserialize, Serialize};
 
 /// Button style. 1:1 port of upstream
@@ -265,11 +266,81 @@ pub enum TableKind {
     Table,
 }
 
+/// Children of an [`ActionsElement`]. 1:1 port of upstream's
+/// `(ButtonElement | LinkButtonElement | SelectElement | RadioSelectElement)[]`
+/// children-type union.
+///
+/// Modeled as `#[serde(untagged)]` over the four element structs because
+/// each carries its own discriminator (`type: "button"`/`"link-button"`/
+/// `"select"`/`"radio_select"`) — serde can disambiguate variants by that
+/// inner `type` field without an outer wrapper, preserving the upstream
+/// JSON shape exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionsChild {
+    Button(ButtonElement),
+    LinkButton(LinkButtonElement),
+    Select(SelectElement),
+    RadioSelect(RadioSelectElement),
+}
+
+impl From<ButtonElement> for ActionsChild {
+    fn from(value: ButtonElement) -> Self {
+        Self::Button(value)
+    }
+}
+
+impl From<LinkButtonElement> for ActionsChild {
+    fn from(value: LinkButtonElement) -> Self {
+        Self::LinkButton(value)
+    }
+}
+
+impl From<SelectElement> for ActionsChild {
+    fn from(value: SelectElement) -> Self {
+        Self::Select(value)
+    }
+}
+
+impl From<RadioSelectElement> for ActionsChild {
+    fn from(value: RadioSelectElement) -> Self {
+        Self::RadioSelect(value)
+    }
+}
+
+/// Container for action buttons and selects. 1:1 port of upstream
+/// `interface ActionsElement`. Discriminator `"actions"`. Children must
+/// be drawn from [`ActionsChild`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ActionsElement {
+    pub children: Vec<ActionsChild>,
+    #[serde(rename = "type")]
+    pub kind: ActionsKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ActionsKind {
+    #[default]
+    #[serde(rename = "actions")]
+    Actions,
+}
+
 // ============================================================================
 // Builder functions — snake_case Rust analogues of upstream's PascalCase
 // JSX-friendly constructors. Each returns the constructed struct with
 // optional fields defaulted to None.
 // ============================================================================
+
+/// 1:1 port of upstream `Actions(children): ActionsElement`. Children
+/// can be passed as concrete `ButtonElement`/`LinkButtonElement`/
+/// `SelectElement`/`RadioSelectElement` values thanks to the
+/// `From<...>` impls on [`ActionsChild`].
+pub fn actions(children: Vec<ActionsChild>) -> ActionsElement {
+    ActionsElement {
+        children,
+        kind: ActionsKind::Actions,
+    }
+}
 
 /// Options for [`button`]. Mirrors upstream `interface ButtonOptions`.
 #[derive(Debug, Default, Clone)]
@@ -602,6 +673,91 @@ mod tests {
         });
         let json = serde_json::to_string(&elem).unwrap();
         assert!(!json.contains("align"));
+    }
+
+    #[test]
+    fn actions_builder_wraps_button_and_link_button_children() {
+        use crate::cards::{button, link_button};
+        let elem = actions(vec![
+            button(ButtonOptions {
+                id: "approve".to_string(),
+                label: "Approve".to_string(),
+                style: Some(ButtonStyle::Primary),
+                ..Default::default()
+            })
+            .into(),
+            link_button(LinkButtonOptions {
+                label: "Docs".to_string(),
+                url: "https://example.com".to_string(),
+                ..Default::default()
+            })
+            .into(),
+        ]);
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"actions\""));
+        assert!(json.contains("\"type\":\"button\""));
+        assert!(json.contains("\"type\":\"link-button\""));
+        assert!(json.contains("\"label\":\"Approve\""));
+        assert!(json.contains("\"label\":\"Docs\""));
+    }
+
+    #[test]
+    fn actions_children_round_trip_through_untagged_union() {
+        // Build an ActionsElement, serialize, deserialize, verify
+        // structural equivalence. The untagged ActionsChild enum should
+        // pick the right variant on the wire shape `type` discriminator.
+        use crate::cards::button;
+        use crate::modals::{SelectOptions, select, select_option};
+        let original = actions(vec![
+            button(ButtonOptions {
+                id: "ok".to_string(),
+                label: "OK".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            select(SelectOptions {
+                id: "prio".to_string(),
+                label: "Priority".to_string(),
+                options: vec![select_option("High", "high", None)],
+                ..Default::default()
+            })
+            .into(),
+        ]);
+        let json = serde_json::to_string(&original).unwrap();
+        let back: ActionsElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, original);
+        // Spot-check that the deserialized children landed in the right
+        // variants (not the leftmost-untagged-match catch-all).
+        assert!(matches!(back.children[0], ActionsChild::Button(_)));
+        assert!(matches!(back.children[1], ActionsChild::Select(_)));
+    }
+
+    #[test]
+    fn actions_children_accept_radio_select_and_link_button_via_from() {
+        use crate::cards::link_button;
+        use crate::modals::{RadioSelectOptions, radio_select, select_option};
+        let elem = actions(vec![
+            link_button(LinkButtonOptions {
+                label: "Open".to_string(),
+                url: "https://example.com".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            radio_select(RadioSelectOptions {
+                id: "status".to_string(),
+                label: "Status".to_string(),
+                options: vec![select_option("Open", "open", None)],
+                ..Default::default()
+            })
+            .into(),
+        ]);
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"link-button\""));
+        assert!(json.contains("\"type\":\"radio_select\""));
+        let back: ActionsElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.children.len(), 2);
+        assert!(matches!(back.children[0], ActionsChild::LinkButton(_)));
+        assert!(matches!(back.children[1], ActionsChild::RadioSelect(_)));
     }
 
     #[test]
