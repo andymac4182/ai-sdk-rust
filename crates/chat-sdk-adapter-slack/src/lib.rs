@@ -9,6 +9,7 @@
 //! uses). For top-level messages, `thread_ts` is the message's own
 //! timestamp, so the encoding is symmetric.
 
+pub mod api;
 pub mod crypto;
 pub mod webhook;
 
