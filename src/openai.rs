@@ -9,25 +9,29 @@ use serde::{Deserialize, Serialize};
 use crate::file_data::{FileDataContent, ProviderReference};
 use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 use crate::headers::Headers;
-use crate::json::{JsonObject, JsonValue};
+use crate::image_model::{
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
+    ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+};
+use crate::json::{JsonArray, JsonObject, JsonValue};
 use crate::open_responses::{
     OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
 };
 use crate::openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
-    OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
-    OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
+    OpenAICompatibleEmbeddingModel, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
+    OpenAICompatibleTransport,
 };
 use crate::provider::{
     NoSuchModelError, Provider, ProviderMetadata, ProviderWithFiles, ProviderWithSkills,
     ProviderWithSpeechModel, ProviderWithTranscriptionModel,
 };
 use crate::provider_utils::{
-    FetchErrorInfo, FormData, FormDataInputValue, FormDataValue, HandledFetchError,
-    PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiResponseHandlerError,
-    ResponseHandlerResult, convert_base64_to_bytes, convert_to_form_data,
-    create_binary_response_handler, create_json_response_handler, media_type_to_extension,
-    post_form_data_to_api, post_json_to_api, without_trailing_slash,
+    ConvertToFormDataOptions, FetchErrorInfo, FormData, FormDataInputValue, FormDataValue,
+    HandledFetchError, PostFormDataToApiOptions, PostJsonToApiOptions,
+    ProviderApiResponseHandlerError, ResponseHandlerResult, convert_base64_to_bytes,
+    convert_to_form_data, create_binary_response_handler, create_json_response_handler,
+    media_type_to_extension, post_form_data_to_api, post_json_to_api, without_trailing_slash,
 };
 use crate::skills::{
     Skills, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
@@ -192,6 +196,117 @@ pub struct OpenAITranscriptionResponse {
     pub words: Option<Vec<OpenAITranscriptionWord>>,
 }
 
+/// Response returned by OpenAI's image endpoints.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIImageResponse {
+    /// Unix creation timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
+
+    /// Generated image entries.
+    pub data: Vec<OpenAIImageData>,
+
+    /// Response-level background metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+
+    /// Response-level output format metadata.
+    #[serde(
+        default,
+        rename = "output_format",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_format: Option<String>,
+
+    /// Response-level size metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+
+    /// Response-level quality metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+
+    /// Optional image-generation token usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<OpenAIImageUsage>,
+}
+
+/// OpenAI image response item.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIImageData {
+    /// Base64-encoded image.
+    #[serde(rename = "b64_json")]
+    pub b64_json: String,
+
+    /// Revised prompt, when returned by OpenAI.
+    #[serde(
+        default,
+        rename = "revised_prompt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub revised_prompt: Option<String>,
+}
+
+/// OpenAI image usage response.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIImageUsage {
+    /// Input token count.
+    #[serde(
+        default,
+        rename = "input_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_tokens: Option<u64>,
+
+    /// Output token count.
+    #[serde(
+        default,
+        rename = "output_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_tokens: Option<u64>,
+
+    /// Total token count.
+    #[serde(
+        default,
+        rename = "total_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub total_tokens: Option<u64>,
+
+    /// Input token detail split.
+    #[serde(
+        default,
+        rename = "input_tokens_details",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_tokens_details: Option<OpenAIImageInputTokenDetails>,
+}
+
+/// OpenAI image input token detail response.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAIImageInputTokenDetails {
+    /// Image input token count.
+    #[serde(
+        default,
+        rename = "image_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub image_tokens: Option<u64>,
+
+    /// Text input token count.
+    #[serde(
+        default,
+        rename = "text_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub text_tokens: Option<u64>,
+}
+
 /// OpenAI transcription segment item.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -267,6 +382,55 @@ impl OpenAISkills {
             headers,
             transport,
         }
+    }
+}
+
+/// OpenAI image model for `/images/generations` and `/images/edits`.
+#[derive(Clone)]
+pub struct OpenAIImageModel {
+    provider: String,
+    model_id: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    current_date: Option<Arc<dyn Fn() -> OffsetDateTime + Send + Sync>>,
+}
+
+impl OpenAIImageModel {
+    fn new(
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            headers,
+            transport,
+            current_date: None,
+        }
+    }
+
+    /// Injects the response timestamp provider. This is primarily useful for deterministic tests.
+    pub fn with_current_date(
+        mut self,
+        current_date: impl Fn() -> OffsetDateTime + Send + Sync + 'static,
+    ) -> Self {
+        self.current_date = Some(Arc::new(current_date));
+        self
+    }
+
+    /// Returns the provider id for this model.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the provider-specific model id.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
     }
 }
 
@@ -535,12 +699,22 @@ impl OpenAIProvider {
     }
 
     /// Creates an OpenAI image model.
-    pub fn image(&self, model_id: impl Into<String>) -> OpenAICompatibleImageModel {
-        self.openai_compatible_provider().image_model(model_id)
+    pub fn image(&self, model_id: impl Into<String>) -> OpenAIImageModel {
+        let provider_name = openai_provider_name(&self.settings);
+        OpenAIImageModel::new(
+            format!("{provider_name}.image"),
+            model_id,
+            openai_base_url(&self.settings),
+            openai_headers(&self.settings),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_openai_files_transport),
+        )
     }
 
     /// Creates an OpenAI image model.
-    pub fn image_model(&self, model_id: impl Into<String>) -> OpenAICompatibleImageModel {
+    pub fn image_model(&self, model_id: impl Into<String>) -> OpenAIImageModel {
         self.image(model_id)
     }
 
@@ -663,7 +837,7 @@ impl Default for OpenAIProvider {
 impl Provider for OpenAIProvider {
     type LanguageModel = OpenResponsesLanguageModel;
     type EmbeddingModel = OpenAICompatibleEmbeddingModel;
-    type ImageModel = OpenAICompatibleImageModel;
+    type ImageModel = OpenAIImageModel;
 
     fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
         Ok(OpenAIProvider::language_model(self, model_id))
@@ -691,6 +865,105 @@ impl ProviderWithSkills for OpenAIProvider {
 
     fn skills(&self) -> Self::Skills {
         OpenAIProvider::skills(self)
+    }
+}
+
+impl ImageModel for OpenAIImageModel {
+    type MaxImagesPerCallFuture<'a>
+        = Pin<Box<dyn Future<Output = Option<usize>> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+        let max_images = openai_image_max_images_per_call(&self.model_id);
+        Box::pin(std::future::ready(Some(max_images)))
+    }
+
+    fn do_generate(&self, options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+        let provider = self.provider.clone();
+        let model_id = self.model_id.clone();
+        let base_url = self.base_url.clone();
+        let mut headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+        let current_date = self.current_date.as_ref().map(Arc::clone);
+
+        Box::pin(async move {
+            let timestamp = current_date
+                .as_ref()
+                .map(|current_date| current_date())
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let warnings = openai_image_warnings(&options);
+
+            if let Some(request_headers) = &options.headers {
+                for (name, value) in request_headers {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+
+            let response = if options
+                .files
+                .as_ref()
+                .is_some_and(|files| !files.is_empty())
+            {
+                let form_data = openai_image_edit_form_data(&model_id, &options);
+                post_form_data_to_api(
+                    PostFormDataToApiOptions::new(format!("{base_url}/images/edits"), form_data)
+                        .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value))))
+                        .with_optional_abort_signal(options.abort_signal),
+                    move |request| transport(request),
+                    |request, response| {
+                        create_json_response_handler::<OpenAIImageResponse, _, _>(
+                            response.json_response_handler_options(request),
+                            |value| serde_json::from_value(value.clone()),
+                        )
+                        .map_err(ProviderApiResponseHandlerError::from)
+                    },
+                    move |request, response| {
+                        Ok(openai_failed_response_handler(&provider, request, response))
+                    },
+                )
+                .await
+                .expect("OpenAI image edit failed")
+            } else {
+                let request_body = openai_image_generation_request_body(&model_id, &options);
+                post_json_to_api(
+                    PostJsonToApiOptions::new(
+                        format!("{base_url}/images/generations"),
+                        JsonValue::Object(request_body),
+                    )
+                    .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value))))
+                    .with_optional_abort_signal(options.abort_signal),
+                    move |request| transport(request),
+                    |request, response| {
+                        create_json_response_handler::<OpenAIImageResponse, _, _>(
+                            response.json_response_handler_options(request),
+                            |value| serde_json::from_value(value.clone()),
+                        )
+                        .map_err(ProviderApiResponseHandlerError::from)
+                    },
+                    move |request, response| {
+                        Ok(openai_failed_response_handler(&provider, request, response))
+                    },
+                )
+                .await
+                .expect("OpenAI image generation failed")
+            };
+
+            openai_image_result(model_id, timestamp, response, warnings)
+        })
     }
 }
 
@@ -971,6 +1244,341 @@ fn default_openai_files_transport() -> OpenAICompatibleTransport {
             "multipart form data requires an injected OpenAI transport",
         ))))
     })
+}
+
+fn openai_image_max_images_per_call(model_id: &str) -> usize {
+    match model_id {
+        "dall-e-2"
+        | "gpt-image-1"
+        | "gpt-image-1-mini"
+        | "gpt-image-1.5"
+        | "gpt-image-2"
+        | "chatgpt-image-latest" => 10,
+        "dall-e-3" => 1,
+        _ => 1,
+    }
+}
+
+fn openai_image_has_default_response_format(model_id: &str) -> bool {
+    [
+        "chatgpt-image-",
+        "gpt-image-1-mini",
+        "gpt-image-1.5",
+        "gpt-image-1",
+        "gpt-image-2",
+    ]
+    .iter()
+    .any(|prefix| model_id.starts_with(prefix))
+}
+
+fn openai_image_warnings(options: &ImageModelCallOptions) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+
+    if options.aspect_ratio.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "aspectRatio".to_string(),
+            details: Some(
+                "This model does not support aspect ratio. Use `size` instead.".to_string(),
+            ),
+        });
+    }
+
+    if options.seed.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_string(),
+            details: None,
+        });
+    }
+
+    warnings
+}
+
+fn openai_image_generation_request_body(
+    model_id: &str,
+    options: &ImageModelCallOptions,
+) -> JsonObject {
+    let mut body = JsonObject::new();
+    body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
+
+    if let Some(prompt) = &options.prompt {
+        body.insert("prompt".to_string(), JsonValue::String(prompt.clone()));
+    }
+    body.insert("n".to_string(), JsonValue::from(options.n));
+    if let Some(size) = &options.size {
+        body.insert("size".to_string(), JsonValue::String(size.clone()));
+    }
+
+    if let Some(openai_options) = options.provider_options.get("openai") {
+        openai_image_insert_option(&mut body, openai_options, "quality", "quality");
+        openai_image_insert_option(&mut body, openai_options, "style", "style");
+        openai_image_insert_option(&mut body, openai_options, "background", "background");
+        openai_image_insert_option(&mut body, openai_options, "moderation", "moderation");
+        openai_image_insert_option(&mut body, openai_options, "outputFormat", "output_format");
+        openai_image_insert_option(
+            &mut body,
+            openai_options,
+            "outputCompression",
+            "output_compression",
+        );
+        openai_image_insert_option(&mut body, openai_options, "user", "user");
+    }
+
+    if !openai_image_has_default_response_format(model_id) {
+        body.insert(
+            "response_format".to_string(),
+            JsonValue::String("b64_json".to_string()),
+        );
+    }
+
+    body
+}
+
+fn openai_image_edit_form_data(model_id: &str, options: &ImageModelCallOptions) -> FormData {
+    let mut input = vec![
+        (
+            "model".to_string(),
+            Some(FormDataInputValue::text(model_id.to_string())),
+        ),
+        (
+            "prompt".to_string(),
+            options.prompt.clone().map(FormDataInputValue::text),
+        ),
+        (
+            "image".to_string(),
+            options.files.as_ref().map(|files| {
+                FormDataInputValue::array(
+                    files
+                        .iter()
+                        .map(|file| FormDataValue::bytes(openai_image_file_bytes(file)))
+                        .collect(),
+                )
+            }),
+        ),
+        (
+            "mask".to_string(),
+            options
+                .mask
+                .as_ref()
+                .map(|mask| FormDataInputValue::bytes(openai_image_file_bytes(mask))),
+        ),
+        (
+            "n".to_string(),
+            Some(FormDataInputValue::text(options.n.to_string())),
+        ),
+        (
+            "size".to_string(),
+            options.size.clone().map(FormDataInputValue::text),
+        ),
+    ];
+
+    if let Some(openai_options) = options.provider_options.get("openai") {
+        openai_image_push_form_option(&mut input, openai_options, "quality", "quality");
+        openai_image_push_form_option(&mut input, openai_options, "background", "background");
+        openai_image_push_form_option(&mut input, openai_options, "outputFormat", "output_format");
+        openai_image_push_form_option(
+            &mut input,
+            openai_options,
+            "outputCompression",
+            "output_compression",
+        );
+        openai_image_push_form_option(
+            &mut input,
+            openai_options,
+            "inputFidelity",
+            "input_fidelity",
+        );
+        openai_image_push_form_option(&mut input, openai_options, "user", "user");
+    }
+
+    convert_to_form_data(input, ConvertToFormDataOptions::new())
+}
+
+fn openai_image_insert_option(
+    body: &mut JsonObject,
+    options: &JsonObject,
+    source: &str,
+    target: &str,
+) {
+    if let Some(value) = options.get(source) {
+        body.insert(target.to_string(), value.clone());
+    }
+}
+
+fn openai_image_push_form_option(
+    input: &mut Vec<(String, Option<FormDataInputValue>)>,
+    options: &JsonObject,
+    source: &str,
+    target: &str,
+) {
+    input.push((
+        target.to_string(),
+        options
+            .get(source)
+            .cloned()
+            .and_then(openai_image_form_value),
+    ));
+}
+
+fn openai_image_form_value(value: JsonValue) -> Option<FormDataInputValue> {
+    match value {
+        JsonValue::Null => None,
+        JsonValue::String(value) => Some(FormDataInputValue::text(value)),
+        JsonValue::Bool(value) => Some(FormDataInputValue::text(value.to_string())),
+        JsonValue::Number(value) => Some(FormDataInputValue::text(value.to_string())),
+        JsonValue::Array(values) => Some(FormDataInputValue::array(
+            values
+                .into_iter()
+                .filter_map(|value| {
+                    openai_image_form_value(value).and_then(|value| match value {
+                        FormDataInputValue::Text { value } => Some(FormDataValue::text(value)),
+                        FormDataInputValue::Bytes { value } => Some(FormDataValue::bytes(value)),
+                        FormDataInputValue::Array { .. } => None,
+                    })
+                })
+                .collect(),
+        )),
+        JsonValue::Object(value) => Some(FormDataInputValue::text(
+            JsonValue::Object(value).to_string(),
+        )),
+    }
+}
+
+fn openai_image_file_bytes(file: &ImageModelFile) -> Vec<u8> {
+    match file {
+        ImageModelFile::File { data, .. } => match data {
+            FileDataContent::Bytes(bytes) => bytes.clone(),
+            FileDataContent::Base64(base64) => {
+                convert_base64_to_bytes(base64).unwrap_or_else(|_| base64.as_bytes().to_vec())
+            }
+        },
+        ImageModelFile::Url { url, .. } => url.as_str().as_bytes().to_vec(),
+    }
+}
+
+fn openai_image_result(
+    model_id: String,
+    timestamp: OffsetDateTime,
+    response: ResponseHandlerResult<OpenAIImageResponse>,
+    warnings: Vec<Warning>,
+) -> ImageModelResult {
+    let mut image_response = ImageModelResponse::new(timestamp, model_id);
+    if let Some(response_headers) = response.response_headers {
+        image_response.headers = Some(response_headers);
+    }
+
+    let usage = response.value.usage.as_ref().map(|usage| {
+        let mut image_usage = ImageModelUsage::new();
+        if let Some(input_tokens) = usage.input_tokens {
+            image_usage = image_usage.with_input_tokens(input_tokens);
+        }
+        if let Some(output_tokens) = usage.output_tokens {
+            image_usage = image_usage.with_output_tokens(output_tokens);
+        }
+        if let Some(total_tokens) = usage.total_tokens {
+            image_usage = image_usage.with_total_tokens(total_tokens);
+        }
+        image_usage
+    });
+    let provider_metadata = openai_image_provider_metadata(&response.value);
+    let mut result = ImageModelResult::new(
+        response
+            .value
+            .data
+            .iter()
+            .map(|image| FileDataContent::Base64(image.b64_json.clone()))
+            .collect(),
+        image_response,
+    )
+    .with_provider_metadata(provider_metadata);
+
+    if let Some(usage) = usage {
+        result = result.with_usage(usage);
+    }
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
+fn openai_image_provider_metadata(response: &OpenAIImageResponse) -> ImageModelProviderMetadata {
+    let total = response.data.len();
+    let images: JsonArray = response
+        .data
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let mut metadata = JsonObject::new();
+            if let Some(revised_prompt) = image
+                .revised_prompt
+                .as_ref()
+                .filter(|revised_prompt| !revised_prompt.is_empty())
+            {
+                metadata.insert(
+                    "revisedPrompt".to_string(),
+                    JsonValue::String(revised_prompt.clone()),
+                );
+            }
+            if let Some(created) = response.created {
+                metadata.insert("created".to_string(), JsonValue::from(created));
+            }
+            if let Some(size) = &response.size {
+                metadata.insert("size".to_string(), JsonValue::String(size.clone()));
+            }
+            if let Some(quality) = &response.quality {
+                metadata.insert("quality".to_string(), JsonValue::String(quality.clone()));
+            }
+            if let Some(background) = &response.background {
+                metadata.insert(
+                    "background".to_string(),
+                    JsonValue::String(background.clone()),
+                );
+            }
+            if let Some(output_format) = &response.output_format {
+                metadata.insert(
+                    "outputFormat".to_string(),
+                    JsonValue::String(output_format.clone()),
+                );
+            }
+            if let Some(details) = response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.input_tokens_details.as_ref())
+            {
+                if let Some(image_tokens) =
+                    openai_image_distribute_token_count(details.image_tokens, index, total)
+                {
+                    metadata.insert("imageTokens".to_string(), JsonValue::from(image_tokens));
+                }
+                if let Some(text_tokens) =
+                    openai_image_distribute_token_count(details.text_tokens, index, total)
+                {
+                    metadata.insert("textTokens".to_string(), JsonValue::from(text_tokens));
+                }
+            }
+            JsonValue::Object(metadata)
+        })
+        .collect();
+
+    ImageModelProviderMetadata::from([(
+        "openai".to_string(),
+        ImageModelProviderMetadataEntry::new(images),
+    )])
+}
+
+fn openai_image_distribute_token_count(
+    tokens: Option<u64>,
+    index: usize,
+    total: usize,
+) -> Option<u64> {
+    let tokens = tokens?;
+    let total = u64::try_from(total).ok().filter(|total| *total > 0)?;
+    let base = tokens / total;
+    if index + 1 == usize::try_from(total).ok()? {
+        Some(tokens - base * (total - 1))
+    } else {
+        Some(base)
+    }
 }
 
 async fn upload_openai_file(
@@ -1510,6 +2118,7 @@ mod tests {
     use crate::generate_image::{GenerateImageOptions, GenerateImagePrompt, generate_image};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
+    use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelUsage};
     use crate::json::JsonValue;
     use crate::language_model::{
         LanguageModel, LanguageModelCallOptions, LanguageModelFilePart, LanguageModelMessage,
@@ -1522,7 +2131,7 @@ mod tests {
         ProviderWithTranscriptionModel, SpecificationVersion,
     };
     use crate::provider_utils::{
-        FormDataValue, ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody,
+        FormData, FormDataValue, ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, Schema, safe_parse_json_with_schema,
     };
     use crate::skills::{Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions};
@@ -2067,6 +2676,713 @@ mod tests {
         assert_eq!(
             requests[1].url,
             "https://api.openai.test/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn openai_image_should_pass_the_model_and_the_settings() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_fixture());
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": { "style": "vivid" }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            provider.image("dall-e-3").do_generate(
+                openai_image_call_options()
+                    .with_size("1024x1024")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "dall-e-3",
+                "prompt": "A cute baby sea otter",
+                "n": 1,
+                "size": "1024x1024",
+                "style": "vivid",
+                "response_format": "b64_json"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_image_should_map_provider_options_to_snake_case_for_images_generations() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_fixture());
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "quality": "high",
+                "background": "transparent",
+                "moderation": "low",
+                "outputFormat": "webp",
+                "outputCompression": 80,
+                "user": "user-123"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            provider.image("gpt-image-1").do_generate(
+                openai_image_call_options()
+                    .with_size("1024x1024")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "gpt-image-1",
+                "prompt": "A cute baby sea otter",
+                "n": 1,
+                "size": "1024x1024",
+                "quality": "high",
+                "background": "transparent",
+                "moderation": "low",
+                "output_format": "webp",
+                "output_compression": 80,
+                "user": "user-123"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_image_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_fixture())
+                .with_organization("test-organization")
+                .with_project("test-project")
+                .with_header("Custom-Provider-Header", "provider-header-value");
+
+        let _result = poll_ready(
+            provider.image("dall-e-3").do_generate(
+                openai_image_call_options()
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let request = captured_request(&captured_requests);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("test-organization")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("test-project")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-provider-header")
+                .map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-request-header")
+                .map(String::as_str),
+            Some("request-header-value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai/"))
+        );
+    }
+
+    #[test]
+    fn openai_image_should_extract_the_generated_images() {
+        let provider =
+            openai_image_test_provider(Arc::new(Mutex::new(Vec::new())), openai_image_fixture());
+
+        let result = poll_ready(
+            provider
+                .image("dall-e-3")
+                .do_generate(openai_image_call_options()),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![
+                FileDataContent::Base64("base64-image-1".to_string()),
+                FileDataContent::Base64("base64-image-2".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_return_warnings_for_unsupported_settings() {
+        let provider =
+            openai_image_test_provider(Arc::new(Mutex::new(Vec::new())), openai_image_fixture());
+
+        let result = poll_ready(
+            provider.image("dall-e-3").do_generate(
+                openai_image_call_options()
+                    .with_aspect_ratio("1:1")
+                    .with_seed(123),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Unsupported {
+                    feature: "aspectRatio".to_string(),
+                    details: Some(
+                        "This model does not support aspect ratio. Use `size` instead.".to_string()
+                    )
+                },
+                Warning::Unsupported {
+                    feature: "seed".to_string(),
+                    details: None
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_respect_max_images_per_call_setting() {
+        let provider = OpenAIProvider::new();
+
+        assert_eq!(
+            poll_ready(provider.image("dall-e-2").max_images_per_call()),
+            Some(10)
+        );
+        assert_eq!(
+            poll_ready(provider.image("unknown-model").max_images_per_call()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn openai_image_should_include_response_data_with_timestamp_model_id_and_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_image_test_provider_with_headers(
+            Arc::clone(&captured_requests),
+            openai_image_fixture(),
+            Headers::from([
+                ("x-request-id".to_string(), "test-request-id".to_string()),
+                ("x-ratelimit-remaining".to_string(), "123".to_string()),
+            ]),
+        );
+        let test_date =
+            OffsetDateTime::parse("2024-03-15T12:00:00Z", &Rfc3339).expect("test date parses");
+
+        let result = poll_ready(
+            provider
+                .image("dall-e-3")
+                .with_current_date(move || test_date)
+                .do_generate(openai_image_call_options()),
+        );
+
+        assert_eq!(result.response.timestamp, test_date);
+        assert_eq!(result.response.model_id, "dall-e-3");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id")),
+            Some(&"test-request-id".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_image_should_use_real_date_when_no_custom_date_provider_is_specified() {
+        let provider =
+            openai_image_test_provider(Arc::new(Mutex::new(Vec::new())), openai_image_fixture());
+        let before_date = OffsetDateTime::now_utc();
+
+        let result = poll_ready(
+            provider
+                .image("dall-e-3")
+                .do_generate(openai_image_call_options()),
+        );
+
+        let after_date = OffsetDateTime::now_utc();
+        assert!(result.response.timestamp >= before_date);
+        assert!(result.response.timestamp <= after_date);
+        assert_eq!(result.response.model_id, "dall-e-3");
+    }
+
+    #[test]
+    fn openai_image_should_not_include_response_format_for_gpt_image_1() {
+        assert_openai_image_model_omits_response_format("gpt-image-1");
+    }
+
+    #[test]
+    fn openai_image_should_not_include_response_format_for_gpt_image_2() {
+        assert_openai_image_model_omits_response_format("gpt-image-2");
+    }
+
+    #[test]
+    fn openai_image_should_not_include_response_format_for_chatgpt_image_latest() {
+        assert_openai_image_model_omits_response_format("chatgpt-image-latest");
+    }
+
+    #[test]
+    fn openai_image_should_not_include_response_format_for_date_suffixed_gpt_image_model_ids() {
+        assert_openai_image_model_omits_response_format("gpt-image-1.5-2025-12-16");
+    }
+
+    #[test]
+    fn openai_image_should_handle_null_revised_prompt_responses() {
+        let provider = openai_image_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "created": 1733837122_u64,
+                "data": [
+                    {
+                        "revised_prompt": null,
+                        "b64_json": "base64-image-1"
+                    }
+                ]
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_call_options()),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("base64-image-1".to_string())]
+        );
+        assert!(result.warnings.is_empty());
+        let metadata = result.provider_metadata.expect("provider metadata exists");
+        assert_eq!(
+            metadata["openai"].images,
+            vec![json!({
+                "created": 1733837122_u64
+            })]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_include_response_format_for_dall_e_3() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_fixture());
+
+        let _result = poll_ready(
+            provider
+                .image("dall-e-3")
+                .do_generate(openai_image_call_options()),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests)
+                .get("response_format")
+                .and_then(JsonValue::as_str),
+            Some("b64_json")
+        );
+    }
+
+    #[test]
+    fn openai_image_should_return_image_meta_data() {
+        let provider =
+            openai_image_test_provider(Arc::new(Mutex::new(Vec::new())), openai_image_fixture());
+
+        let result = poll_ready(
+            provider
+                .image("dall-e-3")
+                .do_generate(openai_image_call_options()),
+        );
+
+        let metadata = result.provider_metadata.expect("provider metadata exists");
+        assert_eq!(
+            metadata["openai"].images,
+            vec![
+                json!({
+                    "revisedPrompt": "A small and adorable baby sea otter.",
+                    "created": 1770935200_u64,
+                    "size": "1024x1024",
+                    "quality": "hd",
+                    "background": "transparent",
+                    "outputFormat": "png"
+                }),
+                json!({
+                    "created": 1770935200_u64,
+                    "size": "1024x1024",
+                    "quality": "hd",
+                    "background": "transparent",
+                    "outputFormat": "png"
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_map_openai_usage_to_usage() {
+        let provider = openai_image_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "created": 1733837122_u64,
+                "data": [{ "b64_json": "base64-image-1" }],
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 0,
+                    "total_tokens": 12,
+                    "input_tokens_details": {
+                        "image_tokens": 7,
+                        "text_tokens": 5
+                    }
+                }
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_call_options()),
+        );
+
+        assert_eq!(
+            result.usage,
+            Some(
+                ImageModelUsage::new()
+                    .with_input_tokens(12)
+                    .with_output_tokens(0)
+                    .with_total_tokens(12)
+            )
+        );
+        let metadata = result.provider_metadata.expect("provider metadata exists");
+        assert_eq!(
+            metadata["openai"].images,
+            vec![json!({
+                "created": 1733837122_u64,
+                "imageTokens": 7,
+                "textTokens": 5
+            })]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_distribute_input_token_details_evenly_across_images() {
+        let provider = openai_image_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "created": 1733837122_u64,
+                "data": [
+                    { "b64_json": "base64-image-1" },
+                    { "b64_json": "base64-image-2" },
+                    { "b64_json": "base64-image-3" }
+                ],
+                "usage": {
+                    "input_tokens": 30,
+                    "output_tokens": 900,
+                    "total_tokens": 930,
+                    "input_tokens_details": {
+                        "image_tokens": 194,
+                        "text_tokens": 28
+                    }
+                }
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_call_options_with_n(3)),
+        );
+
+        let metadata = result.provider_metadata.expect("provider metadata exists");
+        assert_eq!(
+            metadata["openai"].images,
+            vec![
+                json!({ "created": 1733837122_u64, "imageTokens": 64, "textTokens": 9 }),
+                json!({ "created": 1733837122_u64, "imageTokens": 64, "textTokens": 9 }),
+                json!({ "created": 1733837122_u64, "imageTokens": 66, "textTokens": 10 })
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_call_images_edits_endpoint_when_files_are_provided() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_edit_fixture());
+
+        let _result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_edit_call_options()),
+        );
+
+        assert_eq!(
+            captured_request(&captured_requests).url,
+            "https://api.openai.test/v1/images/edits"
+        );
+    }
+
+    #[test]
+    fn openai_image_should_send_image_as_form_data_with_uint8array_input() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_edit_fixture());
+
+        let _result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_edit_call_options().with_size("1024x1024")),
+        );
+
+        let form_data = captured_form_data(&captured_requests);
+        assert_eq!(
+            form_data.get("model"),
+            Some(&FormDataValue::text("gpt-image-1"))
+        );
+        assert_eq!(
+            form_data.get("prompt"),
+            Some(&FormDataValue::text("A cute baby sea otter"))
+        );
+        assert_eq!(form_data.get("n"), Some(&FormDataValue::text("1")));
+        assert_eq!(
+            form_data.get("size"),
+            Some(&FormDataValue::text("1024x1024"))
+        );
+        assert_eq!(
+            form_data.get("image"),
+            Some(&FormDataValue::bytes(vec![137, 80, 78, 71]))
+        );
+    }
+
+    #[test]
+    fn openai_image_should_send_image_as_form_data_with_base64_string_input() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_edit_fixture());
+
+        let _result = poll_ready(provider.image("gpt-image-1").do_generate(
+            openai_image_call_options().with_files(vec![ImageModelFile::file(
+                "image/png",
+                FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+            )]),
+        ));
+
+        let form_data = captured_form_data(&captured_requests);
+        assert_eq!(
+            form_data.get("model"),
+            Some(&FormDataValue::text("gpt-image-1"))
+        );
+        assert!(form_data.get("image").is_some());
+    }
+
+    #[test]
+    fn openai_image_should_send_multiple_images_as_form_data_array() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_edit_fixture());
+
+        let _result = poll_ready(provider.image("gpt-image-1").do_generate(
+            openai_image_call_options().with_files(vec![
+                ImageModelFile::file("image/png", FileDataContent::Bytes(vec![137, 80, 78, 71])),
+                ImageModelFile::file(
+                    "image/jpeg",
+                    FileDataContent::Bytes(vec![255, 216, 255, 224]),
+                ),
+            ]),
+        ));
+
+        let form_data = captured_form_data(&captured_requests);
+        assert!(form_data.has("image[]"));
+        assert_eq!(form_data.get_all("image[]").len(), 2);
+    }
+
+    #[test]
+    fn openai_image_should_pass_provider_options_in_form_data() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_edit_fixture());
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "quality": "high",
+                "background": "transparent"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result =
+            poll_ready(provider.image("gpt-image-1").do_generate(
+                openai_image_edit_call_options().with_provider_options(provider_options),
+            ));
+
+        let form_data = captured_form_data(&captured_requests);
+        assert_eq!(form_data.get("quality"), Some(&FormDataValue::text("high")));
+        assert_eq!(
+            form_data.get("background"),
+            Some(&FormDataValue::text("transparent"))
+        );
+    }
+
+    #[test]
+    fn openai_image_should_map_provider_options_to_snake_case_for_images_edits() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_edit_fixture());
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "inputFidelity": "high",
+                "outputFormat": "webp",
+                "outputCompression": 80,
+                "user": "user-123"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result =
+            poll_ready(provider.image("gpt-image-1").do_generate(
+                openai_image_edit_call_options().with_provider_options(provider_options),
+            ));
+
+        let form_data = captured_form_data(&captured_requests);
+        assert_eq!(
+            form_data.get("input_fidelity"),
+            Some(&FormDataValue::text("high"))
+        );
+        assert_eq!(
+            form_data.get("output_format"),
+            Some(&FormDataValue::text("webp"))
+        );
+        assert_eq!(
+            form_data.get("output_compression"),
+            Some(&FormDataValue::text("80"))
+        );
+        assert_eq!(
+            form_data.get("user"),
+            Some(&FormDataValue::text("user-123"))
+        );
+    }
+
+    #[test]
+    fn openai_image_should_extract_the_edited_images_from_response() {
+        let provider = openai_image_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_image_edit_fixture(),
+        );
+
+        let result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_edit_call_options()),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("edited-base64-image-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn openai_image_should_include_response_metadata_for_edited_images() {
+        let provider = openai_image_test_provider_with_headers(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_image_edit_fixture(),
+            Headers::from([("x-request-id".to_string(), "edit-request-id".to_string())]),
+        );
+        let test_date =
+            OffsetDateTime::parse("2024-03-15T12:00:00Z", &Rfc3339).expect("test date parses");
+
+        let result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .with_current_date(move || test_date)
+                .do_generate(openai_image_edit_call_options()),
+        );
+
+        assert_eq!(result.response.timestamp, test_date);
+        assert_eq!(result.response.model_id, "gpt-image-1");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id")),
+            Some(&"edit-request-id".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_image_should_return_warnings_for_unsupported_settings_in_edit_mode() {
+        let provider = openai_image_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_image_edit_fixture(),
+        );
+
+        let result = poll_ready(
+            provider.image("gpt-image-1").do_generate(
+                openai_image_edit_call_options()
+                    .with_aspect_ratio("16:9")
+                    .with_seed(42),
+            ),
+        );
+
+        assert_eq!(result.warnings.len(), 2);
+        assert_eq!(
+            result.warnings[0],
+            Warning::Unsupported {
+                feature: "aspectRatio".to_string(),
+                details: Some(
+                    "This model does not support aspect ratio. Use `size` instead.".to_string()
+                )
+            }
+        );
+        assert_eq!(
+            result.warnings[1],
+            Warning::Unsupported {
+                feature: "seed".to_string(),
+                details: None
+            }
+        );
+    }
+
+    #[test]
+    fn openai_image_should_return_usage_information_for_edited_images() {
+        let provider = openai_image_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "created": 1733837122_u64,
+                "data": [{ "b64_json": "edited-base64-image-1" }],
+                "usage": {
+                    "input_tokens": 25,
+                    "output_tokens": 0,
+                    "total_tokens": 25
+                }
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .image("gpt-image-1")
+                .do_generate(openai_image_edit_call_options()),
+        );
+
+        assert_eq!(
+            result.usage,
+            Some(
+                ImageModelUsage::new()
+                    .with_input_tokens(25)
+                    .with_output_tokens(0)
+                    .with_total_tokens(25)
+            )
         );
     }
 
@@ -3227,6 +4543,137 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn openai_image_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: JsonValue,
+    ) -> OpenAIProvider {
+        openai_image_test_provider_with_headers(captured_requests, response_body, Headers::new())
+    }
+
+    fn openai_image_test_provider_with_headers(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(response_headers.clone()))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_transport(transport)
+    }
+
+    fn openai_image_call_options() -> ImageModelCallOptions {
+        openai_image_call_options_with_n(1)
+    }
+
+    fn openai_image_call_options_with_n(n: u64) -> ImageModelCallOptions {
+        ImageModelCallOptions::new(n).with_prompt("A cute baby sea otter")
+    }
+
+    fn openai_image_edit_call_options() -> ImageModelCallOptions {
+        openai_image_call_options().with_files(vec![ImageModelFile::file(
+            "image/png",
+            FileDataContent::Bytes(vec![137, 80, 78, 71]),
+        )])
+    }
+
+    fn openai_image_fixture() -> JsonValue {
+        json!({
+            "created": 1770935200_u64,
+            "size": "1024x1024",
+            "quality": "hd",
+            "background": "transparent",
+            "output_format": "png",
+            "data": [
+                {
+                    "b64_json": "base64-image-1",
+                    "revised_prompt": "A small and adorable baby sea otter."
+                },
+                {
+                    "b64_json": "base64-image-2"
+                }
+            ]
+        })
+    }
+
+    fn openai_image_edit_fixture() -> JsonValue {
+        json!({
+            "created": 1733837122_u64,
+            "data": [
+                {
+                    "b64_json": "edited-base64-image-1"
+                }
+            ]
+        })
+    }
+
+    fn assert_openai_image_model_omits_response_format(model_id: &str) {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider =
+            openai_image_test_provider(Arc::clone(&captured_requests), openai_image_fixture());
+
+        let _result = poll_ready(
+            provider
+                .image(model_id)
+                .do_generate(openai_image_call_options().with_size("1024x1024")),
+        );
+
+        let body = captured_json_body(&captured_requests);
+        assert_eq!(
+            body,
+            json!({
+                "model": model_id,
+                "prompt": "A cute baby sea otter",
+                "n": 1,
+                "size": "1024x1024"
+            })
+        );
+        assert!(body.get("response_format").is_none());
+    }
+
+    fn captured_request(
+        captured_requests: &Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .last()
+            .cloned()
+            .expect("request is captured")
+    }
+
+    fn captured_json_body(captured_requests: &Arc<Mutex<Vec<ProviderApiRequest>>>) -> JsonValue {
+        captured_request(captured_requests)
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("JSON body is captured")
+    }
+
+    fn captured_form_data(captured_requests: &Arc<Mutex<Vec<ProviderApiRequest>>>) -> FormData {
+        captured_request(captured_requests)
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .cloned()
+            .expect("form data body is captured")
     }
 
     fn openai_files_test_provider(
