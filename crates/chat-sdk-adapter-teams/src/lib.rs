@@ -6,6 +6,8 @@
 //! encoding is `teams:<conversation_id>:<message_id>` — when posting
 //! a new top-level reply, `message_id` is the root activity id.
 
+pub mod errors;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
