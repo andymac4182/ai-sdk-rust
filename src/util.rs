@@ -1,5 +1,10 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
+use crate::language_model::{LanguageModelAbortController, LanguageModelAbortSignal};
 use crate::provider_utils::{
     ParseJsonResult, convert_base64_to_bytes, normalize_headers, safe_parse_json,
 };
@@ -94,6 +99,155 @@ impl std::fmt::Display for InvalidArgumentError {
 }
 
 impl std::error::Error for InvalidArgumentError {}
+
+/// Source accepted by [`merge_abort_signals`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AbortSignalSource {
+    /// A caller-controlled abort signal.
+    Signal(LanguageModelAbortSignal),
+
+    /// A timeout in milliseconds.
+    TimeoutMs(u64),
+}
+
+impl AbortSignalSource {
+    /// Creates an abort source from a signal.
+    pub fn signal(signal: LanguageModelAbortSignal) -> Self {
+        Self::Signal(signal)
+    }
+
+    /// Creates an abort source from a timeout in milliseconds.
+    pub const fn timeout_ms(timeout_ms: u64) -> Self {
+        Self::TimeoutMs(timeout_ms)
+    }
+}
+
+impl From<LanguageModelAbortSignal> for AbortSignalSource {
+    fn from(signal: LanguageModelAbortSignal) -> Self {
+        Self::signal(signal)
+    }
+}
+
+impl From<u64> for AbortSignalSource {
+    fn from(timeout_ms: u64) -> Self {
+        Self::timeout_ms(timeout_ms)
+    }
+}
+
+/// Options for [`set_abort_timeout`].
+#[derive(Clone, Debug)]
+pub struct AbortTimeoutOptions {
+    abort_controller: Option<LanguageModelAbortController>,
+    label: String,
+    timeout_ms: Option<u64>,
+}
+
+impl AbortTimeoutOptions {
+    /// Creates timeout options with a human-readable label.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            abort_controller: None,
+            label: label.into(),
+            timeout_ms: None,
+        }
+    }
+
+    /// Sets the abort controller that will be aborted when the timeout elapses.
+    pub fn with_abort_controller(mut self, abort_controller: LanguageModelAbortController) -> Self {
+        self.abort_controller = Some(abort_controller);
+        self
+    }
+
+    /// Sets the timeout in milliseconds.
+    pub const fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+}
+
+/// Handle returned by [`set_abort_timeout`].
+#[derive(Clone, Debug)]
+pub struct AbortTimeoutHandle {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl AbortTimeoutHandle {
+    /// Cancels the scheduled abort.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns whether this timeout has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+/// Schedules a timeout that aborts a controller with an upstream-shaped timeout reason.
+pub fn set_abort_timeout(options: AbortTimeoutOptions) -> Option<AbortTimeoutHandle> {
+    let abort_controller = options.abort_controller?;
+    let timeout_ms = options.timeout_ms?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let thread_cancelled = Arc::clone(&cancelled);
+    let reason = timeout_abort_reason(&options.label, timeout_ms);
+
+    let _ = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(timeout_ms));
+        if !thread_cancelled.load(Ordering::SeqCst) {
+            abort_controller.abort_with_reason(reason);
+        }
+    });
+
+    Some(AbortTimeoutHandle { cancelled })
+}
+
+/// Merges abort signals and timeout sources into one signal.
+///
+/// This mirrors upstream `mergeAbortSignals`: absent sources are ignored, an
+/// empty input returns `None`, a single valid signal is returned unchanged, and
+/// multiple valid sources abort the merged signal with the first source reason.
+pub fn merge_abort_signals<I>(sources: I) -> Option<LanguageModelAbortSignal>
+where
+    I: IntoIterator<Item = Option<AbortSignalSource>>,
+{
+    let mut signals = Vec::new();
+
+    for source in sources.into_iter().flatten() {
+        match source {
+            AbortSignalSource::Signal(signal) => signals.push(signal),
+            AbortSignalSource::TimeoutMs(timeout_ms) => {
+                let controller = LanguageModelAbortController::new();
+                let signal = controller.signal();
+                set_abort_timeout(
+                    AbortTimeoutOptions::new("Abort signal")
+                        .with_abort_controller(controller)
+                        .with_timeout_ms(timeout_ms),
+                );
+                signals.push(signal);
+            }
+        }
+    }
+
+    match signals.len() {
+        0 => None,
+        1 => signals.pop(),
+        _ => {
+            let controller = LanguageModelAbortController::new();
+            let merged = controller.signal();
+            for signal in &signals {
+                signal.aborts_signal(&merged);
+            }
+            Some(merged)
+        }
+    }
+}
+
+fn timeout_abort_reason(label: &str, timeout_ms: u64) -> JsonValue {
+    serde_json::json!({
+        "name": "TimeoutError",
+        "message": format!("{label} timeout of {timeout_ms}ms exceeded"),
+    })
+}
 
 /// State returned by [`parse_partial_json`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -738,19 +892,358 @@ pub fn get_text_from_data_url(data_url: &str) -> Result<String, DataUrlTextError
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     use super::{
-        DataUrlTextError, InvalidArgumentError, cosine_similarity, fix_json,
-        get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_objects,
-        parse_partial_json, prepare_headers, split_array,
+        AbortSignalSource, AbortTimeoutOptions, DataUrlTextError, InvalidArgumentError,
+        cosine_similarity, fix_json, get_potential_start_index, get_text_from_data_url,
+        is_deep_equal_data, merge_abort_signals, merge_objects, parse_partial_json,
+        prepare_headers, set_abort_timeout, split_array,
     };
     use crate::headers::Headers;
+    use crate::language_model::{LanguageModelAbortController, LanguageModelAbortSignal};
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < 1e-12,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    fn source(source: impl Into<AbortSignalSource>) -> Option<AbortSignalSource> {
+        Some(source.into())
+    }
+
+    fn wait_for_abort(signal: &LanguageModelAbortSignal) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !signal.is_aborted() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(signal.is_aborted(), "expected abort signal to be aborted");
+    }
+
+    #[test]
+    fn merge_abort_signals_should_return_a_signal_that_is_initially_not_aborted() {
+        let controller1 = LanguageModelAbortController::new();
+        let controller2 = LanguageModelAbortController::new();
+
+        let merged =
+            merge_abort_signals([source(controller1.signal()), source(controller2.signal())])
+                .expect("merged signal exists");
+
+        assert!(!merged.is_aborted());
+    }
+
+    #[test]
+    fn merge_abort_signals_should_abort_when_the_first_signal_aborts() {
+        let controller1 = LanguageModelAbortController::new();
+        let controller2 = LanguageModelAbortController::new();
+        let merged =
+            merge_abort_signals([source(controller1.signal()), source(controller2.signal())])
+                .expect("merged signal exists");
+
+        controller1.abort();
+
+        assert!(merged.is_aborted());
+    }
+
+    #[test]
+    fn merge_abort_signals_should_abort_when_the_second_signal_aborts() {
+        let controller1 = LanguageModelAbortController::new();
+        let controller2 = LanguageModelAbortController::new();
+        let merged =
+            merge_abort_signals([source(controller1.signal()), source(controller2.signal())])
+                .expect("merged signal exists");
+
+        controller2.abort();
+
+        assert!(merged.is_aborted());
+    }
+
+    #[test]
+    fn merge_abort_signals_should_preserve_the_abort_reason_from_the_triggering_signal() {
+        let controller1 = LanguageModelAbortController::new();
+        let controller2 = LanguageModelAbortController::new();
+        let reason = json!({
+            "message": "custom abort reason"
+        });
+        let merged =
+            merge_abort_signals([source(controller1.signal()), source(controller2.signal())])
+                .expect("merged signal exists");
+
+        controller1.abort_with_reason(reason.clone());
+
+        assert_eq!(merged.reason(), Some(reason));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_preserve_string_abort_reason() {
+        let controller = LanguageModelAbortController::new();
+        let merged = merge_abort_signals([source(controller.signal())])
+            .expect("single signal should be returned");
+
+        controller.abort_with_reason("string reason");
+
+        assert_eq!(merged.reason(), Some(json!("string reason")));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_handle_already_aborted_signals() {
+        let controller = LanguageModelAbortController::new();
+        let reason = json!({
+            "message": "already aborted"
+        });
+        controller.abort_with_reason(reason.clone());
+
+        let merged = merge_abort_signals([source(controller.signal())])
+            .expect("single signal should be returned");
+
+        assert!(merged.is_aborted());
+        assert_eq!(merged.reason(), Some(reason));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_use_the_first_already_aborted_signal_reason_when_multiple_are_aborted()
+     {
+        let controller1 = LanguageModelAbortController::new();
+        let controller2 = LanguageModelAbortController::new();
+        let reason1 = json!({
+            "message": "first reason"
+        });
+        let reason2 = json!({
+            "message": "second reason"
+        });
+        controller1.abort_with_reason(reason1.clone());
+        controller2.abort_with_reason(reason2);
+
+        let merged =
+            merge_abort_signals([source(controller1.signal()), source(controller2.signal())])
+                .expect("merged signal exists");
+
+        assert!(merged.is_aborted());
+        assert_eq!(merged.reason(), Some(reason1));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_return_none_when_no_signals_are_provided() {
+        assert!(merge_abort_signals(Vec::<Option<AbortSignalSource>>::new()).is_none());
+    }
+
+    #[test]
+    fn merge_abort_signals_should_return_none_when_only_absent_signals_are_provided() {
+        assert!(merge_abort_signals([None, None]).is_none());
+    }
+
+    #[test]
+    fn merge_abort_signals_should_create_a_timeout_signal_from_numeric_input() {
+        let merged = merge_abort_signals([source(AbortSignalSource::timeout_ms(10))])
+            .expect("timeout signal exists");
+
+        assert!(!merged.is_aborted());
+
+        wait_for_abort(&merged);
+
+        let reason = merged.reason().expect("timeout reason is present");
+        assert_eq!(reason["name"], "TimeoutError");
+    }
+
+    #[test]
+    fn merge_abort_signals_should_preserve_the_first_abort_reason_when_mixing_signals_and_timeouts()
+    {
+        let controller = LanguageModelAbortController::new();
+        let reason = json!({
+            "message": "manual abort reason"
+        });
+        let merged = merge_abort_signals([
+            source(controller.signal()),
+            source(AbortSignalSource::timeout_ms(100)),
+        ])
+        .expect("merged signal exists");
+
+        controller.abort_with_reason(reason.clone());
+
+        assert!(merged.is_aborted());
+        assert_eq!(merged.reason(), Some(reason));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_filter_out_absent_signals() {
+        let controller = LanguageModelAbortController::new();
+        let reason = json!({
+            "message": "abort reason"
+        });
+        let merged = merge_abort_signals([None, source(controller.signal()), None])
+            .expect("merged signal exists");
+
+        assert!(!merged.is_aborted());
+
+        controller.abort_with_reason(reason.clone());
+
+        assert!(merged.is_aborted());
+        assert_eq!(merged.reason(), Some(reason));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_return_the_signal_directly_when_only_one_valid_signal_is_provided()
+     {
+        let controller = LanguageModelAbortController::new();
+        let signal = controller.signal();
+        let merged =
+            merge_abort_signals([None, source(signal.clone()), None]).expect("signal exists");
+
+        assert!(merged.is_same_signal(&signal));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_use_the_first_aborting_signal_reason_when_multiple_abort_simultaneously()
+     {
+        let controller1 = LanguageModelAbortController::new();
+        let controller2 = LanguageModelAbortController::new();
+        let reason1 = json!({
+            "message": "first reason"
+        });
+        let reason2 = json!({
+            "message": "second reason"
+        });
+        let merged =
+            merge_abort_signals([source(controller1.signal()), source(controller2.signal())])
+                .expect("merged signal exists");
+
+        controller1.abort_with_reason(reason1.clone());
+        controller2.abort_with_reason(reason2);
+
+        assert_eq!(merged.reason(), Some(reason1));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_return_the_original_signal_when_only_one_signal_is_provided() {
+        let controller = LanguageModelAbortController::new();
+        let signal = controller.signal();
+        let merged = merge_abort_signals([source(signal.clone())]).expect("signal exists");
+
+        assert!(merged.is_same_signal(&signal));
+    }
+
+    #[test]
+    fn merge_abort_signals_should_work_with_many_signals() {
+        let controllers = (0..10)
+            .map(|_| LanguageModelAbortController::new())
+            .collect::<Vec<_>>();
+        let reason = json!({
+            "message": "signal 5 reason"
+        });
+        let merged = merge_abort_signals(
+            controllers
+                .iter()
+                .map(|controller| source(controller.signal())),
+        )
+        .expect("merged signal exists");
+
+        assert!(!merged.is_aborted());
+
+        controllers[5].abort_with_reason(reason.clone());
+
+        assert!(merged.is_aborted());
+        assert_eq!(merged.reason(), Some(reason));
+    }
+
+    #[test]
+    fn set_abort_timeout_should_not_abort_the_controller_before_the_timeout_elapses() {
+        let abort_controller = LanguageModelAbortController::new();
+        let handle = set_abort_timeout(
+            AbortTimeoutOptions::new("Step")
+                .with_abort_controller(abort_controller.clone())
+                .with_timeout_ms(100),
+        )
+        .expect("timeout is scheduled");
+
+        std::thread::sleep(Duration::from_millis(20));
+        handle.cancel();
+
+        assert!(!abort_controller.signal().is_aborted());
+    }
+
+    #[test]
+    fn set_abort_timeout_should_abort_the_controller_when_the_timeout_elapses() {
+        let abort_controller = LanguageModelAbortController::new();
+        let signal = abort_controller.signal();
+        set_abort_timeout(
+            AbortTimeoutOptions::new("Step")
+                .with_abort_controller(abort_controller)
+                .with_timeout_ms(10),
+        );
+
+        wait_for_abort(&signal);
+    }
+
+    #[test]
+    fn set_abort_timeout_should_abort_with_a_timeout_error_reason() {
+        let abort_controller = LanguageModelAbortController::new();
+        let signal = abort_controller.signal();
+        set_abort_timeout(
+            AbortTimeoutOptions::new("Step")
+                .with_abort_controller(abort_controller)
+                .with_timeout_ms(10),
+        );
+
+        wait_for_abort(&signal);
+
+        let reason = signal.reason().expect("timeout reason is present");
+        assert_eq!(reason["name"], "TimeoutError");
+    }
+
+    #[test]
+    fn set_abort_timeout_should_include_the_label_and_duration_in_the_abort_reason_message() {
+        let abort_controller = LanguageModelAbortController::new();
+        let signal = abort_controller.signal();
+        set_abort_timeout(
+            AbortTimeoutOptions::new("Chunk")
+                .with_abort_controller(abort_controller)
+                .with_timeout_ms(10),
+        );
+
+        wait_for_abort(&signal);
+
+        let reason = signal.reason().expect("timeout reason is present");
+        assert_eq!(reason["message"], "Chunk timeout of 10ms exceeded");
+    }
+
+    #[test]
+    fn set_abort_timeout_should_return_a_handle_that_can_be_cancelled_to_cancel_the_abort() {
+        let abort_controller = LanguageModelAbortController::new();
+        let handle = set_abort_timeout(
+            AbortTimeoutOptions::new("Step")
+                .with_abort_controller(abort_controller.clone())
+                .with_timeout_ms(10),
+        )
+        .expect("timeout is scheduled");
+
+        handle.cancel();
+        std::thread::sleep(Duration::from_millis(30));
+
+        assert!(handle.is_cancelled());
+        assert!(!abort_controller.signal().is_aborted());
+    }
+
+    #[test]
+    fn set_abort_timeout_should_return_none_when_abort_controller_is_absent() {
+        let handle = set_abort_timeout(AbortTimeoutOptions::new("Step").with_timeout_ms(10));
+
+        assert!(handle.is_none());
+    }
+
+    #[test]
+    fn set_abort_timeout_should_return_none_when_timeout_ms_is_absent() {
+        let abort_controller = LanguageModelAbortController::new();
+
+        let handle = set_abort_timeout(
+            AbortTimeoutOptions::new("Step").with_abort_controller(abort_controller.clone()),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(handle.is_none());
+        assert!(!abort_controller.signal().is_aborted());
     }
 
     #[test]
