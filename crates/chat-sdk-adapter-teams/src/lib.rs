@@ -153,6 +153,13 @@ impl TeamsAdapter {
             self.api_base()
         )
     }
+
+    /// Render formatted content to Teams-flavored markdown. 1:1
+    /// with upstream `adapter.renderFormatted(content)` which
+    /// delegates to `formatConverter.fromAst(content)`.
+    pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
+        crate::markdown::TeamsFormatConverter::new().from_ast(ast)
+    }
 }
 
 #[async_trait]
@@ -416,6 +423,18 @@ mod tests {
     fn adapter_name_is_teams() {
         let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("app", "pwd", "tenant"));
         assert_eq!(adapter.name(), "teams");
+    }
+
+    // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    fn render_formatted_should_render_markdown_from_ast() {
+        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("app", "pwd", "tenant"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("Hello world"),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert!(result.contains("Hello world"), "got: {result}");
     }
 
     #[test]
