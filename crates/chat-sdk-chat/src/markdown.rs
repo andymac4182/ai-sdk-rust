@@ -177,6 +177,63 @@ pub fn to_plain_text(ast: &Node) -> String {
     ast.to_string()
 }
 
+/// Mutable accessor for the `children` field of any container [`Node`]
+/// variant. Returns `None` for leaf variants (Text/Code/Html/…) that
+/// don't carry a children vector.
+///
+/// Used by [`walk_ast`] to swap children out for recursive visitation.
+/// Kept private — consumers should use `walk_ast` or pattern-match the
+/// concrete variant directly.
+fn children_mut(node: &mut Node) -> Option<&mut Vec<Node>> {
+    match node {
+        Node::Root(n) => Some(&mut n.children),
+        Node::Paragraph(n) => Some(&mut n.children),
+        Node::Heading(n) => Some(&mut n.children),
+        Node::Blockquote(n) => Some(&mut n.children),
+        Node::List(n) => Some(&mut n.children),
+        Node::ListItem(n) => Some(&mut n.children),
+        Node::Emphasis(n) => Some(&mut n.children),
+        Node::Strong(n) => Some(&mut n.children),
+        Node::Delete(n) => Some(&mut n.children),
+        Node::Link(n) => Some(&mut n.children),
+        Node::LinkReference(n) => Some(&mut n.children),
+        Node::FootnoteDefinition(n) => Some(&mut n.children),
+        Node::Table(n) => Some(&mut n.children),
+        Node::TableRow(n) => Some(&mut n.children),
+        Node::TableCell(n) => Some(&mut n.children),
+        _ => None,
+    }
+}
+
+/// Walk an mdast tree and transform descendants. 1:1 port of upstream
+/// `walkAst<T extends Content | Root>(node, visitor)`.
+///
+/// The visitor is called on every *descendant* of `node` (never `node`
+/// itself, matching upstream). Each visitor return value can:
+///
+/// - `Some(replacement)` — replace the descendant with `replacement`,
+///   then recurse into `replacement`'s own children.
+/// - `None` — drop the descendant entirely.
+///
+/// The signature uses [`Option`] instead of upstream's
+/// `Content | null` union; semantics are identical.
+pub fn walk_ast<F>(mut node: Node, visitor: &mut F) -> Node
+where
+    F: FnMut(Node) -> Option<Node>,
+{
+    if let Some(children) = children_mut(&mut node) {
+        let original = std::mem::take(children);
+        let walked: Vec<Node> = original
+            .into_iter()
+            .filter_map(|child| visitor(child).map(|replaced| walk_ast(replaced, visitor)))
+            .collect();
+        if let Some(children) = children_mut(&mut node) {
+            *children = walked;
+        }
+    }
+    node
+}
+
 /// Parse a Markdown string and extract its plain text. 1:1 port of upstream
 /// `markdownToPlainText(markdown): string` — `parseMarkdown` then
 /// [`to_plain_text`]. Returns an empty string when the input fails to
@@ -568,6 +625,86 @@ mod tests {
         // Non-leaf nodes return an empty string per upstream behavior.
         assert_eq!(get_node_value(&make_paragraph()), "");
         assert_eq!(get_node_value(&make_strong()), "");
+    }
+
+    // ------------------------------------------------------------------
+    // walk_ast — slice 29 ports of the upstream walkAst describe block.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn walk_ast_replaces_every_descendant_text_with_a_new_value() {
+        // Tree: Root -> Paragraph -> [Text("a"), Strong -> [Text("b")]]
+        let tree = Node::Root(root(vec![Node::Paragraph(paragraph(vec![
+            Node::Text(text("a")),
+            Node::Strong(strong(vec![Node::Text(text("b"))])),
+        ]))]));
+        let walked = walk_ast(tree, &mut |node| match node {
+            Node::Text(_) => Some(Node::Text(text("REPLACED"))),
+            other => Some(other),
+        });
+        assert_eq!(to_plain_text(&walked), "REPLACEDREPLACED");
+    }
+
+    #[test]
+    fn walk_ast_drops_descendants_when_visitor_returns_none() {
+        // Tree: Root -> Paragraph -> [Text("keep"), Delete -> [Text("drop")]]
+        let tree = Node::Root(root(vec![Node::Paragraph(paragraph(vec![
+            Node::Text(text("keep")),
+            Node::Delete(strikethrough(vec![Node::Text(text("drop"))])),
+        ]))]));
+        let walked = walk_ast(tree, &mut |node| match node {
+            Node::Delete(_) => None,
+            other => Some(other),
+        });
+        // Delete subtree was dropped, leaving only the Text("keep").
+        assert_eq!(to_plain_text(&walked), "keep");
+    }
+
+    #[test]
+    fn walk_ast_does_not_call_visitor_on_the_root_node_itself() {
+        // Upstream walkAst visits *descendants only* — the input node is
+        // never passed to the visitor. Rust port preserves that.
+        let tree = Node::Root(root(vec![Node::Text(text("inside"))]));
+        let mut visited: Vec<String> = Vec::new();
+        walk_ast(tree, &mut |node| {
+            visited.push(match &node {
+                Node::Root(_) => "Root".to_string(),
+                Node::Paragraph(_) => "Paragraph".to_string(),
+                Node::Text(t) => format!("Text({})", t.value),
+                _ => "other".to_string(),
+            });
+            Some(node)
+        });
+        // Only the Text descendant should have been visited — not the Root.
+        assert_eq!(visited, vec!["Text(inside)".to_string()]);
+    }
+
+    #[test]
+    fn walk_ast_recurses_into_replacement_subtrees() {
+        // When the visitor replaces a node with a fresh subtree, walk_ast
+        // recurses into that replacement's children — matching upstream
+        // semantics. The replacement's Text children should also be visited.
+        let tree = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
+            text("placeholder"),
+        )]))]));
+        let mut text_visits = 0;
+        let walked = walk_ast(tree, &mut |node| {
+            if matches!(node, Node::Text(_)) {
+                text_visits += 1;
+            }
+            match node {
+                Node::Paragraph(_) => Some(Node::Paragraph(paragraph(vec![Node::Text(text(
+                    "inserted-by-visitor",
+                ))]))),
+                other => Some(other),
+            }
+        });
+        // The visitor saw: original Paragraph (no text count), then the
+        // replacement Paragraph's Text child (text_visits == 1). The
+        // original "placeholder" Text was NOT visited because we replaced
+        // its parent Paragraph wholesale before recursing.
+        assert_eq!(text_visits, 1);
+        assert_eq!(to_plain_text(&walked), "inserted-by-visitor");
     }
 
     // ------------------------------------------------------------------
