@@ -1731,6 +1731,38 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_generate_passes_sandbox_to_tool_execution() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([tool_call_result(), text_result("done")]);
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let received_sandbox = Arc::new(Mutex::new(None::<Arc<dyn ExperimentalSandbox>>));
+        let received_sandbox_for_closure = Arc::clone(&received_sandbox);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_tool(
+            Tool::new("weather", object_schema()).with_execute(move |_input, options| {
+                let received_sandbox = Arc::clone(&received_sandbox_for_closure);
+                async move {
+                    *received_sandbox.lock().expect("sandbox lock") = options.experimental_sandbox;
+                    Ok(json!({ "forecast": "sunny" }))
+                }
+            }),
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("What is the weather?")
+                .with_experimental_sandbox(Arc::clone(&sandbox));
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "done");
+        let received_sandbox = received_sandbox.lock().expect("sandbox lock");
+        assert!(Arc::ptr_eq(
+            received_sandbox
+                .as_ref()
+                .expect("tool execution receives sandbox"),
+            &sandbox
+        ));
+    }
+
+    #[test]
     fn tool_loop_agent_merges_generate_start_callbacks_in_order() {
         let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
         let calls = Rc::new(RefCell::new(Vec::new()));
@@ -1892,6 +1924,38 @@ mod tests {
             .clone()
             .expect("tool timeout creates abort signal");
         assert!(!captured_signal.is_aborted());
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_passes_sandbox_to_tool_execution() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_tool_call_result(), stream_text_result("done")]);
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let received_sandbox = Arc::new(Mutex::new(None::<Arc<dyn ExperimentalSandbox>>));
+        let received_sandbox_for_closure = Arc::clone(&received_sandbox);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_tool(
+            Tool::new("weather", object_schema()).with_execute(move |_input, options| {
+                let received_sandbox = Arc::clone(&received_sandbox_for_closure);
+                async move {
+                    *received_sandbox.lock().expect("sandbox lock") = options.experimental_sandbox;
+                    Ok(json!({ "forecast": "sunny" }))
+                }
+            }),
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("What is the weather?")
+                .with_experimental_sandbox(Arc::clone(&sandbox));
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "done");
+        let received_sandbox = received_sandbox.lock().expect("sandbox lock");
+        assert!(Arc::ptr_eq(
+            received_sandbox
+                .as_ref()
+                .expect("tool execution receives sandbox"),
+            &sandbox
+        ));
     }
 
     #[test]
