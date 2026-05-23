@@ -290,6 +290,24 @@ intentionally non-portable.
     invariant is load-bearing — make it test-enforced.
 13. Add focused serialization/deserialization and behavior tests for every new
    public contract.
+14. **Pure-ASCII ledger and TSV.** `docs/chat/upstream-parity.md` and
+    `docs/chat/package-progress-estimates.tsv` must contain only ASCII
+    characters. Em-dashes (`-`), curly quotes, arrows, and similar Unicode
+    punctuation break the Ruby progress-table generator (slices 26 and 30
+    regressed this). When pasting prose, prefer plain hyphen, straight
+    quotes, and `->`. Recovery on a regression:
+    `python3 -c "import sys; p = sys.argv[1]; t = open(p, encoding='utf-8').read(); open(p, 'w', encoding='utf-8').write(t.replace(chr(8212), '-').replace(chr(8594), '->'))" docs/chat/upstream-parity.md`.
+15. **Heredoc commit messages when the body mentions Rust generics or
+    TypeScript unions.** `git commit -m "<...Option<Node>...>"` blows up
+    because the shell interprets `<`, `>`, `|`, and `(`. Always wrap such
+    messages in `git commit -m "$(cat <<'EOF' ... EOF)"`.
+16. **markdown-rs is the chosen markdown stack.** `markdown = "1.0.0"` is
+    the Rust analogue of upstream `remark-*` + `mdast`. `Node::to_string()`
+    is the upstream `mdast-util-to-string` plain-text extractor. When
+    porting an AST visitor or transformer over `markdown::mdast::Node`,
+    keep `markdown.rs::children_mut` updated as the canonical
+    "container variants" enumeration — every new visitor reuses the same
+    helper rather than re-enumerating the variant list.
 4. Port EVERY portable test from the original upstream TypeScript package
    into Rust before marking that package row `verified`. This is a hard
    minimum: Rust may add more tests for Rust-specific safety, typing, and
