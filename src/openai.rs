@@ -1190,8 +1190,15 @@ pub fn openai(model_id: impl Into<String>) -> OpenResponsesLanguageModel {
 }
 
 fn openai_base_url(settings: &OpenAIProviderSettings) -> String {
+    openai_base_url_with_env(settings, || env::var("OPENAI_BASE_URL").ok())
+}
+
+fn openai_base_url_with_env(
+    settings: &OpenAIProviderSettings,
+    env_base_url: impl FnOnce() -> Option<String>,
+) -> String {
     let base_url = non_empty_optional_setting(settings.base_url.clone())
-        .or_else(|| non_empty_optional_setting(env::var("OPENAI_BASE_URL").ok()))
+        .or_else(|| non_empty_optional_setting(env_base_url()))
         .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
 
     without_trailing_slash(Some(&base_url))
@@ -2593,6 +2600,35 @@ mod tests {
                 "dimensions": 2,
                 "user": "user_123"
             }))
+        );
+    }
+
+    #[test]
+    fn openai_provider_uses_the_default_openai_base_url_when_not_provided() {
+        assert_eq!(
+            super::openai_base_url_with_env(&OpenAIProviderSettings::new(), || None),
+            "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn openai_provider_uses_openai_base_url_when_set() {
+        assert_eq!(
+            super::openai_base_url_with_env(&OpenAIProviderSettings::new(), || {
+                Some("https://proxy.openai.example/v1/".to_string())
+            }),
+            "https://proxy.openai.example/v1"
+        );
+    }
+
+    #[test]
+    fn openai_provider_prefers_the_base_url_option_over_openai_base_url() {
+        assert_eq!(
+            super::openai_base_url_with_env(
+                &OpenAIProviderSettings::new().with_base_url("https://option.openai.example/v1/"),
+                || Some("https://env.openai.example/v1".to_string()),
+            ),
+            "https://option.openai.example/v1"
         );
     }
 
