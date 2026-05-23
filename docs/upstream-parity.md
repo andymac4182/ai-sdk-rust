@@ -604,6 +604,17 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` token metric utility parity documented the
+  existing named Rust counterparts for upstream
+  `generate-text/sum-token-counts.test.ts` and
+  `generate-text/calculate-tokens-per-second.test.ts`: `sum_token_counts_should_*`
+  covers known counts, one unknown count, and both unknown counts, while
+  `calculate_tokens_per_second_should_*` covers average rate, unknown token
+  count, zero duration, zero duration plus unknown token count, and unknown
+  duration. The upstream non-finite `Number.POSITIVE_INFINITY`/`Number.NaN`
+  case is documented as JavaScript-number-only because Rust token counts enter
+  this helper as `Option<u64>` and cannot represent non-finite numbers through
+  the public typed boundary.
 - 2026-05-23: `packages/ai` `convertToLanguageModelPrompt` validation parity
   added the public Rust `convert_to_language_model_prompt` helper plus
   `StandardizedPrompt::try_into_language_model_prompt`, with 4 named
@@ -3349,6 +3360,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    counterparts in `validate_tool_context_*`, including no-schema passthrough,
    validated context return values, and `TypeValidationError` context metadata
    for invalid tool context.
+   The upstream `generate-text/sum-token-counts.test.ts` cases now have named
+   Rust counterparts in `sum_token_counts_should_*`. The upstream
+   `generate-text/calculate-tokens-per-second.test.ts` portable cases now have
+   named Rust counterparts in `calculate_tokens_per_second_should_*`; its
+   non-finite `Number.POSITIVE_INFINITY`/`Number.NaN` token-count case is
+   JavaScript-number-only at Rust's `Option<u64>` token-count boundary.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error
