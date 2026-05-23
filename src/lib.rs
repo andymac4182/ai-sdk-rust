@@ -309,10 +309,11 @@ pub use openai_compatible::{
     OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
 };
 pub use prompt::{
-    Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
-    PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
-    TimeoutConfigurationOptions, convert_data_content_to_base64_string, get_chunk_timeout_ms,
-    get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms, standardize_prompt,
+    Instructions, InvalidDataContentError, InvalidMessageRoleError, LanguageModelCallSettings,
+    MessageConversionError, Prompt, PromptInput, PromptSource, RequestOptions, StandardizedPrompt,
+    TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
+    get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+    prepare_language_model_call_options, standardize_prompt,
 };
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,

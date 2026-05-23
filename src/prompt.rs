@@ -8,11 +8,13 @@ use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
-    LanguageModelMessage, LanguageModelPrompt, LanguageModelSystemMessage, LanguageModelTextPart,
-    LanguageModelUserContentPart, LanguageModelUserMessage,
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
+    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelUserContentPart,
+    LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
 use crate::provider_utils::convert_to_base64;
+use crate::util::InvalidArgumentError;
 
 /// Timeout configuration for high-level model and tool requests.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -429,6 +431,126 @@ impl TimeoutConfigurationOptions {
     }
 }
 
+/// Model-facing generation controls for high-level language model calls.
+///
+/// This mirrors upstream `LanguageModelCallOptions` from `packages/ai` without
+/// the provider-owned prompt fields that live in `LanguageModelCallOptions`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCallSettings {
+    /// Maximum number of tokens to generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Temperature setting. The range depends on the provider and model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u64>,
+
+    /// Presence penalty setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+
+    /// Frequency penalty setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+
+    /// Stop sequences that stop generation when emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+
+    /// Seed used for deterministic sampling when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+
+    /// Reasoning effort requested for the model call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<LanguageModelReasoningEffort>,
+}
+
+impl LanguageModelCallSettings {
+    /// Creates empty high-level language model call settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the maximum number of output tokens.
+    pub const fn with_max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    /// Sets the sampling temperature.
+    pub const fn with_temperature(mut self, temperature: f64) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Sets nucleus sampling.
+    pub const fn with_top_p(mut self, top_p: f64) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Sets top-k sampling.
+    pub const fn with_top_k(mut self, top_k: u64) -> Self {
+        self.top_k = Some(top_k);
+        self
+    }
+
+    /// Sets the presence penalty.
+    pub const fn with_presence_penalty(mut self, presence_penalty: f64) -> Self {
+        self.presence_penalty = Some(presence_penalty);
+        self
+    }
+
+    /// Sets the frequency penalty.
+    pub const fn with_frequency_penalty(mut self, frequency_penalty: f64) -> Self {
+        self.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    /// Sets stop sequences.
+    pub fn with_stop_sequences(mut self, stop_sequences: Vec<String>) -> Self {
+        self.stop_sequences = Some(stop_sequences);
+        self
+    }
+
+    /// Sets the deterministic sampling seed.
+    pub const fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Sets the reasoning effort.
+    pub const fn with_reasoning(mut self, reasoning: LanguageModelReasoningEffort) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+}
+
+/// Validates high-level language model call settings and returns limited values.
+pub fn prepare_language_model_call_options(
+    options: LanguageModelCallSettings,
+) -> Result<LanguageModelCallSettings, InvalidArgumentError> {
+    if options.max_output_tokens == Some(0) {
+        return Err(InvalidArgumentError::new(
+            "maxOutputTokens",
+            JsonValue::from(0),
+            "maxOutputTokens must be >= 1",
+        ));
+    }
+
+    Ok(options)
+}
+
 /// Request-facing controls for high-level SDK calls.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -748,15 +870,17 @@ mod tests {
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
     use crate::language_model::{
-        LanguageModelMessage, LanguageModelPrompt, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
 
     use super::{
-        Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError,
-        Prompt, PromptInput, PromptSource, RequestOptions, StandardizedPrompt,
-        TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+        Instructions, InvalidDataContentError, InvalidMessageRoleError, LanguageModelCallSettings,
+        MessageConversionError, Prompt, PromptInput, PromptSource, RequestOptions,
+        StandardizedPrompt, TimeoutConfiguration, TimeoutConfigurationOptions,
+        convert_data_content_to_base64_string, get_chunk_timeout_ms, get_step_timeout_ms,
+        get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
         standardize_prompt,
     };
 
@@ -768,6 +892,11 @@ mod tests {
 
     fn system_message(text: &str) -> LanguageModelSystemMessage {
         LanguageModelSystemMessage::new(text)
+    }
+
+    fn assert_call_settings_type_boundary_rejects(settings: JsonValue) {
+        serde_json::from_value::<LanguageModelCallSettings>(settings)
+            .expect_err("invalid dynamic JavaScript-shaped input is rejected by serde");
     }
 
     #[test]
@@ -1091,6 +1220,175 @@ mod tests {
 
         assert_eq!(standardized.messages, messages);
         assert_eq!(standardized.instructions, None);
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_not_throw_an_error_for_valid_settings() {
+        let settings = LanguageModelCallSettings::new()
+            .with_max_output_tokens(100)
+            .with_temperature(0.7)
+            .with_top_p(0.9)
+            .with_top_k(50)
+            .with_presence_penalty(0.5)
+            .with_frequency_penalty(0.3)
+            .with_seed(42);
+
+        assert_eq!(
+            prepare_language_model_call_options(settings.clone()).expect("settings are valid"),
+            settings
+        );
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_allow_undefined_values_for_optional_settings() {
+        let settings: LanguageModelCallSettings = serde_json::from_value(json!({
+            "maxOutputTokens": null,
+            "temperature": null,
+            "topP": null,
+            "topK": null,
+            "presencePenalty": null,
+            "frequencyPenalty": null,
+            "seed": null
+        }))
+        .expect("null optional settings deserialize");
+
+        assert_eq!(settings, LanguageModelCallSettings::new());
+        assert_eq!(
+            prepare_language_model_call_options(settings.clone()).expect("settings are valid"),
+            settings
+        );
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_non_integer_max_output_tokens_at_type_boundary()
+     {
+        assert_call_settings_type_boundary_rejects(json!({
+            "maxOutputTokens": 10.5
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_throw_invalid_argument_error_if_max_output_tokens_is_less_than_1()
+     {
+        let error = prepare_language_model_call_options(
+            LanguageModelCallSettings::new().with_max_output_tokens(0),
+        )
+        .expect_err("zero max output tokens is invalid");
+
+        assert_eq!(error.parameter(), "maxOutputTokens");
+        assert_eq!(error.value(), &json!(0));
+        assert_eq!(
+            error.message(),
+            "Invalid argument for parameter maxOutputTokens: maxOutputTokens must be >= 1"
+        );
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_temperature_if_temperature_is_not_a_number_at_type_boundary()
+     {
+        assert_call_settings_type_boundary_rejects(json!({
+            "temperature": "invalid"
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_top_p_if_top_p_is_not_a_number_at_type_boundary()
+     {
+        assert_call_settings_type_boundary_rejects(json!({
+            "topP": "invalid"
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_top_k_if_top_k_is_not_a_number_at_type_boundary()
+     {
+        assert_call_settings_type_boundary_rejects(json!({
+            "topK": "invalid"
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_presence_penalty_if_presence_penalty_is_not_a_number_at_type_boundary()
+     {
+        assert_call_settings_type_boundary_rejects(json!({
+            "presencePenalty": "invalid"
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_frequency_penalty_if_frequency_penalty_is_not_a_number_at_type_boundary()
+     {
+        assert_call_settings_type_boundary_rejects(json!({
+            "frequencyPenalty": "invalid"
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_reject_non_integer_seed_at_type_boundary() {
+        assert_call_settings_type_boundary_rejects(json!({
+            "seed": 10.5
+        }));
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_pass_through_valid_reasoning_values() {
+        for reasoning in [
+            LanguageModelReasoningEffort::None,
+            LanguageModelReasoningEffort::Minimal,
+            LanguageModelReasoningEffort::Low,
+            LanguageModelReasoningEffort::Medium,
+            LanguageModelReasoningEffort::High,
+            LanguageModelReasoningEffort::Xhigh,
+        ] {
+            let settings = LanguageModelCallSettings::new().with_reasoning(reasoning.clone());
+            let options =
+                prepare_language_model_call_options(settings).expect("reasoning is valid");
+
+            assert_eq!(options.reasoning, Some(reasoning));
+        }
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_pass_through_provider_default() {
+        let options = prepare_language_model_call_options(
+            LanguageModelCallSettings::new()
+                .with_reasoning(LanguageModelReasoningEffort::ProviderDefault),
+        )
+        .expect("provider-default reasoning is valid");
+
+        assert_eq!(
+            options.reasoning,
+            Some(LanguageModelReasoningEffort::ProviderDefault)
+        );
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_pass_through_undefined() {
+        let options = prepare_language_model_call_options(LanguageModelCallSettings::new())
+            .expect("missing reasoning is valid");
+
+        assert_eq!(options.reasoning, None);
+    }
+
+    #[test]
+    fn prepare_language_model_call_options_should_return_a_new_object_with_limited_values() {
+        let settings: LanguageModelCallSettings = serde_json::from_value(json!({
+            "maxOutputTokens": 100,
+            "temperature": 0.7,
+            "random": "invalid"
+        }))
+        .expect("unknown fields are ignored at typed boundary");
+
+        let options =
+            prepare_language_model_call_options(settings).expect("limited settings are valid");
+
+        assert_eq!(
+            serde_json::to_value(options).expect("settings serialize"),
+            json!({
+                "maxOutputTokens": 100,
+                "temperature": 0.7
+            })
+        );
     }
 
     #[test]
