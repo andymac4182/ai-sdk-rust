@@ -1094,30 +1094,123 @@ mod tests {
     }
 
     #[test]
-    fn timeout_helpers_match_upstream_number_and_missing_behavior() {
-        let total = TimeoutConfiguration::total_ms(5_000);
-
-        assert_eq!(get_total_timeout_ms(None), None);
-        assert_eq!(get_total_timeout_ms(Some(&total)), Some(5_000));
-        assert_eq!(get_step_timeout_ms(Some(&total)), None);
-        assert_eq!(get_chunk_timeout_ms(Some(&total)), None);
-        assert_eq!(get_tool_timeout_ms(Some(&total), "search"), None);
+    fn get_tool_timeout_ms_should_return_undefined_when_timeout_is_undefined() {
+        assert_eq!(get_tool_timeout_ms(None, "testTool"), None);
     }
 
     #[test]
-    fn timeout_helpers_read_detailed_timeouts() {
+    fn get_tool_timeout_ms_should_return_undefined_when_timeout_is_a_number() {
+        let total = TimeoutConfiguration::total_ms(5_000);
+
+        assert_eq!(get_tool_timeout_ms(Some(&total), "testTool"), None);
+    }
+
+    #[test]
+    fn get_tool_timeout_ms_should_return_undefined_when_tool_ms_is_not_set() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new().with_total_ms(10_000),
+        );
+
+        assert_eq!(get_tool_timeout_ms(Some(&timeout), "testTool"), None);
+    }
+
+    #[test]
+    fn get_tool_timeout_ms_should_return_tool_ms_when_set() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_tool_ms(3_000));
+
+        assert_eq!(get_tool_timeout_ms(Some(&timeout), "testTool"), Some(3_000));
+    }
+
+    #[test]
+    fn get_tool_timeout_ms_should_return_tool_ms_alongside_other_timeout_values() {
         let timeout = TimeoutConfiguration::detailed(
             TimeoutConfigurationOptions::new()
                 .with_total_ms(30_000)
                 .with_step_ms(10_000)
-                .with_chunk_ms(2_000)
+                .with_tool_ms(5_000),
+        );
+
+        assert_eq!(get_tool_timeout_ms(Some(&timeout), "testTool"), Some(5_000));
+    }
+
+    #[test]
+    fn get_total_timeout_ms_should_return_undefined_when_timeout_is_undefined() {
+        assert_eq!(get_total_timeout_ms(None), None);
+    }
+
+    #[test]
+    fn get_total_timeout_ms_should_return_the_number_directly_when_timeout_is_a_number() {
+        let total = TimeoutConfiguration::total_ms(5_000);
+
+        assert_eq!(get_total_timeout_ms(Some(&total)), Some(5_000));
+    }
+
+    #[test]
+    fn get_total_timeout_ms_should_return_total_ms_from_an_object() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new().with_total_ms(10_000),
+        );
+
+        assert_eq!(get_total_timeout_ms(Some(&timeout)), Some(10_000));
+    }
+
+    #[test]
+    fn get_total_timeout_ms_should_return_undefined_when_total_ms_is_not_set() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_step_ms(5_000));
+
+        assert_eq!(get_total_timeout_ms(Some(&timeout)), None);
+    }
+
+    #[test]
+    fn get_step_timeout_ms_should_return_undefined_when_timeout_is_undefined() {
+        assert_eq!(get_step_timeout_ms(None), None);
+    }
+
+    #[test]
+    fn get_step_timeout_ms_should_return_undefined_when_timeout_is_a_number() {
+        let total = TimeoutConfiguration::total_ms(5_000);
+
+        assert_eq!(get_step_timeout_ms(Some(&total)), None);
+    }
+
+    #[test]
+    fn get_step_timeout_ms_should_return_step_ms_from_an_object() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_step_ms(3_000));
+
+        assert_eq!(get_step_timeout_ms(Some(&timeout)), Some(3_000));
+    }
+
+    #[test]
+    fn get_chunk_timeout_ms_should_return_undefined_when_timeout_is_undefined() {
+        assert_eq!(get_chunk_timeout_ms(None), None);
+    }
+
+    #[test]
+    fn get_chunk_timeout_ms_should_return_undefined_when_timeout_is_a_number() {
+        let total = TimeoutConfiguration::total_ms(5_000);
+
+        assert_eq!(get_chunk_timeout_ms(Some(&total)), None);
+    }
+
+    #[test]
+    fn get_chunk_timeout_ms_should_return_chunk_ms_from_an_object() {
+        let timeout =
+            TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new().with_chunk_ms(2_000));
+
+        assert_eq!(get_chunk_timeout_ms(Some(&timeout)), Some(2_000));
+    }
+
+    #[test]
+    fn get_tool_timeout_ms_should_prefer_tool_specific_timeout() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new()
                 .with_tool_ms(5_000)
                 .with_tool_timeout("search", 1_000),
         );
 
-        assert_eq!(get_total_timeout_ms(Some(&timeout)), Some(30_000));
-        assert_eq!(get_step_timeout_ms(Some(&timeout)), Some(10_000));
-        assert_eq!(get_chunk_timeout_ms(Some(&timeout)), Some(2_000));
         assert_eq!(get_tool_timeout_ms(Some(&timeout), "search"), Some(1_000));
         assert_eq!(get_tool_timeout_ms(Some(&timeout), "weather"), Some(5_000));
     }
