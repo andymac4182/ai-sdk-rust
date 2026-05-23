@@ -338,6 +338,109 @@ fn default_simulate_readable_stream_delay(
     Ok(())
 }
 
+/// Options accepted by [`write_to_server_response`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteToServerResponseOptions {
+    stream: Vec<Vec<u8>>,
+    status: Option<u16>,
+    status_text: Option<String>,
+    headers: Headers,
+}
+
+impl WriteToServerResponseOptions {
+    /// Creates response-writing options with the supplied byte chunks.
+    pub fn new(stream: Vec<Vec<u8>>) -> Self {
+        Self {
+            stream,
+            status: None,
+            status_text: None,
+            headers: Headers::new(),
+        }
+    }
+
+    /// Sets the HTTP status code.
+    pub const fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Sets the optional HTTP status text.
+    pub fn with_status_text(mut self, status_text: impl Into<String>) -> Self {
+        self.status_text = Some(status_text.into());
+        self
+    }
+
+    /// Sets all response headers.
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// Adds one response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+}
+
+/// Minimal writer abstraction used by [`write_to_server_response`].
+///
+/// It mirrors the portable contract of Node's `ServerResponse`: write status
+/// and headers once, write byte chunks, wait for drain when a write reports
+/// backpressure, then end the response.
+pub trait ServerResponseWriter {
+    /// Error type returned by the response writer.
+    type Error;
+
+    /// Writes the response status and headers.
+    fn write_head(
+        &mut self,
+        status: u16,
+        status_text: Option<&str>,
+        headers: &Headers,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes one response chunk, returning whether more writes can continue.
+    fn write_chunk(&mut self, chunk: &[u8]) -> Result<bool, Self::Error>;
+
+    /// Waits for the response writer to become writable after backpressure.
+    fn wait_for_drain(&mut self) -> Result<(), Self::Error>;
+
+    /// Finalizes the response.
+    fn end(&mut self) -> Result<(), Self::Error>;
+}
+
+/// Writes byte chunks to a server-response writer.
+///
+/// This mirrors upstream `writeToServerResponse` without depending on Node's
+/// concrete `ServerResponse` type. Status defaults to 200, headers are passed
+/// through unchanged, and write backpressure is respected before the next chunk.
+pub fn write_to_server_response<W>(
+    response: &mut W,
+    options: WriteToServerResponseOptions,
+) -> Result<(), W::Error>
+where
+    W: ServerResponseWriter,
+{
+    let WriteToServerResponseOptions {
+        stream,
+        status,
+        status_text,
+        headers,
+    } = options;
+    let status = status.unwrap_or(200);
+
+    response.write_head(status, status_text.as_deref(), &headers)?;
+
+    for chunk in stream {
+        if !response.write_chunk(&chunk)? {
+            response.wait_for_drain()?;
+        }
+    }
+
+    response.end()
+}
+
 /// Result returned by a high-level callback utility.
 pub type CallbackResult = Result<(), String>;
 
@@ -1530,6 +1633,7 @@ pub fn get_text_from_data_url(data_url: &str) -> Result<String, DataUrlTextError
 mod tests {
     use serde_json::json;
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
     use std::rc::Rc;
@@ -1540,11 +1644,12 @@ mod tests {
     use super::{
         AbortSignalSource, AbortTimeoutOptions, Callback, CallbackResult, DataUrlTextError,
         InvalidArgumentError, NotifyCallbacks, PrepareRetriesOptions, SerialJobError,
-        SerialJobExecutor, SimulateReadableStreamOptions, cosine_similarity, fix_json,
-        get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_abort_signals,
-        merge_callbacks, merge_objects, notify, parse_partial_json, prepare_headers,
-        prepare_retries, set_abort_timeout, simulate_readable_stream,
-        simulate_readable_stream_with_delay, split_array,
+        SerialJobExecutor, ServerResponseWriter, SimulateReadableStreamOptions,
+        WriteToServerResponseOptions, cosine_similarity, fix_json, get_potential_start_index,
+        get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
+        merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
+        set_abort_timeout, simulate_readable_stream, simulate_readable_stream_with_delay,
+        split_array, write_to_server_response,
     };
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -1580,6 +1685,64 @@ mod tests {
             Self {
                 value: value.to_string(),
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct MockServerResponse {
+        status_code: u16,
+        status_message: Option<String>,
+        headers: Headers,
+        written_chunks: Vec<Vec<u8>>,
+        ended: bool,
+        write_responses: VecDeque<bool>,
+        drain_wait_count: usize,
+        events: Vec<String>,
+    }
+
+    impl MockServerResponse {
+        fn with_write_responses(write_responses: impl IntoIterator<Item = bool>) -> Self {
+            Self {
+                write_responses: write_responses.into_iter().collect(),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl ServerResponseWriter for MockServerResponse {
+        type Error = String;
+
+        fn write_head(
+            &mut self,
+            status: u16,
+            status_text: Option<&str>,
+            headers: &Headers,
+        ) -> Result<(), Self::Error> {
+            self.status_code = status;
+            self.status_message = status_text.map(str::to_string);
+            self.headers = headers.clone();
+            Ok(())
+        }
+
+        fn write_chunk(&mut self, chunk: &[u8]) -> Result<bool, Self::Error> {
+            self.written_chunks.push(chunk.to_vec());
+            self.events.push(format!(
+                "write:{}",
+                String::from_utf8_lossy(chunk).into_owned()
+            ));
+            Ok(self.write_responses.pop_front().unwrap_or(true))
+        }
+
+        fn wait_for_drain(&mut self) -> Result<(), Self::Error> {
+            self.drain_wait_count += 1;
+            self.events.push("drain".to_string());
+            Ok(())
+        }
+
+        fn end(&mut self) -> Result<(), Self::Error> {
+            self.ended = true;
+            self.events.push("end".to_string());
+            Ok(())
         }
     }
 
@@ -2224,6 +2387,133 @@ mod tests {
 
         assert_eq!(chunks, vec![1, 2, 3]);
         assert_eq!(delay_values, vec![Some(500), None, None]);
+    }
+
+    #[test]
+    fn write_to_server_response_should_write_data_to_server_response() {
+        let mut response = MockServerResponse::default();
+        let headers = Headers::from([("Content-Type".to_string(), "text/plain".to_string())]);
+
+        write_to_server_response(
+            &mut response,
+            WriteToServerResponseOptions::new(vec![b"chunk1".to_vec(), b"chunk2".to_vec()])
+                .with_status(200)
+                .with_status_text("OK")
+                .with_headers(headers.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.status_message.as_deref(), Some("OK"));
+        assert_eq!(response.headers, headers);
+        assert_eq!(response.written_chunks.len(), 2);
+        assert!(response.ended);
+    }
+
+    #[test]
+    fn write_to_server_response_should_respect_backpressure_and_wait_for_drain_event() {
+        let mut response = MockServerResponse::with_write_responses([true, false, true]);
+
+        write_to_server_response(
+            &mut response,
+            WriteToServerResponseOptions::new(vec![
+                b"chunk1".to_vec(),
+                b"chunk2".to_vec(),
+                b"chunk3".to_vec(),
+            ])
+            .with_status(200),
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.events,
+            vec![
+                "write:chunk1".to_string(),
+                "write:chunk2".to_string(),
+                "drain".to_string(),
+                "write:chunk3".to_string(),
+                "end".to_string(),
+            ]
+        );
+        assert_eq!(response.drain_wait_count, 1);
+        assert_eq!(response.written_chunks.len(), 3);
+        assert!(response.ended);
+    }
+
+    #[test]
+    fn write_to_server_response_should_set_headers_correctly_when_status_text_is_undefined() {
+        let mut response = MockServerResponse::default();
+        let expected_headers = Headers::from([
+            ("X-Example-Header".to_string(), "example-value".to_string()),
+            (
+                "X-Example-Chat-Title".to_string(),
+                "My Conversation".to_string(),
+            ),
+        ]);
+
+        write_to_server_response(
+            &mut response,
+            WriteToServerResponseOptions::new(vec![b"test data".to_vec()])
+                .with_status(200)
+                .with_headers(expected_headers.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.status_message, None);
+        assert_eq!(response.headers, expected_headers);
+        assert!(response.ended);
+        assert_eq!(response.written_chunks.len(), 1);
+    }
+
+    #[test]
+    fn write_to_server_response_should_set_headers_correctly_when_status_text_is_provided() {
+        let mut response = MockServerResponse::default();
+        let expected_headers = Headers::from([
+            ("X-Example-Header".to_string(), "example-value".to_string()),
+            (
+                "X-Example-Chat-Title".to_string(),
+                "New Chat Session".to_string(),
+            ),
+        ]);
+
+        write_to_server_response(
+            &mut response,
+            WriteToServerResponseOptions::new(vec![b"test data".to_vec()])
+                .with_status(201)
+                .with_status_text("Created")
+                .with_headers(expected_headers.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(response.status_code, 201);
+        assert_eq!(response.status_message.as_deref(), Some("Created"));
+        assert_eq!(response.headers, expected_headers);
+        assert!(response.ended);
+        assert_eq!(response.written_chunks.len(), 1);
+    }
+
+    #[test]
+    fn write_to_server_response_should_set_headers_correctly_when_status_text_is_not_set_and_status_is_not_set()
+     {
+        let mut response = MockServerResponse::default();
+        let expected_headers = Headers::from([
+            ("X-Example-Header".to_string(), "example-value".to_string()),
+            ("X-Example-Message".to_string(), "Hello World".to_string()),
+        ]);
+
+        write_to_server_response(
+            &mut response,
+            WriteToServerResponseOptions::new(vec![b"test data".to_vec()])
+                .with_headers(expected_headers.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.status_message, None);
+        assert_eq!(response.headers, expected_headers);
+        assert!(response.ended);
+        assert_eq!(response.written_chunks.len(), 1);
     }
 
     #[test]
