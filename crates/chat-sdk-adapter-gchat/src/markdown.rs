@@ -222,38 +222,19 @@ fn node_to_gchat(node: &Node, list_depth: usize) -> String {
     }
 }
 
-/// Render a list node with per-level indentation. 1:1 with the
-/// chat-sdk `BaseFormatConverter::renderList` helper used by
-/// `nodeToGChat`. `bullet` is the unordered-list glyph (gchat
-/// uses "•"); ordered lists use "<n>." prefixes.
+/// Render a list node with per-level indentation. Delegates to
+/// the chat-sdk-chat `render_list` helper (1:1 with upstream
+/// `BaseFormatConverter::renderList`) so that nested-list
+/// indentation matches upstream's "2 spaces per depth level"
+/// + continuation-line semantics. `bullet` is the unordered-list
+/// glyph (GChat uses "•"); ordered lists use "<n>." prefixes.
 fn render_list(list: &chat_sdk_chat::markdown::List, depth: usize, bullet: &str) -> String {
-    let indent: String = std::iter::repeat_n(' ', depth * 2).collect();
-    let start = list.start.unwrap_or(1) as usize;
-    list.children
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let prefix = if list.ordered {
-                format!("{}. ", start + i)
-            } else {
-                format!("{bullet} ")
-            };
-            if let Node::ListItem(li) = item {
-                let pieces: Vec<String> = li
-                    .children
-                    .iter()
-                    .map(|child| match child {
-                        Node::List(nested) => render_list(nested, depth + 1, bullet),
-                        other => node_to_gchat(other, depth + 1),
-                    })
-                    .collect();
-                format!("{indent}{prefix}{}", pieces.join("\n"))
-            } else {
-                format!("{indent}{prefix}{}", node_to_gchat(item, depth + 1))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    chat_sdk_chat::markdown::render_list(
+        list,
+        depth,
+        &|node| node_to_gchat(node, depth + 1),
+        bullet,
+    )
 }
 
 #[cfg(test)]
@@ -361,6 +342,62 @@ mod tests {
         let ast = c.to_ast("---").unwrap();
         let result = c.from_ast(&ast);
         assert!(result.contains("---"));
+    }
+
+    // ---------- nested list tests (5 deferred cases, slice 199) ----------
+
+    #[test]
+    fn should_indent_nested_unordered_lists() {
+        let c = GoogleChatFormatConverter::new();
+        let result = c.from_markdown("- parent\n  - child 1\n  - child 2").unwrap();
+        assert!(result.contains("• parent"));
+        assert!(result.contains("  • child 1"));
+        assert!(result.contains("  • child 2"));
+    }
+
+    #[test]
+    fn should_indent_nested_ordered_lists() {
+        let c = GoogleChatFormatConverter::new();
+        let result = c
+            .from_markdown("1. first\n   1. sub-first\n   2. sub-second\n2. second")
+            .unwrap();
+        assert!(result.contains("1. first"));
+        assert!(result.contains("  1. sub-first"));
+        assert!(result.contains("  2. sub-second"));
+        assert!(result.contains("2. second"));
+    }
+
+    #[test]
+    fn should_handle_deeply_nested_lists() {
+        let c = GoogleChatFormatConverter::new();
+        let result = c.from_markdown("- level 1\n  - level 2\n    - level 3").unwrap();
+        assert!(result.contains("• level 1"));
+        assert!(result.contains("  • level 2"));
+        assert!(result.contains("    • level 3"));
+    }
+
+    #[test]
+    fn should_keep_sibling_items_at_same_indent() {
+        let c = GoogleChatFormatConverter::new();
+        let result = c.from_markdown("- item 1\n- item 2\n- item 3").unwrap();
+        // Each "• " bullet starts at column 0 (no indent).
+        assert!(result.contains("• item 1"));
+        assert!(result.contains("• item 2"));
+        assert!(result.contains("• item 3"));
+        // No indented bullets at depth 1.
+        assert!(!result.contains("  • item"));
+    }
+
+    #[test]
+    fn should_handle_mixed_ordered_and_unordered_nesting() {
+        let c = GoogleChatFormatConverter::new();
+        let result = c
+            .from_markdown("1. first\n   - sub a\n   - sub b\n2. second")
+            .unwrap();
+        assert!(result.contains("1. first"));
+        assert!(result.contains("  • sub a"));
+        assert!(result.contains("  • sub b"));
+        assert!(result.contains("2. second"));
     }
 
     // ---------- toAst tests (subset) ----------
