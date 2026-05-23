@@ -12,6 +12,7 @@
 
 pub mod cards;
 pub mod chat_singleton;
+pub mod emoji;
 pub mod errors;
 pub mod logger;
 pub mod markdown;
