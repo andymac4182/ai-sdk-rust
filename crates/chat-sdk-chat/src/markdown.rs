@@ -1641,4 +1641,63 @@ mod tests {
         }
         assert!(has_image(&node));
     }
+
+    // ---------- slice 78: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_link_label_with_emphasis_preserves_both() {
+        let node = parse_markdown("[see *more*](https://example.com)").expect("parses");
+        fn link_label_has_emphasis(n: &Node) -> bool {
+            if let Node::Link(l) = n {
+                if l.children.iter().any(|c| matches!(c, Node::Emphasis(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(link_label_has_emphasis)
+        }
+        assert!(link_label_has_emphasis(&node));
+    }
+
+    #[test]
+    fn parse_markdown_code_block_without_language_has_none_lang() {
+        let node = parse_markdown("```\nplain code\n```").expect("parses");
+        fn find_code(n: &Node) -> Option<&Code> {
+            if let Node::Code(c) = n {
+                return Some(c);
+            }
+            None
+        }
+        let mut found = None;
+        for child in get_node_children(&node).iter() {
+            if let Some(c) = find_code(child) {
+                found = Some(c);
+                break;
+            }
+        }
+        let c = found.expect("code block parses at root level");
+        assert!(c.lang.is_none());
+        assert_eq!(c.value, "plain code");
+    }
+
+    #[test]
+    fn parse_markdown_loose_list_keeps_paragraph_children_per_item() {
+        let node = parse_markdown("- first\n\n- second").expect("parses");
+        fn list_item_has_paragraph(n: &Node) -> bool {
+            if let Node::ListItem(li) = n {
+                if li.children.iter().any(|c| matches!(c, Node::Paragraph(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(list_item_has_paragraph)
+        }
+        assert!(list_item_has_paragraph(&node));
+    }
+
+    #[test]
+    fn parse_markdown_strong_at_paragraph_start_position_works() {
+        let node = parse_markdown("**leading bold** then text").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.starts_with("leading bold"));
+        assert!(plain.contains("then text"));
+    }
 }
