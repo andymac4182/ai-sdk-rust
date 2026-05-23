@@ -683,3 +683,106 @@ chat 90%).
   consumer modules (callback_url, transcripts class,
   thread_history class, postable_object dispatch, message
   subject getter). Same item as slices 80/91/97/108.
+
+### 2026-05-24 - slices 115..120
+
+**Slices covered**
+
+115 (modals child-kind reader + 6 per-element predicates +
+is_valid_modal_child; modals tests 25 -> 34; chat 91%).
+116 (cards child-kind reader + 10 per-element predicates;
+cards tests 44 -> 55; chat 92% — additive-helper ceiling
+codified slice 114).
+117 (**Phase 1.5 trait extension**: chat::types::StateAdapter
+extended with 5 async methods + StateAdapterError/StateResult;
+MemoryStateAdapter impls via sync-delegated async wrappers;
+async-trait dep added to both crates; chat 93%).
+118 (TranscriptsApiImpl class on the extended trait: append /
+list / delete / count via async StateAdapter; 8 mapped tests;
+transcripts 18 -> 26; chat 94%).
+119 (ThreadHistoryCache class: append / get_messages / count
+on the extended trait; 6 mapped tests; thread_history 13 -> 19;
+chat 95%).
+120 (CallbackUrlStore class: issue / resolve via async
+StateAdapter; 8 mapped tests; callback_url 10 -> 18; chat 96%).
+
+**What the brief got right (validated)**
+
+- The slice 114 additive-helper ceiling at 92% held for exactly
+  two slices (115 + 116) before the trait extension session
+  began. The cap correctly signaled the inflection point.
+- The Phase 1.5 plan in port-chat-sdk.md slice 114 was almost
+  exactly right: async-trait + 5-method StateAdapter subset +
+  MemoryStateAdapter sync-delegation. The only surprise was
+  that the workspace had `async-trait 0.1.89` already in
+  Cargo.lock as a transitive dep, so adding it as a direct
+  dep was zero-friction.
+- The "inline MockState impl in tests" pattern (slices
+  118/119/120) worked perfectly. Each consumer module's test
+  module defines a small `MockState` that impls the extended
+  trait, then uses `futures_executor::block_on(...)` to drive
+  the async methods. No tokio in the test path, no circular
+  dep on state-memory, ~30 lines of test glue per module.
+
+**What the brief got wrong or left out**
+
+- **The model/adapter split rule extends to "state/adapter
+  split" cleanly.** Each of slices 118/119/120 ported the
+  upstream class straight, with no surprises — the prior
+  additive-helper slices (predicate + inverse + builder)
+  already had a tight footprint, so the class itself was just
+  wiring. Brief should canonize: when porting a class that
+  binds state, FIRST ship the pure helpers (constants,
+  builders, predicates), THEN ship the class. The class slice
+  is then small and review-easy.
+- **`futures-executor::block_on` is the right test executor.**
+  Adopters that need tokio-specific behavior (e.g. tokio's
+  timer wheel for sleep) will write their own integration
+  tests. The chat-sdk test path doesn't need tokio. Brief
+  should canonize: chat-sdk crates use `futures-executor` as
+  a dev-dep for async-trait tests; never pull in tokio as a
+  direct dep unless a specific module needs it.
+- **The chat percentage scoring lost meaning around 92-96%.**
+  At 96% the chat row claims more completeness than reality —
+  the remaining surface (Adapter trait extension, message
+  subject getter, postable_object dispatch, postToCallbackUrl
+  HTTP, and the not-yet-touched Channel/Thread/Chat classes)
+  is still significant. Open refinement: re-baseline the
+  percent scale once the Channel/Thread/Chat class ports begin
+  in a future session.
+
+**Stale or misleading guidance**
+
+- The slice 114 refinement said the trait extension was a
+  "multi-slice session." It IS multi-slice (4 done now: 117
+  trait + 118 transcripts + 119 thread-history + 120
+  callback-url), but a single conversation window can land
+  4-5 of them. The "fresh dedicated session" framing was
+  overly pessimistic. Lesson for future refinement entries:
+  predict slice scope, not session scope.
+- The "test-count hygiene rule" from slice 108 has held for
+  every slice since. No omissions in 115-120. The rule
+  graduates from "tighten" to "stable practice."
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending
+  (next dedicated refinement slice).
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- Phase 1.5 finalization: extend `chat::types::Adapter` with
+  the 4-method subset (post_message, post_object,
+  fetch_subject, parse_message). This unblocks the last
+  consumer paths: message::subject getter, postable_object
+  dispatch helper, reviver Thread/Channel branches (those
+  branches need ChannelImpl/ThreadImpl first).
+- Phase 2: scaffold one of the 9 not-started adapter crates
+  (Slack is the most-tested upstream — probably best first
+  port). The trait surface needs to grow to cover the
+  per-adapter methods first.
+- Phase 3: state-redis / state-ioredis / state-pg. Need an
+  async HTTP/DB client choice first (probably
+  `redis-rs`/`bb8-redis` for Redis, `tokio-postgres`/`sqlx`
+  for Postgres).

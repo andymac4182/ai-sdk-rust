@@ -704,3 +704,41 @@ Plan:
 This is a multi-slice session (5-10 slices) and should not be
 attempted mid-additive-helper-streak. Start a fresh dedicated
 session.
+
+## Consumer-class port pattern (added slice 121)
+
+After slices 117-120 landed StateAdapter + three consumer
+classes (TranscriptsApiImpl, ThreadHistoryCache,
+CallbackUrlStore), the pattern crystallized:
+
+1. **Pre-pull helpers first.** Before writing the class, pull
+   the upstream class's inline expressions into module-level
+   pure helpers — predicates, key formatters, inverse helpers,
+   default-applied getters on the config struct. See slices
+   106 / 110 / 111 for the prior-art. This keeps the class
+   itself thin.
+2. **Write the class as a struct holding `Arc<dyn StateAdapter>`
+   + the config struct.** Use `#[derive(Clone)]` so callers
+   can hand it out cheaply. Implement `Debug` manually so the
+   dyn trait object doesn't break the derive.
+3. **Each public method is one or two `await`s on the trait.**
+   Don't put business logic in the class; delegate to the
+   already-shipped pure helpers (e.g. `user_transcript_key`,
+   `is_tombstone`, `tombstone`). The class's job is wiring,
+   not logic.
+4. **Tests use an inline `MockState` + `futures_executor::block_on`.**
+   Define a small `MockState` struct in the `#[cfg(test)] mod
+   tests` block with `HashMap<String, Value>` (+ optional
+   `HashMap<String, Vec<Value>>` for list ops). Impl the
+   StateAdapter trait with `#[async_trait::async_trait]`. Each
+   test calls `block_on(api.method(...))`.
+5. **`futures-executor` ships as a dev-dependency.** Already
+   transitively in `Cargo.lock`. Never add `tokio` as a
+   direct dep just for tests — `futures-executor` is enough.
+6. **Mapped-case count + percentage bump.** Each consumer-class
+   slice typically bumps the module's test count by 6-8 (the
+   mapped upstream cases), and bumps chat's percentage by 1%.
+
+If a slice doesn't fit this template (e.g. needs HTTP or
+non-trivial business logic), split it into multiple slices
+following the model/adapter split rule.
