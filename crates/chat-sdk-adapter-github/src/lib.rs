@@ -154,9 +154,26 @@ impl GithubAdapter {
     /// `adapter.channelIdFromThreadId(threadId)` which collapses any
     /// `github:<owner>/<repo>:<number>...` to `github:<owner>/<repo>`.
     /// Returns `None` when `thread_id` isn't GitHub-encoded.
+    ///
+    /// Handles both wire formats:
+    /// - `github:<owner>/<repo>:<number>` (PR or issue thread)
+    /// - `github:<owner>/<repo>:<number>:rc:<review-comment-id>` (review
+    ///   comment thread)
+    ///
+    /// The collapsed channel id is always `github:<owner>/<repo>`,
+    /// independent of which thread variant is supplied — upstream
+    /// uses the same shape for both.
     pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
-        let decoded = decode_thread_id(thread_id)?;
-        Some(format!("{THREAD_ID_PREFIX}{}/{}", decoded.owner, decoded.repo))
+        let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
+        // First colon-segment is `<owner>/<repo>`.
+        let repo_path = suffix.split(':').next()?;
+        let mut parts = repo_path.splitn(2, '/');
+        let owner = parts.next()?;
+        let repo = parts.next()?;
+        if owner.is_empty() || repo.is_empty() {
+            return None;
+        }
+        Some(format!("{THREAD_ID_PREFIX}{owner}/{repo}"))
     }
 
     /// All GitHub conversations are issue/PR threads, not DMs. 1:1
@@ -572,6 +589,36 @@ mod tests {
                 .channel_id_from_thread_id("github:a/b:1")
                 .as_deref(),
             Some("github:a/b")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_derives_channel_for_pr_level_thread() {
+        // 1:1 with upstream `channelIdFromThreadId > should derive
+        // channel ID from PR-level thread`.
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("github:acme/app:42")
+                .as_deref(),
+            Some("github:acme/app")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_derives_channel_for_review_comment_thread() {
+        // 1:1 with upstream `channelIdFromThreadId > should derive
+        // channel ID from review comment thread`. The Rust port now
+        // walks the colon-segments instead of delegating to
+        // `decode_thread_id` (which only handles 2-segment forms);
+        // both 3- and 5-segment thread ids collapse to the same
+        // channel id.
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("github:acme/app:42:rc:200")
+                .as_deref(),
+            Some("github:acme/app")
         );
     }
 
