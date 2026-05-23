@@ -594,6 +594,69 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Display name + identifier pair used for `assignee` / `author` on
+/// [`MessageSubject`]. Matches the inline anonymous TypeScript object
+/// `{ id: string; name: string }` upstream.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageSubjectActor {
+    pub id: String,
+    pub name: String,
+}
+
+/// Platform-native subject (e.g. GitHub issue, Linear ticket) the upstream
+/// `Message` is attached to. 1:1 port of upstream `interface MessageSubject`.
+///
+/// `raw` mirrors upstream `unknown` exactly with `serde_json::Value`. All
+/// other optionals elide from the wire when None.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageSubject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<MessageSubjectActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<MessageSubjectActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    pub raw: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Platform-specific subject type tag (e.g. `"issue"`, `"pr"`,
+    /// `"ticket"`). Upstream typed as `string`, intentionally not an enum
+    /// — the set of values is open-ended across adapters.
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Adapter-supplied thread descriptor. 1:1 port of upstream
+/// `interface ThreadInfo`. `metadata` mirrors `Record<string, unknown>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadInfo {
+    #[serde(rename = "channelId")]
+    pub channel_id: String,
+    #[serde(
+        rename = "channelName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_name: Option<String>,
+    #[serde(
+        rename = "channelVisibility",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_visibility: Option<ChannelVisibility>,
+    pub id: String,
+    #[serde(rename = "isDM", default, skip_serializing_if = "Option::is_none")]
+    pub is_dm: Option<bool>,
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Status of a streamed task. 1:1 port of upstream
 /// `"pending" | "in_progress" | "complete" | "error"` literal union on
 /// [`TaskUpdateChunk::status`].
@@ -1258,6 +1321,82 @@ mod tests {
         assert!(json.contains("\"metadata\":{\"platform\":\"slack\"}"));
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, info);
+    }
+
+    #[test]
+    fn message_subject_minimum_shape_round_trips() {
+        let subj = MessageSubject {
+            assignee: None,
+            author: None,
+            description: None,
+            id: "I123".to_string(),
+            labels: None,
+            raw: serde_json::Value::Null,
+            status: None,
+            title: None,
+            kind: "issue".to_string(),
+            url: None,
+        };
+        let json = serde_json::to_string(&subj).unwrap();
+        // `raw: null` and required `id`/`type` must appear; everything
+        // optional must be elided.
+        assert_eq!(json, "{\"id\":\"I123\",\"raw\":null,\"type\":\"issue\"}");
+        let back: MessageSubject = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, subj);
+    }
+
+    #[test]
+    fn message_subject_full_shape_uses_upstream_inline_actor_shape() {
+        let mut raw = serde_json::Map::new();
+        raw.insert("source".to_string(), serde_json::json!("github"));
+        let subj = MessageSubject {
+            assignee: Some(MessageSubjectActor {
+                id: "U1".to_string(),
+                name: "ada".to_string(),
+            }),
+            author: Some(MessageSubjectActor {
+                id: "U2".to_string(),
+                name: "grace".to_string(),
+            }),
+            description: Some("desc".to_string()),
+            id: "I9".to_string(),
+            labels: Some(vec!["bug".to_string(), "p0".to_string()]),
+            raw: serde_json::Value::Object(raw),
+            status: Some("open".to_string()),
+            title: Some("a title".to_string()),
+            kind: "pr".to_string(),
+            url: Some("https://example.com/pr/9".to_string()),
+        };
+        let json = serde_json::to_string(&subj).unwrap();
+        assert!(json.contains("\"assignee\":{\"id\":\"U1\",\"name\":\"ada\"}"));
+        assert!(json.contains("\"author\":{\"id\":\"U2\",\"name\":\"grace\"}"));
+        assert!(json.contains("\"labels\":[\"bug\",\"p0\"]"));
+        assert!(json.contains("\"type\":\"pr\""));
+        assert!(json.contains("\"raw\":{\"source\":\"github\"}"));
+        let back: MessageSubject = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, subj);
+    }
+
+    #[test]
+    fn thread_info_round_trips_camelcase_keys() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("platform".to_string(), serde_json::json!("slack"));
+        let info = ThreadInfo {
+            channel_id: "C123".to_string(),
+            channel_name: Some("general".to_string()),
+            channel_visibility: Some(ChannelVisibility::Workspace),
+            id: "T999".to_string(),
+            is_dm: Some(false),
+            metadata,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"channelId\":\"C123\""));
+        assert!(json.contains("\"channelName\":\"general\""));
+        assert!(json.contains("\"channelVisibility\":\"workspace\""));
+        assert!(json.contains("\"isDM\":false"));
+        assert!(json.contains("\"metadata\":{\"platform\":\"slack\"}"));
+        let back: ThreadInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
     }
 
