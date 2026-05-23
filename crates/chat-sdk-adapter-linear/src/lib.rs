@@ -90,6 +90,28 @@ impl LinearAdapter {
     pub fn graphql_url(&self) -> &str {
         self.options.effective_graphql_url()
     }
+
+    /// Derive channel id from a Linear thread id. 1:1 with upstream
+    /// `adapter.channelIdFromThreadId(threadId)` which decodes via
+    /// `decodeThreadId` and returns `linear:<issueId>`. Returns
+    /// `None` when `thread_id` isn't a Linear-encoded value.
+    ///
+    /// Uses the upstream-shaped [`crate::thread_id::decode_thread_id`]
+    /// (slice 216) so all 4 wire formats are handled:
+    /// `linear:<issue>` / `linear:<issue>:c:<comment>` /
+    /// `linear:<issue>:s:<session>` /
+    /// `linear:<issue>:c:<comment>:s:<session>`.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        let decoded = crate::thread_id::decode_thread_id(thread_id).ok()?;
+        Some(format!("linear:{}", decoded.issue_id))
+    }
+
+    /// All Linear conversations are issue comment threads, not DMs.
+    /// 1:1 with upstream's hard-coded `isDM: false` on every parsed
+    /// message.
+    pub fn is_dm(&self, _thread_id: &str) -> bool {
+        false
+    }
 }
 
 /// GraphQL mutation Linear uses to create a comment on an issue.
@@ -450,6 +472,59 @@ mod tests {
         assert!(decode_thread_id("linear:onlyone").is_none());
         assert!(decode_thread_id("linear::issue").is_none());
         assert!(decode_thread_id("linear:ENG:").is_none());
+    }
+
+    #[test]
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream's helpers (channel = `linear:<issueId>`,
+    // isDM always `false`). Uses the upstream-shape
+    // `thread_id::decode_thread_id` so all 4 wire formats decode.
+
+    #[test]
+    fn channel_id_from_thread_id_returns_linear_prefix_plus_issue_id() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
+        // issue-only thread id
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("linear:ISSUE-1")
+                .as_deref(),
+            Some("linear:ISSUE-1")
+        );
+        // issue + comment thread id
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("linear:ISSUE-1:c:COMMENT-A")
+                .as_deref(),
+            Some("linear:ISSUE-1")
+        );
+        // issue + agent session thread id
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("linear:ISSUE-1:s:SESSION-X")
+                .as_deref(),
+            Some("linear:ISSUE-1")
+        );
+        // issue + comment + agent session thread id
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("linear:ISSUE-1:c:COMMENT-A:s:SESSION-X")
+                .as_deref(),
+            Some("linear:ISSUE-1")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_none_for_non_linear_ids() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
+        assert!(adapter.channel_id_from_thread_id("github:vercel/chat:42").is_none());
+        assert!(adapter.channel_id_from_thread_id("").is_none());
+    }
+
+    #[test]
+    fn is_dm_always_returns_false() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
+        assert!(!adapter.is_dm("linear:ISSUE-1"));
+        assert!(!adapter.is_dm(""));
     }
 
     #[test]
