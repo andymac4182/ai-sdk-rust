@@ -392,13 +392,18 @@ pub fn encode_dm_thread_id(channel_id: &str) -> String {
     encode_thread_id(DM_GUILD, channel_id)
 }
 
-/// Components of a decoded Discord thread id.
+/// Components of a decoded Discord thread id. 1:1 with upstream
+/// `interface DiscordThreadId { guildId; channelId; threadId? }`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DecodedDiscordThreadId {
     /// Discord guild id (or [`DM_GUILD`] for DMs).
     pub guild_id: String,
-    /// Discord channel id.
+    /// Discord parent channel id.
     pub channel_id: String,
+    /// Optional sub-thread id (the 4th colon-segment of the encoded
+    /// thread id). Present when the thread is a sub-thread under a
+    /// channel; absent for channel-level threads.
+    pub thread_id: Option<String>,
 }
 
 impl DecodedDiscordThreadId {
@@ -408,18 +413,24 @@ impl DecodedDiscordThreadId {
     }
 }
 
-/// Decode a Discord thread id.
+/// Decode a Discord thread id. 1:1 with upstream
+/// `decodeThreadId(threadId)` which splits on `:` and requires at
+/// least 3 segments (`discord`, guild, channel) with an optional
+/// 4th sub-thread segment. Returns `None` for any malformed input;
+/// upstream throws `ValidationError` in the same cases.
 pub fn decode_thread_id(thread_id: &str) -> Option<DecodedDiscordThreadId> {
     let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
-    let mut parts = suffix.splitn(2, ':');
+    let mut parts = suffix.split(':');
     let guild_id = parts.next()?;
     let channel_id = parts.next()?;
+    let sub_thread = parts.next();
     if guild_id.is_empty() || channel_id.is_empty() {
         return None;
     }
     Some(DecodedDiscordThreadId {
         guild_id: guild_id.to_string(),
         channel_id: channel_id.to_string(),
+        thread_id: sub_thread.filter(|s| !s.is_empty()).map(str::to_string),
     })
 }
 
@@ -485,6 +496,26 @@ mod tests {
         let decoded = decode_thread_id("discord:@me:789").unwrap();
         assert!(decoded.is_dm());
         assert_eq!(decoded.channel_id, "789");
+    }
+
+    #[test]
+    fn decode_thread_id_captures_optional_sub_thread() {
+        // 1:1 with upstream's optional 4th colon-segment for
+        // sub-threads under a channel.
+        let decoded = decode_thread_id("discord:GUILD:CHAN:SUB").unwrap();
+        assert_eq!(decoded.guild_id, "GUILD");
+        assert_eq!(decoded.channel_id, "CHAN");
+        assert_eq!(decoded.thread_id.as_deref(), Some("SUB"));
+    }
+
+    #[test]
+    fn decode_thread_id_treats_trailing_empty_sub_thread_as_absent() {
+        // `discord:G:C:` (trailing colon, empty 4th part) should not
+        // produce `thread_id: Some("")`. Matches upstream's behavior
+        // where `parts[3]` would be `""` and is dropped at the
+        // shape-guard layer.
+        let decoded = decode_thread_id("discord:G:C:").unwrap();
+        assert_eq!(decoded.thread_id, None);
     }
 
     #[test]
