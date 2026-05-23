@@ -6,19 +6,19 @@
 //!
 //! - [`TelegramAdapter`] + [`TelegramAdapterOptions`] (slice 130:
 //!   skeleton + thread-id codec).
-//! - `adapter.post_message(thread_id, text)` (slice 145, this
-//!   slice): real HTTP POST to Telegram's `/bot<token>/sendMessage`
-//!   via `chat_sdk_adapter_shared::runtime::reqwest`. Decodes the
-//!   chat-sdk thread id, builds the JSON body
-//!   (`{chat_id, text, message_thread_id?}`), and parses the
-//!   `{ok, result: {message_id}}` Telegram envelope.
+//! - `adapter.post_message(thread_id, text)` (slice 145): POST
+//!   `<base_url>/bot<token>/sendMessage` -> parse
+//!   `{ok, result: {message_id}}`.
+//! - `adapter.fetch_subject(thread_id)` (slice 155): POST
+//!   `<base_url>/bot<token>/getChat` -> parse
+//!   `{ok, result: {title}}`. Reference impl for the per-adapter
+//!   subject-fetch port.
 //!
 //! **What is still deferred:**
 //!
-//! - `post_object` / `fetch_subject` / `edit_message` / other
-//!   Adapter trait methods. Each follows the same recipe as
-//!   `post_message` (POST/GET against the relevant `/bot<token>/
-//!   <method>` endpoint).
+//! - `post_object` / `edit_message` / `delete_message` /
+//!   `add_reaction` / `start_typing` / other Adapter trait
+//!   methods. Each follows the same recipe.
 //! - Markdown / card rendering for Telegram's `MarkdownV2` /
 //!   inline-keyboard layout.
 
@@ -189,6 +189,51 @@ impl Adapter for TelegramAdapter {
         })?;
         Ok(message_id.to_string())
     }
+
+    /// Fetch a Telegram chat's title via the `getChat` Bot API
+    /// method. Returns `None` for private (DM) chats that have
+    /// no title; returns the chat's `title` for groups +
+    /// supergroups + channels.
+    async fn fetch_subject(
+        &self,
+        thread_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<Option<String>> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+
+        let url = self.method_url("getChat");
+        let body = serde_json::json!({ "chat_id": decoded.chat_id });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram getChat call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        // Private chats have no title; groups/supergroups/channels
+        // do. Both are valid outcomes.
+        Ok(json["result"]["title"].as_str().map(str::to_owned))
+    }
 }
 
 /// Encode a Telegram thread id. 1:1 with upstream's inline format:
@@ -330,6 +375,22 @@ mod tests {
         let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_fetch_subject_rejects_non_telegram_thread_ids() {
+        // Slice 155 wired fetch_subject to the HTTP layer; the
+        // pre-HTTP validation rejects non-Telegram ids before
+        // any network call.
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.fetch_subject("slack:C1:1.0"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("not Telegram-encoded"));
