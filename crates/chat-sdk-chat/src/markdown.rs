@@ -1827,4 +1827,63 @@ mod tests {
         assert!(plain.contains("a"));
         assert!(plain.contains("b"));
     }
+
+    // ---------- slice 83: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_heading_depth_three_through_six_recognized() {
+        for depth in 3..=6u8 {
+            let prefix = "#".repeat(depth as usize);
+            let input = format!("{prefix} heading text");
+            let node = parse_markdown(&input).expect("parses");
+            fn find_first_heading_depth(n: &Node) -> Option<u8> {
+                if let Node::Heading(h) = n {
+                    return Some(h.depth);
+                }
+                for c in get_node_children(n).iter() {
+                    if let Some(d) = find_first_heading_depth(c) {
+                        return Some(d);
+                    }
+                }
+                None
+            }
+            assert_eq!(find_first_heading_depth(&node), Some(depth));
+        }
+    }
+
+    #[test]
+    fn parse_markdown_html_inline_with_self_closing_tag() {
+        let node = parse_markdown("text <br/> more").expect("parses");
+        fn has_html(n: &Node) -> bool {
+            matches!(n, Node::Html(_)) || get_node_children(n).iter().any(has_html)
+        }
+        assert!(has_html(&node));
+    }
+
+    #[test]
+    fn parse_markdown_paragraph_with_unicode_emoji_passes_through() {
+        let node = parse_markdown("hi 👋 world 🚀").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("👋"));
+        assert!(plain.contains("🚀"));
+    }
+
+    #[test]
+    fn parse_markdown_ordered_list_starting_at_arbitrary_number() {
+        let node = parse_markdown("5. fifth\n6. sixth").expect("parses");
+        fn find_ordered_start(n: &Node) -> Option<u32> {
+            if let Node::List(l) = n {
+                if l.ordered {
+                    return l.start;
+                }
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(s) = find_ordered_start(c) {
+                    return Some(s);
+                }
+            }
+            None
+        }
+        assert_eq!(find_ordered_start(&node), Some(5));
+    }
 }
