@@ -12,11 +12,16 @@ use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
 
+use url::Url;
+
+use crate::VERSION;
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{LanguageModelAbortController, LanguageModelAbortSignal};
 use crate::provider_utils::{
-    ParseJsonResult, convert_base64_to_bytes, normalize_headers, safe_parse_json,
+    DownloadBlobOptions, DownloadBlobResponse, DownloadError, DownloadedBlob, ParseJsonResult,
+    convert_base64_to_bytes, download_blob, normalize_headers, read_response_with_size_limit,
+    safe_parse_json, validate_download_url, with_user_agent_suffix,
 };
 use crate::retry::{DEFAULT_MAX_RETRIES, RetryWithExponentialBackoffOptions};
 
@@ -165,6 +170,299 @@ pub fn prepare_retries(options: PrepareRetriesOptions) -> PreparedRetries {
         max_retries,
         retry_options: RetryWithExponentialBackoffOptions::new().with_max_retries(max_retries),
     }
+}
+
+/// Options accepted by high-level AI download helpers.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CreateDownloadOptions {
+    max_bytes: Option<usize>,
+}
+
+impl CreateDownloadOptions {
+    /// Creates download factory options with upstream defaults.
+    pub const fn new() -> Self {
+        Self { max_bytes: None }
+    }
+
+    /// Sets the maximum accepted download size in bytes.
+    pub const fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Returns the configured byte limit.
+    pub const fn max_bytes(&self) -> Option<usize> {
+        self.max_bytes
+    }
+}
+
+/// Options accepted by [`download`] and [`download_with_transport`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadUrlOptions {
+    url: Url,
+    max_bytes: Option<usize>,
+    abort_signal: Option<LanguageModelAbortSignal>,
+}
+
+impl DownloadUrlOptions {
+    /// Creates download options for a URL.
+    pub fn new(url: Url) -> Self {
+        Self {
+            url,
+            max_bytes: None,
+            abort_signal: None,
+        }
+    }
+
+    /// Sets the maximum accepted download size in bytes.
+    pub const fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Sets the abort signal supplied by the caller.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets the optional abort signal supplied by the caller.
+    pub fn with_optional_abort_signal(
+        mut self,
+        abort_signal: Option<LanguageModelAbortSignal>,
+    ) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+
+    /// Returns the URL to download.
+    pub const fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// Returns the configured byte limit.
+    pub const fn max_bytes(&self) -> Option<usize> {
+        self.max_bytes
+    }
+
+    /// Returns the abort signal.
+    pub const fn abort_signal(&self) -> Option<&LanguageModelAbortSignal> {
+        self.abort_signal.as_ref()
+    }
+}
+
+/// Request passed to an injected high-level download transport.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadTransportRequest {
+    /// URL to fetch.
+    pub url: String,
+
+    /// Headers prepared by the high-level AI SDK download helper.
+    pub headers: Headers,
+
+    /// Optional abort signal propagated to the transport boundary.
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+}
+
+/// Reusable high-level download function created by [`create_download`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DownloadFunction {
+    max_bytes: Option<usize>,
+}
+
+impl DownloadFunction {
+    /// Creates a download function with upstream defaults.
+    pub const fn new() -> Self {
+        Self { max_bytes: None }
+    }
+
+    /// Creates a download function from factory options.
+    pub const fn with_options(options: CreateDownloadOptions) -> Self {
+        Self {
+            max_bytes: options.max_bytes,
+        }
+    }
+
+    /// Returns the configured byte limit.
+    pub const fn max_bytes(&self) -> Option<usize> {
+        self.max_bytes
+    }
+
+    /// Downloads the supplied URL using the default transport.
+    pub async fn download(
+        &self,
+        url: Url,
+        abort_signal: Option<LanguageModelAbortSignal>,
+    ) -> Result<DownloadedBlob, DownloadError> {
+        let mut options = DownloadUrlOptions::new(url).with_optional_abort_signal(abort_signal);
+        options.max_bytes = self.max_bytes;
+        download(options).await
+    }
+}
+
+/// Creates a high-level AI SDK download function.
+pub const fn create_download(options: CreateDownloadOptions) -> DownloadFunction {
+    DownloadFunction::with_options(options)
+}
+
+/// Downloads a URL with the default blocking HTTP transport.
+pub async fn download(options: DownloadUrlOptions) -> Result<DownloadedBlob, DownloadError> {
+    download_with_transport(options, |request| {
+        std::future::ready(execute_download_request(request))
+    })
+    .await
+}
+
+/// Downloads a URL using an injected transport.
+pub async fn download_with_transport<Transport, TransportFuture>(
+    options: DownloadUrlOptions,
+    transport: Transport,
+) -> Result<DownloadedBlob, DownloadError>
+where
+    Transport: FnOnce(DownloadTransportRequest) -> TransportFuture,
+    TransportFuture: Future<Output = Result<DownloadBlobResponse, DownloadError>>,
+{
+    let DownloadUrlOptions {
+        url,
+        max_bytes,
+        abort_signal,
+    } = options;
+    let url_text = url.to_string();
+
+    if url.scheme() == "data" {
+        return download_data_url(&url_text, max_bytes);
+    }
+
+    let request_headers = download_request_headers();
+    download_blob(
+        DownloadBlobOptions {
+            url: url_text,
+            max_bytes,
+        },
+        move |validated_url| {
+            transport(DownloadTransportRequest {
+                url: validated_url.to_string(),
+                headers: request_headers,
+                abort_signal,
+            })
+        },
+    )
+    .await
+}
+
+fn download_request_headers() -> Headers {
+    with_user_agent_suffix(
+        Some(Vec::<(String, Option<String>)>::new()),
+        [format!("ai-sdk/{VERSION}")],
+    )
+}
+
+fn download_data_url(
+    url_text: &str,
+    max_bytes: Option<usize>,
+) -> Result<DownloadedBlob, DownloadError> {
+    validate_download_url(url_text)?;
+
+    let (header, payload) = url_text
+        .split_once(',')
+        .ok_or_else(|| DownloadError::new(url_text, "Invalid data URL format"))?;
+    let header = header
+        .strip_prefix("data:")
+        .ok_or_else(|| DownloadError::new(url_text, "Invalid data URL format"))?;
+    let mut header_parts = header.split(';');
+    let media_type = header_parts
+        .next()
+        .filter(|media_type| !media_type.is_empty())
+        .map(str::to_string);
+    let is_base64 = header_parts.any(|part| part.eq_ignore_ascii_case("base64"));
+    let data = if is_base64 {
+        convert_base64_to_bytes(payload)
+            .map_err(|_| DownloadError::new(url_text, "Invalid data URL base64 payload"))?
+    } else {
+        percent_decode_data_url_payload(payload)
+            .ok_or_else(|| DownloadError::new(url_text, "Invalid data URL percent encoding"))?
+    };
+    let data =
+        read_response_with_size_limit(url_text, std::iter::once(data.as_slice()), None, max_bytes)?;
+    let mut blob = DownloadedBlob::new(data);
+
+    if let Some(media_type) = media_type {
+        blob = blob.with_media_type(media_type);
+    }
+
+    Ok(blob)
+}
+
+fn percent_decode_data_url_payload(payload: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(payload.len());
+    let mut bytes = payload.as_bytes().iter().copied();
+
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = bytes.next().and_then(hex_value)?;
+            let low = bytes.next().and_then(hex_value)?;
+            decoded.push((high << 4) | low);
+        } else {
+            decoded.push(byte);
+        }
+    }
+
+    Some(decoded)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn execute_download_request(
+    request: DownloadTransportRequest,
+) -> Result<DownloadBlobResponse, DownloadError> {
+    if request
+        .abort_signal
+        .as_ref()
+        .is_some_and(LanguageModelAbortSignal::is_aborted)
+    {
+        return Err(DownloadError::with_cause_message(
+            request.url,
+            "The operation was aborted.",
+        ));
+    }
+
+    let mut builder = ureq::get(&request.url);
+
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let mut response = builder
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(|error| DownloadError::with_cause_message(&request.url, error.to_string()))?;
+    let status = response.status();
+    let status_text = status.canonical_reason().unwrap_or("").to_string();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect::<Headers>();
+    let body = response
+        .body_mut()
+        .read_to_vec()
+        .map_err(|error| DownloadError::with_cause_message(&request.url, error.to_string()))?;
+
+    Ok(DownloadBlobResponse::bytes(status.as_u16(), status_text, body).with_headers(headers))
 }
 
 /// Error returned when an async-iterable stream read or cancellation fails.
@@ -2070,7 +2368,7 @@ mod tests {
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::future::Future;
+    use std::future::{Future, ready};
     use std::pin::Pin;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, mpsc};
@@ -2080,19 +2378,22 @@ mod tests {
     use super::{
         AbortSignalSource, AbortTimeoutOptions, AsyncIterableStream, AsyncIterableStreamError,
         AsyncIterableStreamSource, Callback, CallbackResult, DataUrlTextError,
-        InvalidArgumentError, NotifyCallbacks, PrepareRetriesOptions, SerialJobError,
-        SerialJobExecutor, ServerResponseWriter, SimulateReadableStreamOptions, StitchableStream,
-        StitchableStreamRead, VecAsyncIterableStreamSource, WriteToServerResponseOptions,
-        cosine_similarity, create_async_iterable_stream, create_async_iterable_stream_from_source,
-        create_stitchable_stream, fix_json, get_potential_start_index, get_text_from_data_url,
-        is_deep_equal_data, merge_abort_signals, merge_callbacks, merge_objects, notify,
-        parse_partial_json, prepare_headers, prepare_retries, set_abort_timeout,
-        simulate_readable_stream, simulate_readable_stream_with_delay, split_array,
-        write_to_server_response,
+        DownloadTransportRequest, DownloadUrlOptions, InvalidArgumentError, NotifyCallbacks,
+        PrepareRetriesOptions, SerialJobError, SerialJobExecutor, ServerResponseWriter,
+        SimulateReadableStreamOptions, StitchableStream, StitchableStreamRead,
+        VecAsyncIterableStreamSource, WriteToServerResponseOptions, cosine_similarity,
+        create_async_iterable_stream, create_async_iterable_stream_from_source,
+        create_stitchable_stream, download_with_transport, fix_json, get_potential_start_index,
+        get_text_from_data_url, is_deep_equal_data, merge_abort_signals, merge_callbacks,
+        merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
+        set_abort_timeout, simulate_readable_stream, simulate_readable_stream_with_delay,
+        split_array, write_to_server_response,
     };
     use crate::headers::Headers;
     use crate::json::JsonValue;
     use crate::language_model::{LanguageModelAbortController, LanguageModelAbortSignal};
+    use crate::provider_utils::{DownloadBlobResponse, DownloadError};
+    use url::Url;
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
@@ -2249,6 +2550,40 @@ mod tests {
         VecAsyncIterableStreamSource::new(chunks)
     }
 
+    fn download_url_options(url: &str) -> DownloadUrlOptions {
+        DownloadUrlOptions::new(Url::parse(url).expect("valid test URL"))
+    }
+
+    fn download_response(
+        status_code: u16,
+        status_text: &str,
+        body: impl Into<Vec<u8>>,
+        media_type: Option<&str>,
+    ) -> DownloadBlobResponse {
+        let mut headers = Headers::new();
+        if let Some(media_type) = media_type {
+            headers.insert("content-type".to_string(), media_type.to_string());
+        }
+
+        DownloadBlobResponse::bytes(status_code, status_text, body).with_headers(headers)
+    }
+
+    fn expect_download_rejected_before_transport(url: &str) -> DownloadError {
+        let transport_called = Rc::new(RefCell::new(false));
+        let transport_called_for_request = Rc::clone(&transport_called);
+        let error = poll_ready(download_with_transport(
+            download_url_options(url),
+            move |_request| {
+                *transport_called_for_request.borrow_mut() = true;
+                ready(Ok(download_response(200, "OK", Vec::<u8>::new(), None)))
+            },
+        ))
+        .expect_err("download should fail before transport");
+
+        assert!(!*transport_called.borrow());
+        error
+    }
+
     #[derive(Default)]
     struct NoopWake;
 
@@ -2289,6 +2624,17 @@ mod tests {
         let mut context = Context::from_waker(&waker);
         match future.poll(&mut context) {
             Poll::Ready(()) => {}
+            Poll::Pending => panic!("future should be ready"),
+        }
+    }
+
+    fn poll_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+
+        match Future::poll(future.as_mut(), &mut context) {
+            Poll::Ready(result) => result,
             Poll::Pending => panic!("future should be ready"),
         }
     }
@@ -2769,6 +3115,221 @@ mod tests {
 
         assert_eq!(prepared.max_retries(), 2);
         assert_eq!(prepared.retry_options().max_retries, 2);
+    }
+
+    #[test]
+    fn download_should_reject_private_ipv4_addresses() {
+        for url in [
+            "http://127.0.0.1/file",
+            "http://10.0.0.1/file",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            let error = expect_download_rejected_before_transport(url);
+            assert_eq!(error.name(), DownloadError::NAME);
+        }
+    }
+
+    #[test]
+    fn download_should_reject_localhost() {
+        let error = expect_download_rejected_before_transport("http://localhost/file");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+    }
+
+    #[test]
+    fn download_should_reject_redirects_to_private_ip_addresses() {
+        let error = poll_ready(download_with_transport(
+            download_url_options("https://evil.com/redirect"),
+            |_request| {
+                ready(Ok(download_response(
+                    200,
+                    "OK",
+                    b"secret".to_vec(),
+                    Some("text/plain"),
+                )
+                .with_final_url("http://169.254.169.254/latest/meta-data/")))
+            },
+        ))
+        .expect_err("private redirect is rejected");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+    }
+
+    #[test]
+    fn download_should_reject_redirects_to_localhost() {
+        let error = poll_ready(download_with_transport(
+            download_url_options("https://evil.com/redirect"),
+            |_request| {
+                ready(Ok(download_response(
+                    200,
+                    "OK",
+                    b"secret".to_vec(),
+                    Some("text/plain"),
+                )
+                .with_final_url("http://localhost:8080/admin")))
+            },
+        ))
+        .expect_err("localhost redirect is rejected");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+    }
+
+    #[test]
+    fn download_should_allow_redirects_to_safe_urls() {
+        let content = vec![1, 2, 3];
+        let result = poll_ready(download_with_transport(
+            download_url_options("https://example.com/image.png"),
+            {
+                let content = content.clone();
+                move |_request| {
+                    ready(Ok(download_response(200, "OK", content, Some("image/png"))
+                        .with_final_url("https://cdn.example.com/image.png")))
+                }
+            },
+        ))
+        .expect("safe redirect downloads");
+
+        assert_eq!(result.data, vec![1, 2, 3]);
+        assert_eq!(result.media_type.as_deref(), Some("image/png"));
+    }
+
+    #[test]
+    fn download_should_download_data_successfully_and_match_expected_bytes() {
+        let expected_bytes = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let captured_request = Rc::new(RefCell::new(None::<DownloadTransportRequest>));
+        let captured_request_for_transport = Rc::clone(&captured_request);
+        let result = poll_ready(download_with_transport(
+            download_url_options("http://example.com/file"),
+            {
+                let expected_bytes = expected_bytes.clone();
+                move |request| {
+                    *captured_request_for_transport.borrow_mut() = Some(request);
+                    ready(Ok(download_response(
+                        200,
+                        "OK",
+                        expected_bytes,
+                        Some("application/octet-stream"),
+                    )))
+                }
+            },
+        ))
+        .expect("download succeeds");
+
+        assert_eq!(result.data, expected_bytes);
+        assert_eq!(
+            result.media_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        let request = captured_request
+            .borrow()
+            .clone()
+            .expect("transport was called");
+        assert_eq!(request.url, "http://example.com/file");
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/"))
+        );
+    }
+
+    #[test]
+    fn download_should_allow_inline_data_urls() {
+        let transport_called = Rc::new(RefCell::new(false));
+        let transport_called_for_request = Rc::clone(&transport_called);
+        let result = poll_ready(download_with_transport(
+            download_url_options("data:text/plain;base64,aGVsbG8="),
+            move |_request| {
+                *transport_called_for_request.borrow_mut() = true;
+                ready(Ok(download_response(200, "OK", Vec::<u8>::new(), None)))
+            },
+        ))
+        .expect("data URL downloads");
+
+        assert_eq!(result.data, b"hello".to_vec());
+        assert_eq!(result.media_type.as_deref(), Some("text/plain"));
+        assert!(!*transport_called.borrow());
+    }
+
+    #[test]
+    fn download_should_throw_download_error_when_response_is_not_ok() {
+        let error = poll_ready(download_with_transport(
+            download_url_options("http://example.com/file"),
+            |_request| ready(Ok(DownloadBlobResponse::new(404, "Not Found"))),
+        ))
+        .expect_err("non-OK response errors");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert_eq!(error.status_code(), Some(404));
+        assert_eq!(error.status_text(), Some("Not Found"));
+    }
+
+    #[test]
+    fn download_should_throw_download_error_when_fetch_throws_an_error() {
+        let error = poll_ready(download_with_transport(
+            download_url_options("http://example.com/file"),
+            |request| {
+                ready(Err(DownloadError::with_cause_message(
+                    request.url,
+                    "Network error",
+                )))
+            },
+        ))
+        .expect_err("transport failure errors");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert_eq!(error.cause_message(), Some("Network error"));
+    }
+
+    #[test]
+    fn download_should_abort_when_response_exceeds_default_size_limit() {
+        let mut headers = Headers::new();
+        headers.insert(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        );
+        headers.insert(
+            "content-length".to_string(),
+            (3_u128 * 1024 * 1024 * 1024).to_string(),
+        );
+        let error = poll_ready(download_with_transport(
+            download_url_options("http://example.com/large"),
+            move |_request| {
+                ready(Ok(DownloadBlobResponse::bytes(200, "OK", vec![0; 10])
+                    .with_headers(headers.clone())))
+            },
+        ))
+        .expect_err("oversized response errors");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert!(error.message().contains("exceeded maximum size"));
+    }
+
+    #[test]
+    fn download_should_pass_abort_signal_to_fetch() {
+        let abort_controller = LanguageModelAbortController::new();
+        let signal = abort_controller.signal();
+        abort_controller.abort();
+        let captured_signal = Rc::new(RefCell::new(None::<LanguageModelAbortSignal>));
+        let captured_signal_for_transport = Rc::clone(&captured_signal);
+        let error = poll_ready(download_with_transport(
+            download_url_options("http://example.com/file").with_abort_signal(signal.clone()),
+            move |request| {
+                *captured_signal_for_transport.borrow_mut() = request.abort_signal;
+                ready(Err(DownloadError::with_cause_message(
+                    request.url,
+                    "The operation was aborted.",
+                )))
+            },
+        ))
+        .expect_err("aborted download errors");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        let captured_signal = captured_signal
+            .borrow()
+            .clone()
+            .expect("transport received abort signal");
+        assert!(captured_signal.is_aborted());
     }
 
     #[test]

@@ -471,7 +471,8 @@ pub use upload_skill::{
 pub use util::{
     AbortSignalSource, AbortTimeoutHandle, AbortTimeoutOptions, AsyncIterableStream,
     AsyncIterableStreamError, AsyncIterableStreamIterator, AsyncIterableStreamSource, Callback,
-    CallbackFunction, CallbackFuture, CallbackResult, CallbackSettleFuture, DataUrlTextError,
+    CallbackFunction, CallbackFuture, CallbackResult, CallbackSettleFuture, CreateDownloadOptions,
+    DataUrlTextError, DownloadFunction, DownloadTransportRequest, DownloadUrlOptions,
     InvalidArgumentError as AiInvalidArgumentError, NotifyCallbacks, NotifyFuture,
     ParsePartialJsonResult, ParsePartialJsonState, PrepareRetriesOptions, PreparedRetries,
     SerialJobError, SerialJobExecutor, SerialJobHandle, SerialJobResult, ServerResponseWriter,
@@ -479,11 +480,11 @@ pub use util::{
     SimulateReadableStreamOptions, SimulateReadableStreamResult, SimulatedReadableStream,
     SplitArrayError, StitchableStream, StitchableStreamError, StitchableStreamRead,
     VecAsyncIterableStreamSource, WriteToServerResponseOptions, cosine_similarity,
-    create_async_iterable_stream, create_async_iterable_stream_from_source,
-    create_stitchable_stream, fix_json, get_potential_start_index, get_text_from_data_url,
-    is_deep_equal_data, merge_abort_signals, merge_callbacks, merge_objects, notify,
-    parse_partial_json, prepare_headers, prepare_retries, set_abort_timeout,
-    simulate_readable_stream, simulate_readable_stream_with_delay, split_array,
+    create_async_iterable_stream, create_async_iterable_stream_from_source, create_download,
+    create_stitchable_stream, download, download_with_transport, fix_json,
+    get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_abort_signals,
+    merge_callbacks, merge_objects, notify, parse_partial_json, prepare_headers, prepare_retries,
+    set_abort_timeout, simulate_readable_stream, simulate_readable_stream_with_delay, split_array,
     write_to_server_response,
 };
 pub use vercel::{
