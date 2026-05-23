@@ -16,7 +16,9 @@ use crate::language_model::{
     LanguageModelResponse, LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
-use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
+use crate::prompt::{
+    Prompt, prompt_has_url_files, standardize_and_convert_to_language_model_prompt,
+};
 use crate::provider::{
     ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions, TypeValidationError,
 };
@@ -737,7 +739,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
     /// This standardizes text prompts and instructions before delegating to
     /// the provider-v4 language model prompt boundary.
     pub fn from_prompt(model: &'a M, prompt: Prompt) -> Result<Self, InvalidPromptError> {
-        let prompt = standardize_prompt(prompt)?.into_language_model_prompt();
+        let prompt = standardize_and_convert_to_language_model_prompt(prompt)?;
         Ok(Self::new(model, prompt))
     }
 

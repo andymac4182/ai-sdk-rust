@@ -315,9 +315,9 @@ pub use prompt::{
     InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
     PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
     TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-    convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
-    get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
-    prepare_tool_choice, standardize_prompt,
+    convert_to_language_model_prompt, convert_to_language_model_v4_file_part, get_chunk_timeout_ms,
+    get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+    prepare_language_model_call_options, prepare_tool_choice, standardize_prompt,
 };
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,

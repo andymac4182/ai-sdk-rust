@@ -604,6 +604,24 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `convertToLanguageModelPrompt` validation parity
+  added the public Rust `convert_to_language_model_prompt` helper plus
+  `StandardizedPrompt::try_into_language_model_prompt`, with 4 named
+  counterparts for upstream
+  `prompt/convert-to-language-model-prompt.validation.test.ts`:
+  `convert_to_language_model_prompt_validation_should_pass_for_provider_executed_tools_deferred_results`,
+  `convert_to_language_model_prompt_validation_should_pass_for_tool_approval_response`,
+  `convert_to_language_model_prompt_validation_should_preserve_provider_executed_tool_approval_response`,
+  and
+  `convert_to_language_model_prompt_validation_should_throw_error_for_actual_missing_results`.
+  Rust now filters assistant approval requests, uses non-provider approval
+  responses only for validation, preserves provider-executed approval responses
+  in provider-facing tool messages, and raises `MissingToolResultsError` for
+  unresolved local tool calls. The high-level text/object stream and generate
+  `from_prompt` constructors now use the validated conversion path before model
+  calls while preserving their existing `InvalidPromptError` boundary, with
+  `generate_text_from_prompt_rejects_missing_tool_results_before_model_call`
+  covering the root generate-text integration path.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
@@ -3303,6 +3321,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    array instructions, `system` alias fallback, `instructions` precedence, and
    typed-boundary rejection for JavaScript-only malformed system-message
    content parts.
+   The upstream `prompt/convert-to-language-model-prompt.validation.test.ts`
+   cases now have named Rust counterparts in
+   `convert_to_language_model_prompt_validation_should_*`, covering
+   provider-executed deferred tool calls, approval responses satisfying missing
+   local result validation, provider-executed approval response preservation,
+   and `MissingToolResultsError` for unresolved local tool calls.
    The upstream `prompt/prepare-tool-choice.test.ts` cases now have named Rust
    counterparts in `prepare_tool_choice_*`, covering missing/default `auto`,
    `none`, specific tool object with `toolName`, explicit `auto`, and
