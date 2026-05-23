@@ -140,8 +140,24 @@ fn render_child(child: &CardChild) -> Vec<String> {
             }
         }
         CardChild::Divider(_) => vec!["---".to_string()],
-        _ => vec![],
+        CardChild::Link(l) => vec![format!("{}: {}", l.label, l.url)],
+        CardChild::Table(t) => render_table(t),
     }
+}
+
+/// Render a [`TableElement`] as plain pipe-separated rows. 1:1 with
+/// upstream's text-fallback table handling: header row joined by
+/// `" | "`, then each body row likewise. No alignment, no separator
+/// line - Messenger's text branch is intentionally minimal.
+fn render_table(t: &chat_sdk_chat::cards::TableElement) -> Vec<String> {
+    let mut lines = Vec::with_capacity(t.rows.len() + 1);
+    if !t.headers.is_empty() {
+        lines.push(t.headers.join(" | "));
+    }
+    for row in &t.rows {
+        lines.push(row.join(" | "));
+    }
+    lines
 }
 
 fn render_text(t: &TextElement) -> Vec<String> {
@@ -273,6 +289,272 @@ mod tests {
         let decoded = decode_messenger_callback_data(Some(&encoded));
         assert_eq!(decoded.action_id, action_id);
         assert_eq!(decoded.value.as_deref(), Some(value));
+    }
+
+    // ---------- text fallback rendering (13 upstream cases) ----------
+
+    use chat_sdk_chat::cards::{
+        ActionsKind, ButtonElement, ButtonKind, ButtonStyle, CardKind, DividerElement, DividerKind,
+        FieldElement, FieldKind, FieldsKind, ImageElement, ImageKind, LinkButtonElement,
+        LinkButtonKind, LinkElement, LinkKind, SectionElement, SectionKind, TableElement,
+        TableKind, TextKind,
+    };
+
+    fn card(title: Option<&str>, subtitle: Option<&str>, children: Vec<CardChild>) -> CardElement {
+        CardElement {
+            title: title.map(str::to_owned),
+            subtitle: subtitle.map(str::to_owned),
+            image_url: None,
+            kind: CardKind::Card,
+            children,
+        }
+    }
+
+    fn text_child(content: &str) -> CardChild {
+        CardChild::Text(TextElement {
+            content: content.to_string(),
+            style: None,
+            kind: TextKind::Text,
+        })
+    }
+
+    #[test]
+    fn renders_simple_card_with_title() {
+        let c = card(Some("Hello World"), None, vec![]);
+        assert_eq!(card_to_messenger_text(&c), "Hello World");
+    }
+
+    #[test]
+    fn renders_card_with_title_and_subtitle() {
+        let c = card(Some("Order #1234"), Some("Status update"), vec![]);
+        assert_eq!(card_to_messenger_text(&c), "Order #1234\nStatus update");
+    }
+
+    #[test]
+    fn renders_card_with_text_content() {
+        let c = card(
+            Some("Notification"),
+            None,
+            vec![text_child("Your order has been shipped!")],
+        );
+        assert_eq!(
+            card_to_messenger_text(&c),
+            "Notification\n\nYour order has been shipped!"
+        );
+    }
+
+    #[test]
+    fn renders_card_with_fields() {
+        let c = card(
+            Some("Order Details"),
+            None,
+            vec![CardChild::Fields(FieldsElement {
+                children: vec![
+                    FieldElement {
+                        label: "Order ID".to_string(),
+                        value: "12345".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                    FieldElement {
+                        label: "Status".to_string(),
+                        value: "Shipped".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                ],
+                kind: FieldsKind::Fields,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(result.contains("Order ID: 12345"), "got: {result}");
+        assert!(result.contains("Status: Shipped"), "got: {result}");
+    }
+
+    #[test]
+    fn renders_card_with_link_buttons_as_text_with_urls() {
+        let c = card(
+            Some("Actions"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::LinkButton(LinkButtonElement {
+                        label: "Track Order".to_string(),
+                        style: None,
+                        kind: LinkButtonKind::LinkButton,
+                        url: "https://example.com/track".to_string(),
+                    }),
+                    ActionsChild::LinkButton(LinkButtonElement {
+                        label: "Get Help".to_string(),
+                        style: None,
+                        kind: LinkButtonKind::LinkButton,
+                        url: "https://example.com/help".to_string(),
+                    }),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(
+            result.contains("Track Order: https://example.com/track"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("Get Help: https://example.com/help"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn renders_card_with_action_buttons_as_bracketed_text() {
+        let c = card(
+            Some("Approve?"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Button(ButtonElement {
+                        action_type: None,
+                        callback_url: None,
+                        disabled: None,
+                        id: "approve".to_string(),
+                        label: "Approve".to_string(),
+                        style: Some(ButtonStyle::Primary),
+                        kind: ButtonKind::Button,
+                        value: None,
+                    }),
+                    ActionsChild::Button(ButtonElement {
+                        action_type: None,
+                        callback_url: None,
+                        disabled: None,
+                        id: "reject".to_string(),
+                        label: "Reject".to_string(),
+                        style: Some(ButtonStyle::Danger),
+                        kind: ButtonKind::Button,
+                        value: None,
+                    }),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(result.contains("[Approve]"), "got: {result}");
+        assert!(result.contains("[Reject]"), "got: {result}");
+    }
+
+    #[test]
+    fn renders_card_with_inline_image() {
+        let c = card(
+            Some("Image Card"),
+            None,
+            vec![CardChild::Image(ImageElement {
+                url: "https://example.com/image.png".to_string(),
+                alt: Some("Example image".to_string()),
+                kind: ImageKind::Image,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(
+            result.contains("Example image: https://example.com/image.png"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn renders_image_url_without_alt_text() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Image(ImageElement {
+                url: "https://example.com/photo.jpg".to_string(),
+                alt: None,
+                kind: ImageKind::Image,
+            })],
+        );
+        assert_eq!(card_to_messenger_text(&c), "https://example.com/photo.jpg");
+    }
+
+    #[test]
+    fn renders_card_with_divider() {
+        let c = card(
+            None,
+            None,
+            vec![
+                text_child("Before"),
+                CardChild::Divider(DividerElement {
+                    kind: DividerKind::Divider,
+                }),
+                text_child("After"),
+            ],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(result.contains("---"), "got: {result}");
+    }
+
+    #[test]
+    fn renders_card_with_section() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Section(SectionElement {
+                children: vec![text_child("Section content")],
+                kind: SectionKind::Section,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(result.contains("Section content"), "got: {result}");
+    }
+
+    #[test]
+    fn renders_card_with_link_element() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Link(LinkElement {
+                url: "https://example.com".to_string(),
+                label: "Example Link".to_string(),
+                kind: LinkKind::Link,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(
+            result.contains("Example Link: https://example.com"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn renders_card_with_table() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Table(TableElement {
+                align: None,
+                headers: vec!["Name".to_string(), "Age".to_string()],
+                rows: vec![
+                    vec!["Alice".to_string(), "30".to_string()],
+                    vec!["Bob".to_string(), "25".to_string()],
+                ],
+                kind: TableKind::Table,
+            })],
+        );
+        let result = card_to_messenger_text(&c);
+        assert!(result.contains("Name | Age"), "got: {result}");
+        assert!(result.contains("Alice | 30"), "got: {result}");
+        assert!(result.contains("Bob | 25"), "got: {result}");
+    }
+
+    #[test]
+    fn renders_card_image_url_header() {
+        let card = CardElement {
+            title: Some("Card with Header Image".to_string()),
+            subtitle: None,
+            image_url: Some("https://example.com/header.png".to_string()),
+            kind: CardKind::Card,
+            children: vec![],
+        };
+        let result = card_to_messenger_text(&card);
+        assert!(
+            result.contains("https://example.com/header.png"),
+            "got: {result}"
+        );
     }
 
     // ---------- additive Rust-side coverage ----------
