@@ -990,3 +990,119 @@ thread-id codec; 13 tests; row 0% -> 10%).
   needs `tokio` + `reqwest` as a direct dep before any
   adapter ships real HTTP. Defer to the first adapter that
   needs it (Telegram is simplest API; probably first).
+
+### 2026-05-24 - slices 136..142
+
+**Slices covered**
+
+136 (chat-sdk-adapter-linear scaffold: 11 tests; 0% -> 10%).
+137 (chat-sdk-adapter-gchat scaffold w/ empty-thread top-level
+sentinel: 14 tests; 0% -> 10%).
+138 (chat-sdk-adapter-teams scaffold w/ rsplit Bot Framework
+conversation-id parsing: 12 tests; 0% -> 10%).
+139 (chat-sdk-adapter-slack scaffold w/ is_dm/is_group
+channel-id predicates: 14 tests; 0% -> 10%). All 9 Phase-2
+adapter scaffolds complete.
+140 (chat-sdk-state-redis scaffold: RedisStateAdapter impls
+the slice-117 StateAdapter trait with NotConnected
+placeholders; 11 tests; 0% -> 10%). Phase 3 started.
+141 (chat-sdk-state-ioredis scaffold w/ cluster + Sentinel
+config: 11 tests; 0% -> 10%).
+142 (chat-sdk-state-pg scaffold w/ DEFAULT_TABLE_PREFIX +
+state_table()/lists_table() helpers: 10 tests; 0% -> 10%).
+**All 12 originally-not-started packages now in-progress; 0
+at not-started.**
+
+**What the brief got right (validated)**
+
+- The adapter-scaffold template codified in slice 135 ported
+  cleanly to 4 more adapter crates AND 3 state-backend crates.
+  Each landed in one slice, ~250 LOC + 10-14 mapped tests.
+  Total adapter-scaffold throughput: 9 Phase-2 adapters in
+  10 slices (130-134, 136-139), all using the same recipe.
+- Per-platform variance crystallized into a small set of
+  thread-id-codec families:
+  - Numeric-pair (Telegram chat_id+message_thread_id with the
+    second optional).
+  - Owner/repo/number triple (GitHub).
+  - Opaque-pair (Messenger PSID, WhatsApp phone-number-id +
+    customer phone, Linear team_key + issue_uuid).
+  - Opaque-pair with DM sentinel (Discord @me, Slack channel
+    prefix D/G).
+  - Opaque-pair with top-level sentinel (GChat empty thread_id).
+  - Inner-colon-tolerant (Teams Bot Framework rsplit).
+  Each family is ~30 LOC of decoder + ~5 tests. A future
+  `chat-sdk-adapter-shared::thread_id::Decoded2PartKey` helper
+  could absorb the 5+ opaque-pair variants; defer until the
+  HTTP wire-up makes the per-adapter code grow.
+- The Phase-3 state backends adapted the same template by
+  swapping the Adapter trait impl for the StateAdapter trait
+  impl. The 5 required methods that have no defaults return
+  `Err(NotConnected)` until the real client wires in — this is
+  the minimal valid impl, lets the crate compile, and exercises
+  the trait shape via tests.
+
+**What the brief got wrong or left out**
+
+- **Slice 135's prediction "~30-50 slices per adapter to reach
+  verified" stands.** The scaffold is 1 slice; the HTTP layer +
+  card rendering + per-event handler model is the bulk. The
+  workspace still hasn't committed to `tokio + reqwest`. Open
+  refinement: the next session must start with that commitment
+  — pick one adapter (Telegram, simplest API) and ship the
+  HTTP-layer slice that pulls in tokio + reqwest + reqwest-test
+  for HTTP mocking. After that, the per-adapter port is just
+  applying the same pattern.
+- **State-backend scaffolds are smaller than adapter scaffolds**
+  (10 tests vs 13) because they don't have a thread-id codec.
+  The variance is in the config struct: cluster vs sentinel vs
+  single-node (Redis family) and table prefix vs connection
+  pool (Postgres). Future Phase-3 work will need the same
+  workspace runtime decision.
+- **All 18 packages now have at least a scaffold or
+  verified/js-only-documented mark.** The remaining work is
+  exclusively in-progress -> verified, which is the long-tail
+  per-package HTTP/I/O ports. Open refinement: re-baseline the
+  estimator scale once one of the in-progress packages reaches
+  full HTTP coverage so the 10% mark and the 100% target both
+  have real anchor points.
+
+**Stale or misleading guidance**
+
+- The slice 128 / 135 "Phase 2 / Phase 3 prep" section
+  predicted tokio + reqwest + redis-rs + tokio-postgres. All
+  three state backends and all 9 adapter scaffolds have
+  followed that plan exactly — no surprises. Prediction held.
+- The slice 128 priority order (smallest-first) bore out for
+  the 9 adapters: Telegram (7/3) -> GitHub (7/3) -> Messenger
+  (7/3) -> WhatsApp (7/3) -> Discord (8/4) -> Linear (9/4) ->
+  GChat (13/6) -> Teams (16/6) -> Slack (24/11). Each scaffold
+  took roughly the same effort regardless of upstream file
+  count because the scaffold itself is a fixed-size shape.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending — needs
+  a "state-backend scaffold variant" section noting the trait
+  swap (Adapter -> StateAdapter) and a "session 2 kickoff
+  checklist" with the tokio + reqwest commitment.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred to next session**
+
+- **Workspace runtime commitment**: add tokio + reqwest as
+  direct deps on chat-sdk-adapter-shared. This unblocks all 9
+  adapter HTTP layers + state-redis/state-ioredis client
+  wire-up.
+- **state-pg client commitment**: choose between
+  tokio-postgres and sqlx. Recommend sqlx for compile-time
+  query checking; recommend tokio-postgres for lower
+  dependency footprint. No clear preference — adopt whichever
+  the first slice picks.
+- **First HTTP-layer slice**: port Telegram `post_message` end
+  to end (build URL, POST JSON, parse response). Once that
+  pattern lands, the other 8 adapters' post_message methods
+  follow a near-identical recipe.
+- **State-backend client wire-up**: parallel to the adapter
+  HTTP layer. Start with state-redis::set/get/delete using
+  the `redis` crate via tokio.
