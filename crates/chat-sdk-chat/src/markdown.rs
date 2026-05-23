@@ -997,4 +997,75 @@ mod tests {
         };
         assert!(root.children.is_empty());
     }
+
+    // ---------- slice 67: 5 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_extracts_unordered_list_items() {
+        let node = parse_markdown("- alpha\n- beta\n- gamma").expect("parses");
+        let plain = to_plain_text(&node);
+        for item in ["alpha", "beta", "gamma"] {
+            assert!(plain.contains(item), "missing {item}: {plain:?}");
+        }
+        fn has_list_with_three_items(n: &Node) -> bool {
+            if let Node::List(l) = n {
+                if l.children.len() == 3 {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(has_list_with_three_items)
+        }
+        assert!(has_list_with_three_items(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_ordered_list_with_start_field() {
+        let node = parse_markdown("1. first\n2. second").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("first"));
+        assert!(plain.contains("second"));
+        fn find_ordered_list_start(n: &Node) -> Option<u32> {
+            if let Node::List(l) = n {
+                if l.ordered {
+                    return Some(l.start.unwrap_or(1));
+                }
+            }
+            get_node_children(n)
+                .iter()
+                .find_map(find_ordered_list_start)
+        }
+        assert_eq!(find_ordered_list_start(&node), Some(1));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_code_block_with_language() {
+        let node = parse_markdown("```rust\nfn main() {}\n```").expect("parses");
+        fn find_code_lang(n: &Node) -> Option<String> {
+            if let Node::Code(c) = n {
+                return c.lang.clone();
+            }
+            get_node_children(n).iter().find_map(find_code_lang)
+        }
+        assert_eq!(find_code_lang(&node).as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_blockquote_text() {
+        let node = parse_markdown("> quoted text here").expect("parses");
+        assert!(to_plain_text(&node).contains("quoted text here"));
+        fn has_blockquote(n: &Node) -> bool {
+            matches!(n, Node::Blockquote(_)) || get_node_children(n).iter().any(has_blockquote)
+        }
+        assert!(has_blockquote(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_gfm_strikethrough_via_tilde_syntax() {
+        let node = parse_markdown("~~struck through~~").expect("parses");
+        assert_eq!(to_plain_text(&node), "struck through");
+        fn has_delete(n: &Node) -> bool {
+            matches!(n, Node::Delete(_)) || get_node_children(n).iter().any(has_delete)
+        }
+        assert!(has_delete(&node));
+    }
 }
