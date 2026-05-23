@@ -1701,4 +1701,67 @@ mod tests {
         assert!(plain.starts_with("leading bold"));
         assert!(plain.contains("then text"));
     }
+
+    // ---------- slice 81: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_paragraph_followed_by_heading_keeps_both() {
+        let node = parse_markdown("paragraph\n\n## heading").expect("parses");
+        let root = match &node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        assert_eq!(root.children.len(), 2);
+        assert!(matches!(root.children[0], Node::Paragraph(_)));
+        assert!(matches!(root.children[1], Node::Heading(_)));
+    }
+
+    #[test]
+    fn parse_markdown_lists_with_inline_emphasis_inside_items() {
+        let node = parse_markdown("- with *emphasis*\n- with **strong**").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("emphasis"));
+        assert!(plain.contains("strong"));
+    }
+
+    #[test]
+    fn parse_markdown_link_with_dashes_and_paths_in_url() {
+        let node = parse_markdown("[docs](https://example.com/path/to-page?ref=foo&q=2#section)")
+            .expect("parses");
+        fn find_link_url(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return Some(l.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_link_url(&node).as_deref(),
+            Some("https://example.com/path/to-page?ref=foo&q=2#section")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_text_node_value_is_exact_for_simple_input() {
+        let node = parse_markdown("simple text without formatting").expect("parses");
+        fn first_text_value(n: &Node) -> Option<String> {
+            if let Node::Text(t) = n {
+                return Some(t.value.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(v) = first_text_value(c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            first_text_value(&node).as_deref(),
+            Some("simple text without formatting")
+        );
+    }
 }
