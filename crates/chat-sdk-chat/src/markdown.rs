@@ -1661,22 +1661,23 @@ mod tests {
     #[test]
     fn parse_markdown_code_block_without_language_has_none_lang() {
         let node = parse_markdown("```\nplain code\n```").expect("parses");
-        fn find_code(n: &Node) -> Option<&Code> {
-            if let Node::Code(c) = n {
-                return Some(c);
-            }
-            None
-        }
-        let mut found = None;
-        for child in get_node_children(&node).iter() {
-            if let Some(c) = find_code(child) {
-                found = Some(c);
-                break;
-            }
-        }
-        let c = found.expect("code block parses at root level");
-        assert!(c.lang.is_none());
-        assert_eq!(c.value, "plain code");
+        let root = match &node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        let code = root
+            .children
+            .iter()
+            .find_map(|c| {
+                if let Node::Code(code) = c {
+                    Some(code)
+                } else {
+                    None
+                }
+            })
+            .expect("code block parses at root level");
+        assert!(code.lang.is_none());
+        assert_eq!(code.value, "plain code");
     }
 
     #[test]
