@@ -247,6 +247,140 @@ pub enum Emoji {
 /// `export type EmojiMapConfig = Partial<Record<Emoji, EmojiFormats>>`.
 pub type EmojiMapConfig = std::collections::HashMap<Emoji, EmojiFormats>;
 
+/// What to do when the per-thread message queue is full. 1:1 port of
+/// upstream `"drop-oldest" | "drop-newest"` literal union on
+/// [`ConcurrencyConfig::on_queue_full`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueueFullPolicy {
+    DropOldest,
+    DropNewest,
+}
+
+/// Fine-grained concurrency configuration. 1:1 port of upstream
+/// `interface ConcurrencyConfig`.
+///
+/// Every field except `strategy` is optional (matches upstream `?:`
+/// notation), so adapters can use either a strategy-only `ConcurrencyConfig`
+/// or a fully-tuned one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConcurrencyConfig {
+    /// Debounce window in milliseconds (debounce/burst strategies).
+    /// Default: 1500.
+    #[serde(
+        rename = "debounceMs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub debounce_ms: Option<u32>,
+    /// Max concurrent handlers per thread (concurrent strategy).
+    /// Default: `Infinity` upstream → `None` here (no cap).
+    #[serde(
+        rename = "maxConcurrent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent: Option<u32>,
+    /// Max queued messages per thread (queue/burst strategy). Default: 10.
+    #[serde(
+        rename = "maxQueueSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_queue_size: Option<u32>,
+    /// What to do when the queue is full. Default: `DropOldest`.
+    #[serde(
+        rename = "onQueueFull",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub on_queue_full: Option<QueueFullPolicy>,
+    /// TTL for queued entries in milliseconds. Default: 90000 (90s).
+    #[serde(
+        rename = "queueEntryTtlMs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub queue_entry_ttl_ms: Option<u32>,
+    /// The concurrency strategy to use.
+    pub strategy: ConcurrencyStrategy,
+}
+
+/// Whether a chat author is a bot. 1:1 port of the upstream
+/// `boolean | "unknown"` union on [`Author::is_bot`]. Rust has no implicit
+/// "either bool or sentinel string" — the explicit enum keeps wire shape
+/// honest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BotStatus {
+    /// Definite yes/no via a JSON boolean.
+    Known(bool),
+    /// Upstream sentinel string when the platform can't tell.
+    Unknown(UnknownLiteral),
+}
+
+/// Tag type that serializes to/from the literal string `"unknown"` —
+/// used inside [`BotStatus::Unknown`] so the untagged enum can
+/// distinguish a JSON `true`/`false` from the string `"unknown"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UnknownLiteral {
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+impl BotStatus {
+    /// `BotStatus::Known(true)` shortcut.
+    pub const TRUE: Self = Self::Known(true);
+    /// `BotStatus::Known(false)` shortcut.
+    pub const FALSE: Self = Self::Known(false);
+    /// `BotStatus::Unknown(UnknownLiteral::Unknown)` shortcut.
+    pub const UNKNOWN: Self = Self::Unknown(UnknownLiteral::Unknown);
+}
+
+/// Message author. 1:1 port of upstream `interface Author`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Author {
+    /// Display name.
+    #[serde(rename = "fullName")]
+    pub full_name: String,
+    /// Whether the author is a bot. `Unknown` when the platform cannot tell.
+    #[serde(rename = "isBot")]
+    pub is_bot: BotStatus,
+    /// Whether the author is this bot.
+    #[serde(rename = "isMe")]
+    pub is_me: bool,
+    /// Unique user ID.
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    /// Username/handle for @-mentions.
+    #[serde(rename = "userName")]
+    pub user_name: String,
+}
+
+/// User information returned by `adapter.getUser()`. 1:1 port of upstream
+/// `interface UserInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInfo {
+    /// URL to the user's avatar/profile image.
+    #[serde(rename = "avatarUrl", default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// User's email address (requires appropriate scopes on some platforms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// User's display name / full name.
+    #[serde(rename = "fullName")]
+    pub full_name: String,
+    /// Whether the user is a bot.
+    #[serde(rename = "isBot")]
+    pub is_bot: bool,
+    /// Platform-specific user ID.
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    /// Username/handle.
+    #[serde(rename = "userName")]
+    pub user_name: String,
+}
+
 /// State-backend lock token. 1:1 port of upstream
 /// `interface Lock { expiresAt: number; threadId: string; token: string }`.
 ///
@@ -567,5 +701,123 @@ mod tests {
         );
         let back: Lock = serde_json::from_str(&json).unwrap();
         assert_eq!(back, lock);
+    }
+
+    #[test]
+    fn queue_full_policy_uses_upstream_kebab_strings() {
+        assert_eq!(
+            serde_json::to_string(&QueueFullPolicy::DropOldest).unwrap(),
+            "\"drop-oldest\""
+        );
+        assert_eq!(
+            serde_json::to_string(&QueueFullPolicy::DropNewest).unwrap(),
+            "\"drop-newest\""
+        );
+    }
+
+    #[test]
+    fn concurrency_config_round_trips_minimum_shape() {
+        // Strategy-only — every other field omitted.
+        let config = ConcurrencyConfig {
+            debounce_ms: None,
+            max_concurrent: None,
+            max_queue_size: None,
+            on_queue_full: None,
+            queue_entry_ttl_ms: None,
+            strategy: ConcurrencyStrategy::Queue,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, "{\"strategy\":\"queue\"}");
+        let back: ConcurrencyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn concurrency_config_round_trips_full_shape() {
+        let config = ConcurrencyConfig {
+            debounce_ms: Some(1500),
+            max_concurrent: Some(4),
+            max_queue_size: Some(10),
+            on_queue_full: Some(QueueFullPolicy::DropOldest),
+            queue_entry_ttl_ms: Some(90_000),
+            strategy: ConcurrencyStrategy::Burst,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"debounceMs\":1500"));
+        assert!(json.contains("\"maxConcurrent\":4"));
+        assert!(json.contains("\"maxQueueSize\":10"));
+        assert!(json.contains("\"onQueueFull\":\"drop-oldest\""));
+        assert!(json.contains("\"queueEntryTtlMs\":90000"));
+        assert!(json.contains("\"strategy\":\"burst\""));
+        let back: ConcurrencyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn bot_status_serializes_as_bool_or_unknown_string() {
+        assert_eq!(serde_json::to_string(&BotStatus::TRUE).unwrap(), "true");
+        assert_eq!(serde_json::to_string(&BotStatus::FALSE).unwrap(), "false");
+        assert_eq!(
+            serde_json::to_string(&BotStatus::UNKNOWN).unwrap(),
+            "\"unknown\""
+        );
+
+        let true_back: BotStatus = serde_json::from_str("true").unwrap();
+        assert_eq!(true_back, BotStatus::TRUE);
+        let false_back: BotStatus = serde_json::from_str("false").unwrap();
+        assert_eq!(false_back, BotStatus::FALSE);
+        let unknown_back: BotStatus = serde_json::from_str("\"unknown\"").unwrap();
+        assert_eq!(unknown_back, BotStatus::UNKNOWN);
+    }
+
+    #[test]
+    fn author_round_trips_camelcase_with_bot_status_union() {
+        let author = Author {
+            full_name: "Ada Lovelace".to_string(),
+            is_bot: BotStatus::UNKNOWN,
+            is_me: false,
+            user_id: "U_ADA".to_string(),
+            user_name: "ada".to_string(),
+        };
+        let json = serde_json::to_string(&author).unwrap();
+        assert!(json.contains("\"isBot\":\"unknown\""));
+        assert!(json.contains("\"fullName\":\"Ada Lovelace\""));
+        let back: Author = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, author);
+    }
+
+    #[test]
+    fn user_info_omits_absent_optional_fields() {
+        let user = UserInfo {
+            avatar_url: None,
+            email: None,
+            full_name: "Grace".to_string(),
+            is_bot: false,
+            user_id: "U_GRACE".to_string(),
+            user_name: "grace".to_string(),
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(!json.contains("avatarUrl"));
+        assert!(!json.contains("email"));
+        assert!(json.contains("\"fullName\":\"Grace\""));
+        let back: UserInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, user);
+    }
+
+    #[test]
+    fn user_info_preserves_present_optional_fields() {
+        let user = UserInfo {
+            avatar_url: Some("https://example.com/a.png".to_string()),
+            email: Some("ada@example.com".to_string()),
+            full_name: "Ada".to_string(),
+            is_bot: false,
+            user_id: "U_ADA".to_string(),
+            user_name: "ada".to_string(),
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(json.contains("\"avatarUrl\":\"https://example.com/a.png\""));
+        assert!(json.contains("\"email\":\"ada@example.com\""));
+        let back: UserInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, user);
     }
 }
