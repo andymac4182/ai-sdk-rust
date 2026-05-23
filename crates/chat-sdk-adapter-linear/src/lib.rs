@@ -54,13 +54,26 @@ impl LinearAdapterOptions {
 #[derive(Debug, Clone)]
 pub struct LinearAdapter {
     options: LinearAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
 }
 
 impl LinearAdapter {
     /// 1:1 port of upstream
     /// `new LinearAdapter({ apiKey, graphqlUrl? })`.
     pub fn new(options: LinearAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+        }
+    }
+
+    /// Override the HTTP client.
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
     }
 
     /// Read the API key.
@@ -74,10 +87,97 @@ impl LinearAdapter {
     }
 }
 
+/// GraphQL mutation Linear uses to create a comment on an issue.
+/// Lifted out as a `const` so tests can lock the wire shape.
+pub const COMMENT_CREATE_MUTATION: &str = "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success, comment { id } } }";
+
 #[async_trait]
 impl Adapter for LinearAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a comment on a Linear issue via GraphQL. 1:1 with
+    /// upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes `linear:<team_key>:<issue_id>` (the `team_key` is
+    ///   carried in the thread id for cross-team display but is
+    ///   not required for the mutation — `issue_id` is the GraphQL
+    ///   UUID Linear's API addresses by).
+    /// - POSTs `{query, variables: {issueId, body}}` to the Linear
+    ///   GraphQL endpoint with `Authorization: <api_key>` (Linear
+    ///   personal API keys don't carry a scheme prefix; OAuth2
+    ///   tokens use `Bearer ` — adopters using OAuth should pass
+    ///   the full `Bearer <token>` string as the api_key).
+    /// - Returns `data.commentCreate.comment.id` (Linear comment
+    ///   UUID).
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Linear-encoded"))
+        })?;
+
+        let body = serde_json::json!({
+            "query": COMMENT_CREATE_MUTATION,
+            "variables": {
+                "issueId": decoded.issue_id,
+                "body": text,
+            }
+        });
+
+        let response = self
+            .http
+            .post(self.graphql_url())
+            .header("Authorization", self.api_key())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Linear GraphQL request failed"
+            )));
+        }
+
+        // GraphQL errors come back with status 200 + an `errors`
+        // array; the comment data lives at
+        // `data.commentCreate.comment.id`.
+        if let Some(first_error) = json["errors"][0]["message"].as_str() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "Linear GraphQL error: {first_error}"
+            )));
+        }
+
+        if !json["data"]["commentCreate"]["success"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            return Err(AdapterError::InvalidPayload(
+                "Linear commentCreate returned success=false".to_string(),
+            ));
+        }
+
+        json["data"]["commentCreate"]["comment"]["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                AdapterError::InvalidPayload(
+                    "Linear commentCreate response missing comment.id".to_string(),
+                )
+            })
     }
 }
 
@@ -188,14 +288,27 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_linear_thread_ids() {
         let adapter = LinearAdapter::new(LinearAdapterOptions::new("k"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.post_message("linear:ENG:abc", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Linear-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_create_mutation_includes_required_variables() {
+        // Lock the GraphQL mutation shape so renames of the
+        // upstream `commentCreate` payload break this test
+        // rather than silently regressing the wire format.
+        assert!(COMMENT_CREATE_MUTATION.contains("commentCreate"));
+        assert!(COMMENT_CREATE_MUTATION.contains("$issueId: String!"));
+        assert!(COMMENT_CREATE_MUTATION.contains("$body: String!"));
+        assert!(COMMENT_CREATE_MUTATION.contains("comment { id }"));
     }
 
     #[test]
