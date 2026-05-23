@@ -18,21 +18,16 @@
 //!   are JS-symbol-specific (`WORKFLOW_SERIALIZE` /
 //!   `WORKFLOW_DESERIALIZE`).
 //!
-//! **What is deferred:**
+//! - [`MessageSubjectResolver`] — subject getter + cache, ported in
+//!   slice 123 after the Phase 1.5 Adapter trait extension landed
+//!   `Adapter::fetch_subject`.
 //!
-//! - `subject` async getter + `setMessageAdapter` — depend on the
-//!   `Adapter::fetch_subject` method, which lives on the
-//!   placeholder [`crate::types::Adapter`] trait. Will land once the
-//!   trait is extended.
+//! **What is still js-only-adjacent:**
+//!
 //! - `WORKFLOW_SERIALIZE` / `WORKFLOW_DESERIALIZE` Symbol methods are
 //!   JavaScript-runtime-specific. The equivalent Rust functionality
 //!   is just `serde_json::to_value(msg.to_serialized())`. Documented
 //!   in the test module as js-only-adjacent.
-//! - Buffer-data stripping inside `to_serialized` — the Rust port
-//!   already represents `Attachment.data` as `Option<FileBytes>` with
-//!   `skip_serializing_if = "Option::is_none"`; consumers can set it
-//!   to `None` before serializing. Documented in the module header
-//!   so the upstream behavior is preserved.
 
 use serde::{Deserialize, Serialize};
 
@@ -224,6 +219,80 @@ impl Message {
             user_key: None,
             links: serialized.links.unwrap_or_default(),
         }
+    }
+}
+
+/// Caches the result of [`crate::types::Adapter::fetch_subject`] per
+/// `(adapter_name, thread_id)` pair. 1:1 port of upstream's
+/// `setMessageAdapter` WeakMap + private `_subject` cache on `Message`.
+///
+/// The cache lives outside [`Message`] (which is `Clone + Serialize`)
+/// so neither serialization nor cloning carries adapter state. Adopters
+/// hold one [`MessageSubjectResolver`] per Chat instance and call
+/// [`Self::resolve`] whenever a message needs its subject.
+#[derive(Debug, Default)]
+pub struct MessageSubjectResolver {
+    /// (adapter_name, thread_id) -> Some(cached_subject_or_none).
+    cache: std::sync::Mutex<std::collections::HashMap<(String, String), Option<String>>>,
+}
+
+impl MessageSubjectResolver {
+    /// Construct an empty resolver. 1:1 with upstream's
+    /// `new MessageSubjectResolver()` (the upstream form is a closure
+    /// captured at Chat-singleton construction time; the data shape
+    /// matches).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve the subject for `message` against `adapter`. 1:1 port of
+    /// upstream's `Message.subject` getter:
+    ///
+    /// - Returns the cached value when present (1:1 with upstream's
+    ///   "cache the result" / "cache null result" tests).
+    /// - Otherwise calls `adapter.fetch_subject(thread_id)`, caches the
+    ///   outcome (including `None`!), and returns it.
+    /// - Concurrent calls for the same `(adapter, thread_id)` may each
+    ///   trigger a fetch since the cache write happens after the
+    ///   `await`; the cache then stabilizes (matches upstream's
+    ///   `Promise.race`-style coalescing observable behavior).
+    pub async fn resolve(
+        &self,
+        adapter: &dyn crate::types::Adapter,
+        message: &Message,
+    ) -> crate::types::AdapterResult<Option<String>> {
+        let key = (adapter.name().to_string(), message.thread_id.clone());
+        if let Some(cached) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+        {
+            return Ok(cached.clone());
+        }
+        let subject = adapter.fetch_subject(&message.thread_id).await?;
+        self.cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, subject.clone());
+        Ok(subject)
+    }
+
+    /// Drop the cache entry for `(adapter, thread_id)` so the next
+    /// [`Self::resolve`] call triggers a fresh `fetch_subject`. Mirrors
+    /// upstream's `clearSubjectCache(message)` test helper used to
+    /// exercise the "cache miss after invalidation" path.
+    pub fn invalidate(&self, adapter_name: &str, thread_id: &str) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&(adapter_name.to_string(), thread_id.to_string()));
+    }
+
+    /// Snapshot the number of cached subjects. Convenience for tests
+    /// asserting cache hits / misses.
+    pub fn cached_count(&self) -> usize {
+        self.cache.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 }
 
@@ -657,5 +726,171 @@ mod tests {
                 .map(String::as_str),
             Some("123")
         );
+    }
+
+    // ---------- slice 123: MessageSubjectResolver ----------
+
+    use crate::types::{Adapter, AdapterResult};
+    use futures_executor::block_on;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Adapter that counts how many times `fetch_subject` was called
+    /// and returns a configurable Option<String>.
+    #[derive(Debug)]
+    struct CountingAdapter {
+        name: String,
+        fetched: AtomicUsize,
+        result: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for CountingAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn fetch_subject(&self, _thread_id: &str) -> AdapterResult<Option<String>> {
+            self.fetched.fetch_add(1, Ordering::SeqCst);
+            Ok(self.result.clone())
+        }
+    }
+
+    /// Adapter that returns Unsupported(fetch_subject) — equivalent to
+    /// upstream's "adapter has no fetchSubject" case. Achieved by NOT
+    /// overriding fetch_subject and relying on the default — except the
+    /// default returns Ok(None), not Err. So we explicitly return Err
+    /// to exercise the upstream "throw" path.
+    #[derive(Debug)]
+    struct NoFetchSubjectAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for NoFetchSubjectAdapter {
+        fn name(&self) -> &str {
+            "no-fetch-subject"
+        }
+        async fn fetch_subject(&self, _thread_id: &str) -> AdapterResult<Option<String>> {
+            Err(crate::types::AdapterError::Unsupported("fetch_subject"))
+        }
+    }
+
+    fn make_message(id: &str, thread_id: &str) -> Message {
+        Message::new(
+            id,
+            thread_id,
+            "hi",
+            crate::markdown::root(vec![]),
+            json!({}),
+            sample_author(),
+            sample_metadata(),
+            vec![],
+        )
+    }
+
+    #[test]
+    fn message_subject_resolver_returns_subject_from_adapter() {
+        let resolver = MessageSubjectResolver::new();
+        let adapter = CountingAdapter {
+            name: "test".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: Some("General".to_string()),
+        };
+        let msg = make_message("m1", "slack:C1");
+        let subject = block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert_eq!(subject.as_deref(), Some("General"));
+    }
+
+    #[test]
+    fn message_subject_resolver_caches_the_result() {
+        let resolver = MessageSubjectResolver::new();
+        let adapter = CountingAdapter {
+            name: "test".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: Some("General".to_string()),
+        };
+        let msg = make_message("m1", "slack:C1");
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert_eq!(adapter.fetched.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn message_subject_resolver_caches_a_none_result() {
+        let resolver = MessageSubjectResolver::new();
+        let adapter = CountingAdapter {
+            name: "test".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: None,
+        };
+        let msg = make_message("m1", "slack:C1");
+        let first = block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert!(first.is_none());
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert_eq!(adapter.fetched.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn message_subject_resolver_returns_err_when_adapter_does_not_support_fetch_subject() {
+        let resolver = MessageSubjectResolver::new();
+        let adapter = NoFetchSubjectAdapter;
+        let msg = make_message("m1", "slack:C1");
+        let err = block_on(resolver.resolve(&adapter, &msg));
+        assert!(matches!(
+            err,
+            Err(crate::types::AdapterError::Unsupported("fetch_subject"))
+        ));
+    }
+
+    #[test]
+    fn message_subject_resolver_isolates_threads_by_id() {
+        let resolver = MessageSubjectResolver::new();
+        let adapter = CountingAdapter {
+            name: "test".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: Some("General".to_string()),
+        };
+        let m1 = make_message("m1", "slack:C1");
+        let m2 = make_message("m2", "slack:C2");
+        block_on(resolver.resolve(&adapter, &m1)).unwrap();
+        block_on(resolver.resolve(&adapter, &m2)).unwrap();
+        // Different thread_ids -> two cache entries -> two fetch calls.
+        assert_eq!(adapter.fetched.load(Ordering::SeqCst), 2);
+        assert_eq!(resolver.cached_count(), 2);
+    }
+
+    #[test]
+    fn message_subject_resolver_isolates_caches_by_adapter_name() {
+        let resolver = MessageSubjectResolver::new();
+        let a = CountingAdapter {
+            name: "slack".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: Some("A".to_string()),
+        };
+        let b = CountingAdapter {
+            name: "teams".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: Some("B".to_string()),
+        };
+        let msg = make_message("m1", "T1");
+        let from_a = block_on(resolver.resolve(&a, &msg)).unwrap();
+        let from_b = block_on(resolver.resolve(&b, &msg)).unwrap();
+        assert_eq!(from_a.as_deref(), Some("A"));
+        assert_eq!(from_b.as_deref(), Some("B"));
+        assert_eq!(resolver.cached_count(), 2);
+    }
+
+    #[test]
+    fn message_subject_resolver_invalidate_drops_the_cache_entry() {
+        let resolver = MessageSubjectResolver::new();
+        let adapter = CountingAdapter {
+            name: "test".to_string(),
+            fetched: AtomicUsize::new(0),
+            result: Some("S".to_string()),
+        };
+        let msg = make_message("m1", "T1");
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert_eq!(adapter.fetched.load(Ordering::SeqCst), 1);
+        resolver.invalidate("test", "T1");
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert_eq!(adapter.fetched.load(Ordering::SeqCst), 2);
     }
 }
