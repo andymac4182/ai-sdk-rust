@@ -45,6 +45,9 @@ pub const UNFURL_WAIT_MS: u64 = 2000;
 /// `UNFURL_POLL_MS = 150` (150 ms).
 pub const UNFURL_POLL_MS: u64 = 150;
 
+/// 1:1 with upstream's default `userName ?? "bot"` constant.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`SlackAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct SlackAdapterOptions {
@@ -56,6 +59,12 @@ pub struct SlackAdapterOptions {
     pub app_token: Option<String>,
     /// Optional API base URL override.
     pub api_base: Option<String>,
+    /// Optional display name (defaults to [`DEFAULT_USER_NAME`]).
+    pub user_name: Option<String>,
+    /// Slack user id of the bot (`U...`). Used for self-mention
+    /// detection. Resolved automatically via `auth.test` upstream
+    /// when not provided.
+    pub bot_user_id: Option<String>,
 }
 
 impl SlackAdapterOptions {
@@ -66,6 +75,8 @@ impl SlackAdapterOptions {
             signing_secret: signing_secret.into(),
             app_token: None,
             api_base: None,
+            user_name: None,
+            bot_user_id: None,
         }
     }
 
@@ -84,6 +95,12 @@ impl SlackAdapterOptions {
     /// Effective API base URL with default applied.
     pub fn effective_api_base(&self) -> &str {
         self.api_base.as_deref().unwrap_or(DEFAULT_API_BASE)
+    }
+
+    /// Effective `userName` with default applied. 1:1 with upstream's
+    /// `userName ?? "bot"`.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -137,6 +154,19 @@ impl SlackAdapter {
     /// Read the app-level token (Socket Mode), if configured.
     pub fn app_token(&self) -> Option<&str> {
         self.options.app_token.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly userName: string`. Returns the
+    /// configured value or [`DEFAULT_USER_NAME`].
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
+    }
+
+    /// 1:1 with upstream `readonly botUserId?: string`. Returns
+    /// `None` when not configured at construction (upstream resolves
+    /// via `auth.test` on first webhook).
+    pub fn bot_user_id(&self) -> Option<&str> {
+        self.options.bot_user_id.as_deref()
     }
 
     /// Effective API base URL.
@@ -1131,5 +1161,38 @@ mod tests {
         assert_eq!(adapter.signing_secret(), "sig-sec");
         assert_eq!(adapter.app_token(), Some("xapp-tok"));
         assert_eq!(adapter.api_base(), "https://example.test/api");
+    }
+
+    // ---------- createSlackAdapter describe block (4 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("createSlackAdapter")`.
+
+    #[test]
+    fn create_slack_adapter_creates_an_instance() {
+        let opts = SlackAdapterOptions::new("xoxb-test-token", "test-secret");
+        let adapter = SlackAdapter::new(opts);
+        assert_eq!(adapter.name(), "slack");
+    }
+
+    #[test]
+    fn create_slack_adapter_sets_default_user_name_to_bot() {
+        let opts = SlackAdapterOptions::new("xoxb-test-token", "test-secret");
+        let adapter = SlackAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "bot");
+    }
+
+    #[test]
+    fn create_slack_adapter_uses_provided_user_name() {
+        let mut opts = SlackAdapterOptions::new("xoxb-test-token", "test-secret");
+        opts.user_name = Some("custombot".to_string());
+        let adapter = SlackAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "custombot");
+    }
+
+    #[test]
+    fn create_slack_adapter_stores_bot_user_id_when_provided() {
+        let mut opts = SlackAdapterOptions::new("xoxb-test-token", "test-secret");
+        opts.bot_user_id = Some("U12345".to_string());
+        let adapter = SlackAdapter::new(opts);
+        assert_eq!(adapter.bot_user_id(), Some("U12345"));
     }
 }
