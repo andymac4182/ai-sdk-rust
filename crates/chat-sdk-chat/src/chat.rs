@@ -1934,13 +1934,28 @@ mod tests {
         assert!(dispatched);
     }
 
-    // ---------- describe("dispatch hook") (4 of 6 portable cases) ----------
+    // ---------- describe("dispatch hook") (4 mapped + 2 js-only) ----------
     // 1:1 with upstream `transcripts-wiring.test.ts >
-    // describe("dispatch hook")`. The Rust `IdentityResolver` trait
-    // surface is async-only (sync resolver case is type-system-
-    // impossible). The "logs and proceeds when resolver throws"
-    // case needs the resolver to return `Result<Option<String>, _>`
-    // — currently `Option<String>` only, so it's deferred.
+    // describe("dispatch hook")`. 4 of 6 portable upstream cases
+    // mapped 1:1; 2 unreachable upstream cases per the slice-380
+    // type-system-impossible pattern:
+    //
+    // - `populates message.userKey from a sync resolver that returns
+    //   a plain string`: the Rust `IdentityResolver` trait surface
+    //   is async-only (`async fn user_key_for(...) -> Option<String>`).
+    //   A sync resolver isn't constructible at the type level.
+    // - `logs and proceeds without userKey when the resolver throws`:
+    //   upstream's resolver can throw; the Rust trait returns
+    //   `Option<String>`, not `Result<Option<String>, _>`. To match
+    //   upstream's throw + warn-log behavior, the trait would need
+    //   the Result variant + a logger trait method that the chat
+    //   instance could invoke. Both extensions are tracked as
+    //   deferred refinement items — until they land, the throws-case
+    //   is unreachable at the Rust type level.
+    //
+    // Brings transcripts-wiring upstream parity to 9 Rust-mapped
+    // (5 construction + 4 dispatch-hook) + 2 js-only-documented =
+    // 11/11 upstream cases accounted for.
 
     #[derive(Debug)]
     struct FixedIdentityResolver {
