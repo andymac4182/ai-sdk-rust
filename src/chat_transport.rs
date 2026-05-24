@@ -2606,6 +2606,39 @@ mod tests {
         ])
     }
 
+    fn chat_simple_response_chunks() -> Vec<UiMessageChunk> {
+        vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]
+    }
+
+    fn chat_simple_expected_messages() -> JsonValue {
+        json!([
+            {
+                "id": "user-1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello, world.", "state": "done" }
+                ]
+            }
+        ])
+    }
+
     fn text_stream_result(
         deltas: impl IntoIterator<Item = &'static str>,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
@@ -2730,18 +2763,7 @@ mod tests {
 
     #[test]
     fn chat_should_send_the_messages_to_the_api() {
-        let transport = RecordingChatTransport::new([
-            UiMessageChunk::start_with_message_id("assistant-1"),
-            UiMessageChunk::start_step(),
-            UiMessageChunk::text_start("text-1"),
-            UiMessageChunk::text_delta("text-1", "Hello"),
-            UiMessageChunk::text_delta("text-1", ","),
-            UiMessageChunk::text_delta("text-1", " world"),
-            UiMessageChunk::text_delta("text-1", "."),
-            UiMessageChunk::text_end("text-1"),
-            UiMessageChunk::finish_step(),
-            UiMessageChunk::finish_with_reason(FinishReason::Stop),
-        ]);
+        let transport = RecordingChatTransport::new(chat_simple_response_chunks());
         let mut chat = Chat::new("chat-1", transport);
 
         chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
@@ -2760,6 +2782,20 @@ mod tests {
                     "parts": [{ "type": "text", "text": "Hello, world!" }]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn chat_should_return_the_correct_final_messages() {
+        let transport = RecordingChatTransport::new(chat_simple_response_chunks());
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_simple_expected_messages()
         );
     }
 

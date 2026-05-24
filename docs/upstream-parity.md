@@ -2276,9 +2276,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   upstream `ui/chat.test.ts` simple-message history updates by exposing the
   Rust stream-state snapshots returned from `send_message`.
 - 2026-05-25: `packages/ai` `Chat.onFinish` simple-message parity added
-  `chat_should_call_on_finish_with_message_and_messages`, covering the
-  portable upstream `ui/chat.test.ts` finish payload shape by recording the
-  final assistant message, full message list, finish reason, and
+  `chat_should_call_on_finish_with_message_and_messages` and
+  `chat_should_return_the_correct_final_messages`, covering the portable
+  upstream `ui/chat.test.ts` finish payload and final-message shapes by
+  recording the final assistant message, full message list, finish reason, and
   abort/disconnect/error flags after a successful send.
 - 2026-05-25: `packages/ai` `Chat` disconnected-response parity added
   `chat_should_handle_a_disconnected_response_stream`,
