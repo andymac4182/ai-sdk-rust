@@ -85,7 +85,7 @@ Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
 slices. This is a hard ordering gate, not a scheduling preference. The first
 phase includes
-`packages/ai`, `packages/provider`, `packages/provider-utils`,
+`packages/ai`, `packages/provider-utils`, `packages/provider`,
 `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
 Vercel AI Gateway OpenAI-compatible and Open Responses routes, and portable
 non-provider rows such as MCP, OTel, Workflow, telemetry, UI transport,
@@ -94,6 +94,13 @@ part of the first phase, not as a later standalone provider. Other provider
 packages resume only after those rows are verified or explicitly documented as
 intentionally non-portable. Gateway progress does not unlock other providers by
 itself; the whole common/core plus Vercel AI Gateway phase must be closed first.
+Within the first-phase gate, always pick the first package below 100% in this
+order: `packages/ai`, then `packages/provider-utils`
+(`@ai-sdk/provider-utils`), then `packages/provider` (`@ai-sdk/provider`),
+then the remaining first-phase rows in the most effective order. Do not start a
+provider-utils slice while portable `packages/ai` inventory remains open, and
+do not start a provider slice while portable provider-utils inventory remains
+open.
 
 Preserve Rust 2024 style, serde shapes, builders, public exports, tests, and
 workspace boundaries that align with upstream package responsibilities. Build
