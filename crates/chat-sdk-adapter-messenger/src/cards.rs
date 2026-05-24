@@ -11,7 +11,8 @@
 //! WhatsApp ports.
 
 use chat_sdk_chat::cards::{
-    ActionsChild, ActionsElement, CardChild, CardElement, FieldsElement, TextElement,
+    ActionsChild, ActionsElement, ButtonElement, CardChild, CardElement, FieldsElement,
+    LinkButtonElement, TextElement,
 };
 
 /// Callback-data prefix used to distinguish chat-sdk-encoded
@@ -104,6 +105,279 @@ pub fn decode_messenger_callback_data(data: Option<&str>) -> DecodedMessengerCal
         action_id: data.to_string(),
         value: Some(data.to_string()),
     }
+}
+
+/// Messenger button shape. 1:1 with upstream `MessengerButton` —
+/// `postback` for interactive buttons (carrying an opaque
+/// callback-data string), `web_url` for link buttons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessengerButton {
+    Postback { title: String, payload: String },
+    WebUrl { title: String, url: String },
+}
+
+/// Generic Template element. 1:1 with upstream
+/// `MessengerGenericElement`. `subtitle` and `image_url` are
+/// optional; `buttons` is the variable-length button payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessengerGenericElement {
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub image_url: Option<String>,
+    pub buttons: Vec<MessengerButton>,
+}
+
+/// Messenger template payload. 1:1 with the upstream discriminated
+/// union on `template_type`: `"generic"` carries an `elements`
+/// array; `"button"` carries flat `text` + `buttons`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessengerTemplatePayload {
+    Generic { elements: Vec<MessengerGenericElement> },
+    Button { text: String, buttons: Vec<MessengerButton> },
+}
+
+/// Result of [`card_to_messenger`]. 1:1 with upstream's
+/// `MessengerCardResult` union: either a text fallback or a
+/// template payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessengerCardResult {
+    Text { text: String },
+    Template { payload: MessengerTemplatePayload },
+}
+
+/// 1:1 port of upstream `cardToMessenger(card)`. Returns a template
+/// payload when the card's actions fit Messenger's constraints
+/// (≤ [`MAX_BUTTONS`] buttons; each button label ≤
+/// [`MAX_BUTTON_TITLE_LENGTH`] chars) AND the children contain no
+/// unsupported elements (tables and Select / RadioSelect inside
+/// Actions force the text fallback); otherwise returns the text
+/// fallback.
+///
+/// When templated, the renderer picks the Generic Template if the
+/// card has a `title` or `imageUrl`, otherwise the Button Template
+/// for body-text + buttons cards.
+pub fn card_to_messenger(card: &CardElement) -> MessengerCardResult {
+    if has_unsupported_elements(&card.children) {
+        return MessengerCardResult::Text {
+            text: card_to_messenger_text(card),
+        };
+    }
+
+    let actions = find_actions(&card.children);
+    let buttons = actions.and_then(extract_buttons);
+
+    if let Some(buttons) = buttons {
+        if !buttons.is_empty() && buttons.len() <= MAX_BUTTONS {
+            let all_fit = buttons
+                .iter()
+                .all(|b| button_title(b).chars().count() <= MAX_BUTTON_TITLE_LENGTH);
+            if all_fit {
+                if card.title.as_deref().is_some_and(|t| !t.is_empty())
+                    || card.image_url.as_deref().is_some_and(|u| !u.is_empty())
+                {
+                    return MessengerCardResult::Template {
+                        payload: build_generic_template(card, buttons),
+                    };
+                }
+                let body = build_body_text(card);
+                if !body.is_empty() {
+                    return MessengerCardResult::Template {
+                        payload: build_button_template(body, buttons),
+                    };
+                }
+            }
+        }
+    }
+
+    MessengerCardResult::Text {
+        text: card_to_messenger_text(card),
+    }
+}
+
+fn button_title(b: &MessengerButton) -> &str {
+    match b {
+        MessengerButton::Postback { title, .. } | MessengerButton::WebUrl { title, .. } => title,
+    }
+}
+
+/// 1:1 with upstream `hasUnsupportedElements(children)`. Returns
+/// `true` for any descendant `Table`, or for any Actions block
+/// containing `Select` / `RadioSelect` children.
+fn has_unsupported_elements(children: &[CardChild]) -> bool {
+    for child in children {
+        match child {
+            CardChild::Table(_) => return true,
+            CardChild::Section(s) if has_unsupported_elements(&s.children) => return true,
+            CardChild::Actions(a) => {
+                if a.children.iter().any(|c| {
+                    matches!(c, ActionsChild::Select(_) | ActionsChild::RadioSelect(_))
+                }) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 1:1 with upstream `findActions(children)`. Recurses into
+/// `Section` children. Returns the first `ActionsElement` found.
+fn find_actions(children: &[CardChild]) -> Option<&ActionsElement> {
+    for child in children {
+        match child {
+            CardChild::Actions(a) => return Some(a),
+            CardChild::Section(s) => {
+                if let Some(nested) = find_actions(&s.children) {
+                    return Some(nested);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 1:1 with upstream `extractButtons(actions)`. Filters out non-
+/// button children; truncates to [`MAX_BUTTONS`] (first 3). Returns
+/// `None` when no buttons survive the filter (upstream returns
+/// `null` in that case).
+fn extract_buttons(actions: &ActionsElement) -> Option<Vec<MessengerButton>> {
+    let mut buttons: Vec<MessengerButton> = Vec::new();
+    for child in &actions.children {
+        match child {
+            ActionsChild::Button(b) if !b.id.is_empty() => buttons.push(convert_button(b)),
+            ActionsChild::LinkButton(b) => buttons.push(convert_link_button(b)),
+            _ => {}
+        }
+    }
+    if buttons.is_empty() {
+        return None;
+    }
+    if buttons.len() > MAX_BUTTONS {
+        buttons.truncate(MAX_BUTTONS);
+    }
+    Some(buttons)
+}
+
+fn convert_button(button: &ButtonElement) -> MessengerButton {
+    MessengerButton::Postback {
+        title: truncate(&button.label, MAX_BUTTON_TITLE_LENGTH),
+        payload: encode_messenger_callback_data(&button.id, button.value.as_deref()),
+    }
+}
+
+fn convert_link_button(button: &LinkButtonElement) -> MessengerButton {
+    MessengerButton::WebUrl {
+        title: truncate(&button.label, MAX_BUTTON_TITLE_LENGTH),
+        url: button.url.clone(),
+    }
+}
+
+/// 1:1 with upstream `buildGenericTemplate(card, buttons)`. The
+/// `subtitle` field is set when the card has its own subtitle, OR
+/// when the card has a title AND non-empty body text (in which case
+/// the body text becomes the subtitle). Title falls back to the
+/// body text, then to `"Menu"` if neither is present.
+fn build_generic_template(card: &CardElement, buttons: Vec<MessengerButton>) -> MessengerTemplatePayload {
+    let body_text = build_body_text(card);
+    let raw_title = card
+        .title
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if !body_text.is_empty() {
+                body_text.clone()
+            } else {
+                "Menu".to_string()
+            }
+        });
+
+    let subtitle = if let Some(sub) = card.subtitle.as_deref().filter(|s| !s.is_empty()) {
+        Some(truncate(sub, MAX_SUBTITLE_LENGTH))
+    } else if card.title.as_deref().is_some_and(|t| !t.is_empty()) && !body_text.is_empty() {
+        Some(truncate(&body_text, MAX_SUBTITLE_LENGTH))
+    } else {
+        None
+    };
+
+    let image_url = card.image_url.as_deref().filter(|u| !u.is_empty()).map(str::to_owned);
+
+    MessengerTemplatePayload::Generic {
+        elements: vec![MessengerGenericElement {
+            title: truncate(&raw_title, MAX_TITLE_LENGTH),
+            subtitle,
+            image_url,
+            buttons,
+        }],
+    }
+}
+
+/// 1:1 with upstream `buildButtonTemplate(text, buttons)`.
+fn build_button_template(text: String, buttons: Vec<MessengerButton>) -> MessengerTemplatePayload {
+    MessengerTemplatePayload::Button {
+        text: truncate(&text, MAX_BUTTON_TEMPLATE_TEXT_LENGTH),
+        buttons,
+    }
+}
+
+/// 1:1 with upstream `buildBodyText(card)`. Builds text from the
+/// card's non-action children using [`child_to_plain_text`].
+fn build_body_text(card: &CardElement) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for child in &card.children {
+        if matches!(child, CardChild::Actions(_)) {
+            continue;
+        }
+        if let Some(text) = child_to_plain_text(child) {
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// 1:1 with upstream private `childToPlainText(child)`. Used by
+/// `buildBodyText` (not the public text-fallback path which uses
+/// [`render_child`] above). Sections are recursively flattened;
+/// `Actions` returns `None`.
+fn child_to_plain_text(child: &CardChild) -> Option<String> {
+    match child {
+        CardChild::Text(t) => Some(t.content.clone()),
+        CardChild::Fields(f) => {
+            let lines: Vec<String> = f
+                .children
+                .iter()
+                .map(|fld| format!("{}: {}", fld.label, fld.value))
+                .collect();
+            Some(lines.join("\n"))
+        }
+        CardChild::Actions(_) => None,
+        CardChild::Section(s) => {
+            let parts: Vec<String> = s.children.iter().filter_map(child_to_plain_text).collect();
+            if parts.is_empty() { None } else { Some(parts.join("\n")) }
+        }
+        CardChild::Link(l) => Some(format!("{}: {}", l.label, l.url)),
+        _ => None,
+    }
+}
+
+/// 1:1 with upstream private `truncate(text, maxLength)`. Counts
+/// characters (Unicode scalar values), not bytes. Appends `\u{2026}`
+/// (horizontal-ellipsis) when truncating; the ellipsis itself
+/// counts toward `max_length`.
+fn truncate(text: &str, max_length: usize) -> String {
+    if text.chars().count() <= max_length {
+        return text.to_string();
+    }
+    if max_length == 0 {
+        return String::new();
+    }
+    let mut s: String = text.chars().take(max_length - 1).collect();
+    s.push('\u{2026}');
+    s
 }
 
 /// Render a [`CardElement`] as Messenger text. 1:1 port of
@@ -612,5 +886,169 @@ mod tests {
         assert!(result.contains("Hello"));
         assert!(result.contains("World"));
         assert!(result.contains("Some content"));
+    }
+
+    // ---------- cardToMessenger Generic Template (5 cases) ----------
+    // 1:1 with upstream `cards.test.ts > describe("template
+    // conversion") > describe("Generic Template")`. Covers the 5
+    // portable Generic-Template cases — Button Template + constraint
+    // handling + callback-data integration tests land in follow-up
+    // slices.
+
+    fn button_action(id: &str, label: &str) -> ActionsChild {
+        ActionsChild::Button(ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style: None,
+            kind: ButtonKind::Button,
+            value: None,
+        })
+    }
+
+    fn link_button_action(url: &str, label: &str) -> ActionsChild {
+        ActionsChild::LinkButton(LinkButtonElement {
+            label: label.to_string(),
+            style: None,
+            kind: LinkButtonKind::LinkButton,
+            url: url.to_string(),
+        })
+    }
+
+    #[test]
+    fn generic_template_for_card_with_title_and_buttons() {
+        let c = CardElement {
+            title: Some("Choose an action".to_string()),
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                text_child("What would you like to do?"),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("btn_yes", "Yes"), button_action("btn_no", "No")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        };
+        let result = card_to_messenger(&c);
+        match result {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                assert_eq!(elements.len(), 1);
+                assert_eq!(elements[0].title, "Choose an action");
+                assert_eq!(elements[0].buttons.len(), 2);
+                match &elements[0].buttons[0] {
+                    MessengerButton::Postback { title, .. } => assert_eq!(title, "Yes"),
+                    other => panic!("expected Postback, got {other:?}"),
+                }
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_template_for_card_with_image_url() {
+        let c = CardElement {
+            title: Some("Product".to_string()),
+            subtitle: None,
+            image_url: Some("https://example.com/product.jpg".to_string()),
+            kind: CardKind::Card,
+            children: vec![CardChild::Actions(ActionsElement {
+                children: vec![button_action("buy", "Buy Now")],
+                kind: ActionsKind::Actions,
+            })],
+        };
+        let result = card_to_messenger(&c);
+        match result {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                assert_eq!(
+                    elements[0].image_url.as_deref(),
+                    Some("https://example.com/product.jpg")
+                );
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_template_includes_subtitle() {
+        let c = CardElement {
+            title: Some("Order #123".to_string()),
+            subtitle: Some("Your order is ready".to_string()),
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![CardChild::Actions(ActionsElement {
+                children: vec![button_action("view", "View")],
+                kind: ActionsKind::Actions,
+            })],
+        };
+        let result = card_to_messenger(&c);
+        match result {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                assert_eq!(elements[0].subtitle.as_deref(), Some("Your order is ready"));
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_template_supports_link_buttons_as_web_url() {
+        let c = CardElement {
+            title: Some("Resources".to_string()),
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![CardChild::Actions(ActionsElement {
+                children: vec![link_button_action("https://example.com/docs", "View Docs")],
+                kind: ActionsKind::Actions,
+            })],
+        };
+        let result = card_to_messenger(&c);
+        match result {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => match &elements[0].buttons[0] {
+                MessengerButton::WebUrl { url, .. } => {
+                    assert_eq!(url, "https://example.com/docs")
+                }
+                other => panic!("expected WebUrl, got {other:?}"),
+            },
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_template_mixes_postback_and_web_url_buttons() {
+        let c = CardElement {
+            title: Some("Options".to_string()),
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    button_action("action1", "Do Action"),
+                    link_button_action("https://example.com", "Learn More"),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        };
+        let result = card_to_messenger(&c);
+        match result {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                assert_eq!(elements[0].buttons.len(), 2);
+                assert!(matches!(elements[0].buttons[0], MessengerButton::Postback { .. }));
+                assert!(matches!(elements[0].buttons[1], MessengerButton::WebUrl { .. }));
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
     }
 }

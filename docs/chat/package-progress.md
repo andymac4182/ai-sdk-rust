@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 68.0%
-- Portable package average: 61.6%
+- Average estimated completion: 68.2%
+- Portable package average: 61.8%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -31,7 +31,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-discord` | 70% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit/delete/react/typing + slice 197 webhook Ed25519 + slice... |
 | `@chat-sdk/adapter-linear` | 55% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message + slice 166 edit/delete/react/typing + slice 171 utils + slice 177 cards +... |
 | `@chat-sdk/adapter-github` | 54% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit/delete/react/typing... |
-| `@chat-sdk/adapter-messenger` | 57% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react/typing + slice 173 wire-format correction +... |
+| `@chat-sdk/adapter-messenger` | 60% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react/typing + slice 173 wire-format correction +... |
 | `@chat-sdk/adapter-telegram` | 69% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject + slice 161 edit/delete/react/typing + slice 178... |
 | `@chat-sdk/adapter-whatsapp` | 69% | In progress | adapter package | Slice 133 scaffold + slice 148 post_message + slice 164 edit/delete/react/typing + slice 179 cards + slice 189... |
 | `@chat-sdk/state-redis` | 11% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 14 tests. redis-rs wire-up... |
