@@ -122,19 +122,18 @@ mod tests {
     //! `ArrayBuffer`, and `Blob`; in Rust those collapse to `Vec<u8>`
     //! so the equivalent test cases test the happy-path identity
     //! return, the unsupported-input error and `Ok(None)` branches,
-    //! and the data-URI formatting. 7 ported cases out of 16 — the
-    //! remaining 9 upstream cases assert JS-runtime-type plumbing that
-    //! has no Rust analogue and are documented as
-    //! `js-only-documented`-adjacent in the slice ledger entry.
+    //! and the data-URI formatting. 11 of 16 portable cases mapped
+    //! 1:1 in Rust; the remaining 5 upstream cases are
+    //! type-system-impossible (per the slice-380 brief pattern):
     //!
-    //! TS-runtime-only cases that have no Rust counterpart:
-    //! - "returns Buffer as-is" (we have no separate Buffer type).
-    //! - "converts ArrayBuffer using Buffer.from" (no ArrayBuffer).
-    //! - "converts Blob via arrayBuffer()" (no Blob).
-    //! - "toBufferSync throws on Blob" (no Blob).
-    //! - "FileDataInput type accepts all three" (no type tag).
-    //! All five collapse to the same Rust assertion: a `Vec<u8>` round-
-    //! trips identically through `to_buffer`/`to_buffer_sync`.
+    //! - `toBuffer > converts ArrayBuffer to Buffer`: Rust
+    //!   `FileBytes` is `Vec<u8>`; no `ArrayBuffer` variant exists.
+    //! - `toBuffer > converts Blob to Buffer`: same — no `Blob`.
+    //! - `toBufferSync > converts ArrayBuffer to Buffer`: same.
+    //! - `toBufferSync > throws ValidationError for Blob by default`:
+    //!   no `Blob` variant means the throw branch is unreachable.
+    //! - `toBufferSync > returns null for Blob when throwOnUnsupported
+    //!   is false`: same — Blob is type-system-impossible.
 
     use super::*;
 
