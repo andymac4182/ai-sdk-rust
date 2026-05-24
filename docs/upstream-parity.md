@@ -2291,10 +2291,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   original finish/final-message/streaming-update assertions into named Rust
   counterparts.
 - 2026-05-25: `packages/ai` `Chat` aborted-response parity added
-  `chat_should_handle_a_stop_and_an_aborted_response_stream`, covering the
+  `chat_should_handle_a_stop_and_an_aborted_response_stream`,
+  `chat_aborted_should_have_been_aborted`,
+  `chat_aborted_should_call_on_finish_with_message_and_messages`,
+  `chat_aborted_should_return_the_correct_final_messages`, and
+  `chat_aborted_should_update_the_messages_during_streaming`, covering the
   portable upstream `ui/chat.test.ts` stopped/aborted response behavior by
   exposing abort status, reason, and the finish payload's `isAbort` flag while
-  preserving the partial assistant state.
+  preserving the partial assistant state. Rust now distinguishes a transport
+  abort from an in-band UI abort chunk so the upstream `chat.stop()` path keeps
+  the active text part in `streaming` state instead of finalizing it as `done`.
 - 2026-05-25: `packages/ai` `Chat.addToolOutput` state parity added
   `chat_should_add_tool_output_to_the_latest_assistant_message` and
   `chat_should_add_tool_error_to_the_latest_assistant_message`, plus

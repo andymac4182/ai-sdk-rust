@@ -191,6 +191,11 @@ pub enum ChatTransportError {
         message: String,
         chunks: Vec<UiMessageChunk>,
     },
+    StreamAbort {
+        message: String,
+        chunks: Vec<UiMessageChunk>,
+        reason: Option<JsonValue>,
+    },
     ResponseStatus {
         status: u16,
         body: String,
@@ -204,7 +209,9 @@ impl fmt::Display for ChatTransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fetch(message) => formatter.write_str(message),
-            Self::StreamDisconnect { message, .. } => formatter.write_str(message),
+            Self::StreamDisconnect { message, .. } | Self::StreamAbort { message, .. } => {
+                formatter.write_str(message)
+            }
             Self::ResponseStatus { status, body } => {
                 write!(formatter, "chat transport returned status {status}: {body}")
             }
@@ -436,6 +443,11 @@ impl<T: ChatTransport> Chat<T> {
             Err(ChatTransportError::StreamDisconnect { message, chunks }) => {
                 self.apply_disconnected_response_chunks(chunks, message)
             }
+            Err(ChatTransportError::StreamAbort {
+                message: _,
+                chunks,
+                reason,
+            }) => self.apply_aborted_response_chunks(chunks, reason),
             Err(error) => {
                 self.status = ChatStatus::Error;
                 let message = error.to_string();
@@ -664,6 +676,30 @@ impl<T: ChatTransport> Chat<T> {
             message,
             chunks: original_chunks,
         }))
+    }
+
+    fn apply_aborted_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+        reason: Option<JsonValue>,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let folded = self.fold_response_chunks(chunks, true).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        self.status = ChatStatus::Ready;
+        self.error = None;
+        self.is_aborted = true;
+        self.abort_reason = reason;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: folded.finish_reason,
+            is_abort: true,
+            is_disconnect: false,
+            is_error: false,
+            message: folded.assistant_message,
+            messages: self.messages.clone(),
+        });
+        Ok(folded.states)
     }
 
     fn fold_response_chunks(
@@ -2543,6 +2579,33 @@ mod tests {
         ])
     }
 
+    fn chat_aborted_partial_chunks() -> Vec<UiMessageChunk> {
+        vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+        ]
+    }
+
+    fn chat_aborted_expected_messages() -> JsonValue {
+        json!([
+            {
+                "id": "user-1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            }
+        ])
+    }
+
     fn text_stream_result(
         deltas: impl IntoIterator<Item = &'static str>,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
@@ -3095,6 +3158,122 @@ mod tests {
                     ]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn chat_aborted_should_have_been_aborted() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: Some(json!("manual abort")),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        assert!(chat.is_aborted());
+        assert_eq!(chat.abort_reason(), Some(&json!("manual abort")));
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(chat.error(), None);
+    }
+
+    #[test]
+    fn chat_aborted_should_call_on_finish_with_message_and_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: None,
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(event.is_abort);
+        assert!(!event.is_disconnect);
+        assert!(!event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            chat_aborted_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_aborted_should_return_the_correct_final_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: None,
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_aborted_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_aborted_should_update_the_messages_during_streaming() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: None,
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        assert_eq!(
+            serde_json::to_value(&states).expect("states serialize"),
+            json!([
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": []
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "", "state": "streaming" }
+                    ]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "streaming" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_aborted_expected_messages()
         );
     }
 
