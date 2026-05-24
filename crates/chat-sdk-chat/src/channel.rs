@@ -52,6 +52,16 @@ pub fn derive_channel_id(adapter: &dyn Adapter, thread_id: &str) -> String {
         .unwrap_or_else(|| thread_id.to_string())
 }
 
+/// Result of [`Channel::post_stream`]. 1:1 with upstream's
+/// stream-accumulating post return shape `{ text, id }`: the
+/// accumulated text that was posted (joined from the chunk
+/// iterator) plus the platform-assigned message id. (slice 485)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostStreamResult {
+    pub text: String,
+    pub id: String,
+}
+
 /// Cross-platform channel handle. 1:1 port (in progress) of upstream
 /// `class Channel`.
 ///
@@ -278,6 +288,34 @@ impl Channel {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// 1:1 port of upstream `Channel.post(textStream)` overload —
+    /// accumulates string chunks into a single message and POSTs
+    /// the accumulated text as `{markdown: <accumulated>}` via
+    /// [`Adapter::post_channel_message_postable`]. The Rust port
+    /// takes a sync `IntoIterator<Item=String>` rather than an
+    /// async stream; the observable contract (single POST with
+    /// the joined text in markdown shape) matches upstream.
+    /// (slice 485)
+    pub async fn post_stream<I, S>(&self, chunks: I) -> AdapterResult<PostStreamResult>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut accumulated = String::new();
+        for chunk in chunks {
+            accumulated.push_str(chunk.as_ref());
+        }
+        let payload = serde_json::json!({"markdown": accumulated});
+        let id = self
+            .adapter
+            .post_channel_message_postable(&self.channel_id, &payload)
+            .await?;
+        Ok(PostStreamResult {
+            text: accumulated,
+            id,
+        })
     }
 
     /// 1:1 port of upstream `Channel.startTyping(status?)`. Delegates
@@ -826,6 +864,50 @@ mod tests {
         // Verify post_channel_message recorder is empty (the call
         // returned Unsupported and was not recorded).
         assert!(adapter.post_channel_message.lock().unwrap().is_empty());
+    }
+
+    /// Adapter that records every `post_channel_message_postable`
+    /// call — used by the slice-485 streaming-accumulates test.
+    #[derive(Debug, Default)]
+    struct PostableChannelAdapter {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for PostableChannelAdapter {
+        fn name(&self) -> &str {
+            "postable-channel"
+        }
+        async fn post_channel_message_postable(
+            &self,
+            channel_id: &str,
+            message: &serde_json::Value,
+        ) -> AdapterResult<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((channel_id.to_string(), message.clone()));
+            Ok("channel-msg-id".to_string())
+        }
+    }
+
+    #[test]
+    fn channel_post_stream_should_handle_streaming_by_accumulating_text() {
+        // 1:1 with upstream `channel.test.ts > describe("post") >
+        // "should handle streaming by accumulating text"`. The
+        // chunk iterator's strings are joined and the adapter
+        // receives `{markdown: "Hello World"}` via
+        // post_channel_message_postable. The returned result's
+        // `.text` field matches the accumulated string. (slice 485)
+        let adapter = Arc::new(PostableChannelAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let result = block_on(channel.post_stream(["Hello", " ", "World"])).unwrap();
+        assert_eq!(result.text, "Hello World");
+        assert_eq!(result.id, "channel-msg-id");
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123");
+        assert_eq!(calls[0].1, serde_json::json!({"markdown": "Hello World"}));
     }
 
     // ---------- describe("fetchMetadata") (2 upstream cases) ----------
