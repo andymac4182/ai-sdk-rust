@@ -1947,6 +1947,28 @@ mod tests {
     }
 
     #[test]
+    fn generate_object_type_counterpart_does_not_accept_timeout_option() {
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ));
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+        assert!(model.seen_options()[0].abort_signal.is_none());
+    }
+
+    #[test]
     fn generate_object_calls_model_with_json_response_format_and_parses_text() {
         let response_timestamp =
             OffsetDateTime::from_unix_timestamp(1).expect("timestamp is valid");

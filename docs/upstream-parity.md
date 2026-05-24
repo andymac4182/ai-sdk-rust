@@ -1690,7 +1690,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_object_type_counterpart_supports_enum_types`, and
   `stream_object_type_counterpart_supports_array_output_mode`. The upstream
   unsupported `timeout` option is already impossible through Rust's
-  `StreamObjectOptions` API, which has no timeout field.
+  `StreamObjectOptions` API, which has no timeout field; the named Rust
+  counterpart
+  `stream_object_type_counterpart_does_not_accept_timeout_option` now makes
+  that type-level boundary explicit.
 - 2026-05-21: High-level `experimental_telemetry` alias parity added named
   Rust counterparts for upstream deprecated telemetry alias tests across
   `generateText`, `streamText`, `generateObject`, `streamObject`, `embed`,
@@ -3974,6 +3977,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   isolation, onStepStart ordering/model metadata, onStepFinish raw object text,
   usage and reasoning, onFinish parsed object/provider metadata/reasoning,
   callback ordering, call-id correlation, and callback panic isolation.
+- 2026-05-24: `generateObject`/`streamObject` timeout type-level parity added
+  named Rust counterparts for the upstream `.test-d.ts` unsupported `timeout`
+  option assertions:
+  `generate_object_type_counterpart_does_not_accept_timeout_option` and
+  `stream_object_type_counterpart_does_not_accept_timeout_option`. Rust proves
+  this at the typed options boundary: neither API exposes a timeout field, and
+  no timeout-derived abort signal is forwarded to the model call.
 
 ## Next Unported Work Queue
 
@@ -4434,6 +4444,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    `generate_object_on_finish_*`, `generate_object_callbacks_fire_in_order`,
    `generate_object_callbacks_correlate_events_with_same_call_id`, and
    `generate_object_callbacks_should_not_break_generation_when_callback_panics`.
+   The upstream `generate-object.test-d.ts` and `stream-object.test-d.ts`
+   unsupported timeout-option assertions now have named Rust counterparts in
+   `generate_object_type_counterpart_does_not_accept_timeout_option` and
+   `stream_object_type_counterpart_does_not_accept_timeout_option`.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
    array output. The upstream `callback ordering` call-id correlation case now

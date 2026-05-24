@@ -2351,6 +2351,19 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_type_counterpart_does_not_accept_timeout_option() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert!(model.stream_calls()[0].abort_signal.is_none());
+    }
+
+    #[test]
     fn stream_object_type_counterpart_supports_schema_types() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
