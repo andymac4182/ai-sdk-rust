@@ -1711,6 +1711,7 @@ pub struct StreamingUiMessageState {
     active_tool_input_parts: BTreeSet<String>,
     tool_part_indices: BTreeMap<String, usize>,
     tool_input_text: BTreeMap<String, String>,
+    approval_tool_call_ids: BTreeMap<String, String>,
     data_part_indices: BTreeMap<String, usize>,
 }
 
@@ -1732,6 +1733,7 @@ impl StreamingUiMessageState {
             active_tool_input_parts: BTreeSet::new(),
             tool_part_indices: BTreeMap::new(),
             tool_input_text: BTreeMap::new(),
+            approval_tool_call_ids: BTreeMap::new(),
             data_part_indices: BTreeMap::new(),
         }
     }
@@ -2316,13 +2318,92 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                 }
                 updates.push(state.message.clone());
             }
+            UiMessageChunk::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            } => {
+                state
+                    .approval_tool_call_ids
+                    .insert(approval_id.clone(), tool_call_id.clone());
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_approval_requested(
+                        &mut state.message.parts[index],
+                        approval_id,
+                        is_automatic,
+                        provider_metadata,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolApprovalRequest {
+                            approval_id,
+                            tool_call_id,
+                            is_automatic,
+                            provider_metadata,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            } => {
+                if let Some(tool_call_id) = state.approval_tool_call_ids.get(&approval_id) {
+                    if let Some(index) = state.tool_part_indices.get(tool_call_id).copied() {
+                        update_tool_part_approval_responded(
+                            &mut state.message.parts[index],
+                            approval_id,
+                            approved,
+                            reason,
+                            provider_executed,
+                        );
+                    }
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolApprovalResponse {
+                            approval_id,
+                            approved,
+                            reason,
+                            provider_executed,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            } => {
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_output_denied(
+                        &mut state.message.parts[index],
+                        provider_executed,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolOutputDenied {
+                            tool_call_id,
+                            tool_name,
+                            provider_executed,
+                            dynamic,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
             chunk @ (UiMessageChunk::File { .. }
             | UiMessageChunk::ReasoningFile { .. }
             | UiMessageChunk::SourceUrl { .. }
             | UiMessageChunk::SourceDocument { .. }
-            | UiMessageChunk::ToolApprovalRequest { .. }
-            | UiMessageChunk::ToolApprovalResponse { .. }
-            | UiMessageChunk::ToolOutputDenied { .. }
             | UiMessageChunk::Custom { .. }) => {
                 state.message.parts.push(
                     serde_json::to_value(&chunk)
@@ -3076,6 +3157,63 @@ fn update_tool_part_output_error(
         insert_optional_bool(object, "providerExecuted", provider_executed);
         insert_result_provider_metadata(object, provider_metadata);
         insert_optional_object(object, "toolMetadata", tool_metadata);
+    }
+}
+
+fn update_tool_part_approval_requested(
+    part: &mut JsonValue,
+    approval_id: String,
+    is_automatic: Option<bool>,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("approval-requested".to_string()),
+        );
+        object.remove("output");
+        object.remove("errorText");
+        let mut approval = JsonObject::new();
+        approval.insert("id".to_string(), JsonValue::String(approval_id));
+        insert_optional_bool(&mut approval, "isAutomatic", is_automatic);
+        object.insert("approval".to_string(), JsonValue::Object(approval));
+        insert_call_provider_metadata(object, provider_metadata);
+    }
+}
+
+fn update_tool_part_approval_responded(
+    part: &mut JsonValue,
+    approval_id: String,
+    approved: bool,
+    reason: Option<String>,
+    provider_executed: Option<bool>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("approval-responded".to_string()),
+        );
+        let approval = object
+            .entry("approval".to_string())
+            .or_insert_with(|| JsonValue::Object(JsonObject::new()));
+        if let JsonValue::Object(approval) = approval {
+            approval.insert("id".to_string(), JsonValue::String(approval_id));
+            approval.insert("approved".to_string(), JsonValue::Bool(approved));
+            insert_optional_string(approval, "reason", reason);
+        }
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+    }
+}
+
+fn update_tool_part_output_denied(part: &mut JsonValue, provider_executed: Option<bool>) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-denied".to_string()),
+        );
+        object.remove("output");
+        object.remove("errorText");
+        insert_optional_bool(object, "providerExecuted", provider_executed);
     }
 }
 
@@ -4514,6 +4652,181 @@ mod tests {
                 "state": "output-error",
                 "input": { "invalid": "data" },
                 "errorText": "Tool execution failed"
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_maps_static_tool_approval_request() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                ),
+                UiMessageChunk::tool_approval_request("id-1", "call-1"),
+            ],
+            false,
+        )
+        .expect("static approval request processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-requested",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1" }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_maps_dynamic_tool_approval_request() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "tool1".to_string(),
+                    input: json!({ "value": "value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::tool_approval_request("id-1", "call-1"),
+            ],
+            false,
+        )
+        .expect("dynamic approval request processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "approval-requested",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1" }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_automatic_approval_metadata_through_denial() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                ),
+                UiMessageChunk::ToolApprovalRequest {
+                    approval_id: "id-1".to_string(),
+                    tool_call_id: "call-1".to_string(),
+                    is_automatic: Some(true),
+                    provider_metadata: None,
+                },
+                UiMessageChunk::ToolApprovalResponse {
+                    approval_id: "id-1".to_string(),
+                    approved: false,
+                    reason: Some("Policy denied execution".to_string()),
+                    provider_executed: None,
+                },
+                UiMessageChunk::tool_output_denied("call-1", "tool1"),
+            ],
+            false,
+        )
+        .expect("automatic denial processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "output-denied",
+                "input": { "value": "value" },
+                "approval": {
+                    "id": "id-1",
+                    "isAutomatic": true,
+                    "approved": false,
+                    "reason": "Policy denied execution"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_automatic_approval_metadata_through_execution() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "tool1".to_string(),
+                    input: json!({ "value": "value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolApprovalRequest {
+                    approval_id: "id-1".to_string(),
+                    tool_call_id: "call-1".to_string(),
+                    is_automatic: Some(true),
+                    provider_metadata: None,
+                },
+                UiMessageChunk::ToolApprovalResponse {
+                    approval_id: "id-1".to_string(),
+                    approved: true,
+                    reason: Some("trusted internal tool".to_string()),
+                    provider_executed: None,
+                },
+                UiMessageChunk::tool_output_available("call-1", json!("result1")),
+            ],
+            false,
+        )
+        .expect("automatic approval execution processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "output-available",
+                "input": { "value": "value" },
+                "output": "result1",
+                "approval": {
+                    "id": "id-1",
+                    "isAutomatic": true,
+                    "approved": true,
+                    "reason": "trusted internal tool"
+                }
             })
         );
     }
