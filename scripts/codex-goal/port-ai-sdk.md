@@ -175,6 +175,18 @@ a group: do not use Gateway progress as a reason to resume Anthropic, Google,
 Bedrock, xAI, or any other unrelated provider while a common/core package row is
 still open.
 
+Within that first-phase gate, use this explicit package order unless upstream
+drift or a regression forces a narrower repair first:
+
+1. Finish `packages/ai` to 100%.
+2. Then finish `packages/provider-utils` (`@ai-sdk/provider-utils`).
+3. Then finish `packages/provider` (`@ai-sdk/provider`).
+4. Then continue the remaining first-phase rows in the most effective order.
+
+Do not advance to `packages/provider-utils` while portable `packages/ai`
+inventory remains open, and do not advance to `packages/provider` while
+portable `packages/provider-utils` inventory remains open.
+
 ## Priorities
 
 1. Preserve the existing Rust 2024 crate style, serde shapes, builder helpers,

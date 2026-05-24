@@ -116,6 +116,86 @@ pub struct ProviderRegistry<P> {
     options: ProviderRegistryOptions,
 }
 
+/// Rust equivalent of upstream `customProvider` for direct v4 model maps.
+///
+/// This initial Rust surface covers the required provider-v4 model families
+/// (`languageModel`, `embeddingModel`, and `imageModel`). Broader optional
+/// model families, files/skills, string aliases, and fallback providers are
+/// tracked separately in the upstream parity ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProvider<LM, EM, IM> {
+    language_models: Vec<(String, LM)>,
+    embedding_models: Vec<(String, EM)>,
+    image_models: Vec<(String, IM)>,
+}
+
+impl<LM, EM, IM> CustomProvider<LM, EM, IM> {
+    /// Creates an empty custom provider.
+    pub fn new() -> Self {
+        Self {
+            language_models: Vec::new(),
+            embedding_models: Vec::new(),
+            image_models: Vec::new(),
+        }
+    }
+
+    /// Registers a language model by model id.
+    pub fn with_language_model(mut self, model_id: impl Into<String>, model: LM) -> Self {
+        self.language_models.push((model_id.into(), model));
+        self
+    }
+
+    /// Registers an embedding model by model id.
+    pub fn with_embedding_model(mut self, model_id: impl Into<String>, model: EM) -> Self {
+        self.embedding_models.push((model_id.into(), model));
+        self
+    }
+
+    /// Registers an image model by model id.
+    pub fn with_image_model(mut self, model_id: impl Into<String>, model: IM) -> Self {
+        self.image_models.push((model_id.into(), model));
+        self
+    }
+}
+
+impl<LM, EM, IM> Default for CustomProvider<LM, EM, IM> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<LM, EM, IM> Provider for CustomProvider<LM, EM, IM>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+{
+    type LanguageModel = LM;
+    type EmbeddingModel = EM;
+    type ImageModel = IM;
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.language_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::LanguageModel))
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.embedding_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.image_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::ImageModel))
+    }
+}
+
 impl<P> ProviderRegistry<P> {
     /// Creates a registry with the upstream default separator (`:`).
     pub fn new<I, K>(providers: I) -> Self
@@ -279,6 +359,11 @@ where
     K: Into<String>,
 {
     ProviderRegistry::with_options(providers, options)
+}
+
+/// Creates an empty custom provider with direct v4 model maps.
+pub fn custom_provider<LM, EM, IM>() -> CustomProvider<LM, EM, IM> {
+    CustomProvider::new()
 }
 
 /// Creates a provider registry that wraps every language model lookup with middleware.
@@ -467,7 +552,7 @@ mod tests {
         NoSuchProviderError, ProviderRegistryOptions, create_provider_registry,
         create_provider_registry_with_image_model_middleware,
         create_provider_registry_with_language_model_middleware,
-        create_provider_registry_with_options, split_registry_model_id,
+        create_provider_registry_with_options, custom_provider, split_registry_model_id,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
     use crate::file_data::{FileDataContent, ProviderReference};
@@ -922,6 +1007,84 @@ mod tests {
     fn provider_reference(provider: &str, id: &str) -> ProviderReference {
         ProviderReference::from_map(BTreeMap::from([(provider.to_string(), id.to_string())]))
             .expect("provider reference is valid")
+    }
+
+    #[test]
+    fn custom_provider_language_model_should_return_the_language_model_if_it_exists() {
+        let model = StaticLanguageModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-language-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_language_model("test-model", model.clone());
+
+        assert_eq!(provider.language_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_language_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+        let error = provider
+            .language_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::LanguageModel);
+    }
+
+    #[test]
+    fn custom_provider_embedding_model_should_return_the_embedding_model_if_it_exists() {
+        let model = StaticEmbeddingModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-embedding-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_embedding_model("test-model", model.clone());
+
+        assert_eq!(provider.embedding_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_embedding_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+        let error = provider
+            .embedding_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::EmbeddingModel);
+    }
+
+    #[test]
+    fn custom_provider_image_model_should_return_the_image_model_if_it_exists() {
+        let model = StaticImageModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-image-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_image_model("test-model", model.clone());
+
+        assert_eq!(provider.image_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_image_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+        let error = provider
+            .image_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::ImageModel);
     }
 
     #[derive(Clone, Debug)]
