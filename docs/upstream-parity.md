@@ -4961,6 +4961,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    The upstream `streamText` context `onFinish` case now has the named Rust
    counterpart `stream_text_passes_runtime_context_to_finish_callback`,
    proving the final finish event receives the configured runtime context.
+   The upstream `streamText` single invalid tool-call content, full-stream,
+   and UI-message stream cases now have the named Rust counterpart
+   `stream_text_marks_schema_invalid_tool_call_in_result_full_and_ui_stream`,
+   proving streamed schema-invalid tool calls are marked invalid before local
+   execution, produce a tool-error result, update full-stream parts, and emit
+   raw tool input/output error text into UI-message chunks while provider
+   stream errors remain masked by default.
    The upstream automatic approval and automatic denial tool-approval stream
    cases now have Rust coverage in
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`

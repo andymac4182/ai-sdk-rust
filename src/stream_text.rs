@@ -24,12 +24,12 @@ use crate::generate_text::{
     apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
     generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
     invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
-    invoke_tool_input_start_callback, is_stop_condition_met, mark_runtime_dynamic_tool_calls,
-    mark_tool_call_metadata, mark_tool_call_titles, mark_tool_result_metadata,
-    mark_unavailable_tool_calls, merge_provider_options, refine_tool_inputs,
-    refresh_generate_text_content, refresh_tool_call_views, refresh_tool_result_views,
-    repair_tool_calls, resolve_tool_approvals_for_step, response_messages_for_step,
-    should_continue_after_tool_results, sync_tool_result_inputs,
+    invoke_tool_input_start_callback, is_stop_condition_met, mark_invalid_tool_inputs,
+    mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
+    mark_tool_result_metadata, mark_unavailable_tool_calls, merge_provider_options,
+    refine_tool_inputs, refresh_generate_text_content, refresh_tool_call_views,
+    refresh_tool_result_views, repair_tool_calls, resolve_tool_approvals_for_step,
+    response_messages_for_step, should_continue_after_tool_results, sync_tool_result_inputs,
     update_pending_deferred_provider_tool_calls,
 };
 use crate::headers::Headers;
@@ -2602,6 +2602,10 @@ where
             &mut collected_step.tool_calls,
             step_call_options.tools.as_deref(),
         );
+        mark_invalid_tool_inputs(
+            &mut collected_step.tool_calls,
+            step_call_options.tools.as_deref(),
+        );
         repair_tool_calls(
             &mut collected_step.tool_calls,
             &collected_step.provider_content,
@@ -4375,6 +4379,12 @@ fn tool_call_error_text(error: Option<&str>, options: &StreamTextUiMessageStream
     let error = error
         .map(|error| JsonValue::String(error.to_string()))
         .unwrap_or_else(|| JsonValue::String("An error occurred.".to_string()));
+    if options.on_error.is_none() {
+        return error
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| error.to_string());
+    }
     ui_message_error_text(&error, options)
 }
 
@@ -4382,6 +4392,14 @@ fn tool_result_error_text(
     tool_result: &GenerateTextToolResult,
     options: &StreamTextUiMessageStreamOptions,
 ) -> String {
+    if options.on_error.is_none() {
+        return tool_result
+            .output
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| tool_result.output.to_string());
+    }
+
     if tool_result.provider_executed != Some(true) {
         return ui_message_error_text(&tool_result.output, options);
     }
@@ -4473,7 +4491,11 @@ fn sync_stream_text_tool_parts(
         match part {
             TextStreamPart::ToolCall(part) => {
                 if let Some(tool_call) = tool_calls.iter().find(|tool_call| {
-                    tool_call.tool_call_id == part.tool_call_id && tool_call.invalid != Some(true)
+                    tool_call.tool_call_id == part.tool_call_id
+                        && (tool_call.invalid != Some(true)
+                            || !tool_call.error.as_deref().is_some_and(|error| {
+                                error.starts_with("Model tried to call unavailable tool")
+                            }))
                 }) {
                     *part = tool_call.clone();
                 }
@@ -11211,6 +11233,135 @@ mod tests {
                 .expect("finish contexts lock")
                 .as_slice(),
             [runtime_context]
+        );
+    }
+
+    #[test]
+    fn stream_text_marks_schema_invalid_tool_call_in_result_full_and_ui_stream() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
+                    "call-1",
+                    "cityAttractions",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{ "cities": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "cityAttractions",
+                    r#"{ "cities": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("cityAttractions", input_schema)),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "cityAttractions");
+        assert_eq!(
+            result.tool_calls[0].input,
+            json!({ "cities": "San Francisco" })
+        );
+        assert_eq!(result.tool_calls[0].invalid, Some(true));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        let error_text = result.tool_calls[0]
+            .error
+            .as_deref()
+            .expect("invalid tool call includes an error");
+        assert!(error_text.contains("Invalid input for tool cityAttractions"));
+        assert!(error_text.contains("$.city is required"));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(result.tool_results[0].dynamic, Some(true));
+        assert_eq!(
+            result.tool_results[0]
+                .output
+                .as_str()
+                .expect("tool error output is text"),
+            error_text
+        );
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_calls, result.tool_calls);
+        assert_eq!(result.steps[0].tool_results, result.tool_results);
+
+        let full_stream_tool_call = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes invalid tool call");
+        assert_eq!(full_stream_tool_call.invalid, Some(true));
+        assert_eq!(full_stream_tool_call.error.as_deref(), Some(error_text));
+
+        let full_stream_tool_result = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool error result");
+        assert_eq!(full_stream_tool_result.is_error, Some(true));
+        assert_eq!(full_stream_tool_result.output.as_str(), Some(error_text));
+
+        let ui_chunks = serde_json::to_value(result.to_ui_message_stream())
+            .expect("ui message stream serializes");
+        let ui_chunks = ui_chunks.as_array().expect("ui chunks are an array");
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-input-start"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["toolName"] == "cityAttractions")
+        );
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-input-delta"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["inputTextDelta"] == r#"{ "cities": "San Francisco" }"#)
+        );
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-input-error"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["toolName"] == "cityAttractions"
+                    && chunk["input"] == json!({ "cities": "San Francisco" })
+                    && chunk["errorText"] == error_text)
+        );
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-output-error"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["errorText"] == error_text)
         );
     }
 
