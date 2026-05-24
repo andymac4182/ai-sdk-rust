@@ -4415,3 +4415,125 @@ that gates ~80 chat.test.ts + thread.test.ts cases.
 - **chat.test.ts isDM 2 remaining cases** — both need
   handleIncomingMessage to deliver a thread handle into a
   registered handler.
+
+## Slices 412..420 refinement cycle (multi-slice handler-trait sequence + dispatcher cascade)
+
+9-slice cycle covering slices 412..420. After the user redirected
+from small-slice cadence to multi-slice architectural work (option
+1: `handleIncomingMessage` + handler-trait surface), slices 415..420
+landed the full chat.test.ts handler-registration + dispatcher
+cascade.
+
+**Slices summary**
+
+- 412: regenerate package-progress.md + refresh estimates basis
+  lines for chat / adapter-github / adapter-linear.
+- 413: split adapter-gchat bundled is_dm test into 2 explicit
+  upstream-named cases + 1 additive.
+- 414: enumerate adapter-teams ESM-compatibility upstream case as
+  js-only-documented (only adapter with this test).
+- 415: **Phase A** — Chat::on_new_mention + ChatHandlers storage
+  + dispatcher branch (is_mention=true gate). 2 portable + 4
+  additive.
+- 416: **Phase B** — Chat::on_subscribed_message + state.is_subscribed-
+  keyed priority dispatch (subscribed absorbs mention). 2 portable
+  + 3 additive.
+- 417: **Phase C** — Chat::on_direct_message + DirectMessageHandler
+  (3-arg with Channel) + adapter.is_dm-keyed priority dispatch
+  (DM > subscribed > mention cascade with fall-through). 4
+  portable + 1 additive.
+- 418: **Phase D** — Chat::on_new_message regex pattern handler +
+  full 5-step upstream dispatcher cascade (DM-with-handlers →
+  DM-no-handlers-sets-is_mention → subscribed → mention → patterns
+  walk). Added regex 1.11 dependency. 2 portable + 4 additive.
+- 419: **Phase E** — Chat::on_reaction + on_reaction_filtered +
+  process_reaction async dispatcher + EmojiFilter (Emoji|Raw with
+  upstream's `filter_name == emoji.name OR filter_name == raw_emoji`
+  match rule). 8 portable + 1 additive.
+- 420: **Phase F** — Chat::on_action + on_action_filtered +
+  process_action async dispatcher (mirrors reaction pattern with
+  String-equality filter). 5 portable + 1 additive.
+
+Total: 23 portable + 14 additive upstream cases mapped across the
+handler-trait sequence. chat-sdk-chat 821 → 852 tests (+31).
+
+**Lessons**
+
+1. **Multi-slice architectural sequences work when the user signals
+   approval explicitly.** Pre-slice-415 I was running 1-3-case
+   slices in the autonomous loop. The user redirected to a multi-
+   slice architectural commitment ("option 1: go") after I asked
+   directly. The 6-slice arc 415-420 closed ~30% of the
+   chat.test.ts unmapped cases in a coherent way that the
+   piecemeal cadence couldn't have. Without the explicit "go", a
+   multi-slice architectural commitment is irreversible scope —
+   keep waiting for it.
+
+2. **Boxed-closure handler types compose well with Arc<Mutex<Vec>>
+   storage.** The Phase A scaffold (HandlerFuture =
+   Pin<Box<dyn Future<Output=()> + Send>>; MentionHandler =
+   Arc<dyn Fn(...) -> HandlerFuture + Send + Sync + 'static>) was
+   directly reused across Phases B (subscribed), C (direct_message
+   with 3-arg signature), D (regex+handler pair), E (reaction
+   filter+handler), and F (action filter+handler). Adopting this
+   shape once and instantiating per-handler-class is much cleaner
+   than per-handler trait objects.
+
+3. **Snapshot-under-lock, drop-guard, then await is the canonical
+   pattern for async dispatch with sync storage.** Each dispatcher
+   branch follows the same shape:
+   ```rust
+   let handlers_snapshot: Vec<HandlerType> =
+       self.handlers.<class>.lock().unwrap().clone();
+   for handler in handlers_snapshot {
+       let thread = Thread::new(adapter_arc.clone(), ...);
+       handler(thread, ...).await;
+   }
+   ```
+   The `.clone()` cost is cheap (Arc<dyn Fn>) and the mutex lock
+   is held for only the duration of the snapshot, not the awaits.
+
+4. **Mirror upstream's filter-match semantics precisely.** Slice
+   419's first test run failed because I'd implemented EmojiFilter
+   matching as exact-variant comparison (Raw matches raw_emoji
+   only; Emoji matches emoji.name only). Upstream actually extracts
+   `filter_name` regardless of variant and checks against BOTH
+   emoji.name AND raw_emoji. Lesson: when porting a filter
+   predicate, copy the upstream predicate verbatim, even if the
+   Rust enum makes the cases look "obvious".
+
+5. **Phase splits should match upstream dispatcher cases, not
+   arbitrary boundaries.** Phases A-F each correspond to one
+   upstream `if/else if` branch (mention, subscribed, DM, pattern,
+   reaction, action). Following the upstream code structure
+   directly makes each slice's scope obvious and the cumulative
+   dispatcher easy to reason about.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- (no brief edits — the deferred-adapter-method 3-slice cadence
+  from slice 411 still applies; the handler-trait sequence is a
+  new pattern but doesn't supersede the existing one).
+
+**Open refinements deferred**
+
+- **Phase G+** — onOptionsLoad, onSlashCommand, openModal,
+  callbackUrl POSTs. Each is its own slice in the same pattern.
+- **detectMention walker** — replaces caller-set message.is_mention
+  with a computed value from the formatted AST (walking for
+  `<@botUserId>` mentions of the bot's user id). Currently the
+  dispatcher trusts whatever the caller set on message.is_mention.
+- **Lock + concurrency dispatcher** — the upstream
+  handleIncomingMessage path also threads through per-thread lock
+  acquisition + the concurrency strategy (queue/debounce/burst/
+  concurrent). ~70 cases in chat.test.ts gated on this.
+- **Adapter post_message wire-up for handler tests** — the
+  upstream "should allow posting from reaction thread" and
+  "should allow posting from action thread" cases assert on
+  mockAdapter.postMessage. Need a test mock that records calls
+  through the handler path.
+- **Channel::post → SentMessage refactor** (option 2 from the
+  prior turn). Still deferred.
+- **PostableMessage input enum** (option 3 from the prior turn).
+  Still deferred.
