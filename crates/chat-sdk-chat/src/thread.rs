@@ -720,6 +720,25 @@ impl SentMessage {
             .edit_message(&self.message.thread_id, &self.message.id, text)
             .await
     }
+
+    /// 1:1 with upstream `sent.isMention` field — delegates to the
+    /// wrapped message's `is_mention` flag (preserved through the
+    /// SentMessage wrap so handlers downstream of `Thread::post`
+    /// can branch on whether the original incoming message
+    /// mentioned the bot).
+    pub fn is_mention(&self) -> Option<bool> {
+        self.message.is_mention
+    }
+
+    /// 1:1 port of upstream `sent.toJSON()`. Delegates to the
+    /// wrapped Message's `to_serialized()` (which produces the
+    /// `chat:Message`-tagged envelope). The SentMessage wrapper is
+    /// transparent for serialization: only the wrapped message is
+    /// persisted; the adapter handle is reconstructed at deserialize
+    /// time by the chat dispatcher.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self.message.to_serialized()).unwrap_or(serde_json::Value::Null)
+    }
 }
 
 #[cfg(test)]
@@ -1332,6 +1351,37 @@ mod tests {
                 "thumbsup".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn sent_message_should_preserve_is_mention_from_original_message() {
+        // 1:1 with upstream `describe("createSentMessageFromMessage")
+        // > it("should preserve isMention from original message")` —
+        // when the wrapped Message has `is_mention: Some(true)`, the
+        // SentMessage accessor returns the same value (no transform).
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let mut msg = sample_message("msg-1", "Hello @bot");
+        msg.is_mention = Some(true);
+        let sent = thread.create_sent_message_from_message(msg);
+        assert_eq!(sent.is_mention(), Some(true));
+    }
+
+    #[test]
+    fn sent_message_should_provide_to_json_that_delegates_to_original_message() {
+        // 1:1 with upstream `describe("createSentMessageFromMessage")
+        // > it("should provide toJSON that delegates to the original
+        // message")` — `sent.toJSON()` produces the upstream
+        // `chat:Message`-tagged envelope with `_type` / `id` / `text`
+        // populated from the wrapped Message.
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let msg = sample_message("msg-1", "Hello world");
+        let sent = thread.create_sent_message_from_message(msg);
+        let json = sent.to_json();
+        assert_eq!(json["_type"], "chat:Message");
+        assert_eq!(json["id"], "msg-1");
+        assert_eq!(json["text"], "Hello world");
     }
 
     // ---------- describe("recentMessages getter/setter") (4 cases) ----------
