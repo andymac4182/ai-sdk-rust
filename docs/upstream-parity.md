@@ -990,6 +990,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   materialized encoded SSE body; consumer errors are ignored so the returned
   response body remains readable. Exact asynchronous Web-stream scheduling is
   JavaScript-runtime-specific for the current Rust helper.
+- 2026-05-24: `packages/ai` `createUIMessageStream` writer basics parity
+  added named Rust counterparts for portable upstream
+  `create-ui-message-stream.test.ts` write/merge/error cases:
+  `create_ui_message_stream_should_send_data_stream_part_and_close_the_stream`,
+  `create_ui_message_stream_should_forward_a_single_stream_with_two_elements`,
+  and `create_ui_message_stream_should_add_error_parts_when_stream_errors`.
+  Rust maps upstream `writer.write` and `writer.merge(ReadableStream)` to the
+  existing materialized writer and `merge`/`merge_result` APIs. Browser
+  `ReadableStream` scheduling cases such as delayed merged streams and writes
+  after close remain JavaScript-runtime-specific until a live stream
+  abstraction is introduced.
 - 2026-05-23: `packages/ai` `streamText` automatic tool approval stream
   parity added the named Rust counterpart
   `stream_text_automatic_tool_approval_response_streams_before_tool_result`

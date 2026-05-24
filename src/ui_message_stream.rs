@@ -3232,6 +3232,105 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_should_send_data_stream_part_and_close_the_stream() {
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            writer.write(UiMessageChunk::text_start("1"));
+            writer.write(UiMessageChunk::text_delta("1", "1a"));
+            writer.write(UiMessageChunk::text_end("1"));
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-start",
+                    "id": "1"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-end",
+                    "id": "1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_should_forward_a_single_stream_with_two_elements() {
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            writer.merge([
+                UiMessageChunk::text_delta("1", "1a"),
+                UiMessageChunk::text_delta("1", "1b"),
+            ]);
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1b"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_should_add_error_parts_when_stream_errors() {
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
+            |writer| {
+                writer.merge_result::<_, &str>([
+                    Ok(UiMessageChunk::text_delta("1", "1a")),
+                    Err("1-error"),
+                ]);
+                writer.merge([
+                    UiMessageChunk::text_delta("2", "2a"),
+                    UiMessageChunk::text_delta("2", "2b"),
+                ]);
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2b"
+                },
+                {
+                    "type": "error",
+                    "errorText": "error-message"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn ui_message_chunk_serializes_portable_tool_source_and_file_chunks() {
         let chunks = vec![
             UiMessageChunk::file("text/plain", "data:text/plain;base64,aGk="),
