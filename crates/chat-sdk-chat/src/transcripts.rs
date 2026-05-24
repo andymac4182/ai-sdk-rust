@@ -762,4 +762,79 @@ mod tests {
         assert_eq!(assistant_only.len(), 1);
         assert_eq!(assistant_only[0].role, TranscriptRole::Assistant);
     }
+
+    // ---------- list describe block base cases (3 upstream cases) ----------
+
+    fn seed_five(api: &TranscriptsApiImpl, user: &str) {
+        for i in 0..5 {
+            block_on(api.append(input_for_thread(
+                user,
+                "slack",
+                "slack:C:T",
+                TranscriptRole::User,
+                &format!("msg {i}"),
+            )))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn transcripts_api_list_returns_all_messages_in_chronological_order_by_default() {
+        // 1:1 with upstream `it("returns all messages in chronological
+        // order by default")`. The Rust API exposes both `list(userKey,
+        // limit)` and `list_query(ListQuery)` — both preserve insertion
+        // (chronological) order from the underlying list adapter.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        seed_five(&api, "u1");
+        let list = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: None,
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(list.len(), 5);
+        let texts: Vec<String> = list.iter().map(|e| e.text.clone()).collect();
+        assert_eq!(texts, vec!["msg 0", "msg 1", "msg 2", "msg 3", "msg 4"]);
+    }
+
+    #[test]
+    fn transcripts_api_list_returns_empty_array_when_no_messages_exist() {
+        // 1:1 with upstream `it("returns empty array when no messages
+        // exist")`.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        let list = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: None,
+            thread_id: None,
+            user_key: "nobody".to_string(),
+        }))
+        .unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn transcripts_api_list_returns_newest_n_when_limit_is_set_still_chronological() {
+        // 1:1 with upstream `it("returns the newest N when limit is set,
+        // still chronological")`.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        seed_five(&api, "u1");
+        let list = block_on(api.list_query(&crate::types::ListQuery {
+            limit: Some(2),
+            platforms: None,
+            roles: None,
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(list.len(), 2);
+        // Newest 2 (insertion order preserved): msg 3, msg 4.
+        let texts: Vec<String> = list.iter().map(|e| e.text.clone()).collect();
+        assert_eq!(texts, vec!["msg 3", "msg 4"]);
+    }
 }
