@@ -144,6 +144,10 @@ pub const DEDUPE_TTL_MS: u64 = 5 * 60 * 1000;
 /// `MODAL_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000` (24 h).
 pub const MODAL_CONTEXT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// State-adapter key prefix for modal-context lookups. 1:1 with
+/// upstream's `modal-context:<contextId>` shape (slice 429).
+pub const MODAL_CONTEXT_KEY_PREFIX: &str = "modal-context:";
+
 /// Whether `user_id` matches the Slack member-id pattern. 1:1 with
 /// upstream's private `SLACK_USER_ID_REGEX = /^[UW][A-Z0-9]+$/`.
 /// Slack member ids start with `U` (user) or `W` (workspace owner)
@@ -724,6 +728,75 @@ impl Chat {
             user_name: options.user_name,
             dedupe_ttl_ms: options.dedupe_ttl_ms.unwrap_or(DEDUPE_TTL_MS),
         })
+    }
+
+    /// 1:1 port of upstream `Chat.openModal(triggerId, modal,
+    /// context?)` orchestration. Adopters call this from inside an
+    /// action / slash-command handler with the `trigger_id` they
+    /// received on the event.
+    ///
+    /// Behavior matches upstream:
+    /// - returns `Ok(None)` when `trigger_id.is_none()` (no
+    ///   interaction trigger available; logs warning surrogate);
+    /// - returns `Ok(None)` when the adapter doesn't support
+    ///   modals (open_modal returns `Err(Unsupported)`);
+    /// - generates a fresh UUID `context_id`, stores
+    ///   `modal-context:<context_id>` in state with the optional
+    ///   thread context + adapter name + view metadata (TTL =
+    ///   [`MODAL_CONTEXT_TTL_MS`]), then invokes
+    ///   `adapter.open_modal(trigger_id, modal, context_id)`;
+    /// - on success, returns `Ok(Some(OpenModalResult))`;
+    /// - on other adapter errors, surfaces them as
+    ///   `ChatError::Base("ADAPTER_ERROR")`.
+    pub async fn open_modal(
+        &self,
+        adapter: &dyn Adapter,
+        trigger_id: Option<&str>,
+        thread_id: Option<&str>,
+        modal: &crate::modals::ModalElement,
+    ) -> Result<Option<crate::types::OpenModalResult>, crate::errors::ChatError> {
+        let Some(trigger_id) = trigger_id else {
+            // 1:1 with upstream "Cannot open modal: no triggerId
+            // available" — log + return undefined (mapped to
+            // Ok(None) on the Rust side).
+            return Ok(None);
+        };
+
+        // Generate a fresh context UUID. 1:1 with upstream's
+        // `crypto.randomUUID()`.
+        let context_id = uuid::Uuid::new_v4().to_string();
+
+        // Persist the modal context to state so the eventual
+        // viewSubmission event can look up the originating thread/
+        // adapter. Stored as a JSON envelope keyed by context_id
+        // with `modal-context:` prefix.
+        let context_value = serde_json::json!({
+            "thread": thread_id,
+            "adapterName": adapter.name(),
+            "callbackId": modal.callback_id,
+        });
+        let key = format!("{MODAL_CONTEXT_KEY_PREFIX}{context_id}");
+        // Best-effort write; failures here don't block the modal
+        // open (upstream logs and proceeds).
+        let _ = self
+            .state
+            .set(
+                &key,
+                context_value,
+                Some(MODAL_CONTEXT_TTL_MS),
+            )
+            .await;
+
+        // Call adapter.open_modal. Detect Unsupported → log
+        // surrogate + return Ok(None); other errors surface.
+        match adapter.open_modal(trigger_id, modal, &context_id).await {
+            Ok(result) => Ok(Some(result)),
+            Err(crate::types::AdapterError::Unsupported(_)) => Ok(None),
+            Err(other) => Err(crate::errors::ChatError::new(
+                format!("{other}"),
+                "ADAPTER_ERROR",
+            )),
+        }
     }
 
     /// 1:1 port of upstream `Chat.detectMention(adapter, message)`.
@@ -4874,6 +4947,214 @@ mod tests {
             !get_calls.iter().any(|k| k.starts_with("dedupe:")),
             "dispatcher should not call get on dedupe keys; got: {get_calls:?}"
         );
+    }
+
+    // ---------- describe("openModal") — slice 429 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("Actions") >
+    // describe("openModal")`. Phase B of the deferred-adapter-
+    // method cadence: wires Chat::open_modal orchestration that
+    // adopters call from inside an action / slash-command handler.
+    //
+    // Behavior matches upstream:
+    // - returns Ok(None) when trigger_id is None
+    // - returns Ok(None) when adapter doesn't support modals
+    //   (Err(Unsupported))
+    // - generates a fresh UUID context_id, stores modal-context:<id>
+    //   in state with the thread + adapter metadata (TTL =
+    //   MODAL_CONTEXT_TTL_MS), then calls adapter.open_modal
+
+    #[derive(Debug, Default)]
+    struct RecordingModalAdapter {
+        calls: std::sync::Mutex<Vec<(String, String, String)>>,
+        result: Option<crate::types::OpenModalResult>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for RecordingModalAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn open_modal(
+            &self,
+            trigger_id: &str,
+            modal: &crate::modals::ModalElement,
+            context_id: &str,
+        ) -> AdapterResult<crate::types::OpenModalResult> {
+            self.calls.lock().unwrap().push((
+                trigger_id.to_string(),
+                modal.callback_id.clone(),
+                context_id.to_string(),
+            ));
+            Ok(self.result.clone().unwrap_or(crate::types::OpenModalResult {
+                view_id: "V_FROM_ADAPTER".to_string(),
+            }))
+        }
+    }
+
+    fn make_modal(callback_id: &str) -> crate::modals::ModalElement {
+        crate::modals::modal(crate::modals::ModalOptions {
+            callback_id: callback_id.to_string(),
+            title: "Test".to_string(),
+            children: Some(Vec::new()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn open_modal_calls_adapter_with_trigger_id_modal_and_uuid_context_id() {
+        // 1:1 with upstream "should provide openModal method that
+        // calls adapter.openModal". Verifies the adapter is called
+        // with (trigger_id, modal, contextId) where contextId is a
+        // freshly-generated UUID string.
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter = Arc::new(RecordingModalAdapter {
+            result: Some(crate::types::OpenModalResult {
+                view_id: "V123".to_string(),
+            }),
+            ..Default::default()
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state.clone(),
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            ..Default::default()
+        });
+        let modal = make_modal("test_modal");
+        let result = futures_executor::block_on(chat.open_modal(
+            adapter.as_ref(),
+            Some("trigger-123"),
+            Some("slack:C123:1234.5678"),
+            &modal,
+        ))
+        .unwrap();
+        assert_eq!(
+            result,
+            Some(crate::types::OpenModalResult {
+                view_id: "V123".to_string()
+            })
+        );
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "trigger-123");
+        assert_eq!(calls[0].1, "test_modal");
+        // context_id is a UUID v4 string (36 chars with hyphens).
+        assert_eq!(calls[0].2.len(), 36);
+        assert_eq!(calls[0].2.matches('-').count(), 4);
+    }
+
+    #[test]
+    fn open_modal_returns_none_when_trigger_id_is_missing() {
+        // 1:1 with upstream "should return undefined from openModal
+        // when triggerId is missing". Verifies the adapter is NOT
+        // called.
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter = Arc::new(RecordingModalAdapter::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            ..Default::default()
+        });
+        let modal = make_modal("test_modal");
+        let result = futures_executor::block_on(chat.open_modal(
+            adapter.as_ref(),
+            None, // no trigger
+            Some("slack:C123:1234.5678"),
+            &modal,
+        ))
+        .unwrap();
+        assert!(result.is_none());
+        assert!(adapter.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_modal_returns_none_when_adapter_does_not_support_modals() {
+        // 1:1 with upstream "should return undefined from openModal
+        // when adapter does not support modals". The adapter returns
+        // Err(Unsupported), Chat::open_modal collapses to Ok(None).
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let modal = make_modal("test_modal");
+        let result = futures_executor::block_on(chat.open_modal(
+            adapter.as_ref(),
+            Some("trigger-123"),
+            Some("slack:C123:1234.5678"),
+            &modal,
+        ))
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn open_modal_persists_modal_context_to_state_with_thread_and_adapter() {
+        // 1:1 with upstream's "context was stored in state" assertion
+        // — modal-context:<contextId> contains the originating
+        // thread + adapter name so the eventual viewSubmission event
+        // can look it up.
+        let state = Arc::new(InMemoryState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter = Arc::new(RecordingModalAdapter::default());
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            ..Default::default()
+        });
+        let modal = make_modal("test_modal");
+        futures_executor::block_on(chat.open_modal(
+            adapter.as_ref(),
+            Some("trigger-123"),
+            Some("slack:C123:1234.5678"),
+            &modal,
+        ))
+        .unwrap();
+        // Find the modal-context entry in the in-memory state.
+        let cache = state.cache.lock().unwrap();
+        let modal_context_entry = cache
+            .iter()
+            .find(|(k, _)| k.starts_with(MODAL_CONTEXT_KEY_PREFIX))
+            .expect("modal-context entry should be stored");
+        assert_eq!(
+            modal_context_entry.1["thread"],
+            serde_json::json!("slack:C123:1234.5678")
+        );
+        assert_eq!(modal_context_entry.1["adapterName"], serde_json::json!("slack"));
+        assert_eq!(modal_context_entry.1["callbackId"], serde_json::json!("test_modal"));
+    }
+
+    #[test]
+    fn open_modal_works_with_empty_thread_id() {
+        // 1:1 with upstream "should open modal when action has empty
+        // threadId (no thread context)" — passing None for thread_id
+        // still opens the modal; stored thread is null in state.
+        let state = Arc::new(InMemoryState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter = Arc::new(RecordingModalAdapter::default());
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            ..Default::default()
+        });
+        let modal = make_modal("standalone_modal");
+        let result = futures_executor::block_on(chat.open_modal(
+            adapter.as_ref(),
+            Some("trigger-123"),
+            None, // no thread context
+            &modal,
+        ))
+        .unwrap();
+        assert!(result.is_some());
+        let cache = state.cache.lock().unwrap();
+        let modal_context_entry = cache
+            .iter()
+            .find(|(k, _)| k.starts_with(MODAL_CONTEXT_KEY_PREFIX))
+            .expect("modal-context entry should be stored");
+        assert_eq!(modal_context_entry.1["thread"], serde_json::Value::Null);
     }
 
     #[test]
