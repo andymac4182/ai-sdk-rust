@@ -464,6 +464,57 @@ impl Adapter for TelegramAdapter {
         Ok(())
     }
 
+    /// Remove an emoji reaction via `setMessageReaction` with an
+    /// empty reaction array. 1:1 with upstream
+    /// `adapter.removeReaction` — Telegram's API uses the same
+    /// endpoint as `addReaction` but clears the reaction by
+    /// sending `reaction: []`.
+    async fn remove_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+        let telegram_message_id = decode_composite_message_id(message_id, decoded.chat_id)?;
+
+        let url = self.method_url("setMessageReaction");
+        let body = serde_json::json!({
+            "chat_id": decoded.chat_id,
+            "message_id": telegram_message_id,
+            "reaction": [],
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram setMessageReaction call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Send a "typing…" chat action via `sendChatAction`. 1:1 with
     /// upstream `adapter.startTyping`. The optional `status`
     /// parameter is ignored (Telegram has no per-action status
@@ -1175,6 +1226,34 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_rejects_non_telegram_thread_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.remove_reaction("slack:C1:1.0", "42", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_targets_set_message_reaction_method() {
+        // Verifies the URL helper produces the right Telegram Bot API
+        // method for remove_reaction (upstream sends to the same
+        // setMessageReaction endpoint as add_reaction, with reaction: []).
+        let adapter = TelegramAdapter::new(
+            TelegramAdapterOptions::new("abc:xyz")
+                .with_base_url("https://api.example.test"),
+        );
+        assert_eq!(
+            adapter.method_url("setMessageReaction"),
+            "https://api.example.test/botabc:xyz/setMessageReaction"
+        );
     }
 
     #[test]
