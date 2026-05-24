@@ -181,9 +181,9 @@ selection rule at the start of every iteration: inspect the progress table, pick
 the first package in this list that is not 100%, and keep working that package
 until it is verified or explicitly documented as intentionally non-portable.
 
-1. Finish `packages/ai` to 100%.
-2. Then finish `packages/provider-utils` (`@ai-sdk/provider-utils`).
-3. Then finish `packages/provider` (`@ai-sdk/provider`).
+1. Finish `ai` (`packages/ai`) to 100%.
+2. Then finish `@ai-sdk/provider-utils` (`packages/provider-utils`).
+3. Then finish `@ai-sdk/provider` (`packages/provider`).
 4. Then continue the remaining first-phase rows in the most effective order.
 
 Do not advance to `packages/provider-utils` while portable `packages/ai`

@@ -167,6 +167,12 @@ slice is blocked while any first-phase row is `not-started` or `in-progress`.
 Gateway progress alone does not unblock other providers; the whole common/core
 plus Vercel AI Gateway phase must be finished first.
 
+Within the first phase, package selection is strictly ordered: finish `ai`
+(`packages/ai`) to 100%, then `@ai-sdk/provider-utils`, then
+`@ai-sdk/provider`, then continue the remaining first-phase rows in the most
+effective order. Do not take a later package slice while a portable package
+earlier in that order remains open.
+
 ## Inventory Rules
 
 - Record the upstream commit SHA/date used for each inventory pass.
