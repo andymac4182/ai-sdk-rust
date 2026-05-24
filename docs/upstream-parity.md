@@ -4975,6 +4975,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving local streaming tool executors emit preliminary tool-result parts
    before the repeated final result while `result.tool_results` and step
    tool-results retain only the final output.
+   The upstream `streamText` provider-executed dynamic tool input-streaming
+   full-stream, UI-message stream, and content cases now have the named Rust
+   counterpart
+   `stream_text_preserves_provider_executed_dynamic_tool_input_streaming`,
+   proving provider-executed dynamic flags and provider metadata survive
+   streamed tool-input start/delta/end, tool-call, tool-result, UI-message
+   chunks, and final step tool state.
    The upstream automatic approval and automatic denial tool-approval stream
    cases now have Rust coverage in
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`

@@ -11542,6 +11542,161 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_preserves_provider_executed_dynamic_tool_input_streaming() {
+        let provider_metadata = ProviderMetadata::from([(
+            "anthropic".to_string(),
+            Map::from_iter([("serverName".to_string(), json!("echo"))]),
+        )]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-1", "cityAttractions")
+                        .with_provider_executed(true)
+                        .with_dynamic(true)
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{ "city": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "call-1",
+                        "cityAttractions",
+                        r#"{ "city": "San Francisco" }"#,
+                    )
+                    .with_provider_executed(true)
+                    .with_dynamic(true)
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "call-1",
+                        "cityAttractions",
+                        NonNullJsonValue::new(json!({
+                            "status": "success",
+                            "text": "The weather in San Francisco is 72°F"
+                        }))
+                        .expect("tool result is non-null"),
+                    )
+                    .with_dynamic(true)
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(
+            result.tool_calls[0].provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results[0].dynamic, Some(true));
+        assert_eq!(
+            result.tool_results[0].provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(result.steps[0].tool_calls, result.tool_calls);
+        assert_eq!(result.steps[0].tool_results, result.tool_results);
+
+        let full_stream = serde_json::to_value(&result.parts).expect("parts serialize");
+        for expected in [
+            json!({
+                "type": "tool-input-start",
+                "id": "call-1",
+                "toolName": "cityAttractions",
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-call",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "input": { "city": "San Francisco" },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-result",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "input": { "city": "San Francisco" },
+                "output": {
+                    "status": "success",
+                    "text": "The weather in San Francisco is 72°F"
+                },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+        ] {
+            assert!(
+                full_stream
+                    .as_array()
+                    .expect("full stream parts are an array")
+                    .contains(&expected),
+                "missing expected full-stream part: {expected}"
+            );
+        }
+
+        let ui_chunks = serde_json::to_value(result.to_ui_message_stream())
+            .expect("ui message stream serializes");
+        for expected in [
+            json!({
+                "type": "tool-input-start",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-input-available",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "input": { "city": "San Francisco" },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-output-available",
+                "toolCallId": "call-1",
+                "output": {
+                    "status": "success",
+                    "text": "The weather in San Francisco is 72°F"
+                },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+        ] {
+            assert!(
+                ui_chunks
+                    .as_array()
+                    .expect("ui message chunks are an array")
+                    .contains(&expected),
+                "missing expected UI-message chunk: {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn stream_text_dispatches_telemetry_lifecycle_events() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
