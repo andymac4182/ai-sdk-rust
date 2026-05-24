@@ -50,6 +50,14 @@ pub struct Thread {
     /// `Arc<Mutex>` so the handle remains `Clone` while allowing
     /// `set_recent_messages` to mutate the underlying buffer.
     recent_messages: Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
+    /// 1:1 with upstream `channelId?: string`. The platform-encoded
+    /// channel id that owns this thread. Used by `to_json` to
+    /// expose the channel relationship in the serialized shape.
+    channel_id: Option<String>,
+    /// 1:1 with upstream `currentMessage?: Message`. The active
+    /// message being processed (set by the chat dispatcher for the
+    /// handler call frame; survives serialize/deserialize round-trips).
+    current_message: Option<crate::message::Message>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -73,6 +81,8 @@ impl Thread {
             state_adapter: None,
             is_subscribed_context: false,
             recent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+            channel_id: None,
+            current_message: None,
         }
     }
 
@@ -91,6 +101,8 @@ impl Thread {
             state_adapter: Some(state_adapter),
             is_subscribed_context: false,
             recent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+            channel_id: None,
+            current_message: None,
         }
     }
 
@@ -116,6 +128,78 @@ impl Thread {
             buf.push(message);
         }
         self
+    }
+
+    /// Builder: set the platform-encoded channel id for this thread.
+    /// 1:1 with upstream `new ThreadImpl({ channelId })` constructor
+    /// option.
+    pub fn with_channel_id(mut self, channel_id: impl Into<String>) -> Self {
+        self.channel_id = Some(channel_id.into());
+        self
+    }
+
+    /// Builder: set the active "current" message being processed by
+    /// the handler frame. 1:1 with upstream `new ThreadImpl({
+    /// currentMessage })` constructor option.
+    pub fn with_current_message(mut self, message: crate::message::Message) -> Self {
+        self.current_message = Some(message);
+        self
+    }
+
+    /// 1:1 with upstream `get channelId(): string | undefined`.
+    pub fn channel_id(&self) -> Option<&str> {
+        self.channel_id.as_deref()
+    }
+
+    /// 1:1 with upstream `get currentMessage(): Message | undefined`.
+    pub fn current_message(&self) -> Option<&crate::message::Message> {
+        self.current_message.as_ref()
+    }
+
+    /// 1:1 port of upstream `Thread.toJSON()`. Wire shape:
+    /// `{ _type: "chat:Thread", id, channelId, channelVisibility,
+    /// currentMessage?, isDM, adapterName }`. `currentMessage` is
+    /// serialized via `Message::to_serialized` when present.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": self.thread_id,
+            "channelId": self.channel_id,
+            "channelVisibility": "unknown",
+            "currentMessage": serde_json::Value::Null,
+            "isDM": false,
+            "adapterName": self.adapter.name(),
+        });
+        if let Some(msg) = self.current_message.as_ref() {
+            json["currentMessage"] = serde_json::to_value(msg.to_serialized()).unwrap_or_default();
+        }
+        json
+    }
+
+    /// 1:1 port of upstream `static Thread.fromJSON(json, adapter)`.
+    /// Reconstructs the handle from its serialized form. The
+    /// `adapter` argument is supplied externally (1:1 with upstream's
+    /// `adapter` parameter — the adapter isn't serialized).
+    pub fn from_json(json: &serde_json::Value, adapter: Arc<dyn Adapter>) -> Self {
+        let thread_id = json
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut thread = Self::new(adapter, thread_id);
+        if let Some(channel_id) = json.get("channelId").and_then(serde_json::Value::as_str) {
+            thread.channel_id = Some(channel_id.to_string());
+        }
+        if let Some(serialized) = json.get("currentMessage") {
+            if !serialized.is_null() {
+                if let Ok(msg) =
+                    serde_json::from_value::<crate::message::SerializedMessage>(serialized.clone())
+                {
+                    thread.current_message = Some(crate::message::Message::from_serialized(msg));
+                }
+            }
+        }
+        thread
     }
 
     /// 1:1 with upstream `get recentMessages(): Message[]`. Returns
@@ -819,6 +903,82 @@ mod tests {
         let msgs = thread.recent_messages();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "Replaced");
+    }
+
+    // ---------- describe("serialization") (4 upstream cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("serialization")`.
+
+    #[test]
+    fn thread_serialization_should_serialize_to_json() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123");
+        let json = thread.to_json();
+        assert_eq!(json["_type"], "chat:Thread");
+        assert_eq!(json["id"], "slack:C123:1234.5678");
+        assert_eq!(json["channelId"], "C123");
+        assert_eq!(json["channelVisibility"], "unknown");
+        assert!(json["currentMessage"].is_null());
+        assert_eq!(json["adapterName"], "recording");
+    }
+
+    #[test]
+    fn thread_serialization_should_serialize_with_current_message() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_current_message(sample_message("msg-1", "Current"));
+        let json = thread.to_json();
+        let current = &json["currentMessage"];
+        assert!(!current.is_null());
+        assert_eq!(current["_type"], "chat:Message");
+        assert_eq!(current["text"], "Current");
+    }
+
+    #[test]
+    fn thread_serialization_should_deserialize_from_json_with_explicit_adapter() {
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "slack:C123:1234.5678",
+            "channelId": "C123",
+            "isDM": false,
+            "adapterName": "slack",
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::from_json(&json, adapter.clone());
+        assert_eq!(thread.thread_id(), "slack:C123:1234.5678");
+        assert_eq!(thread.channel_id(), Some("C123"));
+        assert!(Arc::ptr_eq(thread.adapter(), &adapter));
+    }
+
+    #[test]
+    fn thread_serialization_should_deserialize_with_current_message() {
+        // Serialize a message, embed it, deserialize the thread,
+        // then re-serialize and observe the message text round-trips.
+        let msg = sample_message("msg-1", "Serialized");
+        let serialized_msg = serde_json::to_value(msg.to_serialized()).unwrap();
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "slack:C123:1234.5678",
+            "channelId": "C123",
+            "currentMessage": serialized_msg,
+            "isDM": false,
+            "adapterName": "slack",
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::from_json(&json, adapter);
+        let round_tripped = thread.to_json();
+        assert_eq!(round_tripped["currentMessage"]["text"], "Serialized");
     }
 
     #[test]
