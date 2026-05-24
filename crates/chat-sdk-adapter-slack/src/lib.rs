@@ -1038,12 +1038,33 @@ mod tests {
         assert_eq!(opts.effective_api_base(), "https://slack.example.test/api");
     }
 
+    // ---------- describe("encodeThreadId") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("encodeThreadId")`.
+    // Previously the `encode_thread_id_builds_the_upstream_format`
+    // test covered only upstream case 1 ("encodes channel and threadTs
+    // correctly"); case 2 ("handles empty threadTs") was unmapped.
+    // Per the slice-451 split-and-rename pattern, both cases now have
+    // 1:1 Rust tests.
+
     #[test]
-    fn encode_thread_id_builds_the_upstream_format() {
+    fn encode_thread_id_encodes_channel_and_thread_ts_correctly() {
+        // 1:1 with upstream `encodeThreadId > encodes channel and
+        // threadTs correctly`.
         assert_eq!(
             encode_thread_id("C0123ABCD", "1234567890.123456"),
             "slack:C0123ABCD:1234567890.123456"
         );
+    }
+
+    #[test]
+    fn encode_thread_id_handles_empty_thread_ts() {
+        // 1:1 with upstream `encodeThreadId > handles empty threadTs`
+        // — `{channel: "C12345", threadTs: ""}` -> `slack:C12345:`
+        // (trailing colon, empty 2nd segment). The slice-454
+        // permissive `decode_thread_id` change makes this shape
+        // round-trippable: encode -> decode -> Some({channel: "C12345",
+        // thread_ts: ""}).
+        assert_eq!(encode_thread_id("C12345", ""), "slack:C12345:");
     }
 
     #[test]
