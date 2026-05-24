@@ -305,4 +305,46 @@ mod tests {
             other => panic!("expected NotConnected, got {other:?}"),
         }
     }
+
+    // ---------- upstream "should have X method" mappings (2 of 5) ----------
+    // 1:1 with upstream `index.test.ts` cases:
+    //
+    // - `should have appendToList method` → mapped to
+    //   `adapter_append_to_list_returns_not_connected_until_client_lands`
+    //   above (calling the method proves it exists; the upstream
+    //   test only asserts `typeof adapter.appendToList === "function"`).
+    // - `should have getList method` → mapped to
+    //   `adapter_get_list_returns_not_connected_until_client_lands`.
+    //
+    // The remaining 3 upstream method-existence cases (`enqueue` /
+    // `dequeue` / `queueDepth`) are deferred until the chat-sdk-chat
+    // `StateAdapter` trait gets extended with the queue-primitive
+    // methods (currently only `state-memory` has them as inherent
+    // methods, not trait surface). They're tracked as deferred in
+    // `docs/chat/goal-refinements.md`.
+
+    #[test]
+    fn adapter_set_if_not_exists_returns_not_connected_until_client_lands() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        match block_on(adapter.set_if_not_exists("k", serde_json::json!(1), None)) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_connect_default_trait_impl_is_no_op() {
+        // 1:1 with upstream's `connect` method-existence test (the
+        // upstream test asserts the method exists; the Rust trait
+        // default `connect` returns `Ok(())` until a real client is
+        // wired).
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        assert!(block_on(adapter.connect()).is_ok());
+    }
+
+    #[test]
+    fn adapter_disconnect_default_trait_impl_is_no_op() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        assert!(block_on(adapter.disconnect()).is_ok());
+    }
 }

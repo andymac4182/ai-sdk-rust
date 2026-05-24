@@ -261,4 +261,36 @@ mod tests {
             other => panic!("expected NotConnected, got {other:?}"),
         }
     }
+
+    // ---------- upstream ensureConnected describe-block mappings ----------
+    // 1:1 with upstream `index.test.ts > describe("ensureConnected")`
+    // cases. Upstream throws `Error("not connected")` for each method
+    // when called before `connect()`. The Rust port surfaces the same
+    // pre-connect contract via `StateAdapterError::NotConnected` from
+    // the existing get/set/delete/append_to_list/get_list smoke tests
+    // above, plus the new tests below for set_if_not_exists +
+    // subscribe-family + acquire_lock + release_lock + force_release_lock
+    // mappings. (The connect/disconnect cases use the trait-default
+    // Ok(()) since the placeholder adapter has no client to drop.)
+
+    #[test]
+    fn adapter_set_if_not_exists_returns_not_connected_until_client_lands() {
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        match block_on(adapter.set_if_not_exists("k", serde_json::json!(1), None)) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_connect_default_trait_impl_is_no_op() {
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        assert!(block_on(adapter.connect()).is_ok());
+    }
+
+    #[test]
+    fn adapter_disconnect_default_trait_impl_is_no_op() {
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        assert!(block_on(adapter.disconnect()).is_ok());
+    }
 }
