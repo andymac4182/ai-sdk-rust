@@ -2486,6 +2486,59 @@ mod tests {
     }
 
     #[test]
+    fn chat_should_update_the_messages_during_streaming() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        assert_eq!(
+            serde_json::to_value(&states[..3]).expect("states serialize"),
+            json!([
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": []
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "", "state": "streaming" }
+                    ]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "streaming" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            states.last().and_then(|message| message.parts.last()),
+            Some(&json!({ "type": "text", "text": "Hello, world.", "state": "done" }))
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+    }
+
+    #[test]
     fn chat_request_options_serialize_upstream_shape() {
         let options = ChatRequestOptions::new()
             .with_header("X-Test", "yes")
