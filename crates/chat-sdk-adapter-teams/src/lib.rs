@@ -643,4 +643,19 @@ mod tests {
         assert_eq!(adapter.tenant_id(), "tenant-id");
         assert_eq!(adapter.api_base(), "https://example.test/v3");
     }
+
+    // ---------- createTeamsAdapter describe block (1 upstream case) ----------
+    // 1:1 with upstream `index.test.ts > describe("TeamsAdapter") >
+    // it("should create an adapter instance")`. Upstream's
+    // `it("should export createTeamsAdapter function")` is JS-only:
+    // Rust's module system makes the `pub fn new` constructor
+    // visible at compile time so a runtime function-exists check
+    // doesn't apply.
+
+    #[test]
+    fn teams_adapter_creates_an_instance_with_app_credentials() {
+        let opts = TeamsAdapterOptions::new("test-app-id", "test-password", "");
+        let adapter = TeamsAdapter::new(opts);
+        assert_eq!(adapter.name(), "teams");
+    }
 }
