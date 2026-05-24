@@ -2319,7 +2319,9 @@ focused tests for each portable behavior before changing rows to `verified`.
 - 2026-05-25: `packages/ai` `Chat.addToolOutput` follow-up edge parity added
   `chat_should_submit_message_when_a_tool_error_result_is_added`,
   `chat_should_submit_message_when_a_dynamic_tool_output_is_added`, and
-  `chat_should_keep_tool_output_state_when_follow_up_send_fails`, covering the
+  `chat_should_keep_tool_output_state_when_follow_up_send_fails` plus the
+  upstream-named
+  `chat_should_not_send_message_when_the_server_responded_with_an_error`, covering the
   portable upstream `ui/chat.test.ts` tool-error submission, dynamic-tool
   follow-up response folding into the same assistant message, and failed
   follow-up request behavior that preserves the submitted tool output state.

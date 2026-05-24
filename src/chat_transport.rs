@@ -3804,8 +3804,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chat_should_keep_tool_output_state_when_follow_up_send_fails() {
+    fn assert_chat_server_error_follow_up_is_not_applied() {
         let transport = RecordingChatTransport::with_send_results([
             Ok(vec![
                 UiMessageChunk::start_with_message_id("assistant-1"),
@@ -3873,6 +3872,16 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn chat_should_keep_tool_output_state_when_follow_up_send_fails() {
+        assert_chat_server_error_follow_up_is_not_applied();
+    }
+
+    #[test]
+    fn chat_should_not_send_message_when_the_server_responded_with_an_error() {
+        assert_chat_server_error_follow_up_is_not_applied();
     }
 
     #[test]
