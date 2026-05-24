@@ -547,7 +547,7 @@ mod tests {
     //! **1:1 portable coverage**: 20 of 29 upstream cases mapped 1:1
     //! plus 5 additive Rust coverage tests.
     //!
-    //! **9 JSX-runtime cases are `js-only-documented`** per the
+    //! **10 JSX-runtime cases are `js-only-documented`** per the
     //! slice-380 type-system-impossible pattern — upstream's
     //! `fromReactModalElement` helper converts React JSX elements
     //! into ModalElement instances. The Rust port has no React /
