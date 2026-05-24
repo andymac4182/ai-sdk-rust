@@ -5425,3 +5425,127 @@ visible step.
   callbackUrl POSTs, concurrency strategies, attachment
   rehydration, action callbackUrl error logging,
   `MemoryStateAdapter::no_op()` test helper).
+
+## Cycle 477..481 (handler-event structural sub-API completion)
+
+Same interactive-/goal-session context as cycles 471..475. The
+cadence now mixes 4 structural sub-API additions (slices 478,
+479, 480) with a 5-cycle handler-class closure on Slash Commands
+specific+catch-all (slice 477) and a reviver correctness sweep
+(slice 481). Cycles 477..481 closed Reactions to 9/9, brought
+Slash Commands to 10/11 portable (+1 js-only), and Actions to
+13/15 portable (+1 js-only +1 deferred behind Thread→Option<Thread>).
+
+**What the brief got wrong or left out**
+
+- **The "event sub-API addition" pattern is now repeatable.** Slices
+  478 (SlashCommandEvent::open_modal), 479 (ActionEvent::open_modal),
+  and 480 (process_action callback-URL decode-and-POST) all follow
+  the same shape: (1) add a struct field on the event handle
+  (state, trigger_id, or http_poster) that captures the
+  dispatch-side resource the new method/branch needs; (2) plumb
+  the field through the dispatcher constructor (one-line edit
+  at the event-build site); (3) add an impl block with the
+  method body (or branch in the dispatcher) that mirrors
+  upstream's behavior using the event-bound resources; (4) port
+  3-4 upstream test cases that exercise the new surface,
+  including the always-present "returns Ok(None) / no-op when
+  the prerequisite (trigger_id / stored URL / etc.) is absent".
+  Each of these slices was ~60-250 LOC including tests and took
+  one merge cycle. Add to the brief as the canonical shape for
+  "event sub-API addition" so future ticks don't re-derive it.
+
+- **`ActionEvent::open_modal` and `SlashCommandEvent::open_modal`
+  are literal mirrors.** The two impl blocks are byte-identical
+  except for the `thread_id` source (slash uses `self.channel_id`,
+  action uses `self.thread_id`). Consider factoring into a
+  shared helper that takes `(adapter, trigger_id, modal,
+  thread_id_for_context, state)` — would shrink each event-impl
+  to a 1-line call. Deferred to a follow-up cleanup slice; for
+  now the duplication is explicit and per-event docstrings cite
+  one another.
+
+- **The Adapter trait's existing `post_message` /
+  `post_channel_message` signatures are what unlocks all the
+  `event.X.post()` upstream cases.** Three slices (471, 474, 475)
+  ported nearly-identical upstream "should allow posting from
+  event.thread/channel" cases with no new infrastructure — just
+  inline recording adapters and the existing trait methods. The
+  brief should call out that these cases are 1-slice closures
+  once the per-handler-class event dispatcher exists; future
+  handler-classes added later will have the same shape and can
+  be batched.
+
+- **Singleton-required type-system-impossible is a distinct
+  category.** Slice 472 enumerated the upstream
+  ThreadImpl.fromJSON-throws-on-access case as type-system-
+  impossible. Slice 481 enumerated the standalone-reviver
+  chat:Thread case differently: it's not unreachable; it
+  requires the caller to register a Chat singleton first. Add
+  a *third* category to the cookbook: **singleton-required
+  type-system-impossible** — upstream's lazy-resolution-on-
+  access maps to Rust's eager-resolution-via-singleton.
+
+- **`Edit` after `cargo fmt` requires Read.** The harness invalidates
+  the Edit cache after cargo fmt touches files. Encountered in
+  slice 480 — committed only chat.rs (forgot to also re-Read +
+  re-Edit the ledger before committing), needed an `--amend` to
+  bundle the ledger update. Pattern: when running `cargo fmt`
+  after edits, plan to Read affected docs before doing follow-
+  up edits.
+
+**Stale or misleading guidance**
+
+- The brief's `Phase 1.5 trait-extension session` block (added
+  slice 114) describes adding async Adapter/StateAdapter methods
+  as forward-looking work. Both traits now expose the full
+  upstream surface; this section should be marked completed.
+  (Carried over from cycle 471..475.)
+
+- The brief's mention of `~75 cases remain deferred behind
+  openModal / callbackUrl POSTs + lock/concurrency/queue
+  dispatcher` in the chat.test.ts triage row is stale after
+  cycles 471..481. The openModal callback (3 slash + 3 action)
+  and callbackUrl POSTs (4 action) are now ported. Remaining
+  deferred cases are: 1 ActionEvent empty-threadId
+  (Thread→Option<Thread> refactor), 1 message-dedupe concurrent
+  race case, 1 lockScope queue case, 2 JSX-modal js-only —
+  roughly 6 cases, not 75.
+
+**Edits applied**
+
+- `docs/chat/upstream-parity.md`: corrected per-block counts on
+  the chat.test.ts row (Reactions 9/9, Actions 13/15, Slash
+  Commands 10/11) and the serialization.test.ts row reviver
+  sub-counts.
+- `crates/chat-sdk-chat/src/chat.rs`: added
+  `SlashCommandEvent::open_modal` (slice 478),
+  `ActionEvent::open_modal` (slice 479), and `process_action`
+  callback-URL decode-and-POST branch + `ChatOptions::http_poster`
+  (slice 480), plus the slash specific+catch-all 1:1 test
+  (slice 477).
+- `crates/chat-sdk-chat/src/reviver.rs`: enumerated standalone-
+  reviver chat:Thread case as singleton-required type-system-
+  impossible in the test-mod header (slice 481).
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- Tighten the brief's slice-59 "Next Unported Work Queue" to
+  reflect 2026-05-25 state (carry-over from cycle 471..475).
+- Mark the `Phase 1.5 trait-extension session` block as
+  completed (carry-over).
+- Move "Multi-session reality" estimate to historical-note
+  section (carry-over).
+- Factor `SlashCommandEvent::open_modal` /
+  `ActionEvent::open_modal` bodies into a shared helper
+  (cleanup slice).
+- Tackle Thread→Option<Thread> refactor on ActionEvent to close
+  the 14th Actions case (empty-threadId modal opening).
+- Add the "event sub-API addition" canonical shape to the brief
+  as a new section so future ticks pattern-match.
+- Add the "singleton-required type-system-impossible" cookbook
+  entry alongside the existing type-system-impossible category.
+- Inherit prior unchanged deferreds (concurrency=queue
+  dispatcher, attachment rehydration, SentMessage refactor,
+  `MemoryStateAdapter::no_op()` test helper).
