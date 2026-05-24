@@ -1572,6 +1572,65 @@ mod tests {
     // `typeof user === "string" ? user : user.userId` argument-
     // shape branch).
 
+    // ---------- describe("getUser") inference cases (4 of 6 deferred) ----------
+    // 1:1 with upstream `chat.test.ts > describe("getUser")` cases
+    // that exercise inference via different adapter shapes. The
+    // 5th case (AMBIGUOUS_USER_ID) needs the inference helper to
+    // detect multi-adapter collisions and return a typed error
+    // (deferred — current `infer_adapter_for_user_id` picks the
+    // priority-order first match). The 6th (Slack-case-sensitivity)
+    // is exercised indirectly by the unambiguous-numeric tests.
+
+    fn chat_with_named_get_user_adapter(adapter_name: &str) -> (Chat, Arc<GetUserAdapter>) {
+        chat_with_get_user_adapter(GetUserAdapter::new(adapter_name, Some(alice())))
+    }
+
+    #[test]
+    fn chat_get_user_should_infer_linear_adapter_from_a_uuid() {
+        let (chat, _adapter) = chat_with_named_get_user_adapter("linear");
+        let user = futures_executor::block_on(
+            chat.get_user("8f1f3c7e-d4e1-4f9a-bf2b-1c3d4e5f6a7b"),
+        )
+        .unwrap()
+        .unwrap();
+        // Routes to the only registered adapter (linear) since the
+        // UUID shape matches `is_linear_uuid`.
+        assert_eq!(user.full_name, "Alice Smith");
+    }
+
+    #[test]
+    fn chat_get_user_should_infer_telegram_from_numeric_id_when_only_telegram_is_registered() {
+        let (chat, adapter) = chat_with_named_get_user_adapter("telegram");
+        let user = futures_executor::block_on(chat.get_user("12345"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.full_name, "Alice Smith");
+        assert_eq!(adapter.calls.lock().unwrap().as_slice(), &["12345".to_string()]);
+    }
+
+    #[test]
+    fn chat_get_user_should_infer_github_from_numeric_id_when_only_github_is_registered() {
+        let (chat, adapter) = chat_with_named_get_user_adapter("github");
+        let user = futures_executor::block_on(chat.get_user("12345"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.full_name, "Alice Smith");
+        assert_eq!(adapter.calls.lock().unwrap().as_slice(), &["12345".to_string()]);
+    }
+
+    #[test]
+    fn chat_get_user_should_infer_discord_for_17_to_19_digit_snowflake_when_only_discord_is_registered() {
+        let (chat, adapter) = chat_with_named_get_user_adapter("discord");
+        let user = futures_executor::block_on(chat.get_user("123456789012345678"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.full_name, "Alice Smith");
+        assert_eq!(
+            adapter.calls.lock().unwrap().as_slice(),
+            &["123456789012345678".to_string()]
+        );
+    }
+
     #[test]
     fn chat_open_dm_should_accept_author_object_and_extract_user_id() {
         let (chat, adapter) = chat_with_open_dm_adapter("slack");
