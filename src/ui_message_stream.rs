@@ -542,6 +542,21 @@ pub fn is_tool_ui_part(part: &JsonValue) -> bool {
     is_static_tool_ui_part(part) || is_dynamic_tool_ui_part(part)
 }
 
+/// Returns the tool name after the static `tool-` UI part prefix.
+pub fn get_static_tool_name(part: &JsonValue) -> Option<&str> {
+    ui_message_part_type(part)?.strip_prefix("tool-")
+}
+
+/// Checks whether a UI message part is provider-specific custom content.
+pub fn is_custom_content_ui_part(part: &JsonValue) -> bool {
+    ui_message_part_type(part) == Some("custom")
+}
+
+/// Checks whether a UI message part is a data part.
+pub fn is_data_ui_part(part: &JsonValue) -> bool {
+    ui_message_part_type(part).is_some_and(|part_type| part_type.starts_with("data-"))
+}
+
 /// Checks whether the last assistant message has complete non-provider tool calls.
 ///
 /// Mirrors upstream `lastAssistantMessageIsCompleteWithToolCalls`: only the
@@ -3134,6 +3149,77 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
         assert!(!is_tool_ui_part(&json!({
             "type": "text",
             "state": "done"
+        })));
+    }
+
+    #[test]
+    fn get_static_tool_name_should_return_the_tool_name_after_the_tool_prefix() {
+        assert_eq!(
+            get_static_tool_name(&json!({
+                "type": "tool-getLocation",
+                "toolCallId": "tool1",
+                "state": "output-available",
+                "input": {},
+                "output": "some result"
+            })),
+            Some("getLocation")
+        );
+    }
+
+    #[test]
+    fn get_static_tool_name_should_return_the_tool_name_for_tools_that_contains_a_dash() {
+        assert_eq!(
+            get_static_tool_name(&json!({
+                "type": "tool-get-location",
+                "toolCallId": "tool1",
+                "state": "output-available",
+                "input": {},
+                "output": "some result"
+            })),
+            Some("get-location")
+        );
+    }
+
+    #[test]
+    fn is_custom_content_ui_part_should_return_true_for_a_custom_part() {
+        assert!(is_custom_content_ui_part(&json!({
+            "type": "custom",
+            "kind": "test-provider.compaction",
+            "providerMetadata": {
+                "openai": { "itemId": "cmp_123" }
+            }
+        })));
+    }
+
+    #[test]
+    fn is_custom_content_ui_part_should_return_true_for_a_custom_part_without_provider_metadata() {
+        assert!(is_custom_content_ui_part(&json!({
+            "type": "custom",
+            "kind": "openai.compaction"
+        })));
+    }
+
+    #[test]
+    fn is_custom_content_ui_part_should_return_false_for_a_text_part() {
+        assert!(!is_custom_content_ui_part(&json!({
+            "type": "text",
+            "text": "some text"
+        })));
+    }
+
+    #[test]
+    fn is_data_ui_part_should_return_true_if_the_part_is_a_data_part() {
+        assert!(is_data_ui_part(&json!({
+            "type": "data-someDataPart",
+            "data": "some data"
+        })));
+    }
+
+    #[test]
+    fn is_data_ui_part_should_return_false_if_the_part_is_not_a_data_part() {
+        assert!(!is_data_ui_part(&json!({
+            "type": "text",
+            "text": "some text"
         })));
     }
 
