@@ -1580,6 +1580,23 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported("post_channel_message"))
     }
 
+    /// Post a typed PostableMessage (e.g. `{markdown}` for
+    /// accumulated stream output) to a channel. 1:1 with the
+    /// upstream `postChannelMessage(channelId, message: PostableMessage)`
+    /// overload accepting non-string message shapes. The Rust port
+    /// keeps the string-only [`Self::post_channel_message`] for the
+    /// common case and adds this sibling for typed shapes (slice
+    /// 485). Used by [`crate::channel::Channel::post_stream`].
+    /// Adapters that want to handle typed inputs override this; the
+    /// default returns `Err(Unsupported)`.
+    async fn post_channel_message_postable(
+        &self,
+        _channel_id: &str,
+        _message: &serde_json::Value,
+    ) -> AdapterResult<String> {
+        Err(AdapterError::Unsupported("post_channel_message_postable"))
+    }
+
     /// Optional native scheduled-message dispatch. 1:1 with upstream
     /// optional `scheduleMessage?(threadId, text, options):
     /// Promise<ScheduledMessage>`. Schedules `text` for future
