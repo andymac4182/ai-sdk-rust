@@ -202,12 +202,13 @@ mod tests {
     use crate::file_data::{FileDataContent, ProviderReference};
     use crate::mock_models::{MockEmbeddingModel, MockImageModel, MockLanguageModel};
     use crate::provider::{
-        ModelType, NoSuchModelError, Provider, ProviderOptions, ProviderWithSkills,
-        SpecificationVersion,
+        ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
+        ProviderWithSkills, SpecificationVersion,
     };
     use crate::skills::{
         Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
     };
+    use crate::warning::Warning;
 
     #[derive(Clone, Default)]
     struct RecordingSkills {
@@ -221,6 +222,14 @@ mod tests {
                 .expect("recorded skills calls mutex is not poisoned")
                 .clone()
         }
+    }
+
+    fn provider_reference(id: &str) -> ProviderReference {
+        ProviderReference::try_from(BTreeMap::from([(
+            "test-provider".to_string(),
+            id.to_string(),
+        )]))
+        .expect("provider reference is valid")
     }
 
     impl Skills for RecordingSkills {
@@ -297,6 +306,35 @@ mod tests {
 
         fn skills(&self) -> Self::Skills {
             self.skills.clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticResultSkills {
+        result: SkillsUploadSkillResult,
+    }
+
+    impl StaticResultSkills {
+        fn new(result: SkillsUploadSkillResult) -> Self {
+            Self { result }
+        }
+    }
+
+    impl Skills for StaticResultSkills {
+        type UploadSkillFuture<'a>
+            = Ready<SkillsUploadSkillResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn upload_skill(
+            &self,
+            _options: SkillsUploadSkillCallOptions,
+        ) -> Self::UploadSkillFuture<'_> {
+            ready(self.result.clone())
         }
     }
 
@@ -454,6 +492,67 @@ mod tests {
             result,
             UploadSkillResult::new(expected_reference).with_display_title("My Skill")
         );
+    }
+
+    #[test]
+    fn upload_skill_returns_provider_reference_warnings_and_provider_metadata_from_skills() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "test-provider": {
+                "foo": "bar"
+            }
+        }))
+        .expect("provider metadata deserialize");
+        let skills = StaticResultSkills::new(
+            SkillsUploadSkillResult::new(provider_reference("skill_123"))
+                .with_provider_metadata(provider_metadata.clone())
+                .with_warning(Warning::Unsupported {
+                    feature: "displayTitle".to_string(),
+                    details: None,
+                }),
+        );
+
+        let result = poll_ready(upload_skill(
+            &skills,
+            UploadSkillOptions::new(vec![UploadSkillFile::new(
+                "test.ts",
+                UploadSkillFileData::data("aGVsbG8="),
+            )]),
+        ));
+
+        assert_eq!(result.provider_reference, provider_reference("skill_123"));
+        assert_eq!(result.provider_metadata, Some(provider_metadata));
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "displayTitle".to_string(),
+                details: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn upload_skill_passes_provider_options_to_the_skills() {
+        let skills = RecordingSkills::default();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "custom": "value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _ = poll_ready(upload_skill(
+            &skills,
+            UploadSkillOptions::new(vec![UploadSkillFile::new(
+                "test.ts",
+                UploadSkillFileData::data("aGVsbG8="),
+            )])
+            .with_provider_options(provider_options.clone()),
+        ));
+
+        let calls = skills.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].display_title, None);
+        assert_eq!(calls[0].provider_options, Some(provider_options));
     }
 
     #[test]
