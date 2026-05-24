@@ -1748,6 +1748,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_text_generates_consistent_call_id_for_language_model_callbacks`,
   proving a generated streaming language-model call id is reused across
   start/end callbacks while fallback response identity is still generated.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` performance timing
+  parity added
+  `stream_text_measures_time_to_first_output_token_from_text_deltas`, proving
+  streamed text deltas populate `timeToFirstOutputTokenMs` plus input/output
+  token-per-second metrics on language-model-call-end performance.
 - 2026-05-23: `packages/ai` `streamText` `result.fullStream`
   tool-call parity added the named Rust counterpart
   `stream_text_result_full_stream_sends_tool_calls` for the upstream snapshot

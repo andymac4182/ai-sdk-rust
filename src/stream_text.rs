@@ -15,12 +15,12 @@ use crate::generate_text::{
     GenerateTextOnLanguageModelCallEnd, GenerateTextOnLanguageModelCallStart, GenerateTextOnStart,
     GenerateTextOnStepFinish, GenerateTextOnStepStart, GenerateTextOnToolExecutionEnd,
     GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
-    GenerateTextStepStartEvent, GenerateTextTool, GenerateTextToolCall,
-    GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
-    LanguageModelCallEndEvent, LanguageModelCallStartEvent, PrepareStep, PrepareStepOptions,
-    PrepareStepResult, StepToolApprovalResponse, StopCondition, ToolApprovalConfiguration,
-    ToolApprovalResponseOutput, ToolCallNotFoundForApprovalError, ToolCallRepair,
-    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
+    GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextTool,
+    GenerateTextToolCall, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
+    GenerateTextToolResult, LanguageModelCallEndEvent, LanguageModelCallStartEvent, PrepareStep,
+    PrepareStepOptions, PrepareStepResult, StepToolApprovalResponse, StopCondition,
+    ToolApprovalConfiguration, ToolApprovalResponseOutput, ToolCallNotFoundForApprovalError,
+    ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
     apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
     generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
     invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
@@ -334,6 +334,10 @@ impl StreamTextResponseMetadata {
 pub struct StreamTextStepPerformance {
     /// Elapsed wall-clock time for the collected step in milliseconds.
     pub step_time_ms: u64,
+
+    /// Time until the first text, reasoning, or tool input delta was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_output_token_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2625,6 +2629,13 @@ where
             runtime_context.clone(),
             tools_context.clone(),
         );
+        generate_step.performance = GenerateTextStepPerformance::from_stream_usage(
+            &generate_step.usage,
+            response_time_ms,
+            collected_step.performance.step_time_ms,
+            BTreeMap::new(),
+            collected_step.performance.time_to_first_output_token_ms,
+        );
         refresh_generate_text_content(
             &mut generate_step,
             &collected_step.provider_content,
@@ -3391,6 +3402,7 @@ where
     let mut ongoing_tool_call_tool_names = BTreeMap::<String, String>::new();
     let mut aborted = false;
     let mut abort_reason = None;
+    let mut time_to_first_output_token_ms = None;
 
     for part in stream_result.stream {
         if let Some(abort_part) = stream_text_abort_part_from_signal(controls.abort_signal) {
@@ -3423,6 +3435,12 @@ where
                     }
                     LanguageModelStreamPart::TextDelta(part) => {
                         if !part.delta.is_empty() {
+                            if time_to_first_output_token_ms.is_none() {
+                                time_to_first_output_token_ms = Some(
+                                    u64::try_from(step_start.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                );
+                            }
                             text.push_str(&part.delta);
                             text_stream.push(part.delta.clone());
                             if let Some((block_text, block_metadata)) =
@@ -3467,6 +3485,11 @@ where
                         parts.push(TextStreamPart::ReasoningStart(part));
                     }
                     LanguageModelStreamPart::ReasoningDelta(part) => {
+                        if time_to_first_output_token_ms.is_none() {
+                            time_to_first_output_token_ms = Some(
+                                u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            );
+                        }
                         has_reasoning_text = true;
                         reasoning_text.push_str(&part.delta);
                         if let Some((block_text, block_metadata)) =
@@ -3541,6 +3564,11 @@ where
                         .await;
                     }
                     LanguageModelStreamPart::ToolInputDelta(part) => {
+                        if time_to_first_output_token_ms.is_none() {
+                            time_to_first_output_token_ms = Some(
+                                u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            );
+                        }
                         let tool_name = ongoing_tool_call_tool_names.get(&part.id);
                         let tool = tool_name.and_then(|tool_name| {
                             controls.tools.iter().find(|tool| &tool.name == tool_name)
@@ -3733,6 +3761,7 @@ where
 
     let performance = StreamTextStepPerformance {
         step_time_ms: u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        time_to_first_output_token_ms,
     };
 
     CollectedStreamTextStep {
@@ -8592,7 +8621,10 @@ mod tests {
             TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
                 StreamTextResponseMetadata::new(),
                 usage(),
-                StreamTextStepPerformance { step_time_ms: 0 },
+                StreamTextStepPerformance {
+                    step_time_ms: 0,
+                    time_to_first_output_token_ms: None,
+                },
                 FinishReason::Error,
                 Some("error".to_string()),
                 None,
@@ -10661,6 +10693,56 @@ mod tests {
                 .clone()
                 .expect("stream_text generated a response id")]
         );
+    }
+
+    #[test]
+    fn stream_text_measures_time_to_first_output_token_from_text_deltas() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let model_call_end_events = Arc::new(Mutex::new(Vec::new()));
+        let model_call_end_events_for_callback = Arc::clone(&model_call_end_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let model_call_end_events = Arc::clone(&model_call_end_events_for_callback);
+                    async move {
+                        model_call_end_events
+                            .lock()
+                            .expect("model call end events lock")
+                            .push(event.performance);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        assert_eq!(result.steps.len(), 1);
+        let step_performance = &result.steps[0].performance;
+        assert!(
+            step_performance.time_to_first_output_token_ms.is_some(),
+            "first output token duration is captured"
+        );
+
+        let end_events = model_call_end_events
+            .lock()
+            .expect("model call end events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(
+            end_events[0].time_to_first_output_token_ms,
+            step_performance.time_to_first_output_token_ms
+        );
+        assert!(end_events[0].output_tokens_per_second.is_some());
+        assert!(end_events[0].input_tokens_per_second.is_some());
+        assert!(end_events[0].effective_output_tokens_per_second.is_finite());
+        assert!(end_events[0].effective_total_tokens_per_second.is_finite());
     }
 
     #[test]

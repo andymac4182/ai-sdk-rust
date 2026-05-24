@@ -717,6 +717,26 @@ impl LanguageModelCallPerformance {
             time_to_first_output_token_ms: None,
         }
     }
+
+    fn from_step_performance(
+        usage: &LanguageModelUsage,
+        response_time_ms: u64,
+        performance: &GenerateTextStepPerformance,
+    ) -> Self {
+        if performance.response_time_ms == 0 && performance.time_to_first_output_token_ms.is_none()
+        {
+            return Self::from_usage(usage, response_time_ms);
+        }
+
+        Self {
+            response_time_ms: performance.response_time_ms,
+            effective_output_tokens_per_second: performance.effective_output_tokens_per_second,
+            output_tokens_per_second: performance.output_tokens_per_second,
+            input_tokens_per_second: performance.input_tokens_per_second,
+            effective_total_tokens_per_second: performance.effective_total_tokens_per_second,
+            time_to_first_output_token_ms: performance.time_to_first_output_token_ms,
+        }
+    }
 }
 
 /// Event sent after a provider language model call completes, before local tool execution.
@@ -762,7 +782,11 @@ impl LanguageModelCallEndEvent {
                 .as_ref()
                 .and_then(|response| response.id.clone())
                 .expect("generate_text assigns a response id before language-model-call end"),
-            performance: LanguageModelCallPerformance::from_usage(&step.usage, response_time_ms),
+            performance: LanguageModelCallPerformance::from_step_performance(
+                &step.usage,
+                response_time_ms,
+                &step.performance,
+            ),
         }
     }
 }
@@ -4720,6 +4744,38 @@ impl GenerateTextStepPerformance {
             response_time_ms,
             tool_execution_ms,
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn from_stream_usage(
+        usage: &LanguageModelUsage,
+        response_time_ms: u64,
+        step_time_ms: u64,
+        tool_execution_ms: BTreeMap<String, u64>,
+        time_to_first_output_token_ms: Option<u64>,
+    ) -> Self {
+        let output_after_first_token_ms =
+            time_to_first_output_token_ms.map(|duration| response_time_ms.saturating_sub(duration));
+
+        Self {
+            effective_output_tokens_per_second: calculate_tokens_per_second(
+                usage.output_tokens.total,
+                Some(response_time_ms),
+            ),
+            output_tokens_per_second: time_to_first_output_token_ms.map(|_| {
+                calculate_tokens_per_second(usage.output_tokens.total, output_after_first_token_ms)
+            }),
+            input_tokens_per_second: time_to_first_output_token_ms.map(|duration| {
+                calculate_tokens_per_second(usage.input_tokens.total, Some(duration))
+            }),
+            effective_total_tokens_per_second: calculate_tokens_per_second(
+                sum_token_counts(usage.input_tokens.total, usage.output_tokens.total),
+                Some(response_time_ms),
+            ),
+            step_time_ms,
+            response_time_ms,
+            tool_execution_ms,
+            time_to_first_output_token_ms,
         }
     }
 }
