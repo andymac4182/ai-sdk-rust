@@ -864,6 +864,91 @@ mod tests {
         assert!(block_on(api.list("u1", None)).unwrap().is_empty());
     }
 
+    // ---------- maxPerUser eviction describe block (1 upstream case) ----------
+
+    #[test]
+    fn transcripts_api_max_per_user_eviction_trims_via_append_to_list_semantics() {
+        // 1:1 with upstream `describe("maxPerUser eviction") > it(
+        // "trims to maxPerUser via appendToList semantics")`. With
+        // maxPerUser=3, the oldest 2 of 5 entries get evicted; what
+        // remains is the newest 3 ("msg 2", "msg 3", "msg 4") in
+        // chronological order.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                max_per_user: Some(3),
+                ..Default::default()
+            },
+        );
+        for i in 0..5 {
+            block_on(api.append(input_for_thread(
+                "u1",
+                "slack",
+                "slack:C:T",
+                TranscriptRole::User,
+                &format!("msg {i}"),
+            )))
+            .unwrap();
+        }
+        let list = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: None,
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(list.len(), 3);
+        let texts: Vec<String> = list.iter().map(|e| e.text.clone()).collect();
+        assert_eq!(texts, vec!["msg 2", "msg 3", "msg 4"]);
+    }
+
+    // ---------- formatted round-trip describe block (1 upstream case) ----------
+
+    #[test]
+    fn transcripts_api_formatted_round_trip_preserves_mdast_root_through_state_serialization() {
+        // 1:1 with upstream `describe("formatted round-trip") > it(
+        // "preserves mdast Root through state serialization")`. With
+        // storeFormatted=true, the AST passed in survives the
+        // serialize-to-state -> deserialize-from-list round trip.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                store_formatted: Some(true),
+                ..Default::default()
+            },
+        );
+        let original = serde_json::json!({
+            "type": "root",
+            "children": [
+                { "type": "heading", "depth": 1, "children": [{ "type": "text", "value": "Hello" }] },
+                { "type": "paragraph", "children": [{ "type": "emphasis", "children": [{ "type": "text", "value": "world" }] }] },
+            ],
+        });
+        let mut input = input_for_thread(
+            "u1",
+            "slack",
+            "slack:C:T",
+            TranscriptRole::User,
+            "Hello world",
+        );
+        input.formatted = Some(original.clone());
+        block_on(api.append(input)).unwrap();
+
+        let list = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: None,
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].formatted.as_ref(), Some(&original));
+    }
+
     #[test]
     fn transcripts_api_preserves_invariants_when_append_delete_append_are_interleaved() {
         // 1:1 with upstream `it("preserves invariants when
