@@ -909,6 +909,35 @@ pub struct PostEphemeralOptions {
     pub fallback_to_dm: bool,
 }
 
+/// Result of scheduling a message for future delivery. 1:1 port of
+/// upstream `interface ScheduledMessage<TRawMessage>`. Currently only
+/// supported by the Slack adapter via `chat.scheduleMessage`; other
+/// adapters return [`AdapterError::Unsupported("schedule_message")`].
+///
+/// The upstream interface includes a `cancel(): Promise<void>` method
+/// closing over adapter-specific cancellation state. The Rust port
+/// captures cancellation via a separate inherent method on the
+/// adapter (`cancel_scheduled_message`) — see slice 403; the
+/// per-instance closure form is deferred behind a follow-up
+/// `ScheduledMessageCancel` trait extension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledMessage {
+    /// Platform-specific scheduled message ID.
+    #[serde(rename = "scheduledMessageId")]
+    pub scheduled_message_id: String,
+    /// Channel ID where the message will be posted.
+    #[serde(rename = "channelId")]
+    pub channel_id: String,
+    /// When the message will be sent — unix milliseconds.
+    /// (Upstream uses JavaScript `Date`; the Rust port stores the
+    /// integer epoch millis to keep the type Serialize+Eq.)
+    #[serde(rename = "postAtUnixMs")]
+    pub post_at_unix_ms: u64,
+    /// Platform-specific raw response.
+    #[serde(default)]
+    pub raw: serde_json::Value,
+}
+
 /// Result of posting an ephemeral message. 1:1 port of upstream
 /// `interface EphemeralMessage`. Ephemeral messages are visible only to a
 /// specific user and typically cannot be edited or deleted (platform-dependent).
@@ -1494,6 +1523,39 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         _text: &str,
     ) -> AdapterResult<String> {
         Err(AdapterError::Unsupported("post_channel_message"))
+    }
+
+    /// Optional native scheduled-message dispatch. 1:1 with upstream
+    /// optional `scheduleMessage?(threadId, text, options):
+    /// Promise<ScheduledMessage>`. Schedules `text` for future
+    /// delivery in `thread_id` at `post_at_unix_ms`. Default returns
+    /// `Err(Unsupported("schedule_message"))` so
+    /// [`crate::thread::Thread::schedule`] can detect the
+    /// missing-method case and surface
+    /// [`crate::errors::ChatError::NotImplemented`] (matching
+    /// upstream `NotImplementedError("scheduling")`).
+    async fn schedule_message(
+        &self,
+        _thread_id: &str,
+        _text: &str,
+        _post_at_unix_ms: u64,
+    ) -> AdapterResult<ScheduledMessage> {
+        Err(AdapterError::Unsupported("schedule_message"))
+    }
+
+    /// Optional cancellation hook for previously-scheduled messages.
+    /// 1:1 with upstream's per-`ScheduledMessage` `cancel():
+    /// Promise<void>` closure — the Rust port routes cancellation
+    /// through this Adapter method so [`ScheduledMessage`] can stay
+    /// `Serialize + Eq` (closures aren't representable in serde-
+    /// derivable structs). Default returns
+    /// `Err(Unsupported("cancel_scheduled_message"))`.
+    async fn cancel_scheduled_message(
+        &self,
+        _channel_id: &str,
+        _scheduled_message_id: &str,
+    ) -> AdapterResult<()> {
+        Err(AdapterError::Unsupported("cancel_scheduled_message"))
     }
 }
 
