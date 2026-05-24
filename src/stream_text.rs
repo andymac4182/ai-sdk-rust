@@ -4547,16 +4547,18 @@ mod tests {
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
-        LanguageModelDocumentSource, LanguageModelErrorStreamPart, LanguageModelFile,
-        LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelAssistantMessage, LanguageModelDocumentSource, LanguageModelErrorStreamPart,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
         LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoningDelta,
         LanguageModelReasoningFile, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
         LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
         LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolContentPart,
-        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
-        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelUrlSource,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
@@ -6103,6 +6105,57 @@ mod tests {
         let result = poll_ready(stream_text(StreamTextOptions::new(&model, prompt)));
 
         assert_eq!(result.text, "Hello, world!");
+        assert_eq!(model.supported_urls_calls(), 1);
+    }
+
+    #[test]
+    fn stream_text_tool_result_url_file_calls_model_supported_urls() {
+        let model = MockLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_supported_urls(BTreeMap::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Tool history handled.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let prompt = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({}),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "tool1",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/tool-image.png")
+                                    .expect("url parses"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                )),
+            ])),
+        ];
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(&model, prompt)));
+
+        assert_eq!(result.text, "Tool history handled.");
         assert_eq!(model.supported_urls_calls(), 1);
     }
 
