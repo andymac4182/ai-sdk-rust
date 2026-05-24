@@ -1438,6 +1438,44 @@ A package can flip to **verified** when every upstream case
 documented as js-only in this pattern. The state-backends are
 currently in this position pending runtime client wire-up.
 
+## Call-site upstream-case mapping after permissive decoder (added slice 462 from cycle 457..461)
+
+When a permissive-decoder slice (per the previous section) lands,
+**audit every call site of the decoded thread-id** for upstream
+describe-block cases that were previously unrepresentable. Each
+call site that handles empty `thread_ts` differently (early-
+return / conditional JSON field / etc) usually has an upstream
+test case that asserts that branch.
+
+Procedure:
+
+1. List the call sites: `grep -n "decoded\.thread_ts\|decoded\.channel_id" crates/chat-sdk-adapter-X/src/lib.rs`.
+2. For each call site, find the corresponding upstream method's
+   `describe(...)` block in `packages/adapter-X/src/index.test.ts`.
+3. Look for upstream cases whose name suggests empty-threadTs or
+   missing-segment behavior (e.g. "skips when no threadTs
+   present", "posts to a channel with empty threadTs", "handles
+   X without Y"). These are now mappable.
+4. Port each as a 1:1 Rust test exercising the slice-454 early-
+   return or JSON-conditional-field branch. The test usually
+   doesn't need HTTP mocking because the assertion is on the
+   short-circuit return value, not the API response.
+
+Reference port:
+- `crates/chat-sdk-adapter-slack/src/lib.rs::adapter_start_typing_skips_when_no_thread_ts_present`
+  (slice 457) — maps upstream's `describe("startTyping") >
+  it("skips when no threadTs present")` 1:1 by asserting
+  `start_typing(adapter, "slack:C123", None).await.is_ok()`
+  without HTTP traffic; the slice-454 `if thread_ts is empty
+  return Ok(())` early-return handles the assertion.
+
+Also remember to **audit encode-side describe-blocks for the
+mirror case** when the decoder changes. Per slice 459: a
+permissive decoder accepting `slack:CHANNEL:` (empty threadTs)
+must round-trip through an `encode_thread_id(..., "")` that
+produces `"slack:CHANNEL:"`. Upstream usually has a
+"handles empty X" case under the encoder's describe block.
+
 ## Permissive decoder + normalize-at-call-site (added slice 456 from cycle 451..455)
 
 Upstream adapter thread-id decoders are intentionally permissive:

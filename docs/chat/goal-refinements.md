@@ -5127,3 +5127,102 @@ split-and-rename slices but don't touch the deferred surfaces:
 action/modal callbackUrl POSTs, concurrency strategies,
 attachment rehydration, action callbackUrl error logging,
 `MemoryStateAdapter::no_op()` test helper.)
+
+## Cycle 457..461 (permissive-decoder fallout + describe-block audit sweep)
+
+**Date:** 2026-05-25
+
+**Cycles covered:** slice 457 ported upstream's `describe("startTyping")
+> it("skips when no threadTs present")` 1:1 (was untestable in Rust
+pre-slice-454; permissive decoder + early-return made it
+representable) → slice 458 formalized 2 inline-noted js-only
+enumerations (gchat + teams "should export createXxxAdapter
+function" runtime exports) as test-mod header items, completing
+the export-function audit (no other adapters have such tests) →
+slice 459 split slack `encode_thread_id_builds_the_upstream_format`
+into 2 1:1 upstream cases (encodes-channel-and-thread-ts /
+handles-empty-thread-ts), completing the encode/decode round-trip
+pair with slice-454 → slice 460 added missing
+`encode_thread_id_with_sub_thread` helper for discord's 4-part
+shape, mapping upstream's `describe("encodeThreadId") > it("encodes
+with thread ID")` case → slice 461 retargeted slack
+`render_formatted` from generic "Hello world" pass-through to
+upstream's exact strong-node example asserting `**bold**` (same
+pattern slice 450 applied to discord). Cumulative: +3 tests, +1
+new helper, +2 formalized js-only enumerations, +2 retargeted
+assertions over 5 productive slices.
+
+**What this cycle revealed**
+
+1. **Slice-454 permissive-decoder unlocked downstream test
+   mappings.** Slice 457 was a direct consequence: making
+   `start_typing` early-return on empty `thread_ts` made
+   upstream's "skips when no threadTs present" case
+   representable in Rust. The permissive-decoder change isn't
+   just a divergence fix — it propagates through every call site
+   that previously assumed a non-empty `thread_ts`, and each
+   such call site gains a new upstream-mappable case. Look at
+   each call-site method (`post_message`, `edit_message`,
+   `add_reaction`, `remove_reaction`, `post_ephemeral`,
+   `start_typing`, etc.) and check whether the upstream
+   describe-block has a case that exercises the empty-threadTs
+   branch — those are slice-457-style follow-ups.
+
+2. **The encode/decode pair audit is symmetric.** Slice 459 was
+   the encode-side mirror of slice 454's decode-side fix:
+   upstream's `encodeThreadId({channel, threadTs: ""})` must
+   produce `"slack:CHANNEL:"` (with trailing colon, empty
+   threadTs) to round-trip through the new decoder. The Rust
+   port already produced this shape (format string), but no
+   test asserted it. Pattern: after a permissive-decoder slice,
+   immediately audit the encode-side describe-block for the
+   mirror case.
+
+3. **Missing-helper slices are sometimes the right shape.**
+   Slice 460 wasn't a split-and-rename — it added a new
+   `encode_thread_id_with_sub_thread` helper because Rust's
+   2-arg `encode_thread_id` couldn't represent upstream's
+   4-part shape. The pattern: when a describe-block case
+   asserts a shape Rust can't produce, the fix is a new helper,
+   not a test split. The decision rule: if the upstream
+   assertion specifies exact string output, check whether Rust
+   can produce that exact string with existing helpers; if not,
+   add a helper.
+
+4. **Retarget vs split is a different axis.** Slice 461 didn't
+   add tests — it retargeted an existing test from a generic
+   assertion (`result.contains("Hello world")`) to upstream's
+   exact assertion (`result.trim() == "**bold**"`) with
+   upstream's exact input (strong node). The pattern: when a
+   describe-block has 1 upstream case with a specific assertion
+   but the Rust test uses a generic substitute, tighten the
+   assertion rather than splitting. Watch for `.contains(...)`,
+   `.starts_with(...)`, `>= 0` patterns in Rust tests — those
+   often hide where upstream is stricter.
+
+5. **Productive ticks keep landing despite the Stop hook.** The
+   Stop hook fires identically each tick ("13 in-progress, 72.6%")
+   but the underlying parity ledger has tightened by 18+ tests
+   over slices 450..461. Each tick advances 1-4 cases by
+   compounding the slice-451 split-and-rename pattern with the
+   slice-454 permissive-decoder pattern with the slice-457
+   call-site-mapping pattern. None individually flips a package
+   to verified, but each closes another upstream case.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending addition of
+  a *"call-site upstream-case mapping after permissive decoder"*
+  section (lesson 1 above) so future ticks recognize the
+  permissive-decoder ripple effect.
+
+**Open refinements deferred (unchanged)**
+
+(See cycle 434..438 + 441..445 + 446..450 + 451..455 entries.
+Slices 457..461 advance the parity ledger via permissive-decoder
+ripple-effect mappings + symmetric encode/decode audits + missing-
+helper additions + assertion-tightening retargets, but don't
+touch the deferred surfaces: action/modal callbackUrl POSTs,
+concurrency strategies, attachment rehydration, action callbackUrl
+error logging, `MemoryStateAdapter::no_op()` test helper.)
