@@ -902,18 +902,58 @@ pub fn parse_slack_post_ephemeral_response(
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (6) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream `index.test.ts` cases are enumerated as
+    //! js-only-documented here because they exercise behavior that
+    //! is unrepresentable in the Rust port by construction:
     //!
-    //! - `should expose protected members and methods to subclasses`:
-    //!   TypeScript-class-`protected` access modifier check (verifies
-    //!   subclasses can reach `logger` / `formatConverter` / etc on
-    //!   the base class). Rust uses `pub(crate)` visibility +
-    //!   trait composition rather than class inheritance; the
-    //!   subclass-leak test is unrepresentable by construction.
+    //! 1. `describe("subclass extensibility") > should expose
+    //!    protected members and methods to subclasses` —
+    //!    TypeScript `protected` access modifier check (verifies
+    //!    subclasses can reach `logger` / `formatConverter` / etc on
+    //!    the base class). Rust uses `pub(crate)` visibility +
+    //!    trait composition rather than class inheritance.
+    //!
+    //! 2. `describe("webClient getter") > returns the underlying
+    //!    WebClient bound to the static botToken` — asserts the
+    //!    getter returns a `WebClient` typed-class instance with
+    //!    `.token` exposed. Rust has no `WebClient` equivalent —
+    //!    HTTP is held as an opaque `reqwest::Client`; the typed
+    //!    "instanceof" + `.token` accessor have no Rust analogue.
+    //!
+    //! 3. `describe("webClient getter") > returns the same
+    //!    instance across calls in single-workspace mode` —
+    //!    WebClient referential equality. The Rust port's `Client`
+    //!    is held by value (Clone-shared underlying pool); per-call
+    //!    referential equality is moot.
+    //!
+    //! 4. `describe("webClient getter") > exposes the same
+    //!    instance via the deprecated "client" alias` — alias-name
+    //!    backwards-compat. The Rust port never shipped the
+    //!    deprecated alias, so there is nothing to assert.
+    //!
+    //! 5. `describe("webClient getter") > throws on both
+    //!    "webClient" and the "client" alias in multi-workspace
+    //!    mode without context` — runtime "no workspace context"
+    //!    throw via AsyncLocalStorage. The Rust port surfaces the
+    //!    equivalent via typed errors at the per-workspace call
+    //!    sites (webhook handler), not via a property getter, so
+    //!    the property-throw shape is unrepresentable.
+    //!
+    //! 6. `describe("webClient getter") > uses the request
+    //!    context token under withBotToken via "webClient"` —
+    //!    AsyncLocalStorage-based per-request token resolution
+    //!    through a getter. The Rust port plumbs per-request
+    //!    token state through function parameters rather than
+    //!    thread-local context, so the ALS-based getter shape is
+    //!    moot.
+    //!
+    //! Additionally `describe("direct WebClient access via
+    //!    adapter.client")` re-asserts the same alias semantics
+    //!    as case 4 (deprecated property alias check); accounted
+    //!    for under case 4.
     use super::*;
     use futures_executor::block_on;
 
