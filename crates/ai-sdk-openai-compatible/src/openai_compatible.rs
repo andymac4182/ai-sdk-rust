@@ -4111,6 +4111,17 @@ fn openai_compatible_stream_result_from_response(
                     ));
                 }
 
+                for source in openai_compatible_annotation_sources(delta.get("annotations")) {
+                    if is_active_reasoning {
+                        stream.push(LanguageModelStreamPart::ReasoningEnd(
+                            LanguageModelReasoningEnd::new("reasoning-0"),
+                        ));
+                        is_active_reasoning = false;
+                    }
+
+                    stream.push(LanguageModelStreamPart::Source(source));
+                }
+
                 let files = openai_compatible_image_files(delta.get("images"));
                 if !files.is_empty() {
                     if is_active_reasoning {

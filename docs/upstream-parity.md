@@ -2785,6 +2785,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   body, raw headers, request headers, streamed usage/provider metadata, store,
   metadata, and service-tier cases. The OpenAI provider now enables upstream
   `stream_options.include_usage` for OpenAI chat and completion streams.
+- 2026-05-24: OpenAI chat streaming annotation/tool-call edge parity added
+  `openai_chat_stream_should_stream_annotations_and_citations`,
+  `openai_chat_stream_should_stream_tool_deltas`,
+  `openai_chat_stream_should_stream_tool_call_deltas_when_arguments_are_in_first_chunk`,
+  `openai_chat_stream_should_not_duplicate_tool_calls_after_completed_empty_chunk`,
+  `openai_chat_stream_should_stream_tool_call_with_missing_type_field`, and
+  `openai_chat_stream_should_stream_tool_call_that_is_sent_in_one_chunk`,
+  mapping the adjacent upstream `doStream` citation and function-tool delta
+  cases in the OpenAI facade. The shared OpenAI-compatible chat stream parser
+  now emits `Source` parts for streamed `delta.annotations` URL citations
+  instead of only supporting non-streaming message annotations.
 - 2026-05-24: OpenAI chat model-specific request rule parity added
   `openai_chat_reasoning_model_should_clear_unsupported_standard_settings`,
   `openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens`,

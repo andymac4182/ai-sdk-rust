@@ -3046,6 +3046,469 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_stream_should_stream_annotations_and_citations() {
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chatcmpl-citations",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-citations",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 1,
+                        "delta": {
+                            "content": "Based on search results"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-citations",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 1,
+                        "delta": {
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {
+                                        "start_index": 24,
+                                        "end_index": 29,
+                                        "url": "https://example.com/doc1.pdf",
+                                        "title": "Document 1"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-citations",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "completion_tokens": 227,
+                    "total_tokens": 244
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Based on search results"]
+        );
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::Source(crate::language_model::LanguageModelSource::Url(source))
+                    if source.url == "https://example.com/doc1.pdf"
+                        && source.title.as_deref() == Some("Document 1")
+            )
+        }));
+        assert_eq!(
+            openai_chat_stream_finish(&result.stream)
+                .finish_reason
+                .unified,
+            FinishReason::Stop
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_stream_tool_deltas() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            openai_chat_stream_tool_delta_start(call_id, ""),
+            openai_chat_stream_tool_delta_arguments("{\""),
+            openai_chat_stream_tool_delta_arguments("value"),
+            openai_chat_stream_tool_delta_arguments("\":\""),
+            openai_chat_stream_tool_delta_arguments("Spark"),
+            openai_chat_stream_tool_delta_arguments("le"),
+            openai_chat_stream_tool_delta_arguments(" Day"),
+            openai_chat_stream_tool_delta_arguments("\"}"),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 53,
+                    "completion_tokens": 17,
+                    "total_tokens": 70
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_tool(openai_chat_stream_test_tool()),
+            ),
+        );
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.id == call_id && start.tool_name == "test-tool"
+            )
+        }));
+        assert_eq!(
+            openai_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"", "value", "\":\"", "Spark", "le", " Day", "\"}"]
+        );
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::ToolInputEnd(end) if end.id == call_id)
+        }));
+        let tool_call = openai_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"Sparkle Day\"}");
+        let finish = openai_chat_stream_finish(&result.stream);
+        assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(finish.finish_reason.raw.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn openai_chat_stream_should_stream_tool_call_deltas_when_arguments_are_in_first_chunk() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            openai_chat_stream_tool_delta_start(call_id, "{\""),
+            openai_chat_stream_tool_delta_arguments("va"),
+            openai_chat_stream_tool_delta_arguments("lue"),
+            openai_chat_stream_tool_delta_arguments("\":\""),
+            openai_chat_stream_tool_delta_arguments("Spark"),
+            openai_chat_stream_tool_delta_arguments("le"),
+            openai_chat_stream_tool_delta_arguments(" Day"),
+            openai_chat_stream_tool_delta_arguments("\"}"),
+            json!({
+                "id": "chatcmpl-tool-deltas-first",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 53,
+                    "completion_tokens": 17,
+                    "total_tokens": 70
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_tool(openai_chat_stream_test_tool()),
+            ),
+        );
+
+        assert_eq!(
+            openai_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"", "va", "lue", "\":\"", "Spark", "le", " Day", "\"}"]
+        );
+        let tool_call = openai_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"Sparkle Day\"}");
+        assert_eq!(
+            openai_chat_stream_finish(&result.stream)
+                .finish_reason
+                .unified,
+            FinishReason::ToolCalls
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_not_duplicate_tool_calls_after_completed_empty_chunk() {
+        let call_id = "chatcmpl-tool-b3b307239370432d9910d4b79b4dbbaa";
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 226,
+                    "completion_tokens": 0
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "index": 0,
+                                    "function": {
+                                        "name": "searchGoogle"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 233,
+                    "completion_tokens": 7
+                }
+            }),
+            openai_chat_stream_tool_delta_arguments("{\"query\": \""),
+            openai_chat_stream_tool_delta_arguments("latest"),
+            openai_chat_stream_tool_delta_arguments(" news"),
+            openai_chat_stream_tool_delta_arguments(" on"),
+            openai_chat_stream_tool_delta_arguments(" ai\"}"),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "arguments": ""
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 246,
+                    "completion_tokens": 20
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 246,
+                    "completion_tokens": 20
+                }
+            }),
+        ]));
+        let search_google_tool = LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "searchGoogle",
+            openai_chat_response_format_schema(),
+        ));
+
+        let result = poll_ready(provider.chat("gpt-3.5-turbo").do_stream(
+            LanguageModelCallOptions::new(openai_chat_user_prompt()).with_tool(search_google_tool),
+        ));
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter(|part| matches!(part, LanguageModelStreamPart::ToolCall(_)))
+            .count();
+        assert_eq!(tool_calls, 1);
+        let tool_call = openai_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "searchGoogle");
+        assert_eq!(tool_call.input, "{\"query\": \"latest news on ai\"}");
+    }
+
+    #[test]
+    fn openai_chat_stream_should_stream_tool_call_with_missing_type_field() {
+        let call_id = "call_abc123";
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chatcmpl-azure-001",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "mistral-large",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": call_id,
+                                    "function": {
+                                        "name": "test-tool",
+                                        "arguments": ""
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            openai_chat_stream_tool_delta_arguments("{\"value\""),
+            openai_chat_stream_tool_delta_arguments(":\"hello\"}"),
+            json!({
+                "id": "chatcmpl-azure-001",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "mistral-large",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_tool(openai_chat_stream_test_tool()),
+            ),
+        );
+
+        let tool_call = openai_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"hello\"}");
+        assert_eq!(
+            openai_chat_stream_finish(&result.stream)
+                .finish_reason
+                .unified,
+            FinishReason::ToolCalls
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_stream_tool_call_that_is_sent_in_one_chunk() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            openai_chat_stream_tool_delta_start(call_id, "{\"value\":\"Sparkle Day\"}"),
+            json!({
+                "id": "chatcmpl-one-chunk-tool",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 53,
+                    "completion_tokens": 17,
+                    "total_tokens": 70
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_tool(openai_chat_stream_test_tool()),
+            ),
+        );
+
+        assert_eq!(
+            openai_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"value\":\"Sparkle Day\"}"]
+        );
+        let tool_call = openai_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"Sparkle Day\"}");
+        assert_eq!(
+            openai_chat_stream_finish(&result.stream)
+                .finish_reason
+                .unified,
+            FinishReason::ToolCalls
+        );
+    }
+
+    #[test]
     fn openai_chat_stream_should_send_request_body() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let provider = openai_chat_test_provider_with_stream_response_and_capture(
@@ -8527,6 +8990,100 @@ mod tests {
                 _ => None,
             })
             .expect("stream finish part is present")
+    }
+
+    fn openai_chat_stream_tool_input_deltas<'a>(
+        stream: &'a [LanguageModelStreamPart],
+        tool_call_id: &str,
+    ) -> Vec<&'a str> {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == tool_call_id => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn openai_chat_stream_tool_call<'a>(
+        stream: &'a [LanguageModelStreamPart],
+        tool_call_id: &str,
+    ) -> &'a crate::language_model::LanguageModelToolCall {
+        stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_call_id == tool_call_id =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("tool call part is present")
+    }
+
+    fn openai_chat_stream_test_tool() -> LanguageModelTool {
+        LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "test-tool",
+            openai_chat_response_format_schema(),
+        ))
+    }
+
+    fn openai_chat_stream_tool_delta_start(call_id: &str, arguments: &str) -> JsonValue {
+        json!({
+            "id": "chatcmpl-tool-deltas",
+            "object": "chat.completion.chunk",
+            "created": 1711357598,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "test-tool",
+                                    "arguments": arguments
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })
+    }
+
+    fn openai_chat_stream_tool_delta_arguments(arguments: &str) -> JsonValue {
+        json!({
+            "id": "chatcmpl-tool-deltas",
+            "object": "chat.completion.chunk",
+            "created": 1711357598,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {
+                                    "arguments": arguments
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })
     }
 
     fn openai_chat_stream_captured_body_with_provider_options(
