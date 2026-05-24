@@ -1940,10 +1940,18 @@ mod tests {
         }
 
         fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
-            let message = format!(
-                "stream raw {:?}",
-                options.include_raw_chunks.unwrap_or(false)
-            );
+            let message = if let Some(max_output_tokens) = options.max_output_tokens {
+                format!(
+                    "stream max {} raw {:?}",
+                    max_output_tokens,
+                    options.include_raw_chunks.unwrap_or(false)
+                )
+            } else {
+                format!(
+                    "stream raw {:?}",
+                    options.include_raw_chunks.unwrap_or(false)
+                )
+            };
             ready(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
                     Warning::Other { message },
@@ -2043,6 +2051,235 @@ mod tests {
                 ));
                 result
             }))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct NoopLanguageMiddleware;
+
+    impl<M> LanguageModelMiddleware<M> for NoopLanguageMiddleware
+    where
+        M: LanguageModel,
+        M::Stream: Send,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<M::Stream>>
+        where
+            Self: 'a,
+            M: 'a;
+    }
+
+    #[derive(Clone, Copy)]
+    struct AddMaxOutputTokensMiddleware(u64);
+
+    impl<M> LanguageModelMiddleware<M> for AddMaxOutputTokensMiddleware
+    where
+        M: LanguageModel,
+        M::Stream: Send,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<M::Stream>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: LanguageModelTransformParamsOptions<'a, M>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            options.params.max_output_tokens =
+                Some(options.params.max_output_tokens.unwrap_or_default() + self.0);
+            Some(ready(options.params))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendGenerateWarningMiddleware(&'static str);
+
+    impl<M> LanguageModelMiddleware<M> for AppendGenerateWarningMiddleware
+    where
+        M: LanguageModel,
+        M::Stream: Send,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<M::Stream>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn wrap_generate<'a>(
+            &'a self,
+            options: LanguageModelWrapGenerateOptions<'a, M>,
+        ) -> Option<Self::WrapGenerateFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            Some(Box::pin(async move {
+                let mut result = (options.do_generate)().await;
+                result.warnings.push(Warning::Other {
+                    message: self.0.to_string(),
+                });
+                result
+            }))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendStreamWarningMiddleware(&'static str);
+
+    impl<M> LanguageModelMiddleware<M> for AppendStreamWarningMiddleware
+    where
+        M: LanguageModel<Stream = Vec<LanguageModelStreamPart>>,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Pin<
+            Box<
+                dyn Future<Output = LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
+                    + Send
+                    + 'a,
+            >,
+        >
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn wrap_stream<'a>(
+            &'a self,
+            options: LanguageModelWrapStreamOptions<'a, M>,
+        ) -> Option<Self::WrapStreamFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            Some(Box::pin(async move {
+                let mut result = (options.do_stream)().await;
+                result.stream.push(LanguageModelStreamPart::StreamStart(
+                    LanguageModelStreamStart::new(vec![Warning::Other {
+                        message: self.0.to_string(),
+                    }]),
+                ));
+                result
+            }))
+        }
+    }
+
+    struct StatefulSupportedUrlsLanguageModel {
+        urls: LanguageModelSupportedUrls,
+    }
+
+    impl LanguageModel for StatefulSupportedUrlsLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "stateful-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "stateful-language"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(self.urls.clone())
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(language_result("stateful"))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
         }
     }
 
@@ -3181,36 +3418,8 @@ mod tests {
 
     #[test]
     fn language_model_middleware_hooks_are_optional_by_default() {
-        struct NoopMiddleware;
-
-        impl LanguageModelMiddleware<StaticLanguageModel> for NoopMiddleware {
-            type OverrideSupportedUrlsFuture<'a>
-                = Ready<LanguageModelSupportedUrls>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-
-            type TransformParamsFuture<'a>
-                = Ready<LanguageModelCallOptions>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-
-            type WrapGenerateFuture<'a>
-                = Ready<LanguageModelGenerateResult>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-
-            type WrapStreamFuture<'a>
-                = Ready<LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-        }
-
         let model = StaticLanguageModel;
-        let middleware = NoopMiddleware;
+        let middleware = NoopLanguageMiddleware;
 
         assert_eq!(
             middleware.override_provider(LanguageModelMiddlewareModelOptions::new(&model)),
@@ -3274,6 +3483,259 @@ mod tests {
 
         assert_eq!(explicit.provider(), "explicit-provider");
         assert_eq!(explicit.model_id(), "explicit-language");
+    }
+
+    #[test]
+    fn wrap_language_model_model_property_should_pass_through_by_default() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware);
+
+        assert_eq!(wrapped.model_id(), "language-base");
+    }
+
+    #[test]
+    fn wrap_language_model_model_property_should_use_middleware_override_model_id_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(wrapped.model_id(), "language-base-wrapped");
+    }
+
+    #[test]
+    fn wrap_language_model_model_property_should_use_model_id_parameter_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware)
+            .with_model_id("override-model");
+
+        assert_eq!(wrapped.model_id(), "override-model");
+    }
+
+    #[test]
+    fn wrap_language_model_provider_property_should_pass_through_by_default() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider");
+    }
+
+    #[test]
+    fn wrap_language_model_provider_property_should_use_middleware_override_provider_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+    }
+
+    #[test]
+    fn wrap_language_model_provider_property_should_use_provider_id_parameter_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware)
+            .with_provider_id("override-provider");
+
+        assert_eq!(wrapped.provider(), "override-provider");
+    }
+
+    #[test]
+    fn wrap_language_model_supported_urls_property_should_pass_through_by_default() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware);
+
+        assert_eq!(
+            poll_boxed(wrapped.supported_urls()),
+            BTreeMap::from([(
+                "image/*".to_string(),
+                vec!["^https://base\\.example/images/".to_string()]
+            )])
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_supported_urls_property_should_use_middleware_override_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(
+            poll_boxed(wrapped.supported_urls()),
+            BTreeMap::from([("application/pdf".to_string(), vec!["\\.pdf$".to_string()])])
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_transform_params_middleware_for_do_generate() {
+        let wrapped = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(5));
+
+        let result = poll_boxed(wrapped.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "generated max 5".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_wrap_generate_middleware() {
+        let wrapped = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendGenerateWarningMiddleware("wrapped generate"),
+        );
+
+        let result = poll_boxed(wrapped.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "generated max 0".to_string(),
+                },
+                Warning::Other {
+                    message: "wrapped generate".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_transform_params_middleware_for_do_stream() {
+        let wrapped = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(7));
+
+        let result = poll_boxed(wrapped.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![LanguageModelStreamPart::StreamStart(
+                LanguageModelStreamStart::new(vec![Warning::Other {
+                    message: "stream max 7 raw false".to_string(),
+                }])
+            )]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_wrap_stream_middleware() {
+        let wrapped = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendStreamWarningMiddleware("wrapped stream"),
+        );
+
+        let result = poll_boxed(wrapped.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "stream raw false".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrapped stream".to_string(),
+                    }
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_support_models_that_use_context_in_supported_urls() {
+        let supported_urls = BTreeMap::from([(
+            "image/*".to_string(),
+            vec!["^https://stateful\\.example/".to_string()],
+        )]);
+        let wrapped = wrap_language_model(
+            StatefulSupportedUrlsLanguageModel {
+                urls: supported_urls.clone(),
+            },
+            NoopLanguageMiddleware,
+        );
+
+        assert_eq!(poll_boxed(wrapped.supported_urls()), supported_urls);
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_generate()
+     {
+        let first = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(2));
+        let second = wrap_language_model(first, AddMaxOutputTokensMiddleware(3));
+
+        let result = poll_boxed(second.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "generated max 5".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_stream()
+     {
+        let first = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(2));
+        let second = wrap_language_model(first, AddMaxOutputTokensMiddleware(3));
+
+        let result = poll_boxed(second.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![LanguageModelStreamPart::StreamStart(
+                LanguageModelStreamStart::new(vec![Warning::Other {
+                    message: "stream max 5 raw false".to_string(),
+                }])
+            )]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_chain_multiple_wrap_generate_middlewares_in_the_correct_order() {
+        let first = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendGenerateWarningMiddleware("wrap1"),
+        );
+        let second = wrap_language_model(first, AppendGenerateWarningMiddleware("wrap2"));
+
+        let result = poll_boxed(second.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "generated max 0".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap1".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap2".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_chain_multiple_wrap_stream_middlewares_in_the_correct_order() {
+        let first = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendStreamWarningMiddleware("wrap1"),
+        );
+        let second = wrap_language_model(first, AppendStreamWarningMiddleware("wrap2"));
+
+        let result = poll_boxed(second.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "stream raw false".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrap1".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrap2".to_string(),
+                    }
+                ])),
+            ]
+        );
     }
 
     #[test]
