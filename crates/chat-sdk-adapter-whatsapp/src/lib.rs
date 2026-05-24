@@ -223,6 +223,15 @@ impl Adapter for WhatsappAdapter {
         Some(self.is_dm(thread_id))
     }
 
+    /// 1:1 with upstream `adapter.openDM(userId)`. Delegates to the
+    /// inherent [`WhatsappAdapter::open_dm`] which builds the thread
+    /// id from the bound `phone_number_id` + `user_id` (WhatsApp
+    /// Cloud API addresses conversations by `<business_phone>:<customer_phone>`
+    /// — no HTTP call required).
+    async fn open_dm(&self, user_id: &str) -> chat_sdk_chat::types::AdapterResult<String> {
+        Ok(self.open_dm(user_id))
+    }
+
     /// Post a text message via the WhatsApp Cloud API. 1:1 with
     /// upstream's `adapter.postMessage`:
     ///
