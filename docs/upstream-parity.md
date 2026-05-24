@@ -2715,6 +2715,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   upstream `openai-chat-language-model.test.ts` prompt `cached_tokens` usage
   and completion `accepted_prediction_tokens`/`rejected_prediction_tokens`
   provider-metadata cases through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat reasoning-token usage parity added
+  `openai_chat_should_return_reasoning_tokens_in_provider_metadata`, mapping
+  upstream `openai-chat-language-model.test.ts` `should return the reasoning
+  tokens in the provider metadata` through the OpenAI provider facade by
+  asserting completion `reasoning_tokens` splits output text/reasoning usage
+  and preserves the raw usage payload.
 - 2026-05-24: OpenAI chat response-format request-body parity added
   `openai_chat_should_not_send_response_format_when_response_format_is_text`,
   `openai_chat_should_forward_json_response_format_as_json_object_without_schema`,

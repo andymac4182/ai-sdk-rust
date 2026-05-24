@@ -3484,6 +3484,58 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_return_reasoning_tokens_in_provider_metadata() {
+        let provider = openai_chat_test_provider_with_json_response(json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 20,
+                "total_tokens": 35,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 10
+                }
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        }));
+
+        let result = poll_ready(
+            provider
+                .chat("o4-mini")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(15));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.input_tokens.cache_write, None);
+        assert_eq!(result.usage.input_tokens.no_cache, Some(15));
+        assert_eq!(result.usage.output_tokens.total, Some(20));
+        assert_eq!(result.usage.output_tokens.text, Some(10));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(10));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("completion_tokens_details"))
+                .and_then(|details| details.get("reasoning_tokens")),
+            Some(&json!(10))
+        );
+    }
+
+    #[test]
     fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
