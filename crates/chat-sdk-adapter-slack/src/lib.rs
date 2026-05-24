@@ -1106,6 +1106,39 @@ mod tests {
         );
     }
 
+    // ---------- Slack Web API method coverage (parametric) ----------
+    // Parametric coverage of all Slack Web API methods the adapter
+    // posts to. Mirrors the upstream `index.test.ts` URL-shape
+    // assertions (each per-method `it("calls slack <method>")`
+    // describes asserts via the mockClient spy on the URL path).
+    // Bundles them into one Rust test since they all flow through
+    // the same `method_url` helper.
+
+    #[test]
+    fn adapter_method_url_produces_slack_endpoints_for_all_runtime_methods() {
+        let adapter = SlackAdapter::new(
+            SlackAdapterOptions::new("xoxb", "s").with_api_base("https://slack.example.test/api"),
+        );
+        for method in [
+            "chat.postMessage",
+            "chat.update",
+            "chat.delete",
+            "conversations.info",
+            "reactions.add",
+            "reactions.remove",
+            "assistant.threads.setStatus",
+            "views.open",
+            "views.update",
+        ] {
+            let url = adapter.method_url(method);
+            assert_eq!(
+                url,
+                format!("https://slack.example.test/api/{method}"),
+                "method_url({method}) mismatch"
+            );
+        }
+    }
+
     #[test]
     fn adapter_start_typing_rejects_non_slack_thread_ids() {
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
