@@ -124,15 +124,20 @@ pub struct ProviderRegistry<P> {
 
 /// Rust equivalent of upstream `customProvider` for direct v4 model maps.
 ///
-/// This initial Rust surface covers the required provider-v4 model families
-/// (`languageModel`, `embeddingModel`, and `imageModel`). Broader optional
-/// model families, files/skills, string aliases, and fallback providers are
-/// tracked separately in the upstream parity ledger.
+/// Rust resolves string aliases through the configured fallback provider
+/// instead of JavaScript's ambient `globalThis.AI_SDK_DEFAULT_PROVIDER`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomProvider<LM, EM, IM, FP = NoFallbackProvider<LM, EM, IM>> {
     language_models: Vec<(String, LM)>,
+    language_model_aliases: Vec<(String, String)>,
     embedding_models: Vec<(String, EM)>,
+    embedding_model_aliases: Vec<(String, String)>,
     image_models: Vec<(String, IM)>,
+    image_model_aliases: Vec<(String, String)>,
+    transcription_model_aliases: Vec<(String, String)>,
+    speech_model_aliases: Vec<(String, String)>,
+    reranking_model_aliases: Vec<(String, String)>,
+    video_model_aliases: Vec<(String, String)>,
     fallback_provider: FP,
 }
 
@@ -220,8 +225,15 @@ impl<LM, EM, IM> CustomProvider<LM, EM, IM> {
     pub fn new() -> Self {
         Self {
             language_models: Vec::new(),
+            language_model_aliases: Vec::new(),
             embedding_models: Vec::new(),
+            embedding_model_aliases: Vec::new(),
             image_models: Vec::new(),
+            image_model_aliases: Vec::new(),
+            transcription_model_aliases: Vec::new(),
+            speech_model_aliases: Vec::new(),
+            reranking_model_aliases: Vec::new(),
+            video_model_aliases: Vec::new(),
             fallback_provider: NoFallbackProvider::default(),
         }
     }
@@ -234,15 +246,48 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
         self
     }
 
+    /// Registers a language model alias resolved through the fallback provider.
+    pub fn with_language_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.language_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
     /// Registers an embedding model by model id.
     pub fn with_embedding_model(mut self, model_id: impl Into<String>, model: EM) -> Self {
         self.embedding_models.push((model_id.into(), model));
         self
     }
 
+    /// Registers an embedding model alias resolved through the fallback provider.
+    pub fn with_embedding_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.embedding_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
     /// Registers an image model by model id.
     pub fn with_image_model(mut self, model_id: impl Into<String>, model: IM) -> Self {
         self.image_models.push((model_id.into(), model));
+        self
+    }
+
+    /// Registers an image model alias resolved through the fallback provider.
+    pub fn with_image_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.image_model_aliases
+            .push((model_id.into(), target_model_id.into()));
         self
     }
 
@@ -253,8 +298,15 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
     ) -> CustomProvider<LM, EM, IM, NewFP> {
         CustomProvider {
             language_models: self.language_models,
+            language_model_aliases: self.language_model_aliases,
             embedding_models: self.embedding_models,
+            embedding_model_aliases: self.embedding_model_aliases,
             image_models: self.image_models,
+            image_model_aliases: self.image_model_aliases,
+            transcription_model_aliases: self.transcription_model_aliases,
+            speech_model_aliases: self.speech_model_aliases,
+            reranking_model_aliases: self.reranking_model_aliases,
+            video_model_aliases: self.video_model_aliases,
             fallback_provider,
         }
     }
@@ -287,6 +339,17 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
         }
     }
 
+    /// Registers a transcription model alias resolved through the fallback provider.
+    pub fn with_transcription_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.transcription_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
     /// Registers a speech model by model id.
     pub fn with_speech_model<SM>(
         self,
@@ -297,6 +360,17 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
             provider: self,
             speech_models: vec![(model_id.into(), model)],
         }
+    }
+
+    /// Registers a speech model alias resolved through the fallback provider.
+    pub fn with_speech_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.speech_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
     }
 
     /// Registers a reranking model by model id.
@@ -311,6 +385,17 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
         }
     }
 
+    /// Registers a reranking model alias resolved through the fallback provider.
+    pub fn with_reranking_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.reranking_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
     /// Registers a video model by model id.
     pub fn with_video_model<VM>(
         self,
@@ -321,6 +406,17 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
             provider: self,
             video_models: vec![(model_id.into(), model)],
         }
+    }
+
+    /// Registers a video model alias resolved through the fallback provider.
+    pub fn with_video_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.video_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
     }
 }
 
@@ -362,27 +458,51 @@ where
     type ImageModel = IM;
 
     fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
-        self.language_models
+        if let Some(model) = self
+            .language_models
             .iter()
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
-            .map(Ok)
-            .unwrap_or_else(|| self.fallback_provider.language_model(model_id))
+        {
+            return Ok(model);
+        }
+
+        if let Some(target_model_id) = lookup_model_alias(&self.language_model_aliases, model_id) {
+            return self.fallback_provider.language_model(target_model_id);
+        }
+
+        self.fallback_provider.language_model(model_id)
     }
 
     fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
-        self.embedding_models
+        if let Some(model) = self
+            .embedding_models
             .iter()
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
-            .map(Ok)
-            .unwrap_or_else(|| self.fallback_provider.embedding_model(model_id))
+        {
+            return Ok(model);
+        }
+
+        if let Some(target_model_id) = lookup_model_alias(&self.embedding_model_aliases, model_id) {
+            return self.fallback_provider.embedding_model(target_model_id);
+        }
+
+        self.fallback_provider.embedding_model(model_id)
     }
 
     fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
-        self.image_models
+        if let Some(model) = self
+            .image_models
             .iter()
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
-            .map(Ok)
-            .unwrap_or_else(|| self.fallback_provider.image_model(model_id))
+        {
+            return Ok(model);
+        }
+
+        if let Some(target_model_id) = lookup_model_alias(&self.image_model_aliases, model_id) {
+            return self.fallback_provider.image_model(target_model_id);
+        }
+
+        self.fallback_provider.image_model(model_id)
     }
 }
 
@@ -399,6 +519,12 @@ where
         &self,
         model_id: &str,
     ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        if let Some(target_model_id) =
+            lookup_model_alias(&self.transcription_model_aliases, model_id)
+        {
+            return self.fallback_provider.transcription_model(target_model_id);
+        }
+
         self.fallback_provider.transcription_model(model_id)
     }
 }
@@ -413,6 +539,10 @@ where
     type SpeechModel = FP::SpeechModel;
 
     fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        if let Some(target_model_id) = lookup_model_alias(&self.speech_model_aliases, model_id) {
+            return self.fallback_provider.speech_model(target_model_id);
+        }
+
         self.fallback_provider.speech_model(model_id)
     }
 }
@@ -427,6 +557,10 @@ where
     type RerankingModel = FP::RerankingModel;
 
     fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError> {
+        if let Some(target_model_id) = lookup_model_alias(&self.reranking_model_aliases, model_id) {
+            return self.fallback_provider.reranking_model(target_model_id);
+        }
+
         self.fallback_provider.reranking_model(model_id)
     }
 }
@@ -441,6 +575,10 @@ where
     type VideoModel = FP::VideoModel;
 
     fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+        if let Some(target_model_id) = lookup_model_alias(&self.video_model_aliases, model_id) {
+            return self.fallback_provider.video_model(target_model_id);
+        }
+
         self.fallback_provider.video_model(model_id)
     }
 }
@@ -897,6 +1035,12 @@ where
 /// Creates an empty custom provider with direct v4 model maps.
 pub fn custom_provider<LM, EM, IM>() -> CustomProvider<LM, EM, IM> {
     CustomProvider::new()
+}
+
+fn lookup_model_alias<'a>(aliases: &'a [(String, String)], model_id: &str) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find_map(|(id, target)| (id == model_id).then_some(target.as_str()))
 }
 
 /// Creates a provider registry that wraps every language model lookup with middleware.
@@ -1664,6 +1808,72 @@ mod tests {
             Ok(StaticImageModel {
                 provider: "fallback".to_string(),
                 model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_should_resolve_string_model_ids_through_the_explicit_default_provider() {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_language_model_alias("alias", "language")
+                .with_embedding_model_alias("alias", "embedding")
+                .with_image_model_alias("alias", "image")
+                .with_transcription_model_alias("alias", "transcription")
+                .with_speech_model_alias("alias", "speech")
+                .with_reranking_model_alias("alias", "reranking")
+                .with_video_model_alias("alias", "video")
+                .with_fallback_provider(StaticProvider {
+                    id: "default-provider",
+                });
+
+        assert_eq!(
+            provider.language_model("alias"),
+            Ok(StaticLanguageModel {
+                provider: "default-provider".to_string(),
+                model_id: "language".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.embedding_model("alias"),
+            Ok(StaticEmbeddingModel {
+                provider: "default-provider".to_string(),
+                model_id: "embedding".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.image_model("alias"),
+            Ok(StaticImageModel {
+                provider: "default-provider".to_string(),
+                model_id: "image".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.transcription_model("alias"),
+            Ok(StaticTranscriptionModel {
+                provider: "default-provider".to_string(),
+                model_id: "transcription".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.speech_model("alias"),
+            Ok(StaticSpeechModel {
+                provider: "default-provider".to_string(),
+                model_id: "speech".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.reranking_model("alias"),
+            Ok(StaticRerankingModel {
+                provider: "default-provider".to_string(),
+                model_id: "reranking".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.video_model("alias"),
+            Ok(StaticVideoModel {
+                provider: "default-provider".to_string(),
+                model_id: "video".to_string(),
             })
         );
     }
