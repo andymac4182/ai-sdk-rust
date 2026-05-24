@@ -2115,8 +2115,6 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                     }
                 }
 
-                state.active_text_parts.clear();
-                state.active_reasoning_parts.clear();
                 state.aborted = true;
                 state.abort_reason = reason;
 
@@ -3409,6 +3407,477 @@ mod tests {
             finish_events[0].messages[1],
             finish_events[0].response_message
         );
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_passes_through_chunks_without_callbacks() {
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-123"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", " World"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone())
+                .with_message_id("unused-message-id")
+                .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)]),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_empty_original_messages_array() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-789"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Response"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].messages.len(), 1);
+        assert_eq!(
+            finish_events[0].messages[0],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_continuation_when_last_message_is_assistant() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Continue this" })),
+            UiMessage::new("assistant-msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "This is" })),
+        ];
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("assistant-msg-1"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", " continued"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_message_id("ignored-new-message-id")
+            .with_original_messages(original_messages.clone())
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "assistant-msg-1");
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0], original_messages[0]);
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_does_not_treat_user_message_as_continuation() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Question" })),
+            UiMessage::new("user-msg-2", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Another question" })),
+        ];
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-001"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "New response"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_original_messages(original_messages)
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "msg-001");
+        assert_eq!(finish_events[0].messages.len(), 3);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_sets_is_aborted_when_abort_chunk_is_encountered() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-abort-1"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Starting text"),
+            UiMessageChunk::abort(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone())
+                .with_original_messages([UiMessage::new("user-msg-1", UiMessageRole::User)])
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_aborted);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "msg-abort-1");
+        assert_eq!(finish_events[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_sets_is_aborted_false_without_abort_chunk() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-normal"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Complete text"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_original_messages([UiMessage::new("user-msg-1", UiMessageRole::User)])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_aborted);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "msg-normal");
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_passes_through_abort_chunk_without_callbacks() {
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-abort-passthrough"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Text before abort"),
+            UiMessageChunk::abort(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(HandleUiMessageStreamFinishOptions::new(
+            chunks.clone(),
+        ))
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_multiple_abort_chunks() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-multiple-abort"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::abort(),
+            UiMessageChunk::text_delta("text-1", "Some text"),
+            UiMessageChunk::abort_with_reason("manual abort"),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone()).with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_aborted);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_on_step_finish_when_finish_step_chunk_is_encountered()
+    {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello" })),
+        ];
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-step-1"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Step 1 text"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone())
+                .with_original_messages(original_messages.clone())
+                .with_on_step_finish(move |event| {
+                    step_events_for_callback
+                        .lock()
+                        .expect("step events lock")
+                        .push(event);
+                }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert!(!step_events[0].is_continuation);
+        assert_eq!(step_events[0].response_message.id, "msg-step-1");
+        assert_eq!(
+            step_events[0].response_message.role,
+            UiMessageRole::Assistant
+        );
+        assert_eq!(step_events[0].messages.len(), 2);
+        assert_eq!(step_events[0].messages[0], original_messages[0]);
+        assert_eq!(step_events[0].messages[1].id, "msg-step-1");
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_on_step_finish_multiple_times_for_multiple_steps() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-multi-step"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Step 1"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-2"),
+                UiMessageChunk::text_delta("text-2", "Step 2"),
+                UiMessageChunk::text_end("text-2"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-3"),
+                UiMessageChunk::text_delta("text-3", "Step 3"),
+                UiMessageChunk::text_end("text-3"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_step_finish(move |event| {
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 3);
+        assert_eq!(step_events[0].response_message.parts.len(), 1);
+        assert_eq!(step_events[1].response_message.parts.len(), 3);
+        assert_eq!(step_events[2].response_message.parts.len(), 5);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_both_on_step_finish_and_on_finish() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-both"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_step_finish(move |event| {
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            })
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(step_events.lock().expect("step events lock").len(), 1);
+        assert_eq!(finish_events.lock().expect("finish events lock").len(), 1);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_continuation_scenario_with_on_step_finish() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Continue this" })),
+            UiMessage::new("assistant-msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "This is" })),
+        ];
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("assistant-msg-1"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", " continued"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_message_id("ignored-new-message-id")
+            .with_original_messages(original_messages)
+            .with_on_step_finish(move |event| {
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert!(step_events[0].is_continuation);
+        assert_eq!(step_events[0].response_message.id, "assistant-msg-1");
+        assert_eq!(step_events[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_provides_cloned_messages_to_on_step_finish() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-clone"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_step_finish(move |mut event| {
+                event
+                    .response_message
+                    .parts
+                    .push(json!({ "type": "text", "text": "MUTATION!" }));
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            })
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert_eq!(step_events[0].response_message.parts.len(), 2);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].response_message.parts.len(), 1);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_does_not_process_stream_when_no_callbacks_are_provided() {
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-passthrough"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Test"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(HandleUiMessageStreamFinishOptions::new(
+            chunks.clone(),
+        ))
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
     }
 
     #[test]

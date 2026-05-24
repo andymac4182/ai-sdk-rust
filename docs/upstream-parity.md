@@ -951,6 +951,32 @@ focused tests for each portable behavior before changing rows to `verified`.
   proves the equivalent typed boundary by exposing no configured static tools
   for a no-tool `ToolLoopAgent`, keeping dynamic/data UI parts representable,
   and preserving caller-provided UI message metadata through serialization.
+- 2026-05-24: `packages/ai` `handleUIMessageStreamFinish` parity added
+  named Rust counterparts for the portable upstream
+  `handle-ui-message-stream-finish.test.ts` pass-through, injected message id,
+  finish callback, continuation, abort, multi-step `onStepFinish`, combined
+  step/final callback, continuation step, cloned-message, and no-callback
+  pass-through cases:
+  `handle_ui_message_stream_finish_passes_through_chunks_without_callbacks`,
+  `handle_ui_message_stream_finish_handles_empty_original_messages_array`,
+  `handle_ui_message_stream_finish_handles_continuation_when_last_message_is_assistant`,
+  `handle_ui_message_stream_finish_does_not_treat_user_message_as_continuation`,
+  `handle_ui_message_stream_finish_sets_is_aborted_when_abort_chunk_is_encountered`,
+  `handle_ui_message_stream_finish_sets_is_aborted_false_without_abort_chunk`,
+  `handle_ui_message_stream_finish_passes_through_abort_chunk_without_callbacks`,
+  `handle_ui_message_stream_finish_handles_multiple_abort_chunks`,
+  `handle_ui_message_stream_finish_calls_on_step_finish_when_finish_step_chunk_is_encountered`,
+  `handle_ui_message_stream_finish_calls_on_step_finish_multiple_times_for_multiple_steps`,
+  `handle_ui_message_stream_finish_calls_both_on_step_finish_and_on_finish`,
+  `handle_ui_message_stream_finish_handles_continuation_scenario_with_on_step_finish`,
+  `handle_ui_message_stream_finish_provides_cloned_messages_to_on_step_finish`,
+  and
+  `handle_ui_message_stream_finish_does_not_process_stream_when_no_callbacks_are_provided`.
+  Rust now preserves open text/reasoning part tracking after abort chunks so
+  later chunks in the same upstream-style stream remain processable. Upstream's
+  reader-cancellation and rejected async callback logging cases remain
+  JavaScript Web-stream/Promise-runtime boundaries for the current
+  materialized synchronous Rust API.
 - 2026-05-23: `packages/ai` `streamText` automatic tool approval stream
   parity added the named Rust counterpart
   `stream_text_automatic_tool_approval_response_streams_before_tool_result`
