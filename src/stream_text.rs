@@ -11172,6 +11172,49 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_passes_runtime_context_to_finish_callback() {
+        let runtime_context = JsonObject::from_iter([("context".to_string(), json!("test"))]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1", "Hello, ",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let finish_contexts = Arc::new(Mutex::new(Vec::<JsonObject>::new()));
+        let finish_contexts_for_callback = Arc::clone(&finish_contexts);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_runtime_context(runtime_context.clone())
+                .with_on_finish(move |event| {
+                    let finish_contexts = Arc::clone(&finish_contexts_for_callback);
+                    async move {
+                        finish_contexts
+                            .lock()
+                            .expect("finish contexts lock")
+                            .push(event.runtime_context);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            finish_contexts
+                .lock()
+                .expect("finish contexts lock")
+                .as_slice(),
+            [runtime_context]
+        );
+    }
+
+    #[test]
     fn stream_text_dispatches_telemetry_lifecycle_events() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
