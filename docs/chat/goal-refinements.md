@@ -4772,3 +4772,91 @@ resolver (~5).
   fetchSubject works after JSON roundtrip.
 - **action callbackUrl error logging** — 1 case + logger
   plumbing (logger errors need to be surfaced for observation).
+
+## Cycle 434..438 (slice 439, 2026-05-24)
+
+**What landed**
+
+- Slice 434: `LockScope` enum + Adapter::lock_scope() + dispatcher
+  lock-key resolution (4/5 portable chat.test.ts lockScope cases;
+  5th queue-dependent case deferred).
+- Slice 435: github adapter test-mod header js-only-documented
+  enumeration extended 1 → 5 (4 octokit-getter cases).
+- Slice 436: linear adapter test-mod header js-only-documented
+  enumeration extended 1 → 6 (5 linearClient-getter cases).
+- Slice 437: slack adapter test-mod header js-only-documented
+  enumeration extended 1 → 6 (5 webClient-getter cases).
+- Slice 438: discord adapter test-mod header js-only-documented
+  enumeration extended 1 → 2 (1 gateway-config Partials case).
+
+**Lessons learned**
+
+1. **Stale-lock recovery for the directory-style merge lock.**
+   The shared `/tmp/ai-sdk-rust-main-merge.lock` is a directory
+   (created via `mkdir`). The protocol's stale-lock recovery
+   covers the regular-file case but is silent on the directory
+   case. After 25+ minutes of lock contention with no movement
+   on `origin/main`, I confirmed:
+   - lock `stat` mtime > all-zero recent commits on `origin/main`
+   - no `cargo`/`git` processes belonging to the other session
+   - `lsof` on the lock dir was empty
+   Then `rmdir` to clear the leaked lock, then retry.
+   This is safe only after all three signals confirm the other
+   session is gone. Codify in the brief.
+
+2. **Pre-existing cargo fmt violations + the merge-back fmt
+   gate.** Slice 434's merge-back uncovered fmt violations in
+   33 chat-sdk-* files that had shipped under earlier merges
+   without enforcing `cargo fmt --check`. Bundled `cargo fmt
+   --all` cleanup into the slice 434 commit as a separate
+   commit. Going forward, every merge-back enforces the fmt
+   gate, so this can't re-accumulate.
+
+3. **Naming-script allowlist for chat-sdk modules mirroring
+   upstream package boundaries.** The chat-sdk-adapter-gchat
+   src/thread_utils.rs and chat-sdk-adapter-linear src/utils.rs
+   mirror upstream thread-utils.ts and utils.ts filenames; the
+   naming-script previously flagged the "utils" token. Added
+   file-path + identifier allowlists (gated on exact origin
+   file path) so the bare identifier is accepted only at its
+   declaring lib.rs.
+
+4. **Typed-client-getter js-only-documented pattern.** Several
+   adapters (slack, github, linear) ship a `webClient` /
+   `octokit` / `linearClient` getter that:
+   - returns a typed-class wrapper (WebClient/Octokit/LinearClient)
+   - exposes a deprecated `client` alias
+   - throws when called in multi-workspace mode without
+     AsyncLocalStorage request context
+   - resolves a per-request token via ALS inside a `withBotToken`
+     scope
+   The Rust port holds HTTP as an opaque `reqwest::Client` (no
+   typed wrapper); per-request context is plumbed through
+   function parameters, not thread-local storage; the deprecated
+   alias was never shipped. All getter cases are
+   js-only-documented by construction. **Pattern: when an
+   adapter's getter exposes a JS-runtime concept (typed class
+   instance, deprecated alias, ALS context), enumerate the
+   describe block in the test-mod header as a single
+   js-only-documented entry per case.**
+
+5. **The `main` checkout's `.claude/` directory triggers a
+   false-positive dirty-status check.** The original protocol
+   used `git status --short`; `.claude/` is an untracked
+   worktree-metadata directory and shows up as `??`. Updated the
+   merge-back script to `git status --short --untracked-files=no`
+   so untracked files don't trip the dirty check; tracked-file
+   changes still block the merge.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending
+  codification of lesson 1 (stale-lock directory recovery) +
+  lesson 4 (typed-client-getter js-only-documented pattern) +
+  lesson 5 (untracked-files=no in dirty check) in a follow-up.
+
+**Open refinements deferred**
+
+(Unchanged from cycle 428..432 — still pending; the 4 cases
+ported in slices 434..438 do not touch the deferred surfaces.)
