@@ -176,13 +176,23 @@ impl ThreadHistoryCache {
 
 #[cfg(test)]
 mod tests {
-    //! Coverage notes for `packages/chat/src/thread-history.test.ts`:
-    //! all 7 upstream cases exercise `ThreadHistoryCache.append` /
-    //! `getMessages` which depend on the `StateAdapter.appendToList`
-    //! / `getList` methods that the placeholder trait doesn't carry
-    //! yet. Those cases ship in the follow-up `ThreadHistoryCache`
-    //! slice once the trait is extended. The 4 tests below are
-    //! additive Rust-side coverage for the pure helpers shipped now.
+    //! Coverage for `packages/chat/src/thread-history.test.ts`:
+    //! 7 of 8 portable upstream cases mapped 1:1 in Rust via the
+    //! StateAdapter trait extension; the 1 remaining case is
+    //! js-only-documented per the slice-380 type-system-impossible
+    //! pattern:
+    //!
+    //! - `describe("MessageHistoryCache (deprecated alias)") >
+    //!   it("re-exports ThreadHistoryCache under the old name")`:
+    //!   upstream tests that the JS export `MessageHistoryCache`
+    //!   resolves to the same class as `ThreadHistoryCache` (a
+    //!   module-loader-level check via `expect(MessageHistoryCache
+    //!   === ThreadHistoryCache).toBe(true)`). The Rust port has
+    //!   no equivalent deprecated alias — there's just the single
+    //!   `ThreadHistoryCache` type. A `pub use ThreadHistoryCache
+    //!   as MessageHistoryCache` could be added if downstream
+    //!   crates need the old name, but the test itself is module-
+    //!   loader-specific and has no Rust analogue.
     use super::*;
 
     #[test]
