@@ -1481,6 +1481,9 @@ focused tests for each portable behavior before changing rows to `verified`.
   `supported_urls()` when URL-backed files appear in tool-result multipart
   content; the JavaScript custom async `download` callback shape remains a JS
   prompt-boundary API and is not exposed by the current Rust prompt converter.
+  `generate_text_tool_result_url_file_calls_model_supported_urls` now proves
+  the root `generate_text` entry point exercises that detection path for
+  provider-facing tool history.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

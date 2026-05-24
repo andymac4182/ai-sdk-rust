@@ -14692,6 +14692,46 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_tool_result_url_file_calls_model_supported_urls() {
+        let supported_urls_called = Arc::new(AtomicBool::new(false));
+        let model = FakeLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
+                "Hello, world!",
+            ))])
+            .with_supported_urls_called(Arc::clone(&supported_urls_called));
+        let prompt = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "toolCallId",
+                    "toolName",
+                    json!({}),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/tool-image.png")
+                                    .expect("url parses"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                )),
+            ])),
+        ];
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(&model, prompt)));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert!(supported_urls_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn generate_text_retries_retryable_pre_content_errors() {
         let mut retry_metadata = ProviderMetadata::new();
         retry_metadata.insert(
