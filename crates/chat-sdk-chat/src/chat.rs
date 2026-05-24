@@ -272,6 +272,20 @@ impl Chat {
         }
         let _ = self.state.disconnect().await;
     }
+
+    /// 1:1 port of upstream's lazy initialization (triggered by the
+    /// first webhook call). Invokes [`Adapter::initialize`] on
+    /// every registered adapter, then [`StateAdapter::connect`] on
+    /// the state backend. Errors from individual adapter
+    /// initialization are swallowed (matches upstream's defensive
+    /// behavior — a single failing adapter shouldn't block the
+    /// rest from coming online).
+    pub async fn initialize(&self) {
+        for adapter in self.adapters.values() {
+            let _ = adapter.initialize().await;
+        }
+        let _ = self.state.connect().await;
+    }
 }
 
 impl ChatSingleton for Chat {
@@ -725,5 +739,84 @@ mod tests {
         assert_eq!(handles[0].disconnect_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(handles[1].disconnect_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(state.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    // ---------- initialize (1 upstream case) ----------
+
+    #[derive(Debug, Default)]
+    struct InitTracker {
+        platform_name: &'static str,
+        initialize_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for InitTracker {
+        fn name(&self) -> &str {
+            self.platform_name
+        }
+        async fn initialize(&self) -> AdapterResult<()> {
+            self.initialize_calls
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ConnectTracker {
+        connect_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for ConnectTracker {
+        async fn connect(&self) -> StateResult<()> {
+            self.connect_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+        async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn chat_initialize_calls_initialize_on_every_adapter_and_connect_on_state() {
+        let adapter = Arc::new(InitTracker {
+            platform_name: "slack",
+            initialize_calls: AtomicUsize::new(0),
+        });
+        let state = Arc::new(ConnectTracker::default());
+        let chat = Chat::new(ChatOptions {
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            state: state.clone(),
+        });
+        block_on(chat.initialize());
+        assert_eq!(adapter.initialize_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(state.connect_calls.load(AtomicOrdering::SeqCst), 1);
     }
 }
