@@ -540,10 +540,29 @@ pub fn radio_select(options: RadioSelectOptions) -> RadioSelectElement {
 
 #[cfg(test)]
 mod tests {
-    //! Subset port of `packages/chat/src/modals.test.ts` (slice 33):
-    //! the leaf-element builders and their wire-shape round-trips. The
-    //! remaining upstream cases (Modal + ModalElement + ModalChild +
-    //! filterModalChildren + isModalElement) ship in follow-up slices.
+    //! Subset port of `packages/chat/src/modals.test.ts`:
+    //! the leaf-element builders + Modal + ModalElement + ModalChild +
+    //! filterModalChildren + isModalElement.
+    //!
+    //! **1:1 portable coverage**: 20 of 29 upstream cases mapped 1:1
+    //! plus 5 additive Rust coverage tests.
+    //!
+    //! **9 JSX-runtime cases are `js-only-documented`** per the
+    //! slice-380 type-system-impossible pattern — upstream's
+    //! `fromReactModalElement` helper converts React JSX elements
+    //! into ModalElement instances. The Rust port has no React /
+    //! JSX runtime so these cases are unreachable by construction:
+    //!
+    //! - `fromReactModalElement > should convert a Modal react element`
+    //! - `fromReactModalElement > should convert a TextInput react element`
+    //! - `fromReactModalElement > should convert a Select react element with children`
+    //! - `fromReactModalElement > should convert an ExternalSelect react element`
+    //! - `fromReactModalElement > should convert a RadioSelect react element`
+    //! - `fromReactModalElement > should return null for non-react, non-modal elements`
+    //! - `fromReactModalElement > should pass through plain modal elements`
+    //! - `fromReactModalElement > should pass through plain modal children`
+    //! - `fromReactModalElement > should handle unknown component by extracting children`
+    //! - `fromReactModalElement > should return null for unknown component without children`
 
     use super::*;
 
