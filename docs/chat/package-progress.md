@@ -24,7 +24,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 99% | In progress | core SDK package | chat-sdk-chat 815 colocated tests across 19 modules. Slices 354..411 add: Thread::post_ephemeral + 5 cases (slice... |
+| `@chat-sdk/chat` | 99% | In progress | core SDK package | chat-sdk-chat 865 colocated tests across 19 modules. Slices 354..423 add: Thread::post_ephemeral + 5 cases (slice... |
 | `@chat-sdk/adapter-slack` | 85% | In progress | adapter package | chat-sdk-adapter-slack 203 tests (slice 355 adds post_ephemeral pure helpers + 5 cases, slice 366 adds Adapter trait... |
 | `@chat-sdk/adapter-teams` | 65% | In progress | adapter package | chat-sdk-adapter-teams 107 tests (slice 365 adds channel_id_from_thread_id helper + 2 cases, slice 366 adds Adapter... |
 | `@chat-sdk/adapter-gchat` | 75% | In progress | adapter package | chat-sdk-adapter-gchat 134 tests (slice 357 adds post_ephemeral via privateMessageViewer pure helpers + 4 cases, slice... |
