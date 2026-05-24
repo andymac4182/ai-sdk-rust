@@ -1630,6 +1630,47 @@ mod tests {
     }
 
     #[test]
+    fn thread_serialization_fromjson_should_round_trip_channel_visibility_correctly() {
+        // 1:1 with upstream `describe("ThreadImpl.fromJSON()") >
+        // it("should round-trip channelVisibility correctly")` —
+        // `channelVisibility: External` survives toJSON+fromJSON
+        // round-trip via the slice-463 field + serde wire shape.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let original = Thread::with_state_adapter(
+            adapter.clone(),
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_channel_visibility(ChannelVisibility::External);
+        let json = original.to_json();
+        let restored = Thread::from_json(&json, adapter);
+        assert_eq!(restored.channel_visibility(), ChannelVisibility::External);
+    }
+
+    #[test]
+    fn thread_serialization_fromjson_should_default_channel_visibility_to_unknown_when_missing() {
+        // 1:1 with upstream `describe("ThreadImpl.fromJSON()") >
+        // it("should default channelVisibility to unknown when
+        // missing from JSON")` — when the JSON omits
+        // `channelVisibility`, the reconstructed Thread defaults to
+        // `Unknown`.
+        use crate::types::ChannelVisibility;
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "slack:C123:1234.5678",
+            "channelId": "C123",
+            "isDM": false,
+            "adapterName": "slack",
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::from_json(&json, adapter);
+        assert_eq!(thread.channel_visibility(), ChannelVisibility::Unknown);
+    }
+
+    #[test]
     fn thread_serialization_should_deserialize_from_json_with_explicit_adapter() {
         let json = serde_json::json!({
             "_type": "chat:Thread",
