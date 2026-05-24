@@ -1195,3 +1195,55 @@ Reference ports:
 - `Chat::get_user` + `Chat::get_user_for_author` (slice 348)
 - `Thread::post_ephemeral` + `Thread::post_ephemeral_for_author`
   (slice 354)
+
+## Trait-impl sweep pattern (added slice 366)
+
+Once a new method lands on the `Adapter` (or `StateAdapter`) trait
+in `chat-sdk-chat::types`, the per-adapter trait impl bodies should
+be added in a **single sweep slice** (one commit) rather than per-
+adapter (N commits). This:
+
+1. Reduces merge overhead — the brief mandates a separate
+   merge-back per slice, so each per-adapter commit costs a full
+   merge cycle.
+2. Surfaces compile-time mismatches in one place — when the trait
+   default doesn't compile against one adapter's inherent method
+   signature (e.g. `String` vs `Option<String>`), the diff shows
+   the fix at the wrap site.
+3. Documents the wiring once — the commit message lists which
+   adapters got which trait-impl pairs.
+
+Template:
+
+```rust
+#[async_trait]
+impl Adapter for XxxAdapter {
+    fn name(&self) -> &str {
+        ADAPTER_NAME
+    }
+
+    /// 1:1 with upstream `adapter.<methodName>(args)`. Delegates to
+    /// the inherent [`XxxAdapter::<method_name>`].
+    fn <method_name>(&self, args: ...) -> ReturnType {
+        self.<method_name>(args)
+    }
+
+    // ... existing trait impl body
+}
+```
+
+Rust's inherent-method-takes-precedence resolution means `self.method(args)`
+inside the trait impl body calls the inherent method (not the trait
+method itself), so no recursion. When the inherent method returns
+`String` / `bool` directly but the trait wants `Option<String>` /
+`Option<bool>`, wrap in `Some(_)`.
+
+No new tests are needed for the wiring itself — the trait impl is
+exercised by callers via the trait object, while the inherent
+method's tests already cover the implementation. Add tests only
+when the wrap (`Some(_)`) changes observable behavior at the trait
+boundary.
+
+Reference port: slice 366 sweep added `Adapter::channel_id_from_thread_id`
++ `Adapter::is_dm` impls across 8 adapters (Slack, Discord, GChat,
+WhatsApp, Messenger, Telegram, Linear, GitHub) in one commit.
