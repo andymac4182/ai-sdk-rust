@@ -4342,7 +4342,7 @@ fn append_stream_text_user_agent(call_options: &mut LanguageModelCallOptions) {
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
@@ -4370,7 +4370,7 @@ mod tests {
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
-    use crate::provider_utils::{Tool, ToolExecutionError};
+    use crate::provider_utils::{Schema, Tool, ToolExecutionError, ValidationResult};
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
@@ -10876,6 +10876,107 @@ mod tests {
                                 )
             )
         ));
+    }
+
+    #[test]
+    fn stream_text_validates_tool_context_before_approval_callback_and_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let approval_called = Arc::new(AtomicBool::new(false));
+        let approval_called_for_callback = Arc::clone(&approval_called);
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_tool = Arc::clone(&executed);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("expected apiKey string")
+            }
+        });
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": 123 }))]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_context_schema(context_schema)
+                        .with_execute(move |_input, _options| {
+                            let executed = Arc::clone(&executed_for_tool);
+                            async move {
+                                executed.store(true, Ordering::SeqCst);
+                                Ok(json!({ "forecast": "sunny" }))
+                            }
+                        }),
+                )
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new().with_tool_approval_function(
+                        "weather",
+                        move |_input, _options| {
+                            let approval_called = Arc::clone(&approval_called_for_callback);
+                            async move {
+                                approval_called.store(true, Ordering::SeqCst);
+                                Some(
+                                    NormalizedToolApprovalStatus::approved_with_reason("trusted")
+                                        .into(),
+                                )
+                            }
+                        },
+                    ),
+                ),
+        ));
+
+        assert!(!approval_called.load(Ordering::SeqCst));
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert!(
+            result.tool_results[0]
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("expected apiKey string")
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolApprovalRequest(_)))
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolApprovalResponse(_)))
+        );
     }
 
     #[test]

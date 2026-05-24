@@ -1386,6 +1386,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   mapping upstream `telemetry integrations > should support multiple per-call
   integrations as an array` by proving both per-call integrations receive
   `onStart` in configured order.
+- 2026-05-24: `packages/ai` streamed tool execution context-validation parity
+  added
+  `stream_text_validates_tool_context_before_approval_callback_and_execution`,
+  mapping upstream `executeToolsFromStream`'s context-schema failure before
+  approval callbacks by proving invalid `toolsContext` suppresses approval
+  callbacks and local tool execution before emitting the tool error.
 - 2026-05-23: `packages/ai` `streamText` UI-message response helper
   parity added named Rust counterparts
   `stream_text_result_to_ui_message_stream_masks_error_messages_by_default`,
@@ -4012,6 +4018,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    `execute_tool_call_should_measure_only_inner_execute_duration_when_wrapped`.
    Rust documents JavaScript object identity checks for merged `AbortSignal`
    as native signal-linkage assertions instead of pointer identity.
+   The upstream `execute-tools-from-stream.test.ts` context-validation error
+   case now has the named high-level Rust counterpart
+   `stream_text_validates_tool_context_before_approval_callback_and_execution`,
+   proving invalid streamed tool context prevents approval callbacks and local
+   tool execution before the tool-error output is surfaced. The exact
+   JavaScript thrown-stream `TypeValidationError` boundary is represented as
+   Rust's materialized stream result with the same pre-callback/pre-execution
+   ordering guarantee.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error
