@@ -200,6 +200,28 @@ pub fn is_numeric_user_id(user_id: &str) -> bool {
     !user_id.is_empty() && user_id.chars().all(|c| c.is_ascii_digit())
 }
 
+/// Boxed future returned by an event-handler closure. The handler is
+/// `async`, so each invocation produces a fresh `Pin<Box<dyn Future>>`.
+pub type HandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// 1:1 with upstream `MentionHandler<TState>` — invoked when a new
+/// `@bot` mention arrives in a non-subscribed thread. The closure
+/// receives a [`Thread`] handle bound to the matched adapter + a clone
+/// of the message; the upstream third `context` parameter is deferred
+/// behind a `MessageContext` port.
+pub type MentionHandler = Arc<
+    dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
+>;
+
+/// Per-Chat handler storage. Each handler vec is wrapped in
+/// `Arc<Mutex<...>>` so registration goes through `&self` (matching
+/// upstream's mutating-but-not-`&mut` shape) while keeping
+/// [`Chat::clone`] cheap.
+#[derive(Clone, Default)]
+struct ChatHandlers {
+    mention: Arc<std::sync::Mutex<Vec<MentionHandler>>>,
+}
+
 /// Top-level chat handle. 1:1 port (in progress) of upstream
 /// `class Chat`.
 #[derive(Clone)]
@@ -213,6 +235,10 @@ pub struct Chat {
     /// invoked by `handle_incoming_message` to populate
     /// `message.user_key` before handlers run (slice 387).
     identity: Option<Arc<dyn IdentityResolver>>,
+    /// Registered event handlers (slice 415). Wrapped in
+    /// `Arc<Mutex<...>>` so registration works through `&self` and
+    /// handler dispatch can snapshot the vec under a short lock.
+    handlers: ChatHandlers,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -376,7 +402,30 @@ impl Chat {
             state: options.state,
             transcripts,
             identity: options.identity,
+            handlers: ChatHandlers::default(),
         })
+    }
+
+    /// 1:1 port of upstream `chat.onNewMention(handler)`. Registers a
+    /// handler that fires for messages containing a bot mention in a
+    /// non-subscribed thread. Multiple handlers are invoked in
+    /// registration order; each runs to completion before the next
+    /// starts (matching upstream's sequential `await` loop).
+    ///
+    /// The closure must be `Send + Sync + 'static` because the
+    /// dispatcher runs handlers across async tasks. Use
+    /// [`HandlerFuture`] as the return type:
+    ///
+    /// ```ignore
+    /// chat.on_new_mention(|thread, message| Box::pin(async move {
+    ///     thread.post(&format!("got: {}", message.text)).await.unwrap();
+    /// }));
+    /// ```
+    pub fn on_new_mention<F>(&self, handler: F)
+    where
+        F: Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
+    {
+        self.handlers.mention.lock().unwrap().push(Arc::new(handler));
     }
 
     /// 1:1 port of upstream `chat.transcripts` getter. Panics when
@@ -534,9 +583,43 @@ impl Chat {
             }
         }
 
-        // Full dispatcher (lock + concurrency + handler dispatch)
-        // is deferred. Returning `Ok(true)` signals the message
-        // *would* have been dispatched in the upstream code.
+        // Handler dispatch (slice 415, Phase A: onNewMention only).
+        // Snapshot the handler list under a short lock then drop the
+        // guard before awaiting so handler invocations don't hold the
+        // registration mutex. Multi-handler dispatch is sequential to
+        // match upstream's `await` loop semantics.
+        //
+        // Routing for Phase A: dispatch to mention handlers when
+        // `message.is_mention == Some(true)`. The upstream `is_mention`
+        // computation (walking the formatted AST for `<@botUserId>`)
+        // is deferred — Phase A trusts whatever the caller (or
+        // adapter) set on the message.
+        //
+        // Full routing (subscribed → onSubscribedMessage; DM →
+        // onDirectMessage; isMention → onNewMention; pattern →
+        // onNewMessage; fall-through behaviors) lands in Phase B.
+        if message.is_mention == Some(true) {
+            let adapter_arc = self
+                .adapters
+                .get(adapter.name())
+                .cloned()
+                // Fallback: if the dispatching adapter isn't in the
+                // registered map (the upstream tests sometimes pass a
+                // standalone mock adapter), the Thread handle can't
+                // be constructed. Skip mention dispatch in that case
+                // — the message still counts as dispatched per the
+                // `Ok(true)` return contract.
+                ;
+            if let Some(adapter_arc) = adapter_arc {
+                let handlers_snapshot: Vec<MentionHandler> =
+                    self.handlers.mention.lock().unwrap().clone();
+                for handler in handlers_snapshot {
+                    let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                    handler(thread, message.clone()).await;
+                }
+            }
+        }
+
         Ok(true)
     }
 
@@ -2050,5 +2133,169 @@ mod tests {
         // No identity configured → user_key stays None and no
         // resolver invocation can happen (no resolver to invoke).
         assert!(msg.user_key.is_none());
+    }
+
+    // ---------- describe("onNewMention behavior") — Phase A (slice 415) ----------
+    //
+    // 1:1 with the simplest upstream `chat.test.ts` mention-dispatch
+    // cases. Phase A wires `Chat::on_new_mention` registration + the
+    // `handle_incoming_message` dispatcher branch that fires when
+    // `message.is_mention == Some(true)`. The upstream `detectMention`
+    // computation (walking the formatted AST for `<@botUserId>`) is
+    // deferred to Phase B — Phase A trusts whatever the caller set on
+    // the message before invoking the dispatcher.
+
+    #[test]
+    fn on_new_mention_dispatches_when_message_is_mention_is_true() {
+        // 1:1 with upstream "should trigger onNewMention for message
+        // events containing a bot mention" (Phase A scope: caller
+        // pre-sets `is_mention`; detectMention walker deferred).
+        let (chat, adapter) = chat_with_in_memory_state();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = counter.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(invocations.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_new_mention_does_not_dispatch_when_is_mention_is_false() {
+        // 1:1 with upstream "should not trigger onNewMention when
+        // message event has no bot mention" (Phase A scope).
+        let (chat, adapter) = chat_with_in_memory_state();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = counter.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(invocations.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_new_mention_does_not_dispatch_when_is_mention_is_none() {
+        // Phase A behavior: `None` is treated as "no mention", same
+        // as `Some(false)`. The upstream detectMention walker (which
+        // runs unconditionally) lands in Phase B and will replace
+        // the caller-set value before dispatch.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = counter.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        // is_mention deliberately left as None (default)
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(invocations.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_new_mention_invokes_all_registered_handlers_in_order() {
+        // Additive: upstream's onNewMention spec doesn't enumerate
+        // multi-handler ordering explicitly but does iterate via
+        // sequential awaits. This test locks in that handlers fire
+        // in registration order.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        let o3 = order.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let o = o3.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(3);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn on_new_mention_handler_receives_thread_bound_to_dispatching_adapter() {
+        // Additive: verifies the Thread passed to the handler is
+        // constructed from the adapter that dispatched the message.
+        // The handler asserts adapter_name() matches.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_new_mention(move |thread, _msg| {
+            let o = o.clone();
+            let name = thread.adapter_name().to_string();
+            Box::pin(async move {
+                *o.lock().unwrap() = Some(name);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(observed.lock().unwrap().as_deref(), Some("slack"));
+    }
+
+    #[test]
+    fn on_new_mention_handler_does_not_fire_for_self_messages() {
+        // 1:1 with the existing skip-self early-exit covering the
+        // mention dispatch path — even if is_mention=true, an
+        // author.is_me message short-circuits before handlers run.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = counter.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-self", true);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(invocations.load(AtomicOrdering::SeqCst), 0);
     }
 }
