@@ -464,12 +464,22 @@ fn convert_message_for_language_model_prompt(
     message: LanguageModelMessage,
 ) -> LanguageModelMessage {
     match message {
-        LanguageModelMessage::Assistant(mut message) => {
+        LanguageModelMessage::User(mut message) => {
             message.content.retain(|part| {
                 !matches!(
                     part,
-                    LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+                    LanguageModelUserContentPart::Text(text) if text.text.is_empty()
                 )
+            });
+            LanguageModelMessage::User(message)
+        }
+        LanguageModelMessage::Assistant(mut message) => {
+            message.content.retain(|part| match part {
+                LanguageModelAssistantContentPart::ToolApprovalRequest(_) => false,
+                LanguageModelAssistantContentPart::Text(text) => {
+                    !text.text.is_empty() || text.provider_options.is_some()
+                }
+                _ => true,
             });
             LanguageModelMessage::Assistant(message)
         }
@@ -1216,9 +1226,10 @@ mod tests {
         InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
         PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
         TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-        convert_to_language_model_prompt, convert_to_language_model_v4_file_part,
-        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
-        prepare_language_model_call_options, prepare_tool_choice, standardize_prompt,
+        convert_message_for_language_model_prompt, convert_to_language_model_prompt,
+        convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
+        get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
+        prepare_tool_choice, standardize_prompt,
     };
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
@@ -2100,6 +2111,118 @@ mod tests {
                     }
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_user_should_filter_out_empty_text_parts() {
+        let result = convert_message_for_language_model_prompt(LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new(""),
+            )]),
+        ));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "user",
+                "content": []
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_user_should_pass_through_non_empty_text_parts() {
+        let result = convert_message_for_language_model_prompt(LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("hello, world!"),
+            )]),
+        ));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "hello, world!"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_ignore_empty_text_parts_when_there_are_no_provider_options()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("")),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "toolCallId",
+                "toolName",
+                json!({}),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {}
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_include_empty_text_parts_when_there_are_provider_options()
+     {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Text(
+                LanguageModelTextPart::new("").with_provider_options(provider_options),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "toolCallId",
+                "toolName",
+                json!({}),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1"
+                            }
+                        }
+                    },
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {}
+                    }
+                ]
+            })
         );
     }
 

@@ -1391,6 +1391,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream `prompt/convert-to-language-model-prompt.test.ts` provider
   options case, proving provider options stay on the converted user message
   without moving them into individual content parts.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` empty text
+  filtering parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` user and assistant text
+  part cases:
+  `convert_to_language_model_message_user_should_filter_out_empty_text_parts`,
+  `convert_to_language_model_message_user_should_pass_through_non_empty_text_parts`,
+  `convert_to_language_model_message_assistant_should_ignore_empty_text_parts_when_there_are_no_provider_options`,
+  and
+  `convert_to_language_model_message_assistant_should_include_empty_text_parts_when_there_are_provider_options`.
+  Rust now removes empty user text and empty assistant text without provider
+  options while preserving empty assistant text that carries provider options.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
