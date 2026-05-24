@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 66.5%
-- Portable package average: 59.8%
+- Average estimated completion: 66.7%
+- Portable package average: 60.1%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -25,7 +25,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 587 chat tests. Phase 1.5 complete. Slice 159 extended Adapter trait. Slice... |
-| `@chat-sdk/adapter-slack` | 76% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject + slice 160 edit/delete/react/typing + slice 169... |
+| `@chat-sdk/adapter-slack` | 80% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject + slice 160 edit/delete/react/typing + slice 169... |
 | `@chat-sdk/adapter-teams` | 52% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message + slice 167 edit/delete/react/typing + slice 172 errors + slice 217... |
 | `@chat-sdk/adapter-gchat` | 63% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message + slice 168 edit/delete/react/typing + slice 190 markdown converter +... |
 | `@chat-sdk/adapter-discord` | 70% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit/delete/react/typing + slice 197 webhook Ed25519 + slice... |
