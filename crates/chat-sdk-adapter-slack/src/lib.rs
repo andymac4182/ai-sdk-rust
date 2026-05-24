@@ -29,6 +29,22 @@ pub const THREAD_ID_PREFIX: &str = "slack:";
 /// Default Slack Web API base URL.
 pub const DEFAULT_API_BASE: &str = "https://slack.com/api";
 
+/// Timeout the adapter waits before failing an
+/// `options_load` external-select callback. Slack expects a
+/// response within ~3 s; the adapter rounds down to 2500 ms. 1:1
+/// with upstream's private `OPTIONS_LOAD_TIMEOUT_MS = 2500`.
+pub const OPTIONS_LOAD_TIMEOUT_MS: u64 = 2500;
+
+/// Wall-clock budget the adapter spends polling for link-unfurl
+/// completion before giving up on the unfurl. 1:1 with upstream's
+/// private `UNFURL_WAIT_MS = 2000` (2 s).
+pub const UNFURL_WAIT_MS: u64 = 2000;
+
+/// Poll interval the adapter uses while waiting for link-unfurl
+/// completion. 1:1 with upstream's private
+/// `UNFURL_POLL_MS = 150` (150 ms).
+pub const UNFURL_POLL_MS: u64 = 150;
+
 /// Options for [`SlackAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct SlackAdapterOptions {
@@ -831,6 +847,16 @@ mod tests {
             adapter.get_channel_visibility(""),
             ChannelVisibility::Unknown
         );
+    }
+
+    #[test]
+    #[test]
+    fn slack_timing_constants_match_upstream() {
+        // 1:1 with upstream's private `OPTIONS_LOAD_TIMEOUT_MS`,
+        // `UNFURL_WAIT_MS`, `UNFURL_POLL_MS`.
+        assert_eq!(OPTIONS_LOAD_TIMEOUT_MS, 2500);
+        assert_eq!(UNFURL_WAIT_MS, 2000);
+        assert_eq!(UNFURL_POLL_MS, 150);
     }
 
     #[test]
