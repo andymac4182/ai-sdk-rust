@@ -208,6 +208,20 @@ mod tests {
     }
 
     // ---------- extract_files ----------
+    //
+    // 1:1 with upstream `adapter-utils.test.ts > describe("extractFiles")`.
+    // The following upstream cases are 1:1 via the type system (per
+    // the slice-380 brief tightening) and have no matching Rust test:
+    //
+    // - `handles Blob data in files` / `handles ArrayBuffer data in
+    //   files`: the Rust `FileUpload::data` field is `FileBytes`
+    //   (`Vec<u8>`), not a `Blob | ArrayBuffer | Buffer` union — the
+    //   JS-runtime-specific variants collapse to a single
+    //   `FileBytes` case at the type level.
+    // - `returns empty array for null input` / `returns empty array
+    //   for undefined input`: the Rust signature takes
+    //   `&AdapterPostableMessage` (non-null), so the cases are
+    //   unreachable.
 
     #[test]
     fn extract_files_returns_files_from_postable_raw() {
@@ -283,6 +297,19 @@ mod tests {
             attachments: None,
             files: None,
             raw: "Text".to_string(),
+        });
+        assert!(extract_files(&msg).is_empty());
+    }
+
+    #[test]
+    fn extract_files_returns_empty_slice_for_postable_markdown_without_files() {
+        // 1:1 with upstream `describe("extractFiles") > it("returns
+        // empty array for PostableMarkdown without files")` — the
+        // `files` field on PostableMarkdown is None.
+        let msg = AdapterPostableMessage::from(PostableMarkdown {
+            attachments: None,
+            files: None,
+            markdown: "**Bold**".to_string(),
         });
         assert!(extract_files(&msg).is_empty());
     }
