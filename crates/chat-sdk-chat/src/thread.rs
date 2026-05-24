@@ -544,6 +544,10 @@ mod tests {
         start_typing: Mutex<Vec<(String, Option<String>)>>,
         on_thread_subscribe: Mutex<Vec<String>>,
         on_thread_subscribe_unsupported: bool,
+        edit_message: Mutex<Vec<(String, String, String)>>,
+        delete_message: Mutex<Vec<(String, String)>>,
+        add_reaction: Mutex<Vec<(String, String, String)>>,
+        remove_reaction: Mutex<Vec<(String, String, String)>>,
     }
 
     #[async_trait::async_trait]
@@ -596,6 +600,56 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(thread_id.to_string());
+            Ok(())
+        }
+        async fn edit_message(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            text: &str,
+        ) -> AdapterResult<String> {
+            self.edit_message.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                text.to_string(),
+            ));
+            Ok(message_id.to_string())
+        }
+        async fn delete_message(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+        ) -> AdapterResult<()> {
+            self.delete_message
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), message_id.to_string()));
+            Ok(())
+        }
+        async fn add_reaction(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> AdapterResult<()> {
+            self.add_reaction.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                emoji.to_string(),
+            ));
+            Ok(())
+        }
+        async fn remove_reaction(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> AdapterResult<()> {
+            self.remove_reaction.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                emoji.to_string(),
+            ));
             Ok(())
         }
     }
@@ -975,6 +1029,79 @@ mod tests {
         assert_eq!(sent.author(), &msg.author);
         assert_eq!(sent.metadata(), &msg.metadata);
         assert_eq!(sent.attachments(), &msg.attachments[..]);
+    }
+
+    #[test]
+    fn sent_message_edit_delegates_to_adapter_edit_message() {
+        // 1:1 with upstream "should provide edit capability".
+        let adapter = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let msg = sample_message("msg-1", "Hello");
+        let sent = thread.create_sent_message_from_message(msg);
+        let new_id = block_on(sent.edit("edited content")).unwrap();
+        assert_eq!(new_id, "msg-1");
+        let calls = adapter.edit_message.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[(
+                "slack:C123:1234.5678".to_string(),
+                "msg-1".to_string(),
+                "edited content".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn sent_message_delete_delegates_to_adapter_delete_message() {
+        // 1:1 with upstream "should provide delete capability".
+        let adapter = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let msg = sample_message("msg-1", "Hello");
+        let sent = thread.create_sent_message_from_message(msg);
+        block_on(sent.delete()).unwrap();
+        let calls = adapter.delete_message.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[("slack:C123:1234.5678".to_string(), "msg-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn sent_message_add_reaction_delegates_to_adapter_add_reaction() {
+        // 1:1 with upstream "should provide addReaction capability".
+        let adapter = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let msg = sample_message("msg-1", "Hello");
+        let sent = thread.create_sent_message_from_message(msg);
+        block_on(sent.add_reaction("thumbsup")).unwrap();
+        let calls = adapter.add_reaction.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[(
+                "slack:C123:1234.5678".to_string(),
+                "msg-1".to_string(),
+                "thumbsup".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn sent_message_remove_reaction_delegates_to_adapter_remove_reaction() {
+        // 1:1 with upstream "should provide removeReaction capability".
+        let adapter = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let msg = sample_message("msg-1", "Hello");
+        let sent = thread.create_sent_message_from_message(msg);
+        block_on(sent.remove_reaction("thumbsup")).unwrap();
+        let calls = adapter.remove_reaction.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[(
+                "slack:C123:1234.5678".to_string(),
+                "msg-1".to_string(),
+                "thumbsup".to_string()
+            )]
+        );
     }
 
     // ---------- describe("recentMessages getter/setter") (4 cases) ----------
