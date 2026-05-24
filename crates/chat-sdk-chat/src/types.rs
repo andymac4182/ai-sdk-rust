@@ -1410,6 +1410,17 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported("open_dm"))
     }
 
+    /// Optional user-info lookup. 1:1 with upstream optional
+    /// `getUser?(userId): Promise<UserInfo | null>` — resolves a
+    /// platform user id to a `UserInfo` descriptor, or `Ok(None)`
+    /// when the user isn't found. Default returns
+    /// `Err(Unsupported("get_user"))` so [`crate::chat::Chat::get_user`]
+    /// can surface the upstream "Adapter does not support getUser"
+    /// error.
+    async fn get_user(&self, _user_id: &str) -> AdapterResult<Option<UserInfo>> {
+        Err(AdapterError::Unsupported("get_user"))
+    }
+
     /// Optional channel-scoped post. 1:1 with upstream optional
     /// `postChannelMessage?(channelId, text): Promise<{id: string}>`.
     /// Some platforms distinguish channel-level posts (no parent
