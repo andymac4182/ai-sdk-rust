@@ -1354,6 +1354,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   calls while preserving their existing `InvalidPromptError` boundary, with
   `generate_text_from_prompt_rejects_missing_tool_results_before_model_call`
   covering the root generate-text integration path.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` system-message
+  conversion parity added named Rust counterparts for the first three upstream
+  `prompt/convert-to-language-model-prompt.test.ts` system-message cases:
+  `convert_to_language_model_prompt_should_convert_a_string_system_message`,
+  `convert_to_language_model_prompt_should_convert_a_system_model_message_system_message`,
+  and
+  `convert_to_language_model_prompt_should_convert_an_array_of_system_model_message_system_messages`.
+  These prove text instructions plus single and array `SystemModelMessage`
+  instructions are prepended to provider-facing prompts while preserving system
+  message provider options.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

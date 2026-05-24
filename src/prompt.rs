@@ -1208,6 +1208,7 @@ mod tests {
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
+    use crate::provider::ProviderOptions;
     use crate::provider_utils::FilePartData;
 
     use super::{
@@ -1688,6 +1689,120 @@ mod tests {
                 LanguageModelMessage::System(system_message("Second instruction.")),
                 user_text_message("Hello"),
             ]
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_convert_a_string_system_message() {
+        let standardized = standardize_prompt(
+            Prompt::from_messages(vec![user_text_message("Hello, world!")])
+                .with_instructions("INSTRUCTIONS"),
+        )
+        .expect("prompt standardizes");
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_convert_a_system_model_message_system_message() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test": {
+                "value": "test"
+            }
+        }))
+        .expect("provider options deserialize");
+        let standardized = standardize_prompt(
+            Prompt::from_messages(vec![user_text_message("Hello, world!")]).with_instructions(
+                system_message("INSTRUCTIONS").with_provider_options(provider_options),
+            ),
+        )
+        .expect("prompt standardizes");
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS",
+                    "providerOptions": {
+                        "test": {
+                            "value": "test"
+                        }
+                    }
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_convert_an_array_of_system_model_message_system_messages()
+     {
+        let standardized = standardize_prompt(
+            Prompt::from_messages(vec![user_text_message("Hello, world!")]).with_instructions(
+                vec![
+                    system_message("INSTRUCTIONS"),
+                    system_message("INSTRUCTIONS 2"),
+                ],
+            ),
+        )
+        .expect("prompt standardizes");
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS"
+                },
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS 2"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
         );
     }
 
