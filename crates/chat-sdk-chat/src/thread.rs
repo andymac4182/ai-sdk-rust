@@ -26,7 +26,9 @@
 use std::sync::Arc;
 
 use crate::postable_object::{PostableDispatchError, post_postable_object};
-use crate::types::{Adapter, AdapterResult, StateAdapter, StateResult, THREAD_STATE_TTL_MS};
+use crate::types::{
+    Adapter, AdapterError, AdapterResult, StateAdapter, StateResult, THREAD_STATE_TTL_MS,
+};
 
 /// 1:1 with upstream's private
 /// `const THREAD_STATE_KEY_PREFIX = "thread-state:"`.
@@ -39,6 +41,11 @@ pub struct Thread {
     adapter: Arc<dyn Adapter>,
     thread_id: String,
     state_adapter: Option<Arc<dyn StateAdapter>>,
+    /// 1:1 with upstream `isSubscribedContext?: boolean`. When
+    /// `true`, [`Self::is_subscribed`] short-circuits to `true`
+    /// without calling the state adapter — set by the chat event
+    /// dispatcher when invoking `onSubscribedMessage` handlers.
+    is_subscribed_context: bool,
 }
 
 impl std::fmt::Debug for Thread {
@@ -60,6 +67,7 @@ impl Thread {
             adapter,
             thread_id: thread_id.into(),
             state_adapter: None,
+            is_subscribed_context: false,
         }
     }
 
@@ -76,7 +84,19 @@ impl Thread {
             adapter,
             thread_id: thread_id.into(),
             state_adapter: Some(state_adapter),
+            is_subscribed_context: false,
         }
+    }
+
+    /// Builder: mark this Thread handle as running inside a
+    /// "subscribed" context. 1:1 with upstream
+    /// `isSubscribedContext: true` constructor option — the chat
+    /// event dispatcher sets this when invoking
+    /// `onSubscribedMessage` handlers so [`Self::is_subscribed`]
+    /// short-circuits without a state lookup.
+    pub fn with_subscribed_context(mut self) -> Self {
+        self.is_subscribed_context = true;
+        self
     }
 
     /// Borrow the bound state adapter, if any. Returns `None` when
@@ -141,6 +161,54 @@ impl Thread {
     /// renderers translate to the platform-native form downstream).
     pub fn mention_user(&self, user_id: &str) -> String {
         format!("<@{user_id}>")
+    }
+
+    /// 1:1 port of upstream `Thread.subscribe()`. Records the
+    /// subscription in the bound state adapter, then calls
+    /// `adapter.on_thread_subscribe(thread_id)` (default no-op).
+    /// No-op when the Thread was built without a state adapter
+    /// (matches upstream's lazy-singleton fallback which Rust
+    /// hasn't ported yet).
+    pub async fn subscribe(&self) -> AdapterResult<()> {
+        if let Some(state) = self.state_adapter.as_ref() {
+            state
+                .subscribe(&self.thread_id)
+                .await
+                .map_err(|e| AdapterError::Io(Box::new(e)))?;
+        }
+        self.adapter.on_thread_subscribe(&self.thread_id).await
+    }
+
+    /// 1:1 port of upstream `Thread.unsubscribe()`. Removes the
+    /// subscription record from the bound state adapter. No-op when
+    /// no state adapter is bound.
+    pub async fn unsubscribe(&self) -> AdapterResult<()> {
+        if let Some(state) = self.state_adapter.as_ref() {
+            state
+                .unsubscribe(&self.thread_id)
+                .await
+                .map_err(|e| AdapterError::Io(Box::new(e)))?;
+        }
+        Ok(())
+    }
+
+    /// 1:1 port of upstream `Thread.isSubscribed()`. Short-circuits
+    /// to `true` when `is_subscribed_context` was set on the handle
+    /// (subscribed-message handler optimization); otherwise consults
+    /// the bound state adapter. Returns `false` when no state
+    /// adapter is bound (matches upstream's "no state → not
+    /// subscribed" default).
+    pub async fn is_subscribed(&self) -> AdapterResult<bool> {
+        if self.is_subscribed_context {
+            return Ok(true);
+        }
+        let Some(state) = self.state_adapter.as_ref() else {
+            return Ok(false);
+        };
+        state
+            .is_subscribed(&self.thread_id)
+            .await
+            .map_err(|e| AdapterError::Io(Box::new(e)))
     }
 
     fn state_key(&self) -> String {
@@ -226,6 +294,8 @@ mod tests {
         fetch_subject_calls: AtomicUsize,
         subject_result: Option<String>,
         start_typing: Mutex<Vec<(String, Option<String>)>>,
+        on_thread_subscribe: Mutex<Vec<String>>,
+        on_thread_subscribe_unsupported: bool,
     }
 
     #[async_trait::async_trait]
@@ -268,6 +338,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((thread_id.to_string(), status.map(str::to_string)));
+            Ok(())
+        }
+        async fn on_thread_subscribe(&self, thread_id: &str) -> AdapterResult<()> {
+            if self.on_thread_subscribe_unsupported {
+                return Err(AdapterError::Unsupported("on_thread_subscribe"));
+            }
+            self.on_thread_subscribe
+                .lock()
+                .unwrap()
+                .push(thread_id.to_string());
             Ok(())
         }
     }
@@ -530,5 +610,123 @@ mod tests {
         let thread = Thread::new(adapter, "slack:C123:1234.5678");
         assert_eq!(thread.mention_user("UABC123"), "<@UABC123>");
         assert_eq!(thread.mention_user("bot-user-id"), "<@bot-user-id>");
+    }
+
+    // ---------- describe("subscribe and unsubscribe") (4 cases) +
+    //            describe("isSubscribed") (4 cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("subscribe and
+    // unsubscribe")` + `describe("isSubscribed")`.
+
+    #[test]
+    fn thread_subscribe_writes_subscription_via_state_adapter() {
+        let (thread, state) = thread_with_state();
+        block_on(thread.subscribe()).unwrap();
+        // Default trait subscribe writes Bool(true) under
+        // "subscribed:<thread_id>" via set.
+        let set_calls = state.set_calls.lock().unwrap();
+        let last = set_calls.last().unwrap();
+        assert_eq!(last.0, "subscribed:slack:C123:1234.5678");
+        assert_eq!(last.1, serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn thread_subscribe_calls_adapter_on_thread_subscribe_when_available() {
+        let adapter = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter.clone() as Arc<dyn Adapter>,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        );
+        block_on(thread.subscribe()).unwrap();
+        let calls = adapter.on_thread_subscribe.lock().unwrap();
+        assert_eq!(calls.as_slice(), &["slack:C123:1234.5678".to_string()]);
+    }
+
+    #[test]
+    fn thread_subscribe_does_not_error_when_adapter_has_no_on_thread_subscribe() {
+        // 1:1 with upstream "should not error when adapter has no
+        // onThreadSubscribe". Adapters that don't override the
+        // optional trait method get the default Ok(()) impl, and
+        // state.subscribe still runs.
+        #[derive(Debug, Default)]
+        struct NoSubscribeAdapter;
+        #[async_trait::async_trait]
+        impl Adapter for NoSubscribeAdapter {
+            fn name(&self) -> &str {
+                "no-sub"
+            }
+        }
+        let adapter: Arc<dyn Adapter> = Arc::new(NoSubscribeAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state.clone() as Arc<dyn StateAdapter>,
+        );
+        block_on(thread.subscribe()).unwrap();
+        let set_calls = state.set_calls.lock().unwrap();
+        assert_eq!(set_calls.last().unwrap().0, "subscribed:slack:C123:1234.5678");
+    }
+
+    #[test]
+    fn thread_unsubscribe_removes_subscription_via_state_adapter() {
+        let (thread, state) = thread_with_state();
+        block_on(thread.subscribe()).unwrap();
+        block_on(thread.unsubscribe()).unwrap();
+        // Default trait unsubscribe deletes the key.
+        let value = state
+            .cache
+            .lock()
+            .unwrap()
+            .get("subscribed:slack:C123:1234.5678")
+            .cloned();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn thread_is_subscribed_returns_false_when_not_subscribed() {
+        let (thread, _state) = thread_with_state();
+        let result = block_on(thread.is_subscribed()).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn thread_is_subscribed_returns_true_after_subscribing() {
+        let (thread, _state) = thread_with_state();
+        block_on(thread.subscribe()).unwrap();
+        let result = block_on(thread.is_subscribed()).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn thread_is_subscribed_returns_false_after_unsubscribing() {
+        let (thread, _state) = thread_with_state();
+        block_on(thread.subscribe()).unwrap();
+        block_on(thread.unsubscribe()).unwrap();
+        let result = block_on(thread.is_subscribed()).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn thread_is_subscribed_short_circuits_when_is_subscribed_context_is_set() {
+        // 1:1 with upstream "should short-circuit and return true when
+        // isSubscribedContext is set". Verify the state adapter is
+        // NOT called (no get_calls entries for the subscribed: key).
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state.clone() as Arc<dyn StateAdapter>,
+        )
+        .with_subscribed_context();
+        let result = block_on(thread.is_subscribed()).unwrap();
+        assert!(result);
+        let get_calls = state.get_calls.lock().unwrap();
+        assert!(
+            !get_calls.iter().any(|k| k == "subscribed:slack:C123:1234.5678"),
+            "state.get should NOT be called when subscribed context is set"
+        );
     }
 }
