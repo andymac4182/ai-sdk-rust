@@ -3942,8 +3942,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chat_should_submit_message_when_a_tool_approval_response_is_added() {
+    fn assert_chat_tool_approval_response_forwards_follow_up_options() {
         let transport = RecordingChatTransport::new([
             UiMessageChunk::tool_output_available(
                 "call-1",
@@ -4059,6 +4058,16 @@ mod tests {
         );
         let event = chat.last_finish_event().expect("finish event is recorded");
         assert_eq!(event.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_approval_response_is_added() {
+        assert_chat_tool_approval_response_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_add_tool_approval_response_should_forward_options_to_make_request_when_auto_sending() {
+        assert_chat_tool_approval_response_forwards_follow_up_options();
     }
 
     #[test]

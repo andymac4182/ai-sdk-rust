@@ -2338,7 +2338,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   at Rust's explicit follow-up gate boundary.
 - 2026-05-25: `packages/ai` `Chat.addToolApprovalResponse` approved-flow
   parity added `chat_should_add_tool_approval_response_to_the_latest_assistant_message`
-  and `chat_should_submit_message_when_a_tool_approval_response_is_added`,
+  `chat_should_submit_message_when_a_tool_approval_response_is_added`, and
+  `chat_add_tool_approval_response_should_forward_options_to_make_request_when_auto_sending`,
   covering the portable upstream `ui/chat.test.ts` approval response state
   mutation, approved automatic follow-up body/header option forwarding, and
   response folding that turns the approved tool part into `output-available`
