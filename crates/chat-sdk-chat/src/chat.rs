@@ -1734,10 +1734,23 @@ impl Chat {
         let is_dm = adapter.is_dm(thread_id).unwrap_or(false);
         let dm_handlers: Vec<DirectMessageHandler> =
             self.handlers.direct_message.lock().unwrap().clone();
+        // Thread-construction helpers (slice 432). The dispatcher
+        // hands handlers a Thread bound to the dispatching adapter
+        // PLUS the chat's state adapter so handlers can call
+        // `thread.is_subscribed()` / `thread.subscribe()` /
+        // `thread.set_state(...)` without needing to look up state
+        // themselves. The subscribed branch additionally sets
+        // `with_subscribed_context()` so `thread.is_subscribed()`
+        // short-circuits to `true` without round-tripping through
+        // state (1:1 with upstream's `_isSubscribedContext` flag).
+        let make_thread = |adapter: Arc<dyn Adapter>| -> Thread {
+            Thread::with_state_adapter(adapter, thread_id, self.state.clone())
+        };
+
         if is_dm && !dm_handlers.is_empty() {
             let channel_id = crate::channel::derive_channel_id(&*adapter_arc, thread_id);
             for handler in dm_handlers {
-                let thread = Thread::new(adapter_arc.clone(), thread_id);
+                let thread = make_thread(adapter_arc.clone());
                 let channel = crate::channel::Channel::new(adapter_arc.clone(), &channel_id);
                 handler(thread, message.clone(), channel).await;
             }
@@ -1759,7 +1772,7 @@ impl Chat {
             let handlers_snapshot: Vec<SubscribedMessageHandler> =
                 self.handlers.subscribed.lock().unwrap().clone();
             for handler in handlers_snapshot {
-                let thread = Thread::new(adapter_arc.clone(), thread_id);
+                let thread = make_thread(adapter_arc.clone()).with_subscribed_context();
                 handler(thread, message.clone()).await;
             }
             return;
@@ -1769,7 +1782,7 @@ impl Chat {
             let handlers_snapshot: Vec<MentionHandler> =
                 self.handlers.mention.lock().unwrap().clone();
             for handler in handlers_snapshot {
-                let thread = Thread::new(adapter_arc.clone(), thread_id);
+                let thread = make_thread(adapter_arc.clone());
                 handler(thread, message.clone()).await;
             }
             return;
@@ -1785,7 +1798,7 @@ impl Chat {
             .collect();
         for (pattern, handler) in patterns_snapshot {
             if pattern.is_match(&message.text) {
-                let thread = Thread::new(adapter_arc.clone(), thread_id);
+                let thread = make_thread(adapter_arc.clone());
                 handler(thread, message.clone()).await;
             }
         }
@@ -5943,6 +5956,73 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    // ---------- describe("thread.isSubscribed()") — slice 432 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("thread.isSubscribed()")`.
+    // The dispatcher constructs a Thread bound to the chat's state
+    // adapter AND (for the subscribed branch) sets
+    // `with_subscribed_context()` so `thread.is_subscribed()`
+    // short-circuits to true (1:1 with upstream's
+    // `_isSubscribedContext` flag).
+    //
+    // Also exercises the unsubscribed branch — the mention handler
+    // receives a Thread bound to state; `thread.is_subscribed()`
+    // returns false because state.is_subscribed returns false.
+
+    #[test]
+    fn thread_is_subscribed_returns_true_when_handler_runs_in_subscribed_context() {
+        // 1:1 with upstream "should return true for subscribed
+        // threads". The dispatcher routes to onSubscribedMessage
+        // and passes a Thread with `is_subscribed_context = true`;
+        // thread.is_subscribed() short-circuits.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_subscribed_message(move |thread, _msg| {
+            let o = o.clone();
+            Box::pin(async move {
+                let is_sub = thread.is_subscribed().await.unwrap_or(false);
+                *o.lock().unwrap() = Some(is_sub);
+            })
+        });
+        futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(*observed.lock().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn thread_is_subscribed_returns_false_when_handler_runs_in_unsubscribed_thread() {
+        // 1:1 with upstream "should return false for unsubscribed
+        // threads". The dispatcher routes to onNewMention (no
+        // subscribed-context flag); thread.is_subscribed() consults
+        // state and returns false.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_new_mention(move |thread, _msg| {
+            let o = o.clone();
+            Box::pin(async move {
+                let is_sub = thread.is_subscribed().await.unwrap_or(true);
+                *o.lock().unwrap() = Some(is_sub);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(*observed.lock().unwrap(), Some(false));
     }
 
     #[test]
