@@ -210,4 +210,24 @@ mod tests {
         let uri = buffer_to_data_uri(b"hi", Some("image/png"));
         assert_eq!(uri, "data:image/png;base64,aGk=");
     }
+
+    #[test]
+    fn buffer_to_data_uri_handles_image_mime_types() {
+        // 1:1 with upstream `describe("bufferToDataUri") > it("handles
+        // image mime types")` — PNG magic bytes prepended with the
+        // `image/png` mime type produce a data URI that starts with
+        // the `data:image/png;base64,` prefix.
+        let png_magic = [0x89, 0x50, 0x4E, 0x47];
+        let uri = buffer_to_data_uri(&png_magic, Some("image/png"));
+        assert!(uri.starts_with("data:image/png;base64,"), "got: {uri}");
+    }
+
+    #[test]
+    fn buffer_to_data_uri_handles_empty_buffer() {
+        // 1:1 with upstream `describe("bufferToDataUri") > it("handles
+        // empty buffer")` — an empty input produces a data URI
+        // with no base64 payload (just the default-mime prefix).
+        let uri = buffer_to_data_uri(&[], None);
+        assert_eq!(uri, "data:application/octet-stream;base64,");
+    }
 }
