@@ -453,8 +453,15 @@ pub struct ActionEventInput {
 }
 
 /// 1:1 with upstream `ActionEvent` — the input shape plus a
-/// dispatcher-constructed [`Thread`] handle for posting back and a
-/// `state` handle that backs [`ActionEvent::open_modal`].
+/// dispatcher-constructed optional [`Thread`] handle for posting
+/// back and a `state` handle that backs
+/// [`ActionEvent::open_modal`].
+///
+/// `thread` is `None` when `thread_id` is empty (1:1 with
+/// upstream's home-tab actions which carry no thread context).
+/// `open_modal` still works because the dispatching `adapter` is
+/// stored as a dedicated field, decoupled from the thread handle
+/// (slice 483).
 #[derive(Clone, Debug)]
 pub struct ActionEvent {
     pub action_id: String,
@@ -464,7 +471,14 @@ pub struct ActionEvent {
     pub thread_id: String,
     pub trigger_id: Option<String>,
     pub raw: serde_json::Value,
-    pub thread: Thread,
+    /// Posting-back handle. `None` when `thread_id` is empty
+    /// (home-tab actions). Use [`Self::adapter`] for adapter
+    /// access regardless of thread presence.
+    pub thread: Option<Thread>,
+    /// Dispatching adapter, available even when `thread` is
+    /// `None`. Used by [`Self::open_modal`] and direct adapter
+    /// access. (slice 483)
+    pub(crate) adapter: Arc<dyn Adapter>,
     /// State adapter used by [`Self::open_modal`] to persist the
     /// modal-context payload keyed by the generated UUID. Set by
     /// the dispatcher from the parent `Chat`'s state.
@@ -472,16 +486,24 @@ pub struct ActionEvent {
 }
 
 impl ActionEvent {
+    /// Borrow the dispatching adapter. Available regardless of
+    /// whether `thread` is `Some` (slice 483).
+    pub fn adapter(&self) -> &Arc<dyn Adapter> {
+        &self.adapter
+    }
+
     /// 1:1 with upstream `ActionEvent.openModal(modal)`. Mirrors
     /// [`SlashCommandEvent::open_modal`] (slice 478) and
     /// [`Chat::open_modal`] (slice 429) using the event-bound
     /// adapter + trigger_id + state: generates a fresh UUID
     /// context_id, persists a `modal-context:<context_id>`
-    /// envelope with the action's thread_id + adapter name +
-    /// callback_id, then calls `adapter.open_modal(trigger_id,
-    /// modal, context_id)`. Returns `Ok(None)` when `trigger_id`
-    /// is missing or when the adapter returns `Unsupported` for
-    /// `open_modal`.
+    /// envelope with the action's thread_id (omitted when empty) +
+    /// adapter name + callback_id, then calls
+    /// `adapter.open_modal(trigger_id, modal, context_id)`.
+    /// Returns `Ok(None)` when `trigger_id` is missing or when
+    /// the adapter returns `Unsupported` for `open_modal`. Works
+    /// for empty `thread_id` (home-tab actions) — the context
+    /// envelope's `thread` field is then `null`.
     pub async fn open_modal(
         &self,
         modal: &crate::modals::ModalElement,
@@ -489,10 +511,18 @@ impl ActionEvent {
         let Some(trigger_id) = self.trigger_id.as_deref() else {
             return Ok(None);
         };
-        let adapter = self.thread.adapter();
+        let adapter = &self.adapter;
         let context_id = uuid::Uuid::new_v4().to_string();
+        // 1:1 with upstream: when threadId is empty the context's
+        // `thread` is null/undefined, otherwise it's the platform
+        // thread id string.
+        let thread_value = if self.thread_id.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(self.thread_id.clone())
+        };
         let context_value = serde_json::json!({
-            "thread": self.thread_id,
+            "thread": thread_value,
             "adapterName": adapter.name(),
             "callbackId": modal.callback_id,
         });
@@ -1346,7 +1376,14 @@ impl Chat {
             if !matches {
                 continue;
             }
-            let thread = Thread::new(adapter_arc.clone(), &event.thread_id);
+            // 1:1 with upstream: empty thread_id (home-tab actions)
+            // produces a null Thread; non-empty constructs the
+            // posting-back handle bound to the dispatching adapter.
+            let thread = if event.thread_id.is_empty() {
+                None
+            } else {
+                Some(Thread::new(adapter_arc.clone(), &event.thread_id))
+            };
             let action = ActionEvent {
                 action_id: event.action_id.clone(),
                 value: event.value.clone(),
@@ -1356,6 +1393,7 @@ impl Chat {
                 trigger_id: event.trigger_id.clone(),
                 raw: event.raw.clone(),
                 thread,
+                adapter: adapter_arc.clone(),
                 state: self.state.clone(),
             };
             handler(action).await;
@@ -4872,8 +4910,12 @@ mod tests {
         let o = observed.clone();
         chat.on_action(move |event| {
             let o = o.clone();
-            let tid = event.thread.thread_id().to_string();
-            let name = event.thread.adapter_name().to_string();
+            let thread = event
+                .thread
+                .as_ref()
+                .expect("thread present for non-empty thread_id");
+            let tid = thread.thread_id().to_string();
+            let name = thread.adapter_name().to_string();
             Box::pin(async move {
                 *o.lock().unwrap() = Some((tid, name));
             })
@@ -4959,7 +5001,10 @@ mod tests {
         let i = invoked.clone();
         chat.on_action(move |event| {
             let i = i.clone();
-            let thread = event.thread.clone();
+            let thread = event
+                .thread
+                .clone()
+                .expect("thread present for non-empty thread_id");
             Box::pin(async move {
                 let _ = thread.post("Action received!").await;
                 i.fetch_add(1, AtomicOrdering::SeqCst);
@@ -5093,6 +5138,65 @@ mod tests {
         let event = make_action_event("open_form", None, false);
         futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
         assert_eq!(*captured.lock().unwrap(), Some(None));
+    }
+
+    #[test]
+    fn on_action_event_open_modal_works_with_empty_thread_id_home_tab_actions() {
+        // 1:1 with upstream `chat.test.ts > Actions > "should open modal
+        // when action has empty threadId (no thread context)"`. Home-tab
+        // actions carry no thread context; the dispatched event has
+        // `thread = None` but `open_modal` still works using the
+        // event-bound adapter; the persisted modal-context envelope
+        // stores `thread = null` (slice 483).
+        let modal_adapter: Arc<RecordingModalAdapter> = Arc::new(RecordingModalAdapter::default());
+        let adapter: Arc<dyn Adapter> = modal_adapter.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state: state.clone(),
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let captured_thread_is_none: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let captured_modal_result: Arc<Mutex<Option<crate::types::OpenModalResult>>> =
+            Arc::new(Mutex::new(None));
+        let t = captured_thread_is_none.clone();
+        let m = captured_modal_result.clone();
+        chat.on_action(move |event| {
+            let t = t.clone();
+            let m = m.clone();
+            let thread_none = event.thread.is_none();
+            let event_for_modal = event.clone();
+            Box::pin(async move {
+                *t.lock().unwrap() = Some(thread_none);
+                let result = event_for_modal
+                    .open_modal(&make_modal("select_scope_form"))
+                    .await
+                    .unwrap();
+                *m.lock().unwrap() = result;
+            })
+        });
+        let mut event = make_action_event("home_select_scope", None, false);
+        event.message_id = String::new();
+        event.thread_id = String::new();
+        event.trigger_id = Some("trigger-456".to_string());
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(*captured_thread_is_none.lock().unwrap(), Some(true));
+        assert!(captured_modal_result.lock().unwrap().is_some());
+        let calls = modal_adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "trigger-456");
+        assert_eq!(calls[0].1, "select_scope_form");
+        // The modal-context envelope under the generated UUID
+        // should store `thread = null` (matching upstream's
+        // "undefined thread" assertion).
+        let key = format!("{MODAL_CONTEXT_KEY_PREFIX}{}", calls[0].2);
+        let stored = futures_executor::block_on(state.get(&key))
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.get("thread").map(|v| v.is_null()).unwrap_or(false),
+            "expected thread=null in modal context, got: {stored}"
+        );
     }
 
     // ---------- describe("Actions") callbackUrl tests — slice 480 ----------
