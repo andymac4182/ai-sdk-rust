@@ -3536,3 +3536,96 @@ module-aliasing test).
   `Adapter::stream` trait extension.
 - **serialization.test.ts** (49 cases) — needs Thread/Message
   JSON revival.
+
+---
+
+## Slices 313..317 refinement cycle (pivot from constructor sweep to Thread/Chat handle surface)
+
+**What was learned**
+
+- The env-var-resolution sweep (slices 304..312) closed the
+  cheap-constructor work. The next-easiest unported surface is
+  the Thread/Channel handle methods that map upstream
+  `ThreadImpl`/`ChannelImpl` describe blocks **without** needing
+  the full chat event loop (handleIncomingMessage, webhooks,
+  onNewMention). Slices 314-317 ported 20 such cases (chat.thread,
+  Thread.startTyping, Thread.mentionUser, Thread.subscribe/
+  unsubscribe/isSubscribed, Thread.recentMessages).
+- Trait extension pattern is now well-grooved: when a Thread/
+  Channel method needs new adapter or state-adapter capability
+  (e.g. `on_thread_subscribe`, `subscribe/unsubscribe/is_subscribed`),
+  add it as a **default trait method** on the existing trait
+  (never define a new trait). state-memory overrides where it has
+  a more efficient impl (HashSet for subscriptions); other
+  backends inherit the generic `set/get/delete` fallback. This
+  keeps the trait extension cost at one method-add per concept
+  with zero downstream churn.
+- Handle methods that mutate (like `set_recent_messages`) need
+  `Arc<Mutex<...>>` interior mutability so `Thread` remains
+  `Clone`. The handle is conceptually a thin reference into the
+  chat dispatcher's per-event state; if it weren't `Clone`,
+  passing it to handlers + downstream `chat.thread(id).post(...)`
+  call sites would force a borrow-checker dance with no semantic
+  win.
+- The "test count drift" auditing pattern (slice 313) is
+  worthwhile cheap hygiene — the chat-sdk-chat row's "X Rust
+  tests total" number had drifted by 17 (679 → 696 → 700 → 704 →
+  712 → 716 over six slices). A one-line update per slice keeps
+  the doc honest with negligible cost.
+
+**What is now true that wasn't before**
+
+- `Chat::thread(thread_id)` single-arg factory exists (1:1 with
+  upstream `chat.thread(threadId)`); 4 describe-block cases
+  ported. The factory short-circuits to `panic!` with
+  upstream-shaped messages for invalid id / unknown prefix; the
+  parallel `try_thread` returns a typed `ThreadLookupError`.
+- `Thread::start_typing` / `mention_user` / `subscribe` /
+  `unsubscribe` / `is_subscribed` / `recent_messages` /
+  `set_recent_messages` / `with_initial_message` /
+  `with_subscribed_context` methods all exist on the Rust handle,
+  covering 16 describe-block cases (startTyping 2, mentionUser 2,
+  subscribe 4, isSubscribed 4, recentMessages 4).
+- `Adapter::on_thread_subscribe` and `StateAdapter::subscribe /
+  unsubscribe / is_subscribed` trait methods are now part of the
+  Rust trait surface, with sensible default impls so adapters /
+  state backends compile unchanged. state-memory overrides for
+  efficient HashSet-backed subscriptions.
+
+**Stale or misleading guidance**
+
+- The brief still recommends "smallest first" for adapter
+  porting order (Phase-2 ordering note), but at this stage the
+  ordering is overtaken by events — every adapter already has
+  its constructor + helpers ported, so the next-batch work is
+  not adapter-by-adapter but cross-cutting (per-adapter
+  post_object, parse_message, real webhook handling).
+- `port-chat-sdk.md`'s "Required Work Order" section assumes a
+  greenfield adapter port. Now that all adapters have the
+  constructor + thread-id + cards + markdown sub-modules in
+  place, the doc's remaining "post_object (9 adapters)" and
+  "parse_message (9 adapters)" line items are the accurate
+  representation of remaining work — keep those as the
+  next-most-important items, defer integration tests until both
+  land.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting work; each adapter needs to dispatch on the
+  postable kind (card / plan / canvas etc.) and translate to the
+  platform-native payload.
+- **parse_message across 9 adapters** — inverse of post_message;
+  needed for handleIncomingMessage to feed the real Chat event
+  loop.
+- **chat-sdk-chat handleIncomingMessage / onNewMention /
+  onSubscribedMessage / dedup** — multi-slice; need
+  per-event-type dispatcher + lock layer + dedupe state.
+- **chat-sdk-chat serialization.test.ts** (49 cases) — Thread/
+  Message JSON revival.
+- **State-backend client wire-up** (state-redis, state-ioredis,
+  state-pg) — still blocked on workspace runtime decision.
