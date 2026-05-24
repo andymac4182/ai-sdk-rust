@@ -913,16 +913,40 @@ mod tests {
     // (first 3 colon-segments of any string) and `adapter.isDM(threadId)`
     // (true iff guild_id == "@me").
 
-    // ---------- renderFormatted (1 upstream case) ----------
+    // ---------- describe("renderFormatted") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("renderFormatted")`.
+    // Previously a single bundled `render_formatted_should_render_markdown_from_ast`
+    // covered the concept generically; split here into one Rust test
+    // per upstream case to preserve the "every portable upstream case
+    // has a matching Rust test" rule.
+
     #[test]
-    fn render_formatted_should_render_markdown_from_ast() {
+    fn render_formatted_renders_ast_to_discord_markdown_format() {
+        // 1:1 with upstream `renderFormatted > renders AST to Discord
+        // markdown format` — a root paragraph wrapping a `strong` node
+        // is rendered with Discord's `**bold**` syntax.
+        use chat_sdk_chat::markdown::{Node, paragraph, root, strong, text};
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Strong(
+            strong(vec![Node::Text(text("bold"))]),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert_eq!(result.trim(), "**bold**");
+    }
+
+    #[test]
+    fn render_formatted_converts_mentions_in_rendered_output() {
+        // 1:1 with upstream `renderFormatted > converts mentions in
+        // rendered output` — bare `@someone` mentions in paragraph text
+        // are rewritten to Discord's `<@someone>` mention syntax during
+        // AST -> markdown rendering.
         use chat_sdk_chat::markdown::{Node, paragraph, root, text};
         let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
         let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
-            text("Hello world"),
+            text("Hello @someone"),
         )]))]));
         let result = adapter.render_formatted(&ast);
-        assert!(result.contains("Hello world"), "got: {result}");
+        assert!(result.contains("<@someone>"), "got: {result}");
     }
 
     #[test]
