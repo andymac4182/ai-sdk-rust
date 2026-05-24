@@ -515,6 +515,137 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct NoopImageMiddleware;
+
+    impl<M: ImageModel> ImageModelMiddleware<M> for NoopImageMiddleware {
+        type OverrideMaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<ImageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a,
+            M: 'a;
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendPromptMiddleware(&'static str);
+
+    impl<M: ImageModel> ImageModelMiddleware<M> for AppendPromptMiddleware {
+        type OverrideMaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<ImageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: ImageModelTransformParamsOptions<'a, M>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            let prompt = options.params.prompt.get_or_insert_with(String::new);
+            prompt.push_str(self.0);
+            Some(ready(options.params))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendImageWarningMiddleware(&'static str);
+
+    impl<M: ImageModel> ImageModelMiddleware<M> for AppendImageWarningMiddleware {
+        type OverrideMaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<ImageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn wrap_generate<'a>(
+            &'a self,
+            options: ImageModelWrapGenerateOptions<'a, M>,
+        ) -> Option<Self::WrapGenerateFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            Some(Box::pin(async move {
+                let mut result = (options.do_generate)().await;
+                result.warnings.push(Warning::Other {
+                    message: self.0.to_string(),
+                });
+                result
+            }))
+        }
+    }
+
+    struct StatefulMaxImagesModel {
+        value: usize,
+    }
+
+    impl ImageModel for StatefulMaxImagesModel {
+        type MaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "stateful-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "stateful-image"
+        }
+
+        fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+            ready(Some(self.value))
+        }
+
+        fn do_generate(&self, _options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(image_result("stateful-image", "stateful-generated"))
+        }
+    }
+
     fn image_result(model_id: &str, image: &str) -> ImageModelResult {
         let response_timestamp = OffsetDateTime::parse(
             "2024-01-02T03:04:05Z",
@@ -618,6 +749,150 @@ mod tests {
     }
 
     #[test]
+    fn wrap_image_model_model_property_should_pass_through_by_default() {
+        let wrapped = wrap_image_model(StaticImageModel, NoopImageMiddleware);
+
+        assert_eq!(wrapped.model_id(), "image-base");
+    }
+
+    #[test]
+    fn wrap_image_model_model_property_should_use_middleware_override_model_id_if_provided() {
+        let wrapped = wrap_image_model(StaticImageModel, StaticImageMiddleware);
+
+        assert_eq!(wrapped.model_id(), "image-base-wrapped");
+    }
+
+    #[test]
+    fn wrap_image_model_model_property_should_use_model_id_parameter_if_provided() {
+        let wrapped =
+            wrap_image_model(StaticImageModel, NoopImageMiddleware).with_model_id("override-model");
+
+        assert_eq!(wrapped.model_id(), "override-model");
+    }
+
+    #[test]
+    fn wrap_image_model_provider_property_should_pass_through_by_default() {
+        let wrapped = wrap_image_model(StaticImageModel, NoopImageMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider");
+    }
+
+    #[test]
+    fn wrap_image_model_provider_property_should_use_middleware_override_provider_if_provided() {
+        let wrapped = wrap_image_model(StaticImageModel, StaticImageMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+    }
+
+    #[test]
+    fn wrap_image_model_provider_property_should_use_provider_id_parameter_if_provided() {
+        let wrapped = wrap_image_model(StaticImageModel, NoopImageMiddleware)
+            .with_provider_id("override-provider");
+
+        assert_eq!(wrapped.provider(), "override-provider");
+    }
+
+    #[test]
+    fn wrap_image_model_max_images_per_call_property_should_pass_through_by_default() {
+        let wrapped = wrap_image_model(StaticImageModel, NoopImageMiddleware);
+
+        assert_eq!(poll_boxed(wrapped.max_images_per_call()), Some(4));
+    }
+
+    #[test]
+    fn wrap_image_model_max_images_per_call_property_should_use_middleware_override_if_provided() {
+        let wrapped = wrap_image_model(StaticImageModel, StaticImageMiddleware);
+
+        assert_eq!(poll_boxed(wrapped.max_images_per_call()), Some(8));
+    }
+
+    #[test]
+    fn wrap_image_model_should_call_transform_params_middleware_for_do_generate() {
+        let wrapped = wrap_image_model(ParamEchoImageModel, AppendPromptMiddleware(" transformed"));
+
+        let result =
+            poll_boxed(wrapped.do_generate(ImageModelCallOptions::new(1).with_prompt("original")));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "original transformed".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_image_model_should_call_wrap_generate_middleware() {
+        let wrapped = wrap_image_model(
+            ParamEchoImageModel,
+            AppendImageWarningMiddleware("wrapped generate"),
+        );
+
+        let result =
+            poll_boxed(wrapped.do_generate(ImageModelCallOptions::new(1).with_prompt("original")));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "original".to_string(),
+                },
+                Warning::Other {
+                    message: "wrapped generate".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_image_model_should_support_models_that_use_context_in_max_images_per_call() {
+        let wrapped = wrap_image_model(StatefulMaxImagesModel { value: 42 }, NoopImageMiddleware);
+
+        assert_eq!(poll_boxed(wrapped.max_images_per_call()), Some(42));
+    }
+
+    #[test]
+    fn wrap_image_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_generate()
+     {
+        let first = wrap_image_model(ParamEchoImageModel, AppendPromptMiddleware(" step1"));
+        let second = wrap_image_model(first, AppendPromptMiddleware(" step2"));
+
+        let result =
+            poll_boxed(second.do_generate(ImageModelCallOptions::new(1).with_prompt("original")));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "original step2 step1".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_image_model_should_chain_multiple_wrap_generate_middlewares_in_the_correct_order() {
+        let first = wrap_image_model(ParamEchoImageModel, AppendImageWarningMiddleware("wrap1"));
+        let second = wrap_image_model(first, AppendImageWarningMiddleware("wrap2"));
+
+        let result =
+            poll_boxed(second.do_generate(ImageModelCallOptions::new(1).with_prompt("original")));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "original".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap1".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap2".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn wrap_image_model_transforms_params_before_wrapping_generate() {
         let wrapped = wrap_image_model(ParamEchoImageModel, TransformAndWrapImageMiddleware);
 
@@ -643,30 +918,8 @@ mod tests {
 
     #[test]
     fn image_model_middleware_hooks_are_optional_by_default() {
-        struct NoopMiddleware;
-
-        impl ImageModelMiddleware<StaticImageModel> for NoopMiddleware {
-            type OverrideMaxImagesPerCallFuture<'a>
-                = Ready<Option<usize>>
-            where
-                Self: 'a,
-                StaticImageModel: 'a;
-
-            type TransformParamsFuture<'a>
-                = Ready<ImageModelCallOptions>
-            where
-                Self: 'a,
-                StaticImageModel: 'a;
-
-            type WrapGenerateFuture<'a>
-                = Ready<ImageModelResult>
-            where
-                Self: 'a,
-                StaticImageModel: 'a;
-        }
-
         let model = StaticImageModel;
-        let middleware = NoopMiddleware;
+        let middleware = NoopImageMiddleware;
 
         assert_eq!(
             middleware.override_provider(ImageModelMiddlewareModelOptions::new(&model)),
