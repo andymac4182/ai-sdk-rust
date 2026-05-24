@@ -2325,6 +2325,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   mutation, approved automatic follow-up body/header option forwarding, and
   response folding that turns the approved tool part into `output-available`
   while appending the follow-up assistant text to the same message.
+- 2026-05-25: `packages/ai` `Chat.addToolResult` alias parity added
+  `chat_should_submit_message_when_a_tool_result_is_added`, covering the
+  portable upstream `ui/chat.test.ts` deprecated `addToolResult` flow by
+  exposing the Rust compatibility alias and proving it mutates the same tool
+  output state and follow-up `submit-message` request shape as `addToolOutput`.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
