@@ -161,8 +161,8 @@ The implementation order is a hard two-phase gate:
    coverage, including Gateway's OpenAI-compatible and Open Responses routes.
 2. Only then resume unrelated standalone provider packages.
 
-The first phase includes `packages/ai`, `packages/provider`,
-`packages/provider-utils`, `packages/openai-compatible`,
+The first phase includes `packages/ai`, `packages/provider-utils`,
+`packages/provider`, `packages/openai-compatible`,
 `packages/open-responses`, `packages/gateway`, Vercel AI Gateway's
 OpenAI-compatible and Open Responses routes, and portable non-provider rows such
 as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
@@ -332,8 +332,8 @@ portable `packages/provider-utils` inventory remains open.
     slice genuinely requires it.
 17. Work in this order as a hard gate: finish ALL common/core SDK packages
     together with Vercel AI Gateway provider coverage first, then return to the
-    remaining standalone providers. The first phase includes `packages/ai`,
-    `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
+    remaining standalone providers. The first phase begins with `packages/ai`,
+    `packages/provider-utils`, `packages/provider`, `packages/openai-compatible`,
     `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
     OpenAI-compatible and Open Responses routes, and portable non-provider
     package rows such as MCP, OTel, Workflow, telemetry, logger, UI transport,

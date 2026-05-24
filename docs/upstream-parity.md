@@ -156,8 +156,8 @@ The queue is two-phase and gated:
 2. Resume unrelated standalone provider packages only after that first phase is
    verified or intentionally documented as non-portable.
 
-The first phase includes `packages/ai`, `packages/provider`,
-`packages/provider-utils`, `packages/openai-compatible`,
+The first phase includes `packages/ai`, `packages/provider-utils`,
+`packages/provider`, `packages/openai-compatible`,
 `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
 OpenAI-compatible and Open Responses routes, and portable non-provider rows such
 as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion/object
@@ -4358,7 +4358,7 @@ focused tests for each portable behavior before changing rows to `verified`.
    before returning to unrelated standalone providers. This ordering is a hard
    gate, not a preference: every next eligible slice must come from this
    first-phase queue until it is closed. The first phase covers
-   `packages/ai`, `packages/provider`, `packages/provider-utils`,
+   `packages/ai`, `packages/provider-utils`, `packages/provider`,
    `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
    the Vercel AI Gateway OpenAI-compatible and Open Responses routes, and the
    portable non-provider package rows such as MCP, OTel, Workflow, telemetry,
