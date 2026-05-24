@@ -364,10 +364,39 @@ fn wrap_tables_for_append(text: &str, close_fences: bool) -> String {
 #[cfg(test)]
 mod tests {
     //! Ports the portable subset of upstream
-    //! `streaming-markdown.test.ts`. The 13 upstream tests that
-    //! exercise `remend`-specific inline-marker healing are
-    //! js-only-documented at the module header (no `remend`
-    //! equivalent in the Rust workspace).
+    //! `streaming-markdown.test.ts`. 33 upstream cases are mapped
+    //! 1:1 in Rust + 5 additive helper assertions; the 13
+    //! remend-dependent upstream cases are js-only-documented per
+    //! the slice-380 type-system-impossible pattern.
+    //!
+    //! ---------- upstream js-only-documented cases (13) ----------
+    //!
+    //! The following upstream cases exercise the `remend` npm
+    //! package's inline-marker healing (closing unmatched `**` /
+    //! `*` / `~~` / `` ` `` / `[` markers when chunk boundaries
+    //! split them). The Rust workspace has no `remend` equivalent;
+    //! the `StreamingMarkdownRenderer` exposes the same
+    //! `getCommittableText` boundary semantics but lets unmatched
+    //! markers stay unbalanced in the render output. The 13
+    //! upstream tests verifying remend-specific healing have no
+    //! Rust analogue:
+    //!
+    //! - `should heal inline markers with remend`
+    //! - `getCommittableText should hold back incomplete line with unclosed bold`
+    //! - `getCommittableText should hold back unclosed bold on complete line`
+    //! - `getCommittableText should release when bold closes`
+    //! - `getCommittableText should hold back unclosed italic`
+    //! - `getCommittableText should hold back unclosed strikethrough`
+    //! - `getCommittableText should hold back unclosed inline code`
+    //! - `getCommittableText should hold back unclosed link`
+    //! - `getCommittableText should release when link closes`
+    //! - `getCommittableText should return clean text when all markers balanced`
+    //! - `getCommittableText should hold back table rows`
+    //! - `getCommittableText should wrap confirmed table in code fence`
+    //! - `should return raw text from getText() without remend`
+    //!
+    //! Total upstream test count: 33 mapped + 13 js-only = 46
+    //! upstream cases accounted for.
     use super::*;
 
     #[test]
