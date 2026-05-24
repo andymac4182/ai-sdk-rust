@@ -27,7 +27,10 @@
 use std::sync::Arc;
 
 use crate::postable_object::{PostableDispatchError, post_postable_object};
-use crate::types::{Adapter, AdapterError, AdapterResult, ChannelInfo, StateAdapter, StateResult};
+use crate::types::{
+    Adapter, AdapterError, AdapterResult, Author, ChannelInfo, EphemeralMessage,
+    PostEphemeralOptions, StateAdapter, StateResult,
+};
 
 /// 1:1 with upstream's private
 /// `const CHANNEL_STATE_KEY_PREFIX = "channel-state:"`.
@@ -244,6 +247,54 @@ impl Channel {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// 1:1 port of upstream `Channel.postEphemeral(user, message, options)`.
+    /// Mirrors [`crate::thread::Thread::post_ephemeral`] semantics:
+    /// tries native ephemeral via [`Adapter::post_ephemeral`]; on
+    /// `Unsupported` falls back to DM (open_dm + post_message) when
+    /// `options.fallback_to_dm` is `true`, otherwise returns
+    /// `Ok(None)`. Returns `Ok(None)` when neither native ephemeral
+    /// nor DM are available.
+    pub async fn post_ephemeral(
+        &self,
+        user_id: &str,
+        text: &str,
+        options: PostEphemeralOptions,
+    ) -> AdapterResult<Option<EphemeralMessage>> {
+        match self.adapter.post_ephemeral(&self.channel_id, user_id, text).await {
+            Ok(msg) => return Ok(Some(msg)),
+            Err(AdapterError::Unsupported(_)) => {}
+            Err(other) => return Err(other),
+        }
+        if !options.fallback_to_dm {
+            return Ok(None);
+        }
+        let dm_thread_id = match self.adapter.open_dm(user_id).await {
+            Ok(id) => id,
+            Err(AdapterError::Unsupported(_)) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        let id = self.adapter.post_message(&dm_thread_id, text).await?;
+        Ok(Some(EphemeralMessage {
+            id,
+            thread_id: dm_thread_id,
+            used_fallback: true,
+            raw: serde_json::Value::Object(serde_json::Map::new()),
+        }))
+    }
+
+    /// 1:1 port of upstream `Channel.postEphemeral(author, message, options)`
+    /// overload — extracts `user_id` from the [`Author`] and delegates
+    /// to [`Self::post_ephemeral`]. Mirrors upstream's runtime
+    /// `typeof user === "string" ? user : user.userId` branch.
+    pub async fn post_ephemeral_for_author(
+        &self,
+        author: &Author,
+        text: &str,
+        options: PostEphemeralOptions,
+    ) -> AdapterResult<Option<EphemeralMessage>> {
+        self.post_ephemeral(&author.user_id, text, options).await
     }
 
     /// Post a postable envelope (cards, modals, plans, polls) to this
@@ -784,5 +835,199 @@ mod tests {
         block_on(channel.post_object(&parsed)).unwrap();
         let calls = adapter.post_object.lock().unwrap();
         assert_eq!(calls[0].1, "poll");
+    }
+
+    // ---------- describe("ChannelImpl.postEphemeral") (5 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("ChannelImpl.postEphemeral")`.
+    // The Rust port uses a dedicated `EphemeralAdapter` test mock with
+    // boolean flags (`supports_ephemeral`, `supports_open_dm`) to
+    // reproduce upstream's `mockAdapter.postEphemeral = undefined` /
+    // `mockAdapter.openDM = undefined` mutation pattern. Mirrors the
+    // identical test mock shape used in the Thread postEphemeral
+    // describe block.
+
+    #[derive(Debug, Default)]
+    struct EphemeralAdapter {
+        supports_ephemeral: bool,
+        supports_open_dm: bool,
+        post_ephemeral_calls: Mutex<Vec<(String, String, String)>>,
+        open_dm_calls: Mutex<Vec<String>>,
+        post_message_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for EphemeralAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn post_ephemeral(
+            &self,
+            thread_id: &str,
+            user_id: &str,
+            text: &str,
+        ) -> AdapterResult<EphemeralMessage> {
+            if !self.supports_ephemeral {
+                return Err(AdapterError::Unsupported("post_ephemeral"));
+            }
+            self.post_ephemeral_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                user_id.to_string(),
+                text.to_string(),
+            ));
+            Ok(EphemeralMessage {
+                id: "eph-1".to_string(),
+                thread_id: thread_id.to_string(),
+                used_fallback: false,
+                raw: serde_json::Value::Object(serde_json::Map::new()),
+            })
+        }
+        async fn open_dm(&self, user_id: &str) -> AdapterResult<String> {
+            if !self.supports_open_dm {
+                return Err(AdapterError::Unsupported("open_dm"));
+            }
+            self.open_dm_calls.lock().unwrap().push(user_id.to_string());
+            Ok(format!("slack:D{user_id}:"))
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_message_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            // Upstream default mock returns id "msg-1" for postMessage.
+            Ok("msg-1".to_string())
+        }
+    }
+
+    fn ephemeral_channel(adapter: Arc<EphemeralAdapter>) -> Channel {
+        Channel::new(adapter as Arc<dyn Adapter>, "slack:C123")
+    }
+
+    #[test]
+    fn channel_post_ephemeral_should_use_adapter_post_ephemeral_when_available() {
+        let adapter = Arc::new(EphemeralAdapter {
+            supports_ephemeral: true,
+            supports_open_dm: true,
+            ..Default::default()
+        });
+        let channel = ephemeral_channel(adapter.clone());
+        let result = block_on(channel.post_ephemeral(
+            "U456",
+            "Secret!",
+            PostEphemeralOptions { fallback_to_dm: true },
+        ))
+        .unwrap()
+        .expect("Expected Some(EphemeralMessage)");
+        let calls = adapter.post_ephemeral_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            (
+                "slack:C123".to_string(),
+                "U456".to_string(),
+                "Secret!".to_string()
+            )
+        );
+        assert_eq!(result.id, "eph-1");
+        assert_eq!(result.thread_id, "slack:C123");
+        assert!(!result.used_fallback);
+    }
+
+    #[test]
+    fn channel_post_ephemeral_should_extract_user_id_from_author_object() {
+        let adapter = Arc::new(EphemeralAdapter {
+            supports_ephemeral: true,
+            supports_open_dm: true,
+            ..Default::default()
+        });
+        let channel = ephemeral_channel(adapter.clone());
+        let author = Author {
+            user_id: "U789".to_string(),
+            user_name: "testuser".to_string(),
+            full_name: "Test User".to_string(),
+            is_bot: crate::types::BotStatus::Known(false),
+            is_me: false,
+        };
+        block_on(channel.post_ephemeral_for_author(
+            &author,
+            "Hello!",
+            PostEphemeralOptions { fallback_to_dm: false },
+        ))
+        .unwrap()
+        .expect("Expected Some(EphemeralMessage)");
+        let calls = adapter.post_ephemeral_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            (
+                "slack:C123".to_string(),
+                "U789".to_string(),
+                "Hello!".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn channel_post_ephemeral_should_return_null_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_false() {
+        let adapter = Arc::new(EphemeralAdapter {
+            supports_ephemeral: false,
+            supports_open_dm: true,
+            ..Default::default()
+        });
+        let channel = ephemeral_channel(adapter.clone());
+        let result = block_on(channel.post_ephemeral(
+            "U456",
+            "Secret!",
+            PostEphemeralOptions { fallback_to_dm: false },
+        ))
+        .unwrap();
+        assert!(result.is_none());
+        assert!(adapter.open_dm_calls.lock().unwrap().is_empty());
+        assert!(adapter.post_message_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn channel_post_ephemeral_should_fallback_to_dm_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_true() {
+        let adapter = Arc::new(EphemeralAdapter {
+            supports_ephemeral: false,
+            supports_open_dm: true,
+            ..Default::default()
+        });
+        let channel = ephemeral_channel(adapter.clone());
+        let result = block_on(channel.post_ephemeral(
+            "U456",
+            "Secret!",
+            PostEphemeralOptions { fallback_to_dm: true },
+        ))
+        .unwrap()
+        .expect("Expected Some(EphemeralMessage) via DM fallback");
+        let dm_calls = adapter.open_dm_calls.lock().unwrap();
+        assert_eq!(dm_calls.as_slice(), &["U456".to_string()]);
+        let post_calls = adapter.post_message_calls.lock().unwrap();
+        assert_eq!(post_calls.len(), 1);
+        assert_eq!(
+            post_calls[0],
+            ("slack:DU456:".to_string(), "Secret!".to_string())
+        );
+        assert_eq!(result.id, "msg-1");
+        assert_eq!(result.thread_id, "slack:DU456:");
+        assert!(result.used_fallback);
+    }
+
+    #[test]
+    fn channel_post_ephemeral_should_return_null_when_no_post_ephemeral_no_open_dm_and_fallback_to_dm_is_true() {
+        let adapter = Arc::new(EphemeralAdapter {
+            supports_ephemeral: false,
+            supports_open_dm: false,
+            ..Default::default()
+        });
+        let channel = ephemeral_channel(adapter.clone());
+        let result = block_on(channel.post_ephemeral(
+            "U456",
+            "Secret!",
+            PostEphemeralOptions { fallback_to_dm: true },
+        ))
+        .unwrap();
+        assert!(result.is_none());
+        assert!(adapter.post_message_calls.lock().unwrap().is_empty());
     }
 }
