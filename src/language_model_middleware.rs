@@ -803,13 +803,15 @@ pub type ExtractJsonTransformFunction = fn(&str) -> String;
 
 /// Removes common Markdown JSON code fences from generated text.
 pub fn default_extract_json_transform(text: &str) -> String {
-    let mut value = text;
+    let mut value = text.trim();
 
     if let Some(rest) = value.strip_prefix("```json") {
         value = rest.trim_start();
     } else if let Some(rest) = value.strip_prefix("```") {
         value = rest.trim_start();
     }
+
+    value = value.trim_end();
 
     if let Some(rest) = value.strip_suffix("```") {
         value = rest.trim_end();
@@ -1700,13 +1702,13 @@ fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -
 #[cfg(test)]
 mod tests {
     use super::{
-        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, ExtractReasoningMiddleware,
-        LanguageModelDefaultSettings, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
-        LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
-        LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
-        add_tool_input_examples_middleware, default_extract_json_transform,
-        default_settings_middleware, extract_json_middleware, extract_reasoning_middleware,
-        simulate_streaming_middleware, wrap_language_model,
+        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, ExtractJsonTransformFunction,
+        ExtractReasoningMiddleware, LanguageModelDefaultSettings, LanguageModelMiddleware,
+        LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
+        LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
+        LanguageModelWrapStreamOptions, add_tool_input_examples_middleware,
+        default_extract_json_transform, default_settings_middleware, extract_json_middleware,
+        extract_reasoning_middleware, simulate_streaming_middleware, wrap_language_model,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
@@ -1716,7 +1718,8 @@ mod tests {
         LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
         LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelSupportedUrls,
         LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-        LanguageModelTool, LanguageModelUsage,
+        LanguageModelTool, LanguageModelToolCall, LanguageModelToolInputDelta,
+        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
@@ -2380,6 +2383,101 @@ mod tests {
         }
     }
 
+    fn strip_prefix_suffix(text: &str) -> String {
+        text.replace("PREFIX", "").replace("SUFFIX", "")
+    }
+
+    fn extract_json_generate_content(
+        content: Vec<LanguageModelContent>,
+        transform: Option<ExtractJsonTransformFunction>,
+    ) -> Vec<LanguageModelContent> {
+        let model = StaticLanguageModel;
+        let middleware = if let Some(transform) = transform {
+            ExtractJsonMiddleware::new().with_transform(transform)
+        } else {
+            extract_json_middleware()
+        };
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(move || {
+                    Box::pin(ready(LanguageModelGenerateResult::new(
+                        content,
+                        LanguageModelFinishReason {
+                            unified: FinishReason::Stop,
+                            raw: None,
+                        },
+                        LanguageModelUsage::default(),
+                    )))
+                }),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract JSON wrap-generate exists");
+
+        poll_boxed(wrapped_generate).content
+    }
+
+    fn extract_json_generate_text(
+        text: impl Into<String>,
+        transform: Option<ExtractJsonTransformFunction>,
+    ) -> String {
+        let content = extract_json_generate_content(
+            vec![LanguageModelContent::Text(LanguageModelText::new(text))],
+            transform,
+        );
+
+        match &content[0] {
+            LanguageModelContent::Text(text) => text.text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    fn extract_json_stream_parts(
+        stream: Vec<LanguageModelStreamPart>,
+        transform: Option<ExtractJsonTransformFunction>,
+    ) -> Vec<LanguageModelStreamPart> {
+        let model = StaticLanguageModel;
+        let middleware = if let Some(transform) = transform {
+            ExtractJsonMiddleware::new().with_transform(transform)
+        } else {
+            extract_json_middleware()
+        };
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(move || Box::pin(ready(LanguageModelStreamResult::new(stream)))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract JSON wrap-stream exists");
+
+        poll_boxed(wrapped_stream).stream
+    }
+
+    fn text_stream(id: &str, deltas: &[&str]) -> Vec<LanguageModelStreamPart> {
+        let mut stream = vec![LanguageModelStreamPart::TextStart(
+            LanguageModelTextStart::new(id),
+        )];
+        stream.extend(deltas.iter().map(|delta| {
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(id, *delta))
+        }));
+        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+            id,
+        )));
+        stream
+    }
+
+    fn collect_text_deltas(stream: &[LanguageModelStreamPart]) -> String {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
     #[test]
     fn language_model_middleware_call_type_uses_upstream_literals() {
         assert_eq!(
@@ -3000,6 +3098,70 @@ mod tests {
     }
 
     #[test]
+    fn extract_json_middleware_wrap_generate_should_strip_markdown_json_fence_from_text_content() {
+        assert_eq!(
+            extract_json_generate_text("```json\n{\"value\": \"test\"}\n```", None),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_strip_markdown_fence_without_json_tag() {
+        assert_eq!(
+            extract_json_generate_text("```\n{\"value\": \"test\"}\n```", None),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_leave_text_without_fences_unchanged() {
+        assert_eq!(
+            extract_json_generate_text("{\"value\": \"test\"}", None),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_use_custom_transform_function_when_provided() {
+        assert_eq!(
+            extract_json_generate_text(
+                "PREFIX{\"value\": \"test\"}SUFFIX",
+                Some(strip_prefix_suffix),
+            ),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_preserve_non_text_content_parts() {
+        let content = extract_json_generate_content(
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new(
+                    "```json\n{\"value\": \"test\"}\n```",
+                )),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    "{\"foo\": \"bar\"}",
+                )),
+            ],
+            None,
+        );
+
+        assert_eq!(
+            content,
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new("{\"value\": \"test\"}")),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    "{\"foo\": \"bar\"}",
+                )),
+            ]
+        );
+    }
+
+    #[test]
     fn extract_json_middleware_transforms_generate_text_parts() {
         fn uppercase(text: &str) -> String {
             text.to_uppercase()
@@ -3023,6 +3185,216 @@ mod tests {
                 "JSON TEXT"
             ))]
         );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_strip_markdown_json_fence_from_streamed_text() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```json\n", "{\"value\": \"test\"}", "\n```"]),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_strip_markdown_fence_without_json_tag() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```\n", "{\"value\": \"test\"}", "\n```"]),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_leave_text_without_fences_unchanged_in_stream() {
+        let result = extract_json_stream_parts(text_stream("1", &["{\"value\": \"test\"}"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_fence_split_across_multiple_deltas() {
+        let result = extract_json_stream_parts(
+            text_stream(
+                "1",
+                &["`", "``", "json\n", "{\"value\": \"test\"}", "\n`", "``"],
+            ),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_content_that_starts_with_backtick_but_is_not_a_fence()
+     {
+        let result = extract_json_stream_parts(text_stream("1", &["`code`"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "`code`");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_pass_through_non_text_chunks_unchanged() {
+        let mut stream = text_stream("1", &["```json\n", "{\"value\": \"test\"}", "\n```"]);
+        stream.push(LanguageModelStreamPart::ToolInputStart(
+            LanguageModelToolInputStart::new("tool-1", "testTool"),
+        ));
+        stream.push(LanguageModelStreamPart::ToolInputDelta(
+            LanguageModelToolInputDelta::new("tool-1", "{\"arg\": \"value\"}"),
+        ));
+        stream.push(LanguageModelStreamPart::ToolInputEnd(
+            LanguageModelToolInputEnd::new("tool-1"),
+        ));
+
+        let result = extract_json_stream_parts(stream, None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+        assert!(result.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolInputStart(start)
+                if start.id == "tool-1" && start.tool_name == "testTool"
+        )));
+        assert!(result.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolInputDelta(delta)
+                if delta.id == "tool-1" && delta.delta == "{\"arg\": \"value\"}"
+        )));
+        assert!(result.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolInputEnd(end) if end.id == "tool-1"
+        )));
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_multiple_text_blocks_with_different_ids() {
+        let mut stream = text_stream("1", &["```json\n", "{\"first\": true}", "\n```"]);
+        stream.extend(text_stream(
+            "2",
+            &["```json\n", "{\"second\": true}", "\n```"],
+        ));
+
+        let result = extract_json_stream_parts(stream, None);
+        let all_text = collect_text_deltas(&result);
+
+        assert!(all_text.contains("{\"first\": true}"));
+        assert!(all_text.contains("{\"second\": true}"));
+        assert!(!all_text.contains("```"));
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_text_delta_without_prior_text_start() {
+        let stream = vec![LanguageModelStreamPart::TextDelta(
+            LanguageModelTextDelta::new("unknown", "some text"),
+        )];
+
+        let result = extract_json_stream_parts(stream.clone(), None);
+
+        assert_eq!(result, stream);
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_emit_text_start_when_stream_ends_while_still_in_prefix_phase()
+     {
+        let result = extract_json_stream_parts(text_stream("1", &["``"]), None);
+
+        assert_eq!(
+            result,
+            vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "``")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_apply_custom_transform_to_streamed_content() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["PREFIX", "{\"value\": \"test\"}", "SUFFIX"]),
+            Some(strip_prefix_suffix),
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_large_content_exceeding_suffix_buffer() {
+        let large_json = format!(
+            "{{\"data\":\"{}\",\"nested\":{{\"values\":[0,1,2,3,4,5,6,7,8,9]}}}}",
+            "x".repeat(100)
+        );
+        let result =
+            extract_json_stream_parts(text_stream("1", &["```json\n", &large_json, "\n```"]), None);
+
+        assert_eq!(collect_text_deltas(&result), large_json);
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_content_arriving_character_by_character() {
+        let source = "```json\n{\"value\": \"test\"}\n```";
+        let deltas = source
+            .chars()
+            .map(|char| char.to_string())
+            .collect::<Vec<_>>();
+        let delta_refs = deltas.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let result = extract_json_stream_parts(text_stream("1", &delta_refs), None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_fence_with_extra_whitespace() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```json  \n", "{\"value\": \"test\"}", "\n```  "]),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_verify_stream_output_matches_expected_structure()
+    {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```json\n", "{\"value\": \"test\"}", "\n```"]),
+            None,
+        );
+
+        assert!(matches!(
+            result.first(),
+            Some(LanguageModelStreamPart::TextStart(start)) if start.id == "1"
+        ));
+        assert!(matches!(
+            result.last(),
+            Some(LanguageModelStreamPart::TextEnd(end)) if end.id == "1"
+        ));
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_empty_content_between_fences() {
+        let result = extract_json_stream_parts(text_stream("1", &["```json\n```"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "");
+        assert_eq!(
+            result,
+            vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_content_starting_without_backtick_quickly_switching_to_streaming()
+     {
+        let result =
+            extract_json_stream_parts(text_stream("1", &["{", "\"value\": \"test\"", "}"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
     }
 
     #[test]
