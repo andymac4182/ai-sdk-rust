@@ -2703,6 +2703,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-chat-language-model.test.ts` `should pass tools and toolChoice` to
   the OpenAI provider facade by asserting function-tool JSON Schema request
   shaping and specific `tool_choice` serialization.
+- 2026-05-24: OpenAI chat strict tool-call parity added
+  `openai_chat_should_set_strict_with_tool_call` and
+  `openai_chat_should_set_strict_for_tool_usage`, mapping upstream
+  `openai-chat-language-model.test.ts` strict tool-call request/result cases
+  to the OpenAI provider facade by asserting required and specific
+  `tool_choice` request bodies and parsed assistant tool-call content.
 - 2026-05-24: OpenAI chat response-format request-body parity added
   `openai_chat_should_not_send_response_format_when_response_format_is_text`,
   `openai_chat_should_forward_json_response_format_as_json_object_without_schema`,

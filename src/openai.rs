@@ -3278,6 +3278,107 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_set_strict_with_tool_call() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_json_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_tool_call_response(),
+        );
+
+        let result = poll_ready(
+            provider.chat("gpt-4o-2024-08-06").do_generate(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_tool(LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new(
+                            "test-tool",
+                            openai_chat_response_format_schema(),
+                        )
+                        .with_description("test description"),
+                    ))
+                    .with_tool_choice(LanguageModelToolChoice::Required),
+            ),
+        );
+        let body = captured_json_body(&captured_requests);
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "tool_choice": "required",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "test-tool",
+                            "description": "test description",
+                            "parameters": openai_chat_response_format_schema()
+                        }
+                    }
+                ]
+            })
+        );
+        assert_openai_chat_tool_call_content(&result.content);
+    }
+
+    #[test]
+    fn openai_chat_should_set_strict_for_tool_usage() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_json_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_tool_call_response(),
+        );
+
+        let result = poll_ready(
+            provider.chat("gpt-4o-2024-08-06").do_generate(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                        "test-tool",
+                        openai_chat_response_format_schema(),
+                    )))
+                    .with_tool_choice(LanguageModelToolChoice::Tool {
+                        tool_name: "test-tool".to_string(),
+                    }),
+            ),
+        );
+        let body = captured_json_body(&captured_requests);
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {
+                        "name": "test-tool"
+                    }
+                },
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "test-tool",
+                            "parameters": openai_chat_response_format_schema()
+                        }
+                    }
+                ]
+            })
+        );
+        assert_openai_chat_tool_call_content(&result.content);
+    }
+
+    #[test]
     fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
@@ -7128,6 +7229,29 @@ mod tests {
             .with_transport(transport)
     }
 
+    fn openai_chat_test_provider_with_json_response_and_capture(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: JsonValue,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+    }
+
     fn openai_chat_test_provider_with_stream_response(
         response_body: impl Into<String>,
     ) -> OpenAIProvider {
@@ -7357,6 +7481,53 @@ mod tests {
         .as_object()
         .cloned()
         .expect("schema is an object")
+    }
+
+    fn openai_chat_tool_call_response() -> JsonValue {
+        json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_O17Uplv4lJvD6DVdIvFFeRMw",
+                                "type": "function",
+                                "function": {
+                                    "name": "test-tool",
+                                    "arguments": "{\"value\":\"Spark\"}"
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        })
+    }
+
+    fn assert_openai_chat_tool_call_content(content: &[LanguageModelContent]) {
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            LanguageModelContent::ToolCall(tool_call) => {
+                assert_eq!(tool_call.tool_call_id, "call_O17Uplv4lJvD6DVdIvFFeRMw");
+                assert_eq!(tool_call.tool_name, "test-tool");
+                assert_eq!(tool_call.input, "{\"value\":\"Spark\"}");
+            }
+            other => panic!("expected tool call content, got {other:?}"),
+        }
     }
 
     fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
