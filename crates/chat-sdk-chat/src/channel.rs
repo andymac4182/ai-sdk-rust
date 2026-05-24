@@ -194,9 +194,24 @@ impl Channel {
     }
 
     /// Post a plain-text message to this channel. 1:1 with upstream
-    /// `Channel.post(text)`. Returns the platform-assigned message id.
+    /// `Channel.post(text)`. Prefers
+    /// [`Adapter::post_channel_message`] when the adapter implements
+    /// it (some platforms distinguish channel-level posts from
+    /// thread replies); falls back to [`Adapter::post_message`]
+    /// when `post_channel_message` returns `Unsupported`. Returns
+    /// the platform-assigned message id.
     pub async fn post(&self, text: &str) -> AdapterResult<String> {
-        self.adapter.post_message(&self.channel_id, text).await
+        match self
+            .adapter
+            .post_channel_message(&self.channel_id, text)
+            .await
+        {
+            Ok(id) => Ok(id),
+            Err(AdapterError::Unsupported(_)) => {
+                self.adapter.post_message(&self.channel_id, text).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Post a postable envelope (cards, modals, plans, polls) to this
@@ -286,6 +301,8 @@ mod tests {
         post_message: Mutex<Vec<(String, String)>>,
         post_object: Mutex<Vec<(String, String, serde_json::Value)>>,
         post_object_unsupported: bool,
+        post_channel_message: Mutex<Vec<(String, String)>>,
+        post_channel_message_unsupported: bool,
     }
 
     #[async_trait::async_trait]
@@ -315,6 +332,20 @@ mod tests {
                 .push((thread_id.to_string(), kind.to_string(), data));
             Ok("obj-id".to_string())
         }
+        async fn post_channel_message(
+            &self,
+            channel_id: &str,
+            text: &str,
+        ) -> AdapterResult<String> {
+            if self.post_channel_message_unsupported {
+                return Err(AdapterError::Unsupported("post_channel_message"));
+            }
+            self.post_channel_message
+                .lock()
+                .unwrap()
+                .push((channel_id.to_string(), text.to_string()));
+            Ok("channel-msg-id".to_string())
+        }
     }
 
     #[test]
@@ -326,8 +357,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_post_delegates_to_adapter_post_message() {
-        let adapter = Arc::new(RecordingAdapter::default());
+    fn channel_post_delegates_to_adapter_post_message_when_post_channel_message_unsupported() {
+        // RecordingAdapter without post_channel_message support
+        // exercises the fall-through path. Adapters that don't
+        // override `post_channel_message` get the same fall-through
+        // via the trait default's `Err(Unsupported)`.
+        let adapter = Arc::new(RecordingAdapter {
+            post_channel_message_unsupported: true,
+            ..Default::default()
+        });
         let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "C123");
         let id = block_on(channel.post("hello")).unwrap();
         assert_eq!(id, "msg-id");
@@ -378,10 +416,12 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter::default());
         let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "C123");
         let cloned = channel.clone();
-        // Both clones invoke the same Arc-shared adapter.
+        // Both clones invoke the same Arc-shared adapter — observe
+        // via the post_channel_message recorder since `Channel::post`
+        // routes there preferentially.
         block_on(channel.post("a")).unwrap();
         block_on(cloned.post("b")).unwrap();
-        let calls = adapter.post_message.lock().unwrap();
+        let calls = adapter.post_channel_message.lock().unwrap();
         assert_eq!(calls.len(), 2);
     }
 
@@ -561,6 +601,49 @@ mod tests {
         let adapter = RecordingAdapter::default();
         let channel_id = derive_channel_id(&adapter, "wa:PNID:E164");
         assert_eq!(channel_id, "wa:PNID:E164");
+    }
+
+    // ---------- describe("post") (2 of 3 upstream cases; streaming deferred) ----------
+    // 1:1 with upstream `channel.test.ts > describe("post")`. The
+    // 3rd case ("should handle streaming by accumulating text")
+    // requires async-stream + StreamingMarkdownRenderer integration
+    // and is deferred to a follow-up slice.
+
+    #[test]
+    fn channel_post_should_use_post_channel_message_when_available() {
+        // 1:1 with upstream "should use postChannelMessage when
+        // available". The RecordingAdapter implements
+        // post_channel_message so Channel::post routes there.
+        let adapter = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let id = block_on(channel.post("Hello channel!")).unwrap();
+        assert_eq!(id, "channel-msg-id");
+        let calls = adapter.post_channel_message.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123");
+        assert_eq!(calls[0].1, "Hello channel!");
+        // Verify post_message was NOT called.
+        assert!(adapter.post_message.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn channel_post_should_fall_back_to_post_message_when_post_channel_message_is_not_available() {
+        // 1:1 with upstream "should fall back to postMessage when
+        // postChannelMessage is not available".
+        let adapter = Arc::new(RecordingAdapter {
+            post_channel_message_unsupported: true,
+            ..Default::default()
+        });
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let id = block_on(channel.post("Hello!")).unwrap();
+        assert_eq!(id, "msg-id");
+        let calls = adapter.post_message.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123");
+        assert_eq!(calls[0].1, "Hello!");
+        // Verify post_channel_message recorder is empty (the call
+        // returned Unsupported and was not recorded).
+        assert!(adapter.post_channel_message.lock().unwrap().is_empty());
     }
 
     // ---------- describe("fetchMetadata") (2 upstream cases) ----------
