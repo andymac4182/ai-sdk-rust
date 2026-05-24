@@ -582,6 +582,42 @@ mod tests {
     }
 
     #[test]
+    fn to_serialized_should_serialize_attachments_without_inline_data() {
+        // 1:1 with upstream `describe("Message.toJSON()") > it("should
+        // serialize attachments without data/fetchData")` — the
+        // wire shape includes type/url/name/mimeType/size/width/height
+        // and excludes the inline `data` bytes + `fetchData` callback.
+        // The Rust port uses to_serialized_stripped to drop inline
+        // data (matches upstream's to-JSON-strips-binary semantics).
+        let mut msg = sample_message();
+        msg.attachments = vec![Attachment {
+            data: Some(FileBytes::from(b"test".to_vec())),
+            fetch_metadata: None,
+            height: Some(600),
+            mime_type: Some("image/png".to_string()),
+            name: Some("image.png".to_string()),
+            size: Some(1024),
+            kind: AttachmentKind::Image,
+            url: Some("https://example.com/image.png".to_string()),
+            width: Some(800),
+        }];
+        let json = serde_json::to_value(msg.to_serialized_stripped()).unwrap();
+        let att = &json["attachments"][0];
+        assert_eq!(att["type"], "image");
+        assert_eq!(att["url"], "https://example.com/image.png");
+        assert_eq!(att["name"], "image.png");
+        assert_eq!(att["mimeType"], "image/png");
+        assert_eq!(att["size"], 1024);
+        assert_eq!(att["width"], 800);
+        assert_eq!(att["height"], 600);
+        // The stripped form omits the inline data bytes.
+        assert!(
+            att.get("data").is_none() || att["data"].is_null(),
+            "stripped attachment should not carry inline data: {att}"
+        );
+    }
+
+    #[test]
     fn to_serialized_should_omit_links_when_empty() {
         // 1:1 with upstream `describe("Message.toJSON()") > it("should
         // omit links when empty")` — the SerializedMessage.links
@@ -760,6 +796,39 @@ mod tests {
         assert_eq!(restored.metadata.date_sent, msg.metadata.date_sent);
         assert_eq!(restored.attachments[0].url, msg.attachments[0].url);
         assert_eq!(restored.links[0].url, "https://example.com");
+    }
+
+    #[test]
+    fn round_trip_should_round_trip_links_correctly() {
+        // 1:1 with upstream `describe("Message.fromJSON()") > it("should
+        // round-trip links correctly")` — links survive toJSON +
+        // fromJSON without losing url/title/siteName fields. The
+        // fetchMessage callback isn't preserved (the Rust LinkPreview
+        // type has no such field by construction).
+        let mut original = sample_message();
+        original.links = vec![
+            LinkPreview {
+                url: "https://example.com".to_string(),
+                title: Some("Example".to_string()),
+                description: None,
+                image_url: None,
+                site_name: None,
+            },
+            LinkPreview {
+                url: "https://vercel.com".to_string(),
+                title: None,
+                description: None,
+                image_url: None,
+                site_name: Some("Vercel".to_string()),
+            },
+        ];
+        let serialized = original.to_serialized();
+        let restored = Message::from_serialized(serialized);
+        assert_eq!(restored.links.len(), 2);
+        assert_eq!(restored.links[0].url, "https://example.com");
+        assert_eq!(restored.links[0].title.as_deref(), Some("Example"));
+        assert_eq!(restored.links[1].url, "https://vercel.com");
+        assert_eq!(restored.links[1].site_name.as_deref(), Some("Vercel"));
     }
 
     // ---------- describe("WORKFLOW_SERIALIZE / WORKFLOW_DESERIALIZE") (2 cases) ----------
