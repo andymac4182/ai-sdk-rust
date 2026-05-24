@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, marker::PhantomData};
 
 use crate::image_model::ImageModel;
 use crate::image_model_middleware::ImageModelMiddleware;
@@ -123,10 +123,48 @@ pub struct ProviderRegistry<P> {
 /// model families, files/skills, string aliases, and fallback providers are
 /// tracked separately in the upstream parity ledger.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CustomProvider<LM, EM, IM> {
+pub struct CustomProvider<LM, EM, IM, FP = NoFallbackProvider<LM, EM, IM>> {
     language_models: Vec<(String, LM)>,
     embedding_models: Vec<(String, EM)>,
     image_models: Vec<(String, IM)>,
+    fallback_provider: FP,
+}
+
+/// Default `custom_provider` fallback that reports missing models.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoFallbackProvider<LM, EM, IM> {
+    _models: PhantomData<(LM, EM, IM)>,
+}
+
+impl<LM, EM, IM> Default for NoFallbackProvider<LM, EM, IM> {
+    fn default() -> Self {
+        Self {
+            _models: PhantomData,
+        }
+    }
+}
+
+impl<LM, EM, IM> Provider for NoFallbackProvider<LM, EM, IM>
+where
+    LM: LanguageModel,
+    EM: crate::embedding_model::EmbeddingModel,
+    IM: ImageModel,
+{
+    type LanguageModel = LM;
+    type EmbeddingModel = EM;
+    type ImageModel = IM;
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::LanguageModel))
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+    }
 }
 
 impl<LM, EM, IM> CustomProvider<LM, EM, IM> {
@@ -136,9 +174,12 @@ impl<LM, EM, IM> CustomProvider<LM, EM, IM> {
             language_models: Vec::new(),
             embedding_models: Vec::new(),
             image_models: Vec::new(),
+            fallback_provider: NoFallbackProvider::default(),
         }
     }
+}
 
+impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
     /// Registers a language model by model id.
     pub fn with_language_model(mut self, model_id: impl Into<String>, model: LM) -> Self {
         self.language_models.push((model_id.into(), model));
@@ -156,6 +197,19 @@ impl<LM, EM, IM> CustomProvider<LM, EM, IM> {
         self.image_models.push((model_id.into(), model));
         self
     }
+
+    /// Sets a fallback provider used when a model id is not registered locally.
+    pub fn with_fallback_provider<NewFP>(
+        self,
+        fallback_provider: NewFP,
+    ) -> CustomProvider<LM, EM, IM, NewFP> {
+        CustomProvider {
+            language_models: self.language_models,
+            embedding_models: self.embedding_models,
+            image_models: self.image_models,
+            fallback_provider,
+        }
+    }
 }
 
 impl<LM, EM, IM> Default for CustomProvider<LM, EM, IM> {
@@ -164,11 +218,12 @@ impl<LM, EM, IM> Default for CustomProvider<LM, EM, IM> {
     }
 }
 
-impl<LM, EM, IM> Provider for CustomProvider<LM, EM, IM>
+impl<LM, EM, IM, FP> Provider for CustomProvider<LM, EM, IM, FP>
 where
     LM: LanguageModel + Clone,
     EM: crate::embedding_model::EmbeddingModel + Clone,
     IM: ImageModel + Clone,
+    FP: Provider<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
 {
     type LanguageModel = LM;
     type EmbeddingModel = EM;
@@ -178,21 +233,24 @@ where
         self.language_models
             .iter()
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
-            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::LanguageModel))
+            .map(Ok)
+            .unwrap_or_else(|| self.fallback_provider.language_model(model_id))
     }
 
     fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
         self.embedding_models
             .iter()
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
-            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+            .map(Ok)
+            .unwrap_or_else(|| self.fallback_provider.embedding_model(model_id))
     }
 
     fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
         self.image_models
             .iter()
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
-            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::ImageModel))
+            .map(Ok)
+            .unwrap_or_else(|| self.fallback_provider.image_model(model_id))
     }
 }
 
@@ -1036,6 +1094,22 @@ mod tests {
     }
 
     #[test]
+    fn custom_provider_language_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.language_model("test-model"),
+            Ok(StaticLanguageModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn custom_provider_embedding_model_should_return_the_embedding_model_if_it_exists() {
         let model = StaticEmbeddingModel {
             provider: "mock-provider".to_string(),
@@ -1062,6 +1136,22 @@ mod tests {
     }
 
     #[test]
+    fn custom_provider_embedding_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.embedding_model("test-model"),
+            Ok(StaticEmbeddingModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn custom_provider_image_model_should_return_the_image_model_if_it_exists() {
         let model = StaticImageModel {
             provider: "mock-provider".to_string(),
@@ -1085,6 +1175,22 @@ mod tests {
 
         assert_eq!(error.model_id(), "test-model");
         assert_eq!(error.model_type(), ModelType::ImageModel);
+    }
+
+    #[test]
+    fn custom_provider_image_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.image_model("test-model"),
+            Ok(StaticImageModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
     }
 
     #[derive(Clone, Debug)]
