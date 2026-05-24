@@ -1201,9 +1201,9 @@ mod tests {
     use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::json::JsonValue;
     use crate::language_model::{
-        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelMessage,
-        LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelFilePart,
+        LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelUserContentPart,
         LanguageModelUserMessage,
@@ -1799,6 +1799,124 @@ mod tests {
                         {
                             "type": "text",
                             "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_pass_through_urls_when_the_model_supports_a_particular_url()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/document.pdf").expect("valid URL"),
+                        },
+                        "application/pdf",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/document.pdf"
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_handle_file_parts_with_base64_string_data() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("SGVsbG8sIFdvcmxkIQ==".to_string()),
+                        },
+                        "text/plain",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "data",
+                                "data": "SGVsbG8sIFdvcmxkIQ=="
+                            },
+                            "mediaType": "text/plain"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_handle_file_parts_with_uint8_array_data() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Bytes(vec![72, 101, 108, 108, 111]),
+                        },
+                        "text/plain",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "data",
+                                "data": [72, 101, 108, 108, 111]
+                            },
+                            "mediaType": "text/plain"
                         }
                     ]
                 }

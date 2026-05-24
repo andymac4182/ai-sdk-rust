@@ -1364,6 +1364,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   These prove text instructions plus single and array `SystemModelMessage`
   instructions are prepended to provider-facing prompts while preserving system
   message provider options.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` user file
+  conversion parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` file URL/base64/byte
+  cases:
+  `convert_to_language_model_prompt_should_pass_through_urls_when_the_model_supports_a_particular_url`,
+  `convert_to_language_model_prompt_should_handle_file_parts_with_base64_string_data`,
+  and
+  `convert_to_language_model_prompt_should_handle_file_parts_with_uint8_array_data`.
+  Rust proves these at the provider-facing prompt boundary: supported URL file
+  data remains a tagged URL part, base64 data remains a tagged data part, and
+  byte data preserves the upstream `Uint8Array` payload as bytes.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
