@@ -22,8 +22,15 @@ pub const THREAD_ID_PREFIX: &str = "whatsapp:";
 /// Default WhatsApp Cloud API base URL (the Meta Graph endpoint).
 pub const DEFAULT_GRAPH_BASE: &str = "https://graph.facebook.com";
 
-/// 1:1 with upstream's default `userName ?? "bot"` constant.
+/// 1:1 with upstream's default `userName ?? "bot"` constant
+/// (adapter-constructor fallback).
 pub const DEFAULT_USER_NAME: &str = "bot";
+
+/// 1:1 with upstream's factory-level default
+/// `userName ?? process.env.WHATSAPP_BOT_USERNAME ?? "whatsapp-bot"`.
+/// Applied by [`try_create_whatsapp_adapter`] when neither config
+/// nor env supplies a name; supersedes [`DEFAULT_USER_NAME`].
+pub const DEFAULT_FACTORY_USER_NAME: &str = "whatsapp-bot";
 
 /// Options for [`WhatsappAdapter::new`].
 #[derive(Debug, Clone)]
@@ -41,6 +48,9 @@ pub struct WhatsappAdapterOptions {
     pub user_name: Option<String>,
     /// Optional Graph API base URL override.
     pub graph_base: Option<String>,
+    /// Optional Graph API version override. Defaults to
+    /// [`DEFAULT_API_VERSION`].
+    pub api_version: Option<String>,
 }
 
 impl WhatsappAdapterOptions {
@@ -58,6 +68,7 @@ impl WhatsappAdapterOptions {
             app_secret: None,
             user_name: None,
             graph_base: None,
+            api_version: None,
         }
     }
 
@@ -70,6 +81,11 @@ impl WhatsappAdapterOptions {
     /// Effective Graph API base URL with default applied.
     pub fn effective_graph_base(&self) -> &str {
         self.graph_base.as_deref().unwrap_or(DEFAULT_GRAPH_BASE)
+    }
+
+    /// Effective Graph API version with default applied.
+    pub fn effective_api_version(&self) -> &str {
+        self.api_version.as_deref().unwrap_or(DEFAULT_API_VERSION)
     }
 
     /// Effective `userName` with default applied.
@@ -124,6 +140,17 @@ impl WhatsappAdapter {
         self.options.effective_graph_base()
     }
 
+    /// Effective Graph API version (e.g. `"v21.0"`).
+    pub fn api_version(&self) -> &str {
+        self.options.effective_api_version()
+    }
+
+    /// 1:1 with upstream `protected readonly graphApiUrl: string` —
+    /// `<graph_base>/<api_version>`.
+    pub fn graph_api_url(&self) -> String {
+        format!("{}/{}", self.graph_base(), self.api_version())
+    }
+
     /// 1:1 with upstream `readonly appSecret?: string`.
     pub fn app_secret(&self) -> Option<&str> {
         self.options.app_secret.as_deref()
@@ -139,8 +166,8 @@ impl WhatsappAdapter {
     /// template.
     fn send_url(&self) -> String {
         format!(
-            "{}/{DEFAULT_API_VERSION}/{}/messages",
-            self.graph_base(),
+            "{}/{}/messages",
+            self.graph_api_url(),
             self.options.phone_number_id
         )
     }
@@ -418,6 +445,119 @@ pub fn split_message(text: &str) -> Vec<String> {
     }
 
     chunks
+}
+
+/// 1:1 with upstream `interface WhatsAppAdapterConfig` — all
+/// fields optional so the factory can fall back to environment
+/// variables. Used by [`try_create_whatsapp_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct WhatsappCreateOptions {
+    /// Permanent access token. Falls back to `WHATSAPP_ACCESS_TOKEN`.
+    pub access_token: Option<String>,
+    /// Facebook app secret. Falls back to `WHATSAPP_APP_SECRET`.
+    pub app_secret: Option<String>,
+    /// Business phone-number ID. Falls back to `WHATSAPP_PHONE_NUMBER_ID`.
+    pub phone_number_id: Option<String>,
+    /// Webhook verify token. Falls back to `WHATSAPP_VERIFY_TOKEN`.
+    pub verify_token: Option<String>,
+    /// Display name override. Falls back to `WHATSAPP_BOT_USERNAME`,
+    /// then [`DEFAULT_FACTORY_USER_NAME`].
+    pub user_name: Option<String>,
+    /// Graph API base URL override. Falls back to `WHATSAPP_API_URL`.
+    pub api_url: Option<String>,
+    /// Graph API version override. Falls back to [`DEFAULT_API_VERSION`].
+    pub api_version: Option<String>,
+}
+
+/// Errors returned by [`try_create_whatsapp_adapter`]. 1:1 with
+/// upstream `throw new ValidationError("whatsapp", "... is
+/// required")` cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhatsappCreateError {
+    /// `accessToken` missing and `WHATSAPP_ACCESS_TOKEN` not set.
+    AccessTokenRequired,
+    /// `appSecret` missing and `WHATSAPP_APP_SECRET` not set.
+    AppSecretRequired,
+    /// `phoneNumberId` missing and `WHATSAPP_PHONE_NUMBER_ID` not set.
+    PhoneNumberIdRequired,
+    /// `verifyToken` missing and `WHATSAPP_VERIFY_TOKEN` not set.
+    VerifyTokenRequired,
+}
+
+impl std::fmt::Display for WhatsappCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccessTokenRequired => write!(
+                f,
+                "accessToken is required. Set WHATSAPP_ACCESS_TOKEN or provide it in config."
+            ),
+            Self::AppSecretRequired => write!(
+                f,
+                "appSecret is required. Set WHATSAPP_APP_SECRET or provide it in config."
+            ),
+            Self::PhoneNumberIdRequired => write!(
+                f,
+                "phoneNumberId is required. Set WHATSAPP_PHONE_NUMBER_ID or provide it in config."
+            ),
+            Self::VerifyTokenRequired => write!(
+                f,
+                "verifyToken is required. Set WHATSAPP_VERIFY_TOKEN or provide it in config."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WhatsappCreateError {}
+
+/// 1:1 with upstream `createWhatsAppAdapter(config)` env-var
+/// resolution path. The `env` reader is a closure (avoids `unsafe
+/// std::env::set_var` and parallel-test races).
+///
+/// Resolution rules (1:1 with upstream):
+/// - `access_token` ← `opts` ?? `env("WHATSAPP_ACCESS_TOKEN")`
+/// - `app_secret` ← `opts` ?? `env("WHATSAPP_APP_SECRET")`
+/// - `phone_number_id` ← `opts` ?? `env("WHATSAPP_PHONE_NUMBER_ID")`
+/// - `verify_token` ← `opts` ?? `env("WHATSAPP_VERIFY_TOKEN")`
+/// - `user_name` ← `opts` ?? `env("WHATSAPP_BOT_USERNAME")` ??
+///   [`DEFAULT_FACTORY_USER_NAME`]
+/// - `api_url` ← `opts` ?? `env("WHATSAPP_API_URL")`
+/// - `api_version` ← `opts` ?? [`DEFAULT_API_VERSION`]
+pub fn try_create_whatsapp_adapter(
+    opts: WhatsappCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<WhatsappAdapter, WhatsappCreateError> {
+    let access_token = opts
+        .access_token
+        .or_else(|| env("WHATSAPP_ACCESS_TOKEN"))
+        .ok_or(WhatsappCreateError::AccessTokenRequired)?;
+    let app_secret = opts
+        .app_secret
+        .or_else(|| env("WHATSAPP_APP_SECRET"))
+        .ok_or(WhatsappCreateError::AppSecretRequired)?;
+    let phone_number_id = opts
+        .phone_number_id
+        .or_else(|| env("WHATSAPP_PHONE_NUMBER_ID"))
+        .ok_or(WhatsappCreateError::PhoneNumberIdRequired)?;
+    let verify_token = opts
+        .verify_token
+        .or_else(|| env("WHATSAPP_VERIFY_TOKEN"))
+        .ok_or(WhatsappCreateError::VerifyTokenRequired)?;
+
+    let user_name = opts
+        .user_name
+        .or_else(|| env("WHATSAPP_BOT_USERNAME"))
+        .or_else(|| Some(DEFAULT_FACTORY_USER_NAME.to_string()));
+    let graph_base = opts.api_url.or_else(|| env("WHATSAPP_API_URL"));
+
+    Ok(WhatsappAdapter::new(WhatsappAdapterOptions {
+        phone_number_id,
+        access_token,
+        verify_token,
+        app_secret: Some(app_secret),
+        user_name,
+        graph_base,
+        api_version: opts.api_version,
+    }))
 }
 
 /// Encode a WhatsApp thread id. 1:1 with upstream's inline format:
@@ -835,5 +975,130 @@ mod tests {
         let adapter = WhatsappAdapter::new(opts);
         assert_eq!(adapter.user_name(), "test-bot");
         assert_eq!(adapter.app_secret(), Some("test-secret"));
+    }
+
+    // ---------- createWhatsAppAdapter env-var resolution (6 cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("createWhatsAppAdapter")`.
+    // Env reader is an injected closure (Rust 2024 `unsafe set_var`
+    // is racy across parallel tests).
+
+    fn required_whatsapp_env(key: &str) -> Option<String> {
+        match key {
+            "WHATSAPP_ACCESS_TOKEN" => Some("env-token".to_string()),
+            "WHATSAPP_APP_SECRET" => Some("env-secret".to_string()),
+            "WHATSAPP_PHONE_NUMBER_ID" => Some("env-phone-id".to_string()),
+            "WHATSAPP_VERIFY_TOKEN" => Some("env-verify".to_string()),
+            _ => None,
+        }
+    }
+
+    fn empty_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn create_whatsapp_adapter_throws_when_access_token_is_missing() {
+        let err = try_create_whatsapp_adapter(
+            WhatsappCreateOptions {
+                app_secret: Some("secret".to_string()),
+                phone_number_id: Some("123".to_string()),
+                verify_token: Some("verify".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("missing accessToken");
+        assert_eq!(err, WhatsappCreateError::AccessTokenRequired);
+        let msg = err.to_string();
+        // Upstream matches /accessToken/i — Rust mirrors the
+        // case-sensitive substring.
+        assert!(msg.contains("accessToken"));
+    }
+
+    #[test]
+    fn create_whatsapp_adapter_throws_when_app_secret_is_missing() {
+        let err = try_create_whatsapp_adapter(
+            WhatsappCreateOptions {
+                access_token: Some("token".to_string()),
+                phone_number_id: Some("123".to_string()),
+                verify_token: Some("verify".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("missing appSecret");
+        assert_eq!(err, WhatsappCreateError::AppSecretRequired);
+        assert!(err.to_string().contains("appSecret"));
+    }
+
+    #[test]
+    fn create_whatsapp_adapter_uses_environment_variables_as_fallback() {
+        let adapter =
+            try_create_whatsapp_adapter(WhatsappCreateOptions::default(), required_whatsapp_env)
+                .expect("env-only construction");
+        assert_eq!(adapter.name(), "whatsapp");
+        assert_eq!(adapter.phone_number_id(), "env-phone-id");
+        assert_eq!(adapter.access_token(), "env-token");
+        assert_eq!(adapter.verify_token(), "env-verify");
+        assert_eq!(adapter.app_secret(), Some("env-secret"));
+        // Factory default userName.
+        assert_eq!(adapter.user_name(), "whatsapp-bot");
+    }
+
+    #[test]
+    fn create_whatsapp_adapter_uses_api_url_config_to_override_base_url() {
+        let adapter = try_create_whatsapp_adapter(
+            WhatsappCreateOptions {
+                access_token: Some("test-token".to_string()),
+                app_secret: Some("test-secret".to_string()),
+                phone_number_id: Some("123456789".to_string()),
+                verify_token: Some("test-verify-token".to_string()),
+                user_name: Some("test-bot".to_string()),
+                api_url: Some("https://custom-graph.example.com".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("apiUrl config override");
+        assert_eq!(
+            adapter.graph_api_url(),
+            "https://custom-graph.example.com/v21.0"
+        );
+    }
+
+    #[test]
+    fn create_whatsapp_adapter_uses_whatsapp_api_url_env_var_via_factory() {
+        let env = |key: &str| match key {
+            "WHATSAPP_API_URL" => Some("https://custom-graph.example.com".to_string()),
+            other => required_whatsapp_env(other),
+        };
+        let adapter = try_create_whatsapp_adapter(WhatsappCreateOptions::default(), env)
+            .expect("WHATSAPP_API_URL env applied");
+        assert_eq!(
+            adapter.graph_api_url(),
+            "https://custom-graph.example.com/v21.0"
+        );
+    }
+
+    #[test]
+    fn create_whatsapp_adapter_uses_api_url_with_custom_api_version() {
+        let adapter = try_create_whatsapp_adapter(
+            WhatsappCreateOptions {
+                access_token: Some("test-token".to_string()),
+                app_secret: Some("test-secret".to_string()),
+                phone_number_id: Some("123456789".to_string()),
+                verify_token: Some("test-verify-token".to_string()),
+                user_name: Some("test-bot".to_string()),
+                api_url: Some("https://custom-graph.example.com".to_string()),
+                api_version: Some("v19.0".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("custom apiVersion");
+        assert_eq!(
+            adapter.graph_api_url(),
+            "https://custom-graph.example.com/v19.0"
+        );
     }
 }
