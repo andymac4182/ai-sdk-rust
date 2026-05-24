@@ -2627,6 +2627,23 @@ mod tests {
         assert_eq!(chat.error(), None);
         assert!(chat.is_aborted());
         assert_eq!(chat.abort_reason(), Some(&json!({ "source": "client" })));
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(event.is_abort);
+        assert!(!event.is_disconnect);
+        assert!(!event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "done" }
+                ]
+            })
+        );
         assert_eq!(
             states.last().and_then(|message| message.parts.last()),
             Some(&json!({ "type": "text", "text": "Hello", "state": "done" }))

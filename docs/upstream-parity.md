@@ -2283,7 +2283,8 @@ focused tests for each portable behavior before changing rows to `verified`.
 - 2026-05-25: `packages/ai` `Chat` aborted-response parity added
   `chat_should_handle_a_stop_and_an_aborted_response_stream`, covering the
   portable upstream `ui/chat.test.ts` stopped/aborted response behavior by
-  exposing abort status and reason while preserving the partial assistant state.
+  exposing abort status, reason, and the finish payload's `isAbort` flag while
+  preserving the partial assistant state.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
