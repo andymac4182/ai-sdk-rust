@@ -30,6 +30,9 @@ pub const DM_GUILD: &str = "@me";
 /// `DISCORD_MAX_CONTENT_LENGTH = 2000`.
 pub const DISCORD_MAX_CONTENT_LENGTH: usize = 2000;
 
+/// 1:1 with upstream's default `userName ?? "bot"` constant.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`DiscordAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct DiscordAdapterOptions {
@@ -39,6 +42,11 @@ pub struct DiscordAdapterOptions {
     pub application_id: String,
     /// Optional API base URL override.
     pub api_base: Option<String>,
+    /// Optional public key (hex-encoded ed25519 verifying key) for
+    /// interaction webhook signature verification.
+    pub public_key: Option<String>,
+    /// Optional display name (defaults to [`DEFAULT_USER_NAME`]).
+    pub user_name: Option<String>,
 }
 
 impl DiscordAdapterOptions {
@@ -49,6 +57,8 @@ impl DiscordAdapterOptions {
             bot_token: bot_token.into(),
             application_id: application_id.into(),
             api_base: None,
+            public_key: None,
+            user_name: None,
         }
     }
 
@@ -61,6 +71,12 @@ impl DiscordAdapterOptions {
     /// Effective API base URL with default applied.
     pub fn effective_api_base(&self) -> &str {
         self.api_base.as_deref().unwrap_or(DEFAULT_API_BASE)
+    }
+
+    /// Effective `userName` with default applied. 1:1 with upstream's
+    /// `userName ?? "bot"`.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -98,6 +114,19 @@ impl DiscordAdapter {
     /// Read the application id.
     pub fn application_id(&self) -> &str {
         &self.options.application_id
+    }
+
+    /// 1:1 with upstream `readonly userName: string`. Returns the
+    /// configured value or [`DEFAULT_USER_NAME`].
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
+    }
+
+    /// 1:1 with upstream `readonly publicKey: string`. Returns
+    /// `None` when not configured (interaction-webhook verification
+    /// will then fail-closed).
+    pub fn public_key(&self) -> Option<&str> {
+        self.options.public_key.as_deref()
     }
 
     /// Effective API base URL.
@@ -746,5 +775,47 @@ mod tests {
         assert_eq!(adapter.bot_token(), "bot-tok");
         assert_eq!(adapter.application_id(), "app-id");
         assert_eq!(adapter.api_base(), "https://example.test");
+    }
+
+    // ---------- createDiscordAdapter describe block (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("createDiscordAdapter")`.
+
+    #[test]
+    fn create_discord_adapter_creates_an_instance() {
+        let opts = DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: Some("ed25519-public-key-hex".to_string()),
+            user_name: None,
+        };
+        let adapter = DiscordAdapter::new(opts);
+        assert_eq!(adapter.name(), "discord");
+    }
+
+    #[test]
+    fn create_discord_adapter_sets_default_user_name_to_bot() {
+        let opts = DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: Some("ed25519-public-key-hex".to_string()),
+            user_name: None,
+        };
+        let adapter = DiscordAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "bot");
+    }
+
+    #[test]
+    fn create_discord_adapter_uses_provided_user_name() {
+        let opts = DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: Some("ed25519-public-key-hex".to_string()),
+            user_name: Some("custombot".to_string()),
+        };
+        let adapter = DiscordAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "custombot");
     }
 }
