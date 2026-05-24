@@ -909,6 +909,24 @@ pub struct PostEphemeralOptions {
     pub fallback_to_dm: bool,
 }
 
+/// Result of posting an ephemeral message. 1:1 port of upstream
+/// `interface EphemeralMessage`. Ephemeral messages are visible only to a
+/// specific user and typically cannot be edited or deleted (platform-dependent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EphemeralMessage {
+    /// Message ID (may be empty for some platforms).
+    pub id: String,
+    /// Thread ID where the message was sent (or DM thread if fallback was used).
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// Whether this used native ephemeral or fell back to DM.
+    #[serde(rename = "usedFallback")]
+    pub used_fallback: bool,
+    /// Platform-specific raw response.
+    #[serde(default)]
+    pub raw: serde_json::Value,
+}
+
 /// Context passed to the upstream `lockScope` resolver function on
 /// [`ChatConfig`]. 1:1 port of upstream `interface LockScopeContext`.
 ///
@@ -1443,6 +1461,22 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     /// error.
     async fn get_user(&self, _user_id: &str) -> AdapterResult<Option<UserInfo>> {
         Err(AdapterError::Unsupported("get_user"))
+    }
+
+    /// Optional native ephemeral post. 1:1 with upstream optional
+    /// `postEphemeral?(threadId, userId, message): Promise<EphemeralMessage>`.
+    /// Posts a message visible only to `user_id` in `thread_id`.
+    /// Default returns `Err(Unsupported("post_ephemeral"))` so
+    /// [`crate::thread::Thread::post_ephemeral`] can detect the
+    /// missing-method case and apply the DM-fallback policy
+    /// (mirrors upstream `if (this.adapter.postEphemeral)`).
+    async fn post_ephemeral(
+        &self,
+        _thread_id: &str,
+        _user_id: &str,
+        _text: &str,
+    ) -> AdapterResult<EphemeralMessage> {
+        Err(AdapterError::Unsupported("post_ephemeral"))
     }
 
     /// Optional channel-scoped post. 1:1 with upstream optional
