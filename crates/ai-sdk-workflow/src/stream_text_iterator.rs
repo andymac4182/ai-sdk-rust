@@ -1606,6 +1606,168 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_iterator_upstream_should_not_add_provider_options_when_provider_metadata_is_undefined()
+     {
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "call-1",
+                        "testTool",
+                        r#"{"query":"test"}"#,
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "result": "success" }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "testTool"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors()
+     {
+        let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
+            .with_provider_metadata(provider_metadata(json!({
+                "openai": {
+                    "itemId": "fc_0402bf2d292dd7ed00697a35fb10e0819ab0098545c4d0d7f5"
+                }
+            })));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(tool_call),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "result": "success" }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "testTool"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id()
+    {
+        let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
+            .with_provider_metadata(provider_metadata(json!({
+                "openai": {
+                    "itemId": "fc_0402bf2d292dd7ed00697a35fb10e0819ab0098545c4d0d7f5",
+                    "someOtherField": "should-be-preserved"
+                }
+            })));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(tool_call),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "result": "success" }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "testTool"),
+            Some(Some(provider_metadata(json!({
+                "openai": {
+                    "someOtherField": "should-be-preserved"
+                }
+            }))))
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata()
+     {
+        let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
+            .with_provider_metadata(provider_metadata(json!({
+                "google": {
+                    "thoughtSignature": "sig_gemini_preserved"
+                },
+                "openai": {
+                    "itemId": "fc_should_be_stripped"
+                }
+            })));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(tool_call),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "result": "success" }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "testTool"),
+            Some(Some(provider_metadata(json!({
+                "google": {
+                    "thoughtSignature": "sig_gemini_preserved"
+                }
+            }))))
+        );
+    }
+
+    #[test]
     fn stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata() {
         let tool_call = LanguageModelToolCall::new("call-1", "mixedTool", "{}")
             .with_provider_metadata(provider_metadata(json!({
