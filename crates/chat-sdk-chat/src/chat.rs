@@ -1661,6 +1661,36 @@ mod tests {
     }
 
     #[test]
+    fn chat_get_user_should_not_match_github_style_logins_as_slack_ids_case_sensitivity() {
+        // 1:1 with upstream "should not match GitHub-style logins
+        // as Slack ids (case sensitivity)". `user123` is lowercase
+        // and must NOT match the case-sensitive Slack regex
+        // `^[UW][A-Z0-9]+$`. With slack + github both registered,
+        // a lowercase id falls through every pattern and yields
+        // UnknownUserIdFormat (not AmbiguousUserId, not a Slack hit).
+        let slack = Arc::new(GetUserAdapter::new("slack", Some(alice())));
+        let github = Arc::new(GetUserAdapter::new("github", Some(alice())));
+        let state: Arc<dyn StateAdapter> = Arc::new(NullState);
+        let adapters: Vec<Arc<dyn Adapter>> = vec![
+            slack.clone() as Arc<dyn Adapter>,
+            github.clone() as Arc<dyn Adapter>,
+        ];
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters,
+            ..Default::default()
+        });
+        let err = futures_executor::block_on(chat.get_user("user123")).unwrap_err();
+        assert!(
+            matches!(err, GetUserError::UnknownUserIdFormat(ref id) if id == "user123"),
+            "expected UnknownUserIdFormat for lowercase id, got {err:?}"
+        );
+        // Neither adapter was called.
+        assert!(slack.calls.lock().unwrap().is_empty());
+        assert!(github.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn chat_get_user_should_throw_ambiguous_user_id_when_numeric_id_matches_multiple_registered_adapters() {
         // 1:1 with upstream `it("should throw AMBIGUOUS_USER_ID
         // when numeric id matches multiple registered adapters")`.
