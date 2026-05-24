@@ -36,22 +36,50 @@ pub const INSTALLATION_KEY_PREFIX: &str = "linear:installation";
 /// `INSTALLATION_REFRESH_BUFFER_MS = 5 * 60 * 1000` (5 min).
 pub const INSTALLATION_REFRESH_BUFFER_MS: u64 = 5 * 60 * 1000;
 
+/// Linear OAuth2 multi-tenant credentials. 1:1 with upstream's
+/// `{ clientId, clientSecret }` pair (multi-tenant OAuth resolves
+/// the per-installation access token per webhook).
+#[derive(Debug, Clone)]
+pub struct LinearOAuthCredentials {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// Linear authentication method. 1:1 with upstream's `(apiKey |
+/// accessToken | clientId+clientSecret)` discriminated union.
+#[derive(Debug, Clone)]
+pub enum LinearAuth {
+    /// Personal Linear API key (`lin_api_*`).
+    ApiKey(String),
+    /// OAuth2 access token (single-tenant).
+    AccessToken(String),
+    /// OAuth2 app credentials (multi-tenant — installation tokens
+    /// resolved per webhook).
+    OAuth(LinearOAuthCredentials),
+}
+
 /// Options for [`LinearAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct LinearAdapterOptions {
-    /// Linear API key (`lin_api_*`) or OAuth2 access token.
-    pub api_key: String,
+    /// Authentication credentials.
+    pub auth: LinearAuth,
     /// Optional GraphQL endpoint URL override.
     pub graphql_url: Option<String>,
+    /// Optional webhook signing secret.
+    pub webhook_secret: Option<String>,
+    /// Display name used as the bot identity.
+    pub user_name: Option<String>,
 }
 
 impl LinearAdapterOptions {
-    /// Construct options. GraphQL URL defaults to
-    /// [`DEFAULT_GRAPHQL_URL`].
+    /// Construct options with an API key (backwards-compatible 1-arg
+    /// form). GraphQL URL defaults to [`DEFAULT_GRAPHQL_URL`].
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            api_key: api_key.into(),
+            auth: LinearAuth::ApiKey(api_key.into()),
             graphql_url: None,
+            webhook_secret: None,
+            user_name: None,
         }
     }
 
@@ -64,6 +92,22 @@ impl LinearAdapterOptions {
     /// Effective GraphQL URL with default applied.
     pub fn effective_graphql_url(&self) -> &str {
         self.graphql_url.as_deref().unwrap_or(DEFAULT_GRAPHQL_URL)
+    }
+
+    /// Borrow the API key when configured with one. Returns `None`
+    /// for OAuth-based auth.
+    pub fn api_key(&self) -> Option<&str> {
+        match &self.auth {
+            LinearAuth::ApiKey(k) => Some(k.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether the adapter is in multi-tenant mode (OAuth app
+    /// credentials, no pinned access token). 1:1 with upstream's
+    /// `readonly isMultiTenant: boolean`.
+    pub fn is_multi_tenant(&self) -> bool {
+        matches!(&self.auth, LinearAuth::OAuth(_))
     }
 }
 
@@ -93,9 +137,30 @@ impl LinearAdapter {
         self
     }
 
-    /// Read the API key.
+    /// Read the API key (when configured with `LinearAuth::ApiKey`).
+    /// Returns the empty string for OAuth-based auth — callers
+    /// needing the credentials should match on `auth()` directly.
     pub fn api_key(&self) -> &str {
-        &self.options.api_key
+        match &self.options.auth {
+            LinearAuth::ApiKey(k) => k.as_str(),
+            LinearAuth::AccessToken(t) => t.as_str(),
+            LinearAuth::OAuth(_) => "",
+        }
+    }
+
+    /// Borrow the configured authentication credentials.
+    pub fn auth(&self) -> &LinearAuth {
+        &self.options.auth
+    }
+
+    /// 1:1 with upstream `readonly isMultiTenant: boolean`.
+    pub fn is_multi_tenant(&self) -> bool {
+        self.options.is_multi_tenant()
+    }
+
+    /// 1:1 with upstream `readonly userName?: string`.
+    pub fn user_name(&self) -> Option<&str> {
+        self.options.user_name.as_deref()
     }
 
     /// Effective GraphQL URL.
@@ -453,7 +518,7 @@ mod tests {
     #[test]
     fn options_new_stores_api_key_and_defaults_graphql_url() {
         let opts = LinearAdapterOptions::new("lin_api_xxx");
-        assert_eq!(opts.api_key, "lin_api_xxx");
+        assert_eq!(opts.api_key(), Some("lin_api_xxx"));
         assert_eq!(opts.effective_graphql_url(), DEFAULT_GRAPHQL_URL);
     }
 
@@ -685,5 +750,55 @@ mod tests {
         );
         assert_eq!(adapter.api_key(), "lin_api_xxx");
         assert_eq!(adapter.graphql_url(), "https://example.test/graphql");
+    }
+
+    // ---------- constructor describe block (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("constructor")`.
+    // The upstream "throws when no auth method provided" case is not
+    // portable as a runtime assertion in Rust: `LinearAuth` is a
+    // required field on `LinearAdapterOptions`, so the compiler
+    // rejects construction without it.
+
+    #[test]
+    fn constructor_creates_adapter_with_api_key_auth() {
+        let opts = LinearAdapterOptions {
+            auth: LinearAuth::ApiKey("lin_api_key_123".to_string()),
+            graphql_url: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("my-bot".to_string()),
+        };
+        let adapter = LinearAdapter::new(opts);
+        assert_eq!(adapter.name(), "linear");
+        assert_eq!(adapter.user_name(), Some("my-bot"));
+        assert!(!adapter.is_multi_tenant());
+    }
+
+    #[test]
+    fn constructor_creates_adapter_with_access_token_auth() {
+        let opts = LinearAdapterOptions {
+            auth: LinearAuth::AccessToken("lin_oauth_token_123".to_string()),
+            graphql_url: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("my-bot".to_string()),
+        };
+        let adapter = LinearAdapter::new(opts);
+        assert_eq!(adapter.name(), "linear");
+        assert!(!adapter.is_multi_tenant());
+    }
+
+    #[test]
+    fn constructor_creates_adapter_with_client_id_client_secret_auth() {
+        let opts = LinearAdapterOptions {
+            auth: LinearAuth::OAuth(LinearOAuthCredentials {
+                client_id: "client-id".to_string(),
+                client_secret: "client-secret".to_string(),
+            }),
+            graphql_url: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("my-bot".to_string()),
+        };
+        let adapter = LinearAdapter::new(opts);
+        assert_eq!(adapter.name(), "linear");
+        assert!(adapter.is_multi_tenant());
     }
 }
