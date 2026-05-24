@@ -911,6 +911,24 @@ mod tests {
     }
 
     #[test]
+    fn transcripts_api_rejects_malformed_duration_strings_at_parse_time() {
+        // 1:1 with upstream `it("rejects malformed duration strings")`.
+        // Upstream throws at `new TranscriptsApiImpl({ retention:
+        // "7days" })` because the retention parser runs in the
+        // constructor. The Rust port enforces this at the type level:
+        // `RetentionPolicy::Duration(DurationString)` requires a
+        // valid `DurationString`, which can only be built via
+        // `parse::<DurationString>()`. Malformed strings fail
+        // parsing — Err, never reach the constructor.
+        let err = "7days".parse::<crate::types::DurationString>();
+        assert!(err.is_err(), "expected '7days' to fail DurationString parse");
+        // Valid forms still parse.
+        assert!("7d".parse::<crate::types::DurationString>().is_ok());
+        assert!("30m".parse::<crate::types::DurationString>().is_ok());
+        assert!("60s".parse::<crate::types::DurationString>().is_ok());
+    }
+
+    #[test]
     fn transcripts_api_count_returns_zero_for_unknown_user_key() {
         // 1:1 with upstream `it("returns 0 for unknown userKey")`.
         let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
