@@ -2681,13 +2681,23 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai_chat_should_pass_logit_bias_parallel_tool_calls_and_user_settings`,
   `openai_chat_should_send_numeric_logprobs_as_logprobs_and_top_logprobs`,
   `openai_chat_should_send_boolean_logprobs_true_with_zero_top_logprobs`, and
-  `openai_chat_should_omit_boolean_logprobs_false`, mapping
+  `openai_chat_should_omit_boolean_logprobs_false`, plus
+  `openai_chat_should_not_set_reasoning_effort_when_reasoning_is_provider_default`,
+  `openai_chat_should_pass_top_level_reasoning_as_reasoning_effort`,
+  `openai_chat_should_prefer_provider_options_reasoning_effort_over_top_level_reasoning`,
+  `openai_chat_should_pass_reasoning_effort_setting_from_provider_options`,
+  `openai_chat_should_pass_reasoning_effort_setting_from_settings`,
+  `openai_chat_should_pass_reasoning_effort_xhigh_setting`, and
+  `openai_chat_should_pass_text_verbosity_setting_from_provider_options`, mapping
   upstream `openai-chat-language-model.test.ts` chat extension request-body
   cases for `maxCompletionTokens`, `prediction`, `store`, `metadata`,
   prompt-cache settings, `safetyIdentifier`, basic `serviceTier`
   flex/priority serialization, `logitBias` to `logit_bias`,
   `parallelToolCalls` to `parallel_tool_calls`, `user`, and
-  `logprobs`/`top_logprobs` option shaping through the OpenAI provider facade.
+  `logprobs`/`top_logprobs` option shaping, plus `reasoning:
+  provider-default`, top-level `reasoning`, provider-option
+  `reasoningEffort` low/high/xhigh precedence, and `textVerbosity` to
+  `verbosity` through the OpenAI provider facade.
 - 2026-05-24: OpenAI chat logprobs provider-metadata parity added
   `openai_chat_should_extract_logprobs_provider_metadata` and
   `openai_chat_stream_should_extract_logprobs_provider_metadata`, mapping

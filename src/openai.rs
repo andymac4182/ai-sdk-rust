@@ -2872,6 +2872,178 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_not_set_reasoning_effort_when_reasoning_is_provider_default() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options.with_reasoning(LanguageModelReasoningEffort::ProviderDefault)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_pass_top_level_reasoning_as_reasoning_effort() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options.with_reasoning(LanguageModelReasoningEffort::Medium)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "medium"
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_prefer_provider_options_reasoning_effort_over_top_level_reasoning() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options
+                    .with_reasoning(LanguageModelReasoningEffort::Medium)
+                    .with_provider_options(provider_options)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "high"
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_pass_reasoning_effort_setting_from_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "low"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("o4-mini", provider_options),
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "low"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_pass_reasoning_effort_setting_from_settings() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("o4-mini", provider_options),
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "high"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_pass_reasoning_effort_xhigh_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "xhigh"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-5.1-codex-max", provider_options),
+            json!({
+                "model": "gpt-5.1-codex-max",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "xhigh"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_pass_text_verbosity_setting_from_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "textVerbosity": "low"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-4o", provider_options),
+            json!({
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "verbosity": "low"
+            })
+        );
+    }
+
+    #[test]
     fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
