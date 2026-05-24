@@ -407,4 +407,56 @@ mod tests {
             Some("2024-01-01T00:00:00.000Z")
         );
     }
+
+    // ---------- describe("@workflow/serde integration") — JS-only-documented (9 upstream cases) ----------
+    // 1:1 enumeration of upstream
+    // `serialization.test.ts > describe("@workflow/serde integration")`.
+    //
+    // All 9 cases below depend on the TypeScript-specific
+    // `@workflow/serde` library, which exposes class-level serde
+    // hooks via JS-`Symbol` static properties (`WORKFLOW_SERIALIZE`
+    // and `WORKFLOW_DESERIALIZE`). The protocol is unrepresentable in
+    // Rust for three independent reasons:
+    //
+    //   1. Rust has no `Symbol`-keyed property system; static methods
+    //      live in inherent `impl` blocks under stable names.
+    //   2. The `@workflow/serde` package is a TypeScript framework not
+    //      ported to Rust; its `[WORKFLOW_SERIALIZE]` / `[WORKFLOW_
+    //      DESERIALIZE]` shape is a JS-language idiom.
+    //   3. Upstream's lazy adapter resolution leans on the JS module-
+    //      level chat singleton mutating shared state across imports —
+    //      the Rust port resolves adapters explicitly through the
+    //      [`crate::chat::Chat`] handle, not through ambient
+    //      module-load order.
+    //
+    // The semantic equivalent in the Rust port is already covered
+    // by [`Message::to_serialized`] / [`Message::from_serialized`]
+    // (see `message.rs` `to_serialized_round_trip_*` tests) and the
+    // 8 already-mapped chat:Message / non-chat-object cases above.
+    // These 9 upstream cases are enumerated for parity accounting:
+    //
+    //   ThreadImpl (4 cases)
+    //     - "should have WORKFLOW_SERIALIZE static method"
+    //     - "should have WORKFLOW_DESERIALIZE static method"
+    //     - "should serialize via WORKFLOW_SERIALIZE"
+    //     - "should deserialize via WORKFLOW_DESERIALIZE with lazy resolution"
+    //
+    //   Message (5 cases)
+    //     - "should have WORKFLOW_SERIALIZE static method"
+    //     - "should have WORKFLOW_DESERIALIZE static method"
+    //     - "should serialize via WORKFLOW_SERIALIZE"
+    //     - "should deserialize via WORKFLOW_DESERIALIZE"
+    //     - "should round-trip via WORKFLOW_SERIALIZE and WORKFLOW_DESERIALIZE"
+
+    // ---------- describe("standalone reviver()") additional js-only case ----------
+    // Upstream "should be usable directly as JSON.parse second argument"
+    // (serialization.test.ts:887) is js-only-documented: it asserts
+    // that the upstream `reviver(_key, value)` callback can be passed
+    // directly as the second argument to `JSON.parse`. Rust's
+    // `serde_json::from_str` has no reviver-callback signature, so
+    // the Rust port exposes the same behavior through
+    // [`revive_str`] (and is exercised by
+    // `revive_str_parses_and_promotes_chat_message_envelope` above).
+    // No additional Rust test is written here because that case
+    // already locks in the same observable contract.
 }
