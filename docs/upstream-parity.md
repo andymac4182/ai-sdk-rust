@@ -1780,12 +1780,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream single-step, per-step multi-step, and empty-warning
   `logWarnings` spy cases. `generate_text` and `stream_text` now invoke the
   shared warning logger with provider/model scope for each completed step.
-- 2026-05-24: `packages/ai` `streamText` telemetry integration array parity
-  added
-  `stream_text_supports_multiple_per_call_telemetry_integrations_as_array`,
-  mapping upstream `telemetry integrations > should support multiple per-call
-  integrations as an array` by proving both per-call integrations receive
-  `onStart` in configured order.
+- 2026-05-25: `packages/ai` `generateText` telemetry integration parity added
+  `generate_text_calls_globally_registered_integration_listeners`,
+  `generate_text_prefers_per_call_integrations_over_global_integrations`,
+  `generate_text_calls_integration_listeners_alongside_user_callbacks`,
+  `generate_text_does_not_break_when_integration_listener_panics`, and
+  `generate_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+  matching the upstream global-listener, per-call precedence, user-callback
+  ordering, panic-isolation, and multiple per-call integration array cases.
 - 2026-05-25: `packages/ai` `streamText` telemetry integration parity added
   `stream_text_calls_globally_registered_integration_listeners`,
   `stream_text_prefers_per_call_integrations_over_global_integrations`,
@@ -5072,6 +5074,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_calls_integration_listeners_alongside_user_callbacks`,
    `stream_text_does_not_break_when_integration_listener_panics`, and
    `stream_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+   proving global integration fallback, per-call override precedence,
+   user-callback plus integration ordering, panic isolation, and array
+   integration ordering.
+   The upstream `generateText` telemetry integration listener cases now have
+   named Rust counterparts in
+   `generate_text_calls_globally_registered_integration_listeners`,
+   `generate_text_prefers_per_call_integrations_over_global_integrations`,
+   `generate_text_calls_integration_listeners_alongside_user_callbacks`,
+   `generate_text_does_not_break_when_integration_listener_panics`, and
+   `generate_text_supports_multiple_per_call_telemetry_integrations_as_array`,
    proving global integration fallback, per-call override precedence,
    user-callback plus integration ordering, panic isolation, and array
    integration ordering.
