@@ -3923,6 +3923,22 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
     }
 
     #[test]
+    fn validate_ui_messages_should_throw_invalid_argument_error_when_messages_parameter_is_undefined()
+     {
+        let error = validate_ui_messages(UiMessageValidationOptions::default())
+            .expect_err("undefined messages should fail");
+
+        assert!(matches!(
+            error,
+            UiMessageValidationError::InvalidArgument(_)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Invalid argument for parameter messages: messages parameter must be provided"
+        );
+    }
+
+    #[test]
     fn validate_ui_messages_should_throw_type_validation_error_when_messages_array_is_empty() {
         let error = validate_messages(json!([])).expect_err("empty array should fail");
 
@@ -4383,6 +4399,99 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
     }
 
     #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_input_streaming_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-streaming",
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_input_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-available",
+                    "input": { "location": "Brisbane" },
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_output_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" },
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_output_error_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "input": { "location": "Brisbane" },
+                    "errorText": "Tool execution failed",
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
     fn validate_ui_messages_should_validate_tool_input_when_state_is_input_available() {
         let messages = json!([
             {
@@ -4445,6 +4554,110 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
     }
 
     #[test]
+    fn validate_ui_messages_should_preserve_result_provider_metadata_when_state_is_output_available()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" },
+                    "resultProviderMetadata": {
+                        "testProvider": { "itemId": "result-item" }
+                    }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location"))
+                .with_output_schema(schema_named("output-weather")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_tool_input_when_state_is_output_error_and_there_is_input()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "input": { "location": "Brisbane" },
+                    "errorText": "Tool execution failed",
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_preserve_result_provider_metadata_when_state_is_output_error() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "input": { "location": "Brisbane" },
+                    "errorText": "Tool execution failed",
+                    "providerExecuted": true,
+                    "resultProviderMetadata": {
+                        "testProvider": { "itemId": "result-item" }
+                    }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
     fn validate_ui_messages_should_skip_tool_input_validation_when_state_is_output_error_and_there_is_no_input()
      {
         let messages = json!([
@@ -4473,6 +4686,61 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_tool_part_in_output_error_state_when_input_key_is_absent()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "rawInput": { "location": "Brisbane" },
+                    "errorText": "Tool input validation failed"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_preserve_raw_input_when_state_is_output_error() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "rawInput": { "location": "Brisbane" },
+                    "errorText": "Tool input validation failed",
+                    "providerExecuted": false
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
     }
 
     #[test]
@@ -4529,6 +4797,72 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                             "state": "output-available",
                             "input": { "unexpected": true },
                             "output": { "anything": true }
+                        }]
+                    }
+                ])),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_validation_for_tool_part_in_output_error_state_when_tool_schema_is_missing()
+     {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(json!([
+                    {
+                        "id": "1",
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool-weather",
+                            "toolCallId": "tool-1",
+                            "state": "output-error",
+                            "input": { "unexpected": true },
+                            "errorText": "Tool execution failed",
+                            "providerExecuted": true
+                        }]
+                    }
+                ])),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_validation_for_tool_part_in_output_denied_state_when_tool_schema_is_missing()
+     {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(json!([
+                    {
+                        "id": "1",
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool-weather",
+                            "toolCallId": "tool-1",
+                            "state": "output-denied",
+                            "input": { "unexpected": true },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": false
+                            }
                         }]
                     }
                 ])),
@@ -4629,6 +4963,37 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
     }
 
     #[test]
+    fn validate_ui_messages_should_not_validate_input_in_input_streaming_state() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-streaming",
+                    "input": { "city": "Brisbane" },
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
     fn safe_validate_ui_messages_should_return_success_result_for_valid_messages() {
         let result = safe_validate_ui_messages(UiMessageValidationOptions {
             messages: Some(json!([
@@ -4654,6 +5019,118 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 error: UiMessageValidationError::InvalidArgument(_)
             }
         ));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_messages_array_is_empty() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([])),
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            SafeValidateUiMessagesResult::Failure {
+                error: UiMessageValidationError::TypeValidation(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_message_has_empty_parts_array() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "parts": []
+                }
+            ])),
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_metadata_validation_fails() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "metadata": { "foo": 123 },
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])),
+            metadata_schema: Some(schema_named("metadata")),
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_tool_input_validation_fails() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "input-available",
+                        "input": { "city": "Brisbane" }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_data_schema_is_missing() {
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("other".to_string(), schema_named("string"));
+
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{ "type": "data-city", "data": "Brisbane" }]
+                }
+            ])),
+            data_schemas,
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            SafeValidateUiMessagesResult::Failure {
+                error: UiMessageValidationError::TypeValidation(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_for_invalid_message_structure() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([{ "role": "user" }])),
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
     }
 
     #[test]
