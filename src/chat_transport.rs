@@ -309,6 +309,8 @@ pub struct Chat<T: ChatTransport> {
     messages: Vec<UiMessage>,
     status: ChatStatus,
     error: Option<String>,
+    is_aborted: bool,
+    abort_reason: Option<JsonValue>,
     next_message_index: usize,
 }
 
@@ -320,6 +322,8 @@ impl<T: ChatTransport> Chat<T> {
             messages: Vec::new(),
             status: ChatStatus::Ready,
             error: None,
+            is_aborted: false,
+            abort_reason: None,
             next_message_index: 0,
         }
     }
@@ -340,6 +344,14 @@ impl<T: ChatTransport> Chat<T> {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.is_aborted
+    }
+
+    pub fn abort_reason(&self) -> Option<&JsonValue> {
+        self.abort_reason.as_ref()
     }
 
     pub fn messages(&self) -> &[UiMessage] {
@@ -377,6 +389,8 @@ impl<T: ChatTransport> Chat<T> {
         self.messages.push(user_message);
         self.status = ChatStatus::Submitted;
         self.error = None;
+        self.is_aborted = false;
+        self.abort_reason = None;
 
         let send_options =
             ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, self.id.clone())
@@ -412,6 +426,8 @@ impl<T: ChatTransport> Chat<T> {
         if let Some(error_text) = has_error_chunk {
             self.status = ChatStatus::Error;
             self.error = Some(error_text.clone());
+            self.is_aborted = false;
+            self.abort_reason = None;
             return Err(ChatError::Stream(error_text));
         }
 
@@ -425,6 +441,8 @@ impl<T: ChatTransport> Chat<T> {
         {
             self.messages.push(state.message);
         }
+        self.is_aborted = state.aborted;
+        self.abort_reason = state.abort_reason;
         self.status = ChatStatus::Ready;
         Ok(states)
     }
@@ -2496,6 +2514,49 @@ mod tests {
                     "id": "user-1",
                     "role": "user",
                     "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_handle_a_stop_and_an_aborted_response_stream() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::abort_with_reason(json!({ "source": "client" })),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("abort chunk does not fail chat send");
+
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(chat.error(), None);
+        assert!(chat.is_aborted());
+        assert_eq!(chat.abort_reason(), Some(&json!({ "source": "client" })));
+        assert_eq!(
+            states.last().and_then(|message| message.parts.last()),
+            Some(&json!({ "type": "text", "text": "Hello", "state": "done" }))
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "done" }
+                    ]
                 }
             ])
         );
