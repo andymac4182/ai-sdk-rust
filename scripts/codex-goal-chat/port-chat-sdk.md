@@ -1480,3 +1480,75 @@ trackers) follow the same shape.
 
 **Reference**: slices 415-420 in `docs/chat/goal-refinements.md`'s
 "Slices 412..420 refinement cycle" entry.
+
+## Dispatcher-hook `||` semantics (added slice 427)
+
+When a handle_incoming_message-style dispatcher hook computes a
+boolean signal that's also settable upstream (e.g. `is_mention`
+populated by gateway-side detection AND by the dispatcher's
+detect_mention walker), the canonical wire-up is:
+
+```rust
+let prior = message.field.unwrap_or(false);
+let computed = self.compute_field(adapter, message);
+message.field = Some(prior || computed);
+```
+
+The `||` matches JavaScript's `message.field = message.field ||
+this.compute(...)` behavior — preserves a truthy gateway value,
+overrides None/false with the computed value. Pure overwrite
+(without `||`) breaks the gateway-pre-set use case.
+
+Tests must cover both directions:
+- prior=None → overwritten with computed
+- prior=Some(true) + computed=false → survives unchanged
+- prior=Some(false) + computed=true → overwritten with true
+
+Reference: slice 425 wiring detect_mention into
+handle_incoming_message.
+
+## Recording test mock pattern (added slice 427)
+
+When asserting that a dispatcher calls a particular trait method
+with specific arguments (e.g. set_if_not_exists with a given TTL,
+post_message with a given thread_id), use a Recording mock that:
+
+1. Implements the trait with mutable `Mutex<Vec<(args...)>>` fields
+   for each method-of-interest.
+2. Records calls before returning the trait-required result.
+3. Exposes the recorded vecs via accessors (or pub fields if
+   inside the same crate) so tests can assert call counts +
+   per-call argument tuples.
+
+Examples in the codebase:
+- `CancelingAdapter` (slice 419) — records reaction cancel calls
+- `OpenDmAdapter` (slice 420) — records open_dm + post_message
+- `SchedulingAndPostingAdapter` (slice 404) — records both
+  schedule_message + post_message to assert no-cross-call
+- `RecordingState` (slice 426) — records set_if_not_exists + get
+  + set with TTL parameters
+
+Don't use a full in-process state backend (InMemoryState) when
+you only need to assert what the dispatcher *called*. The
+recording mock is smaller, faster, and the assertions are direct.
+
+## Optional adapter trait accessors pattern (added slice 427)
+
+For adapter-provided metadata that some adapters resolve (e.g.
+bot user name/id after initialize()) but others don't (e.g.
+adapters that don't model the bot identity at all), use an
+optional accessor on the Adapter trait:
+
+```rust
+fn user_name(&self) -> Option<&str> {
+    None
+}
+```
+
+The default `None` makes it opt-in. Adapters that have the data
+override; the dispatcher does `adapter.user_name().or_else(||
+self.user_name.clone())` to fall back to a Chat-level config.
+
+Avoids the "every adapter must implement this even if it has
+nothing to return" tax. Reference: slice 425's
+`Adapter::user_name()` / `Adapter::bot_user_id()`.
