@@ -316,6 +316,71 @@ mod tests {
         assert_eq!(walked, value);
     }
 
+    // ---------- describe("standalone reviver()") (3 of 8 portable cases) ----------
+    // 1:1 with upstream `serialization.test.ts > describe("standalone reviver()")`.
+    // The standalone reviver in upstream is the JS-callback form
+    // (`JSON.parse(text, reviver)`); the Rust port exposes equivalent
+    // semantics through [`revive_walk`] + [`revive_str`]. The 5 deferred
+    // cases (Thread / Thread+Message / direct JSON.parse usage / Thread
+    // re-serialization / Channel re-serialization) need the singleton-
+    // resolved Adapter lookup branch.
+
+    #[test]
+    fn standalone_reviver_should_revive_chat_message_objects() {
+        // 1:1 with upstream "should revive chat:Message objects" via
+        // the standalone reviver. Same observable contract as
+        // chat.reviver() for the chat:Message branch.
+        let message_json = sample_message_payload();
+        let payload = json!({ "message": message_json });
+        let walked = revive_walk(payload);
+        let revived_msg = &walked["message"];
+        assert_eq!(
+            revived_msg.get("_type").and_then(Value::as_str),
+            Some("chat:Message")
+        );
+        assert_eq!(
+            revived_msg["metadata"]["dateSent"].as_str(),
+            Some("2024-01-01T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn standalone_reviver_should_leave_non_chat_objects_unchanged() {
+        // 1:1 with upstream "should leave non-chat objects unchanged"
+        // — same observable contract as chat.reviver() for non-
+        // envelope values; arrays / primitives / non-chat objects
+        // walk through unmodified.
+        let payload = json!({
+            "users": [
+                { "id": "u1", "name": "alice" },
+                { "id": "u2", "name": "bob" }
+            ],
+            "total": 2
+        });
+        let walked = revive_walk(payload.clone());
+        assert_eq!(walked, payload);
+    }
+
+    #[test]
+    fn standalone_reviver_should_allow_re_serialization_of_a_revived_message_without_singleton() {
+        // 1:1 with upstream "should allow re-serialization of a
+        // revived Thread/Channel without singleton" — the Message
+        // variant equivalent. Revived messages can be re-walked
+        // (round-trip through the reviver) without losing field
+        // content. The Thread/Channel branches need the singleton
+        // adapter lookup and are deferred.
+        let message_json = sample_message_payload();
+        let walked_once = revive_walk(message_json);
+        let walked_twice = revive_walk(walked_once.clone());
+        // Round-trip preserves the entire wire shape.
+        assert_eq!(walked_twice, walked_once);
+        assert_eq!(
+            walked_twice.get("_type").and_then(Value::as_str),
+            Some("chat:Message")
+        );
+        assert_eq!(walked_twice.get("id").and_then(Value::as_str), Some("m1"));
+    }
+
     #[test]
     fn revive_walk_should_work_with_nested_structures() {
         // 1:1 with upstream "should work with nested structures" —
