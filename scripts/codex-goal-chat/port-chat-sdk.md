@@ -1438,6 +1438,47 @@ A package can flip to **verified** when every upstream case
 documented as js-only in this pattern. The state-backends are
 currently in this position pending runtime client wire-up.
 
+## Structural-field-add ripple (added slice 467 from cycle 462..466)
+
+When auditing a chat-sdk-chat describe block (e.g. ThreadImpl.toJSON,
+SentMessage method delegations, dispatcher behaviors) and the
+Rust port has 2-3 mapped tests vs upstream's 5-7 cases, look for
+a **single missing struct field or method** that's blocking
+multiple cases. The cycle:
+
+1. Read the upstream describe block. Note what shape each case
+   asserts on (e.g. `thread.channelVisibility === "external"`,
+   `sent.isMention === true`, `dispatcher sets message.isMention
+   based on walker result`).
+2. Cross-reference with the Rust type — is there a missing
+   field/accessor/method whose absence prevents the cases from
+   being writable?
+3. Add the field/method 1:1 with upstream (constructor option →
+   builder; getter → accessor method; behavior → method
+   delegation).
+4. Update existing serde wiring (`to_json` / `from_json`) to
+   round-trip the new field.
+5. Sweep the upstream describe block and port every case that
+   the new field/method unlocks. One field-add slice typically
+   unlocks 2-7 upstream cases.
+
+This is **higher ROI than split-and-rename**: instead of
+gaining 1 test per slice, you gain a structural alignment +
+multiple closed cases.
+
+Reference ports:
+- `crates/chat-sdk-chat/src/thread.rs::Thread::channel_visibility`
+  (slice 463): field + builder + accessor; unlocked 3
+  toJSON cases (slice 463) + 2 fromJSON cases (slice 464).
+- `crates/chat-sdk-chat/src/thread.rs::SentMessage::is_mention`
+  + `to_json` (slice 465): 2 method-adds + 2 immediate case
+  mappings.
+
+Pattern: when starting a tick, prefer "what structural field is
+missing that would unlock 3+ upstream cases" over "what describe
+block has 1 case I can split into 2". Both are valid, but the
+former closes more cases per cycle.
+
 ## Call-site upstream-case mapping after permissive decoder (added slice 462 from cycle 457..461)
 
 When a permissive-decoder slice (per the previous section) lands,

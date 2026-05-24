@@ -5226,3 +5226,90 @@ helper additions + assertion-tightening retargets, but don't
 touch the deferred surfaces: action/modal callbackUrl POSTs,
 concurrency strategies, attachment rehydration, action callbackUrl
 error logging, `MemoryStateAdapter::no_op()` test helper.)
+
+## Cycle 462..466 (structural-field-add ripples into describe-block closure)
+
+**Date:** 2026-05-25
+
+**Cycles covered:** slice 462 codified the call-site-mapping
+pattern in the brief → slice 463 added the missing
+`Thread::channel_visibility` field + builder + accessor + serde
+wiring (the structural blocker for 3 upstream ThreadImpl.toJSON
+cases) → slice 464 immediately ported the 2 channelVisibility
+fromJSON cases the slice-463 field unlocked → slice 465 added
+the missing `SentMessage::is_mention()` accessor + `to_json()`
+method, closing the createSentMessageFromMessage describe block
+at 7/7 → slice 466 ported the 2 missing
+`describe("isMention property")` cases (false-when-not-mentioned
++ true-in-subscribed-thread-when-mentioned) exercising the
+dispatcher's `is_mention = prior || computed` logic.
+
+Cumulative: ChannelVisibility field + 2 SentMessage methods + 7
+new upstream-mapped tests + 3 closed describe blocks
+(ThreadImpl.toJSON 6/6, createSentMessageFromMessage 7/7,
+isMention property 3/3). 1 deferred case remains in
+ThreadImpl.fromJSON (the "throw on unknown adapter on access"
+needs an adapter-registry mechanism).
+
+**What this cycle revealed**
+
+1. **Structural-field-add slices are the highest-ROI pattern
+   right now.** Slice 463 added one field + builder + accessor;
+   slice 464 immediately mapped 2 upstream cases that the field
+   unlocked. Slice 465 added 2 methods on SentMessage; both
+   immediately mapped to specific upstream cases. The pattern:
+   look for a Rust type that's missing a single field/method
+   compared to upstream, add it, then sweep the upstream
+   describe-block for cases that assert behavior on that
+   field/method. Often closes 2-7 cases per added field.
+
+2. **Multi-tick closure is the new productivity shape.** Instead
+   of single-slice "find and port one case", the cycle is now
+   "find structural gap → add infrastructure → port multiple
+   cases the infrastructure unlocks". Slice 463 + 464 was a
+   2-tick pair (add field, then sweep callers); slice 465 was a
+   single-tick that added 2 methods + their tests together.
+   Either shape is fine; both close more cases per cycle than
+   pure split-and-rename slices.
+
+3. **Test helpers compound.** Slice 466 reused `dispatched_message`
+   + `chat_with_named_bot` + the on_subscribed_message handler
+   infrastructure already in chat.rs to port 2 new dispatcher
+   cases without adding any new mocks. Pattern: when a test
+   helper file (sample_message, MockState, RecordingAdapter,
+   etc.) already exists, prefer adding upstream-mapped tests
+   there rather than spinning up parallel mock infrastructure.
+   Saves stub boilerplate (see the slice-446 open refinement
+   `MemoryStateAdapter::no_op()` which would have been useful
+   for chat-singleton tests but isn't needed for chat.rs tests
+   that already have helpers).
+
+4. **The describe-block-closure metric is meaningful.** Counting
+   "describes closed at N/N" across the chat package: 3 describe
+   blocks fully closed this cycle. That's a leading indicator
+   that the chat package is approaching the verified threshold
+   from the bottom-up, even though the package-level percentage
+   in package-progress.md hasn't moved. Each closed block reduces
+   the long-tail of "remaining cases per describe" — when most
+   describes are at N/N, the remaining gaps become structural
+   (queue concurrency, HTTP-mock infrastructure) rather than
+   per-case omissions.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending addition of
+  a *"structural-field-add ripple"* note in the brief
+  (lesson 1 above) so future ticks recognize this as a
+  high-ROI pattern when describe-blocks are partially mapped.
+
+**Open refinements deferred (unchanged)**
+
+(See cycle 434..438 + 441..445 + 446..450 + 451..455 + 457..461
+entries. Slices 462..466 advance the parity ledger via
+structural-field-add ripples + describe-block closures, but
+don't touch the deferred surfaces: action/modal callbackUrl
+POSTs, concurrency strategies, attachment rehydration, action
+callbackUrl error logging, `MemoryStateAdapter::no_op()` test
+helper, ThreadImpl.fromJSON "throw on unknown adapter on access"
+adapter-registry mechanism.)
