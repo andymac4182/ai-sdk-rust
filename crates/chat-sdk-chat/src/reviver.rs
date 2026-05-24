@@ -24,18 +24,30 @@
 
 use serde_json::Value;
 
+use crate::chat_singleton::try_get_chat_singleton;
 use crate::message::{Message, SerializedMessage};
 
 /// Result of [`revive_value`]. Carries the original `Value` for
 /// non-chat-SDK objects (so the reviver doesn't lose unknown wire
 /// shapes) and a typed Rust struct for the recognized `_type` tags.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Revived {
     /// Pass-through for anything the reviver doesn't recognize.
     PassThrough(Value),
     /// `_type: "chat:Message"` payload, promoted via
     /// [`Message::from_serialized`].
     Message(Message),
+    /// `_type: "chat:Thread"` payload, promoted via
+    /// [`crate::thread::Thread::from_json`] using the adapter
+    /// resolved from the chat singleton (slice 443). When no
+    /// singleton is registered or no adapter matches the
+    /// `adapterName` field, falls through to
+    /// [`Revived::PassThrough`].
+    Thread(crate::thread::Thread),
+    /// `_type: "chat:Channel"` payload, promoted via
+    /// [`crate::channel::Channel::from_json`] using the adapter
+    /// resolved from the chat singleton (slice 443).
+    Channel(crate::channel::Channel),
 }
 
 impl From<Value> for Revived {
@@ -81,9 +93,34 @@ pub fn revive_value(value: Value) -> Revived {
                 Err(_) => Revived::PassThrough(value),
             }
         }
-        // chat:Thread / chat:Channel pass through until their Rust
-        // impls land. The _type tag stays on the wire so a later
-        // revive pass can pick them up once the classes ship.
+        Some("chat:Thread") => {
+            // Adapter is resolved from the chat singleton at revive
+            // time. Falls through to PassThrough when no singleton
+            // is registered or the adapterName field is missing /
+            // doesn't match a registered adapter. 1:1 with upstream's
+            // lazy-resolution semantic (slice 443).
+            if let Some(adapter_name) = value.get("adapterName").and_then(Value::as_str) {
+                if let Some(singleton) = try_get_chat_singleton() {
+                    if let Some(adapter) = singleton.get_adapter(adapter_name) {
+                        return Revived::Thread(crate::thread::Thread::from_json(&value, adapter));
+                    }
+                }
+            }
+            Revived::PassThrough(value)
+        }
+        Some("chat:Channel") => {
+            // Same lazy-adapter-resolution semantic as chat:Thread.
+            if let Some(adapter_name) = value.get("adapterName").and_then(Value::as_str) {
+                if let Some(singleton) = try_get_chat_singleton() {
+                    if let Some(adapter) = singleton.get_adapter(adapter_name) {
+                        return Revived::Channel(crate::channel::Channel::from_json(
+                            &value, adapter,
+                        ));
+                    }
+                }
+            }
+            Revived::PassThrough(value)
+        }
         _ => Revived::PassThrough(value),
     }
 }
@@ -456,4 +493,185 @@ mod tests {
     // `revive_str_parses_and_promotes_chat_message_envelope` above).
     // No additional Rust test is written here because that case
     // already locks in the same observable contract.
+
+    // ---------- describe("chat.reviver()") + describe("standalone
+    //            reviver()") chat:Thread / chat:Channel branches (slice 443) ----------
+    //
+    // 1:1 with upstream `serialization.test.ts > describe("chat.reviver()")`
+    // chat:Thread case + the equivalent in `describe("standalone
+    // reviver()")`. The upstream test registers a Chat singleton with a
+    // mock adapter so the reviver can resolve `adapterName` to a real
+    // adapter. The Rust port mirrors this via the chat_singleton module.
+
+    use crate::chat_singleton::{ChatSingleton, clear_chat_singleton, set_chat_singleton};
+    use crate::types::{Adapter, StateAdapter};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct ReviverTestAdapter;
+    #[async_trait::async_trait]
+    impl Adapter for ReviverTestAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReviverTestState;
+    #[async_trait::async_trait]
+    impl StateAdapter for ReviverTestState {
+        async fn get(&self, _key: &str) -> crate::types::StateResult<Option<serde_json::Value>> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> crate::types::StateResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> crate::types::StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> crate::types::StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> crate::types::StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+        async fn set_if_not_exists(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> crate::types::StateResult<bool> {
+            Ok(true)
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReviverTestSingleton {
+        adapter: Arc<dyn Adapter>,
+        state: Arc<dyn StateAdapter>,
+    }
+
+    impl ChatSingleton for ReviverTestSingleton {
+        fn get_adapter(&self, name: &str) -> Option<Arc<dyn Adapter>> {
+            if name == self.adapter.name() {
+                Some(self.adapter.clone())
+            } else {
+                None
+            }
+        }
+        fn get_state(&self) -> Arc<dyn StateAdapter> {
+            self.state.clone()
+        }
+    }
+
+    /// Helper: install a singleton with a single named adapter and
+    /// return a guard that clears the singleton on drop. Tests
+    /// share global state via the singleton slot, so the guard
+    /// ensures cleanup even on panic.
+    struct SingletonGuard;
+    impl Drop for SingletonGuard {
+        fn drop(&mut self) {
+            clear_chat_singleton();
+        }
+    }
+
+    fn install_test_singleton() -> SingletonGuard {
+        let singleton: Arc<dyn ChatSingleton> = Arc::new(ReviverTestSingleton {
+            adapter: Arc::new(ReviverTestAdapter),
+            state: Arc::new(ReviverTestState),
+        });
+        set_chat_singleton(singleton);
+        SingletonGuard
+    }
+
+    #[test]
+    fn revive_value_promotes_chat_thread_envelopes_when_singleton_resolves_adapter() {
+        // 1:1 with upstream "should revive chat:Thread objects" — when
+        // a singleton is registered with a matching adapter, the
+        // reviver dispatches the chat:Thread branch and constructs a
+        // typed Thread handle.
+        let _g = install_test_singleton();
+        let value = json!({
+            "_type": "chat:Thread",
+            "id": "slack:C123:1234.5678",
+            "channelId": "slack:C123",
+            "channelVisibility": "unknown",
+            "isDM": false,
+            "adapterName": "slack",
+        });
+        match revive_value(value) {
+            Revived::Thread(t) => {
+                assert_eq!(t.thread_id(), "slack:C123:1234.5678");
+            }
+            other => panic!("expected Revived::Thread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revive_value_promotes_chat_channel_envelopes_when_singleton_resolves_adapter() {
+        // 1:1 with upstream "should revive chat:Channel objects" — same
+        // contract as chat:Thread for the Channel reviver branch.
+        let _g = install_test_singleton();
+        let value = json!({
+            "_type": "chat:Channel",
+            "id": "slack:C123",
+            "adapterName": "slack",
+            "channelVisibility": "unknown",
+            "isDM": false,
+        });
+        match revive_value(value) {
+            Revived::Channel(c) => {
+                assert_eq!(c.channel_id(), "slack:C123");
+            }
+            other => panic!("expected Revived::Channel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revive_value_falls_through_when_no_singleton_or_no_matching_adapter() {
+        // 1:1 (subset) with upstream's "no singleton registered" /
+        // "adapter not found" lazy-resolution-failure behavior: the
+        // Rust reviver falls through to PassThrough so the caller
+        // sees the raw value rather than constructing a Thread bound
+        // to a nonexistent adapter. Tested without installing any
+        // singleton (singleton slot is empty).
+        clear_chat_singleton();
+        let value = json!({
+            "_type": "chat:Thread",
+            "id": "slack:C123:1234.5678",
+            "adapterName": "slack",
+        });
+        match revive_value(value.clone()) {
+            Revived::PassThrough(v) => assert_eq!(v, value),
+            other => panic!("expected PassThrough (no singleton), got {other:?}"),
+        }
+
+        // With a singleton installed but no matching adapter, also
+        // falls through.
+        let _g = install_test_singleton();
+        let unknown_adapter = json!({
+            "_type": "chat:Thread",
+            "id": "telegram:123:456",
+            "adapterName": "telegram",
+        });
+        match revive_value(unknown_adapter.clone()) {
+            Revived::PassThrough(v) => assert_eq!(v, unknown_adapter),
+            other => panic!("expected PassThrough (no adapter match), got {other:?}"),
+        }
+    }
 }
