@@ -1892,13 +1892,16 @@ fn openai_compatible_chat_request_body(
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut body = JsonObject::new();
     let mut warnings = Vec::new();
+    let provider_options =
+        openai_compatible_chat_provider_options(provider, options, &mut warnings);
     let OpenAICompatibleChatProviderOptions {
         user,
         reasoning_effort,
         text_verbosity,
         strict_json_schema,
+        force_reasoning: _,
         additional_body_options,
-    } = openai_compatible_chat_provider_options(provider, options, &mut warnings);
+    } = provider_options.clone();
 
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
 
@@ -1976,6 +1979,15 @@ fn openai_compatible_chat_request_body(
     if let Some(text_verbosity) = text_verbosity {
         body.insert("verbosity".to_string(), JsonValue::String(text_verbosity));
     }
+
+    apply_openai_chat_model_request_rules(
+        model_id,
+        provider,
+        options,
+        &provider_options,
+        &mut body,
+        &mut warnings,
+    );
 
     body.insert(
         "messages".to_string(),
@@ -2595,6 +2607,7 @@ struct OpenAICompatibleChatProviderOptions {
     reasoning_effort: Option<String>,
     text_verbosity: Option<String>,
     strict_json_schema: Option<bool>,
+    force_reasoning: Option<bool>,
     additional_body_options: JsonObject,
 }
 
@@ -2681,13 +2694,22 @@ fn merge_openai_compatible_chat_known_options(
     if let Some(strict_json_schema) = options.get("strictJsonSchema").and_then(JsonValue::as_bool) {
         resolved.strict_json_schema = Some(strict_json_schema);
     }
+
+    if let Some(force_reasoning) = options.get("forceReasoning").and_then(JsonValue::as_bool) {
+        resolved.force_reasoning = Some(force_reasoning);
+    }
 }
 
 fn merge_openai_compatible_chat_additional_options(body: &mut JsonObject, options: &JsonObject) {
     for (key, value) in options {
         if !matches!(
             key.as_str(),
-            "user" | "reasoningEffort" | "textVerbosity" | "strictJsonSchema"
+            "user"
+                | "reasoningEffort"
+                | "textVerbosity"
+                | "strictJsonSchema"
+                | "forceReasoning"
+                | "systemMessageMode"
         ) {
             body.insert(
                 openai_compatible_chat_body_option_name(key).to_string(),
@@ -2705,6 +2727,163 @@ fn openai_compatible_chat_body_option_name(name: &str) -> &str {
         "safetyIdentifier" => "safety_identifier",
         "serviceTier" => "service_tier",
         _ => name,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OpenAICompatibleChatModelCapabilities {
+    is_reasoning_model: bool,
+    supports_non_reasoning_parameters: bool,
+    supports_flex_processing: bool,
+    supports_priority_processing: bool,
+}
+
+fn openai_compatible_openai_chat_capabilities(
+    model_id: &str,
+) -> OpenAICompatibleChatModelCapabilities {
+    let is_reasoning_model = model_id.starts_with("o1")
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini")
+        || (model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat"));
+    let supports_non_reasoning_parameters = model_id.starts_with("gpt-5.1")
+        || model_id.starts_with("gpt-5.2")
+        || model_id.starts_with("gpt-5.3")
+        || model_id.starts_with("gpt-5.4")
+        || model_id.starts_with("gpt-5.5");
+    let supports_flex_processing = model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini")
+        || (model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat"));
+    let supports_priority_processing = model_id.starts_with("gpt-4")
+        || (model_id.starts_with("gpt-5")
+            && !model_id.starts_with("gpt-5-nano")
+            && !model_id.starts_with("gpt-5-chat")
+            && !model_id.starts_with("gpt-5.4-nano"))
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini");
+
+    OpenAICompatibleChatModelCapabilities {
+        is_reasoning_model,
+        supports_non_reasoning_parameters,
+        supports_flex_processing,
+        supports_priority_processing,
+    }
+}
+
+fn openai_compatible_openai_reasoning_effort(
+    options: &LanguageModelCallOptions,
+    provider_options: &OpenAICompatibleChatProviderOptions,
+) -> Option<String> {
+    provider_options
+        .reasoning_effort
+        .clone()
+        .or_else(|| match options.reasoning.as_ref()? {
+            LanguageModelReasoningEffort::ProviderDefault => None,
+            LanguageModelReasoningEffort::None => Some("none".to_string()),
+            LanguageModelReasoningEffort::Minimal => Some("minimal".to_string()),
+            LanguageModelReasoningEffort::Low => Some("low".to_string()),
+            LanguageModelReasoningEffort::Medium => Some("medium".to_string()),
+            LanguageModelReasoningEffort::High => Some("high".to_string()),
+            LanguageModelReasoningEffort::Xhigh => Some("xhigh".to_string()),
+        })
+}
+
+fn apply_openai_chat_model_request_rules(
+    model_id: &str,
+    provider: &str,
+    options: &LanguageModelCallOptions,
+    provider_options: &OpenAICompatibleChatProviderOptions,
+    body: &mut JsonObject,
+    warnings: &mut Vec<Warning>,
+) {
+    if openai_compatible_provider_options_name(provider) != "openai" {
+        return;
+    }
+
+    let capabilities = openai_compatible_openai_chat_capabilities(model_id);
+    let resolved_reasoning_effort =
+        openai_compatible_openai_reasoning_effort(options, provider_options);
+    let is_reasoning_model = provider_options
+        .force_reasoning
+        .unwrap_or(capabilities.is_reasoning_model);
+
+    if let Some(reasoning_effort) = resolved_reasoning_effort.as_ref() {
+        body.insert(
+            "reasoning_effort".to_string(),
+            JsonValue::String(reasoning_effort.clone()),
+        );
+    }
+
+    if is_reasoning_model {
+        let allow_non_reasoning_parameters = resolved_reasoning_effort.as_deref() == Some("none")
+            && capabilities.supports_non_reasoning_parameters;
+
+        if !allow_non_reasoning_parameters {
+            if body.remove("temperature").is_some() {
+                warnings.push(Warning::Unsupported {
+                    feature: "temperature".to_string(),
+                    details: Some("temperature is not supported for reasoning models".to_string()),
+                });
+            }
+            if body.remove("top_p").is_some() {
+                warnings.push(Warning::Unsupported {
+                    feature: "topP".to_string(),
+                    details: Some("topP is not supported for reasoning models".to_string()),
+                });
+            }
+        }
+
+        if body.remove("frequency_penalty").is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "frequencyPenalty".to_string(),
+                details: Some("frequencyPenalty is not supported for reasoning models".to_string()),
+            });
+        }
+        if body.remove("presence_penalty").is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "presencePenalty".to_string(),
+                details: Some("presencePenalty is not supported for reasoning models".to_string()),
+            });
+        }
+
+        if let Some(max_tokens) = body.remove("max_tokens") {
+            body.entry("max_completion_tokens".to_string())
+                .or_insert(max_tokens);
+        }
+    } else if (model_id.starts_with("gpt-4o-search-preview")
+        || model_id.starts_with("gpt-4o-mini-search-preview"))
+        && body.remove("temperature").is_some()
+    {
+        warnings.push(Warning::Unsupported {
+            feature: "temperature".to_string(),
+            details: Some(
+                "temperature is not supported for the search preview models and has been removed."
+                    .to_string(),
+            ),
+        });
+    }
+
+    match body.get("service_tier").and_then(JsonValue::as_str) {
+        Some("flex") if !capabilities.supports_flex_processing => {
+            body.remove("service_tier");
+            warnings.push(Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                        .to_string(),
+                ),
+            });
+        }
+        Some("priority") if !capabilities.supports_priority_processing => {
+            body.remove("service_tier");
+            warnings.push(Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported"
+                        .to_string(),
+                ),
+            });
+        }
+        _ => {}
     }
 }
 

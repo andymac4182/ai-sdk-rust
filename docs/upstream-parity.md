@@ -2682,6 +2682,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   cases for `maxCompletionTokens`, `prediction`, `store`, `metadata`,
   prompt-cache settings, `safetyIdentifier`, and basic `serviceTier`
   flex/priority serialization through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat model-specific request rule parity added
+  `openai_chat_reasoning_model_should_clear_unsupported_standard_settings`,
+  `openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens`,
+  `openai_chat_should_allow_temperature_when_reasoning_none_on_gpt_5_1`,
+  `openai_chat_should_still_clear_temperature_when_reasoning_none_on_o4_mini`,
+  `openai_chat_should_allow_forcing_reasoning_behavior_for_unrecognized_model_ids`,
+  `openai_chat_should_remove_temperature_setting_for_search_preview_models`, and
+  `openai_chat_should_warn_and_remove_unsupported_service_tier_settings`, mapping
+  upstream `openai-chat-language-model.test.ts` reasoning-model, search-preview,
+  forced-reasoning, and service-tier request pruning/warning cases for the
+  non-Responses OpenAI chat facade.
 - 2026-05-20: OpenAI Responses hosted tool include parity added
   `open_responses_provider_adds_hosted_tool_include_options` now covers
   upstream automatic `include` additions for hosted web-search action sources

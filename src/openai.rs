@@ -2155,9 +2155,9 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFilePart, LanguageModelMessage, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelReasoningEffort,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -2631,6 +2631,277 @@ mod tests {
                 ],
                 "service_tier": "priority"
             })
+        );
+    }
+
+    #[test]
+    fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options
+                    .with_temperature(0.5)
+                    .with_top_p(0.7)
+                    .with_frequency_penalty(0.2)
+                    .with_presence_penalty(0.3)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "temperature"
+                        && details.as_deref() == Some("temperature is not supported for reasoning models")
+            )
+        }));
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "topP"
+                        && details.as_deref() == Some("topP is not supported for reasoning models")
+            )
+        }));
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "frequencyPenalty"
+                        && details.as_deref() == Some("frequencyPenalty is not supported for reasoning models")
+            )
+        }));
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "presencePenalty"
+                        && details.as_deref() == Some("presencePenalty is not supported for reasoning models")
+            )
+        }));
+    }
+
+    #[test]
+    fn openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options.with_max_output_tokens(1000)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "max_completion_tokens": 1000
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_allow_temperature_when_reasoning_none_on_gpt_5_1() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-5.1", |options| {
+                options
+                    .with_reasoning(LanguageModelReasoningEffort::None)
+                    .with_temperature(0.5)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-5.1",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "temperature": 0.5,
+                "reasoning_effort": "none"
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_still_clear_temperature_when_reasoning_none_on_o4_mini() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options
+                    .with_reasoning(LanguageModelReasoningEffort::None)
+                    .with_temperature(0.5)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "none"
+            })
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("temperature is not supported for reasoning models".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_allow_forcing_reasoning_behavior_for_unrecognized_model_ids() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "forceReasoning": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let (body, warnings) = openai_chat_captured_body_and_warnings_with_options(
+            "stealth-reasoning-model",
+            |options| {
+                options
+                    .with_temperature(0.5)
+                    .with_top_p(0.7)
+                    .with_provider_options(provider_options)
+            },
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "stealth-reasoning-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "temperature"
+                        && details.as_deref() == Some("temperature is not supported for reasoning models")
+            )
+        }));
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "topP"
+                        && details.as_deref() == Some("topP is not supported for reasoning models")
+            )
+        }));
+    }
+
+    #[test]
+    fn openai_chat_should_remove_temperature_setting_for_search_preview_models() {
+        for model_id in [
+            "gpt-4o-search-preview",
+            "gpt-4o-mini-search-preview",
+            "gpt-4o-mini-search-preview-2025-03-11",
+        ] {
+            let (body, warnings) =
+                openai_chat_captured_body_and_warnings_with_options(model_id, |options| {
+                    options.with_temperature(0.7)
+                });
+
+            assert_eq!(
+                body,
+                json!({
+                    "model": model_id,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Hello"
+                        }
+                    ]
+                })
+            );
+            assert_eq!(
+                warnings,
+                vec![Warning::Unsupported {
+                    feature: "temperature".to_string(),
+                    details: Some(
+                        "temperature is not supported for the search preview models and has been removed."
+                            .to_string()
+                    ),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn openai_chat_should_warn_and_remove_unsupported_service_tier_settings() {
+        let unsupported_flex_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "flex"
+            }
+        }))
+        .expect("provider options deserialize");
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-mini", |options| {
+                options.with_provider_options(unsupported_flex_options)
+            });
+
+        assert!(body.get("service_tier").is_none());
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                        .to_string()
+                ),
+            }]
+        );
+
+        let unsupported_priority_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "priority"
+            }
+        }))
+        .expect("provider options deserialize");
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-3.5-turbo", |options| {
+                options.with_provider_options(unsupported_priority_options)
+            });
+
+        assert!(body.get("service_tier").is_none());
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported"
+                        .to_string()
+                ),
+            }]
         );
     }
 
@@ -5897,21 +6168,28 @@ mod tests {
         model_id: &str,
         provider_options: ProviderOptions,
     ) -> JsonValue {
+        openai_chat_captured_body_and_warnings_with_options(model_id, |options| {
+            options.with_provider_options(provider_options)
+        })
+        .0
+    }
+
+    fn openai_chat_captured_body_and_warnings_with_options(
+        model_id: &str,
+        configure: impl FnOnce(LanguageModelCallOptions) -> LanguageModelCallOptions,
+    ) -> (JsonValue, Vec<Warning>) {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let provider = openai_chat_test_provider(Arc::clone(&captured_requests));
 
-        let _result = poll_ready(
-            provider.chat(model_id).do_generate(
-                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                        LanguageModelTextPart::new("Hello"),
-                    )]),
-                )])
-                .with_provider_options(provider_options),
-            ),
-        );
+        let result = poll_ready(provider.chat(model_id).do_generate(configure(
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )]),
+            )]),
+        )));
 
-        captured_json_body(&captured_requests)
+        (captured_json_body(&captured_requests), result.warnings)
     }
 
     fn openai_chat_test_provider(
