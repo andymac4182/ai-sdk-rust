@@ -452,17 +452,27 @@ pub fn is_teams_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (2) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern, 2 upstream
+    //! `index.test.ts` cases are enumerated as js-only-documented:
     //!
-    //! - `should expose protected members and methods to subclasses`:
-    //!   TypeScript-class-`protected` access modifier check. Rust
-    //!   uses `pub(crate)` visibility + trait composition rather
-    //!   than class inheritance — the subclass-protected-leak test
-    //!   is unrepresentable by construction.
+    //! - `describe("subclass extensibility") > should expose protected
+    //!   members and methods to subclasses`: TypeScript-class-`protected`
+    //!   access modifier check. Rust uses `pub(crate)` visibility +
+    //!   trait composition rather than class inheritance — the
+    //!   subclass-protected-leak test is unrepresentable by construction.
+    //!
+    //! - `describe("ESM compatibility") > all subpath imports resolve in
+    //!   Node.js ESM (no bare directory imports)`: spawns a real
+    //!   `node --input-type=module` subprocess and checks that every
+    //!   non-relative `from "<pkg>"` import in `index.ts` resolves
+    //!   under Node.js ESM rules (no bare directory imports without
+    //!   an explicit `/index.js` suffix). The Rust port has no
+    //!   equivalent constraint — the module system is statically
+    //!   resolved at compile time via Cargo + `mod` declarations.
+    //!   Adapter-teams is the only upstream adapter that has this
+    //!   test (slice 414 audited cross-package).
     use super::*;
     use futures_executor::block_on;
 
