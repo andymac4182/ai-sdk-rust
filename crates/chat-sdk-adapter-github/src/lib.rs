@@ -44,25 +44,61 @@ pub const THREAD_ID_PREFIX: &str = "github:";
 /// `const DEFAULT_API_BASE = "https://api.github.com"`.
 pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 
+/// GitHub App credentials. 1:1 with upstream
+/// `{ appId, privateKey, installationId? }` triple on
+/// `GithubAdapterOptions`.
+#[derive(Debug, Clone)]
+pub struct GithubAppCredentials {
+    pub app_id: String,
+    pub private_key: String,
+    /// `Some(id)` pins this app to a single tenant; `None` enables
+    /// multi-tenant mode (the adapter resolves `installationId` per
+    /// webhook via the app credentials).
+    pub installation_id: Option<u64>,
+}
+
+/// GitHub authentication method. 1:1 with upstream's
+/// `(token | app + installationId?)` discriminated union.
+#[derive(Debug, Clone)]
+pub enum GithubAuth {
+    /// Personal access token or installation token.
+    Token(String),
+    /// GitHub App auth (single-tenant when `installation_id` is set,
+    /// multi-tenant otherwise).
+    App(GithubAppCredentials),
+}
+
 /// Options for [`GithubAdapter::new`]. 1:1 with upstream
 /// `interface GithubAdapterOptions`.
 #[derive(Debug, Clone)]
 pub struct GithubAdapterOptions {
-    /// GitHub personal access token (PAT) or installation token.
-    pub token: String,
+    /// Authentication credentials.
+    pub auth: GithubAuth,
     /// Optional API base URL override (defaults to
     /// [`DEFAULT_API_BASE`]). Used by GitHub Enterprise installations
     /// and tests.
     pub api_base: Option<String>,
+    /// Optional webhook signing secret (used by
+    /// [`webhook::verify_github_signature`]).
+    pub webhook_secret: Option<String>,
+    /// Display name used as the bot identity.
+    pub user_name: Option<String>,
+    /// Numeric user id for self-mention detection. Stored as a
+    /// string to match upstream's `botUserId: string` shape (it
+    /// accepts a number config and stringifies on assignment).
+    pub bot_user_id: Option<String>,
 }
 
 impl GithubAdapterOptions {
-    /// Construct options with a token; base URL defaults to
-    /// [`DEFAULT_API_BASE`].
+    /// Construct options with a personal access token; base URL
+    /// defaults to [`DEFAULT_API_BASE`].
     pub fn new(token: impl Into<String>) -> Self {
         Self {
-            token: token.into(),
+            auth: GithubAuth::Token(token.into()),
             api_base: None,
+            webhook_secret: None,
+            user_name: None,
+            bot_user_id: None,
         }
     }
 
@@ -75,6 +111,28 @@ impl GithubAdapterOptions {
     /// Effective API base URL with default applied.
     pub fn effective_api_base(&self) -> &str {
         self.api_base.as_deref().unwrap_or(DEFAULT_API_BASE)
+    }
+
+    /// Borrow the auth token when configured with one. Returns
+    /// `None` for App-based auth.
+    pub fn token(&self) -> Option<&str> {
+        match &self.auth {
+            GithubAuth::Token(t) => Some(t.as_str()),
+            GithubAuth::App(_) => None,
+        }
+    }
+
+    /// Whether the adapter is in multi-tenant mode (App auth with
+    /// no pinned `installation_id`). 1:1 with upstream's
+    /// `readonly isMultiTenant: boolean`.
+    pub fn is_multi_tenant(&self) -> bool {
+        matches!(
+            &self.auth,
+            GithubAuth::App(GithubAppCredentials {
+                installation_id: None,
+                ..
+            })
+        )
     }
 }
 
@@ -89,12 +147,30 @@ pub struct GithubAdapter {
 }
 
 impl GithubAdapter {
-    /// 1:1 port of upstream `new GithubAdapter({ token, apiBase? })`.
+    /// 1:1 port of upstream `new GithubAdapter({ token | (appId +
+    /// privateKey + installationId?), webhookSecret?, userName?,
+    /// botUserId?, apiBase? })`.
     pub fn new(options: GithubAdapterOptions) -> Self {
         Self {
             options,
             http: chat_sdk_adapter_shared::runtime::default_http_client(),
         }
+    }
+
+    /// 1:1 with upstream `readonly isMultiTenant: boolean` —
+    /// `true` when App-based auth has no pinned `installation_id`.
+    pub fn is_multi_tenant(&self) -> bool {
+        self.options.is_multi_tenant()
+    }
+
+    /// 1:1 with upstream `readonly userName?: string`.
+    pub fn user_name(&self) -> Option<&str> {
+        self.options.user_name.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly botUserId?: string`.
+    pub fn bot_user_id(&self) -> Option<&str> {
+        self.options.bot_user_id.as_deref()
     }
 
     /// Override the HTTP client (mostly useful for tests).
@@ -106,9 +182,16 @@ impl GithubAdapter {
         self
     }
 
-    /// Read the auth token.
+    /// Read the auth token (when configured with `GithubAuth::Token`).
+    /// Returns the empty string for App-based auth — callers needing
+    /// the credentials should match on `auth()` directly.
     pub fn token(&self) -> &str {
-        &self.options.token
+        self.options.token().unwrap_or("")
+    }
+
+    /// Borrow the configured authentication credentials.
+    pub fn auth(&self) -> &GithubAuth {
+        &self.options.auth
     }
 
     /// Effective API base URL.
@@ -519,7 +602,7 @@ mod tests {
     #[test]
     fn options_new_stores_token_and_defaults_api_base() {
         let opts = GithubAdapterOptions::new("ghp_xxx");
-        assert_eq!(opts.token, "ghp_xxx");
+        assert_eq!(opts.token(), Some("ghp_xxx"));
         assert_eq!(opts.effective_api_base(), DEFAULT_API_BASE);
     }
 
@@ -837,5 +920,85 @@ mod tests {
         assert_eq!(decoded.repo, "next.js");
         let decoded = decode_thread_id("github:vercel/chat-sdk-rust:1").unwrap();
         assert_eq!(decoded.repo, "chat-sdk-rust");
+    }
+
+    // ---------- constructor describe block (5 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("constructor")`.
+    // Tests construct the adapter via the various auth shapes and
+    // assert `name`/`userName`/`isMultiTenant`/`botUserId` getters.
+
+    #[test]
+    fn constructor_creates_adapter_with_pat_config() {
+        let opts = GithubAdapterOptions {
+            auth: GithubAuth::Token("ghp_abc".to_string()),
+            api_base: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("bot".to_string()),
+            bot_user_id: None,
+        };
+        let a = GithubAdapter::new(opts);
+        assert_eq!(a.name(), "github");
+        assert_eq!(a.user_name(), Some("bot"));
+        assert!(!a.is_multi_tenant());
+    }
+
+    #[test]
+    fn constructor_creates_adapter_with_app_plus_installation_id_single_tenant() {
+        let opts = GithubAdapterOptions {
+            auth: GithubAuth::App(GithubAppCredentials {
+                app_id: "12345".to_string(),
+                private_key:
+                    "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                        .to_string(),
+                installation_id: Some(99),
+            }),
+            api_base: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("my-bot[bot]".to_string()),
+            bot_user_id: None,
+        };
+        let a = GithubAdapter::new(opts);
+        assert!(!a.is_multi_tenant());
+    }
+
+    #[test]
+    fn constructor_creates_adapter_in_multi_tenant_mode_when_app_without_installation_id() {
+        let opts = GithubAdapterOptions {
+            auth: GithubAuth::App(GithubAppCredentials {
+                app_id: "12345".to_string(),
+                private_key:
+                    "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                        .to_string(),
+                installation_id: None,
+            }),
+            api_base: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("my-bot[bot]".to_string()),
+            bot_user_id: None,
+        };
+        let a = GithubAdapter::new(opts);
+        assert!(a.is_multi_tenant());
+    }
+
+    #[test]
+    fn constructor_sets_bot_user_id_when_provided_in_config() {
+        // Upstream stores numeric `botUserId` config as a string;
+        // the Rust port models it as `Option<String>` directly.
+        let opts = GithubAdapterOptions {
+            auth: GithubAuth::Token("ghp_abc".to_string()),
+            api_base: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("bot".to_string()),
+            bot_user_id: Some("42".to_string()),
+        };
+        let a = GithubAdapter::new(opts);
+        assert_eq!(a.bot_user_id(), Some("42"));
+    }
+
+    #[test]
+    fn constructor_returns_none_bot_user_id_when_not_provided() {
+        let opts = GithubAdapterOptions::new("ghp_abc");
+        let a = GithubAdapter::new(opts);
+        assert!(a.bot_user_id().is_none());
     }
 }
