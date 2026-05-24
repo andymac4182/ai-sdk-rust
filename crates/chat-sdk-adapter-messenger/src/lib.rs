@@ -225,6 +225,19 @@ impl Adapter for MessengerAdapter {
         ADAPTER_NAME
     }
 
+    /// 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`.
+    /// Messenger has no separate channel id (every thread is a 1:1
+    /// conversation) — returns the thread id unchanged.
+    fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        Some(self.channel_id_from_thread_id(thread_id))
+    }
+
+    /// 1:1 with upstream `adapter.isDM(threadId)`. Messenger is
+    /// always a DM.
+    fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        Some(self.is_dm(thread_id))
+    }
+
     /// Post a text message via the Messenger Send API. 1:1 with
     /// upstream's `adapter.postMessage`:
     ///

@@ -294,6 +294,19 @@ impl Adapter for GithubAdapter {
         ADAPTER_NAME
     }
 
+    /// 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`.
+    /// Delegates to the inherent
+    /// [`GithubAdapter::channel_id_from_thread_id`].
+    fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        self.channel_id_from_thread_id(thread_id)
+    }
+
+    /// 1:1 with upstream `adapter.isDM(threadId)`. GitHub issues and
+    /// PRs are never DMs — returns `Some(false)`.
+    fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        Some(self.is_dm(thread_id))
+    }
+
     /// Post a comment on a GitHub issue or PR via the REST API.
     /// 1:1 with upstream's `adapter.postMessage`:
     ///
