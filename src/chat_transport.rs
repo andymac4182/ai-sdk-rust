@@ -3500,8 +3500,7 @@ mod tests {
         assert_eq!(chat.status(), ChatStatus::Ready);
     }
 
-    #[test]
-    fn chat_should_not_submit_message_when_tool_output_is_added_without_follow_up() {
+    fn assert_chat_tool_output_does_not_submit_without_follow_up() {
         let transport = RecordingChatTransport::new([
             UiMessageChunk::start_with_message_id("assistant-1"),
             UiMessageChunk::start_step(),
@@ -3546,6 +3545,16 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn chat_should_not_submit_message_when_tool_output_is_added_without_follow_up() {
+        assert_chat_tool_output_does_not_submit_without_follow_up();
+    }
+
+    #[test]
+    fn chat_should_not_send_message_when_send_automatically_when_returns_false_via_promise() {
+        assert_chat_tool_output_does_not_submit_without_follow_up();
     }
 
     #[test]
