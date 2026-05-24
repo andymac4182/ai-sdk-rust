@@ -1091,3 +1091,107 @@ in `crates/chat-sdk-adapter-discord/src/lib.rs`).
 This pattern unblocks the env-var-resolution describe blocks for
 Telegram, Messenger, WhatsApp, Linear, GitHub, GChat (and any
 future adapters with `process.env.PREFIX_*` resolution).
+
+## Optional-adapter-method port pattern (added slice 355)
+
+Upstream's `Adapter` interface uses TypeScript's `?` modifier on
+methods that an adapter may or may not implement (e.g. `openDM?`,
+`postEphemeral?`, `postChannelMessage?`, `isDM?`,
+`channelIdFromThreadId?`, `getUser?`, `fetchChannelInfo?`,
+`onThreadSubscribe?`, `parseMessage?`, `postObject?`). Callers
+detect the missing-method case via `if (adapter.method)` and
+choose a fallback branch.
+
+Rust traits cannot mark methods optional. The canonical port:
+
+1. Add the method to the `Adapter` trait with a default
+   implementation that returns
+   `Err(AdapterError::Unsupported("<method_name>"))`.
+2. In the dispatcher (Chat::*, Thread::*, Channel::*) that
+   would call this method, match on the result and treat the
+   `Unsupported` variant the same way upstream treats a missing
+   method (fallback, return `Ok(None)`, etc.):
+
+```rust
+match self.adapter.optional_method(args).await {
+    Ok(v) => return Ok(Some(v)),
+    Err(AdapterError::Unsupported(_)) => {} // fall through to fallback
+    Err(other) => return Err(other),
+}
+// ... fallback branch
+```
+
+3. Adapters that natively support the method override the
+   default with their real impl. Adapters that don't simply
+   don't override (the default returns Unsupported).
+4. Test the dispatcher by injecting a test adapter that toggles
+   `Unsupported`-vs-supported via a boolean flag, reproducing
+   upstream's `mockAdapter.method = undefined` mutation
+   pattern. Example test adapter shape:
+
+```rust
+struct TestAdapter {
+    supports_x: bool,
+    supports_y: bool,
+}
+
+#[async_trait::async_trait]
+impl Adapter for TestAdapter {
+    async fn x(&self, ...) -> AdapterResult<X> {
+        if !self.supports_x { return Err(AdapterError::Unsupported("x")); }
+        // real impl ...
+    }
+}
+```
+
+For predicate-style optional methods that upstream returns
+`boolean` rather than throwing (e.g. `isDM?`,
+`channelIdFromThreadId?`), use `Option<T>` return types instead
+of `Result<T, AdapterError>` — `None` is the
+"not-implemented-by-this-adapter" signal.
+
+Reference ports:
+- `Thread::post_ephemeral` (slice 354) — `Adapter::post_ephemeral`
+  with `Unsupported` fallback to `open_dm + post_message`.
+- `Thread::post_object` — `Adapter::post_object` with
+  `Unsupported` fallback to `post_message`.
+- `Channel::post` — `Adapter::post_channel_message` with
+  `Unsupported` fallback to `post_message`.
+- `Adapter::is_dm` returning `Option<bool>` — `None` for
+  adapters that don't model channel/DM separation.
+
+**Do not** introduce a separate `supports_method() -> bool` trait
+method as a workaround. The `Unsupported`-sentinel pattern
+already encodes that question and matches upstream's runtime
+detection 1:1.
+
+## Author-overload sibling-method pattern (added slice 348)
+
+Upstream signatures of the form `method(user: string | Author, ...)`
+branch on `typeof user === "string" ? user : user.userId` at
+runtime. The canonical port adds two Rust methods rather than
+a `Union<&str, &Author>` or `Into<UserKey>` trait:
+
+```rust
+impl Chat {
+    pub async fn open_dm(&self, user_id: &str) -> Result<Thread, OpenDmError> {
+        // ... real impl
+    }
+    pub async fn open_dm_for_author(&self, author: &Author) -> Result<Thread, OpenDmError> {
+        self.open_dm(&author.user_id).await
+    }
+}
+```
+
+Rationale: simpler API surface, no trait-bound complexity, no
+need for `From<&Author> for UserKey`-style impls, and each
+method has an unambiguous signature for IDE assistance. The
+upstream-mapped describe blocks port as two test cases
+exercising the two sibling methods (the upstream "should accept
+Author object" case maps to the `_for_author` variant test).
+
+Reference ports:
+- `Chat::open_dm` + `Chat::open_dm_for_author` (slice 348)
+- `Chat::get_user` + `Chat::get_user_for_author` (slice 348)
+- `Thread::post_ephemeral` + `Thread::post_ephemeral_for_author`
+  (slice 354)
