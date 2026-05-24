@@ -213,6 +213,15 @@ pub type MentionHandler = Arc<
     dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
 >;
 
+/// 1:1 with upstream `SubscribedMessageHandler<TState>` — invoked for
+/// every message in a thread previously subscribed via
+/// `thread.subscribe()`. Subscribed handlers take priority over
+/// mention handlers; in a subscribed thread, even an `@bot` mention
+/// fires the subscribed handler (not the mention handler).
+pub type SubscribedMessageHandler = Arc<
+    dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
+>;
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -220,6 +229,7 @@ pub type MentionHandler = Arc<
 #[derive(Clone, Default)]
 struct ChatHandlers {
     mention: Arc<std::sync::Mutex<Vec<MentionHandler>>>,
+    subscribed: Arc<std::sync::Mutex<Vec<SubscribedMessageHandler>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -428,6 +438,24 @@ impl Chat {
         self.handlers.mention.lock().unwrap().push(Arc::new(handler));
     }
 
+    /// 1:1 port of upstream `chat.onSubscribedMessage(handler)`.
+    /// Registers a handler that fires for every message in a thread
+    /// previously subscribed via `thread.subscribe()`. Subscribed
+    /// handlers take priority over mention handlers — a thread that
+    /// is subscribed routes to `onSubscribedMessage`, NOT to
+    /// `onNewMention`, even when the message contains an `@bot`
+    /// mention.
+    pub fn on_subscribed_message<F>(&self, handler: F)
+    where
+        F: Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
+    {
+        self.handlers
+            .subscribed
+            .lock()
+            .unwrap()
+            .push(Arc::new(handler));
+    }
+
     /// 1:1 port of upstream `chat.transcripts` getter. Panics when
     /// transcripts were not configured at construction (matches
     /// upstream's `throw new Error("chat.transcripts is not
@@ -583,34 +611,43 @@ impl Chat {
             }
         }
 
-        // Handler dispatch (slice 415, Phase A: onNewMention only).
-        // Snapshot the handler list under a short lock then drop the
-        // guard before awaiting so handler invocations don't hold the
-        // registration mutex. Multi-handler dispatch is sequential to
-        // match upstream's `await` loop semantics.
+        // Handler dispatch (slices 415, 416). Snapshot each handler
+        // list under a short lock then drop the guard before awaiting
+        // so handler invocations don't hold the registration mutex.
+        // Multi-handler dispatch is sequential to match upstream's
+        // `await` loop semantics.
         //
-        // Routing for Phase A: dispatch to mention handlers when
-        // `message.is_mention == Some(true)`. The upstream `is_mention`
-        // computation (walking the formatted AST for `<@botUserId>`)
-        // is deferred — Phase A trusts whatever the caller (or
-        // adapter) set on the message.
+        // Routing priority (Phase A+B scope):
+        // 1. If the thread is subscribed → dispatch to
+        //    `onSubscribedMessage` handlers and SKIP mention dispatch
+        //    (subscribed handlers absorb mentions per upstream).
+        // 2. Else if `message.is_mention == Some(true)` → dispatch
+        //    to `onNewMention` handlers.
         //
-        // Full routing (subscribed → onSubscribedMessage; DM →
-        // onDirectMessage; isMention → onNewMention; pattern →
-        // onNewMessage; fall-through behaviors) lands in Phase B.
-        if message.is_mention == Some(true) {
-            let adapter_arc = self
-                .adapters
-                .get(adapter.name())
-                .cloned()
-                // Fallback: if the dispatching adapter isn't in the
-                // registered map (the upstream tests sometimes pass a
-                // standalone mock adapter), the Thread handle can't
-                // be constructed. Skip mention dispatch in that case
-                // — the message still counts as dispatched per the
-                // `Ok(true)` return contract.
-                ;
-            if let Some(adapter_arc) = adapter_arc {
+        // Full routing (DM → onDirectMessage; pattern → onNewMessage;
+        // detectMention walker computing is_mention; lock/concurrency
+        // dispatch) lands in Phases C-E.
+        //
+        // Skip dispatch entirely if the dispatching adapter isn't in
+        // the registered map (upstream tests sometimes pass a
+        // standalone mock); the message still counts as dispatched
+        // per the `Ok(true)` return contract.
+        let adapter_arc = self.adapters.get(adapter.name()).cloned();
+        if let Some(adapter_arc) = adapter_arc {
+            let is_subscribed = self
+                .state
+                .is_subscribed(_thread_id)
+                .await
+                .unwrap_or(false);
+
+            if is_subscribed {
+                let handlers_snapshot: Vec<SubscribedMessageHandler> =
+                    self.handlers.subscribed.lock().unwrap().clone();
+                for handler in handlers_snapshot {
+                    let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                    handler(thread, message.clone()).await;
+                }
+            } else if message.is_mention == Some(true) {
                 let handlers_snapshot: Vec<MentionHandler> =
                     self.handlers.mention.lock().unwrap().clone();
                 for handler in handlers_snapshot {
@@ -2274,6 +2311,167 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed.lock().unwrap().as_deref(), Some("slack"));
+    }
+
+    // ---------- describe("onNewMention behavior in subscribed threads") — slice 416 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("onNewMention
+    // behavior in subscribed threads")`. Phase B (slice 416) adds the
+    // `Chat::on_subscribed_message` registration + the dispatcher's
+    // subscribed-thread priority branch: subscribed threads route to
+    // `onSubscribedMessage`, NOT to `onNewMention`, even when the
+    // message contains a bot mention. State subscription is read via
+    // `StateAdapter::is_subscribed`.
+    //
+    // Construction of the `is_subscribed=true` state is via direct
+    // `state.subscribe(thread_id)` calls (the same path `thread.subscribe()`
+    // uses). The InMemoryState test mock relies on the StateAdapter
+    // trait's default `subscribe/is_subscribed` impl (set/get-backed).
+
+    #[test]
+    fn on_subscribed_message_fires_in_subscribed_threads_even_when_mentioned() {
+        // 1:1 with upstream "should NOT call onNewMention for
+        // mentions in subscribed threads". Both handlers registered;
+        // thread subscribed; message has is_mention=true; only
+        // subscribed handler should fire.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let subscribed_calls = Arc::new(AtomicUsize::new(0));
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let s = subscribed_calls.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let c = s.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        // Subscribe the thread BEFORE dispatching the message.
+        futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_new_mention_only_fires_in_unsubscribed_threads_when_mentioned() {
+        // 1:1 with upstream "should call onNewMention only for
+        // mentions in unsubscribed threads". Both handlers
+        // registered; thread NOT subscribed; message has
+        // is_mention=true; only mention handler should fire.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let subscribed_calls = Arc::new(AtomicUsize::new(0));
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let s = subscribed_calls.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let c = s.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        // No state.subscribe() call — thread is unsubscribed.
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_subscribed_message_fires_for_non_mention_messages_in_subscribed_threads() {
+        // Additive: subscribed threads fire onSubscribedMessage for
+        // EVERY message, not just mentions. Verifies a plain message
+        // (is_mention=false) in a subscribed thread still dispatches.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let subscribed_calls = Arc::new(AtomicUsize::new(0));
+        let s = subscribed_calls.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let c = s.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_subscribed_message_does_not_fire_for_unsubscribed_threads() {
+        // Additive: without a state.subscribe() call, the subscribed
+        // handler must not fire even for messages that look subscribed
+        // (no mention, no other signals).
+        let (chat, adapter) = chat_with_in_memory_state();
+        let subscribed_calls = Arc::new(AtomicUsize::new(0));
+        let s = subscribed_calls.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let c = s.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_subscribed_message_invokes_all_registered_handlers_in_order() {
+        // Additive: like the mention multi-handler ordering test —
+        // subscribed handlers fire in registration order via
+        // sequential awaits.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
     #[test]
