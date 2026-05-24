@@ -3209,6 +3209,43 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_object_stream_invokes_on_error_callback_with_error() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "test error"}),
+                )),
+            ]));
+        let callback_errors = Arc::new(Mutex::new(Vec::new()));
+        let errors_for_callback = Arc::clone(&callback_errors);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_error(move |event| {
+                    let errors = Arc::clone(&errors_for_callback);
+                    async move {
+                        errors
+                            .lock()
+                            .expect("callback errors lock")
+                            .push(event.error);
+                    }
+                }),
+        ));
+
+        assert!(result.partial_object_stream.is_empty());
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.error, Some(json!({"message": "test error"})));
+        assert_eq!(
+            callback_errors
+                .lock()
+                .expect("callback errors lock")
+                .as_slice(),
+            [json!({"message": "test error"})]
+        );
+    }
+
+    #[test]
     fn stream_object_retains_error_parts() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
