@@ -550,6 +550,11 @@ pub struct Chat {
     /// (5 minutes); callers can lower or raise it via
     /// [`ChatOptions::dedupe_ttl_ms`] (slice 426).
     dedupe_ttl_ms: u64,
+    /// Effective thread-history config. 1:1 with upstream
+    /// `config.threadHistory ?? config.messageHistory` precedence.
+    /// `None` means use the [`crate::thread_history::ThreadHistoryConfig::default`]
+    /// (DEFAULT_MAX_MESSAGES + DEFAULT_TTL_MS) when caching applies.
+    thread_history: Option<crate::thread_history::ThreadHistoryConfig>,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -618,6 +623,14 @@ pub struct ChatOptions {
     /// `ChatConfig.dedupeTtlMs`. When `None`, uses
     /// [`DEDUPE_TTL_MS`] (5 minutes).
     pub dedupe_ttl_ms: Option<u64>,
+    /// Thread-history caching config (preferred). 1:1 with
+    /// upstream `ChatConfig.threadHistory`. Used when an adapter
+    /// opts in via [`crate::types::Adapter::persist_thread_history`].
+    pub thread_history: Option<crate::thread_history::ThreadHistoryConfig>,
+    /// Deprecated alias for [`Self::thread_history`]. 1:1 with
+    /// upstream `ChatConfig.messageHistory`. Honored only when
+    /// `thread_history` is `None`.
+    pub message_history: Option<crate::thread_history::ThreadHistoryConfig>,
 }
 
 impl Default for ChatOptions {
@@ -631,6 +644,8 @@ impl Default for ChatOptions {
             identity: None,
             user_name: None,
             dedupe_ttl_ms: None,
+            thread_history: None,
+            message_history: None,
         }
     }
 }
@@ -727,6 +742,11 @@ impl Chat {
             handlers: ChatHandlers::default(),
             user_name: options.user_name,
             dedupe_ttl_ms: options.dedupe_ttl_ms.unwrap_or(DEDUPE_TTL_MS),
+            // 1:1 with upstream `config.threadHistory ??
+            // config.messageHistory` precedence — threadHistory
+            // takes precedence; messageHistory is the deprecated
+            // alias.
+            thread_history: options.thread_history.or(options.message_history),
         })
     }
 
@@ -1474,6 +1494,32 @@ impl Chat {
         let prior = message.is_mention.unwrap_or(false);
         let computed = self.detect_mention(adapter, message);
         message.is_mention = Some(prior || computed);
+
+        // 1:1 with upstream's persistThreadHistory branch
+        // (slice 430): when the dispatching adapter opts in via
+        // `persist_thread_history()` or the deprecated
+        // `persist_message_history()`, append the message to the
+        // `msg-history:<thread_id>` list before handlers run.
+        // Caps come from `Chat.thread_history` (resolved from
+        // ChatOptions.thread_history ?? message_history ?? default).
+        if adapter.persist_thread_history() || adapter.persist_message_history() {
+            let history_key = crate::thread_history::history_key(_thread_id);
+            let cfg = self
+                .thread_history
+                .unwrap_or_default();
+            let serialized = serde_json::to_value(message.to_serialized())
+                .unwrap_or(serde_json::Value::Null);
+            // Best-effort write; failures don't block dispatch.
+            let _ = self
+                .state
+                .append_to_list(
+                    &history_key,
+                    serialized,
+                    Some(cfg.max_messages_or_default()),
+                    Some(cfg.ttl_ms_or_default()),
+                )
+                .await;
+        }
 
         // Handler dispatch (slices 415, 416, 417, 418). Snapshot
         // each handler list under a short lock then drop the guard
@@ -2396,6 +2442,8 @@ mod tests {
             identity: None,
             user_name: None,
             dedupe_ttl_ms: None,
+            thread_history: None,
+            message_history: None,
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2410,6 +2458,8 @@ mod tests {
             identity: None,
             user_name: None,
             dedupe_ttl_ms: None,
+            thread_history: None,
+            message_history: None,
         });
         assert!(result.is_ok());
     }
@@ -2423,6 +2473,8 @@ mod tests {
             identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
             user_name: None,
             dedupe_ttl_ms: None,
+            thread_history: None,
+            message_history: None,
         });
         assert!(result.is_ok());
     }
@@ -2437,6 +2489,8 @@ mod tests {
             identity: None,
             user_name: None,
             dedupe_ttl_ms: None,
+            thread_history: None,
+            message_history: None,
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -2452,6 +2506,8 @@ mod tests {
             identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
             user_name: None,
             dedupe_ttl_ms: None,
+            thread_history: None,
+            message_history: None,
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -5155,6 +5211,256 @@ mod tests {
             .find(|(k, _)| k.starts_with(MODAL_CONTEXT_KEY_PREFIX))
             .expect("modal-context entry should be stored");
         assert_eq!(modal_context_entry.1["thread"], serde_json::Value::Null);
+    }
+
+    // ---------- describe("persistThreadHistory") — slice 430 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("persistThreadHistory")`.
+    // Adds Adapter::persist_thread_history() + persist_message_history()
+    // (deprecated) optional accessors + ChatOptions.thread_history /
+    // message_history config + dispatcher branch that appends to
+    // `msg-history:<thread_id>` via state.append_to_list when the
+    // adapter opts in.
+
+    #[derive(Debug, Default)]
+    struct HistoryAdapter {
+        persist_thread: bool,
+        persist_message: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for HistoryAdapter {
+        fn name(&self) -> &str {
+            "whatsapp"
+        }
+        fn persist_thread_history(&self) -> bool {
+            self.persist_thread
+        }
+        fn persist_message_history(&self) -> bool {
+            self.persist_message
+        }
+    }
+
+    /// State adapter that records append_to_list calls (key, value,
+    /// max_length, ttl_ms) for thread-history assertions.
+    #[derive(Debug, Default)]
+    struct HistoryRecordingState {
+        appends: Mutex<Vec<(String, serde_json::Value, Option<usize>, Option<u64>)>>,
+        cache: Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for HistoryRecordingState {
+        async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            max_length: Option<usize>,
+            ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            self.appends.lock().unwrap().push((
+                key.to_string(),
+                value.clone(),
+                max_length,
+                ttl_ms,
+            ));
+            self.cache
+                .lock()
+                .unwrap()
+                .entry(key.to_string())
+                .or_default()
+                .push(value);
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(self.cache.lock().unwrap().get(key).cloned().unwrap_or_default())
+        }
+    }
+
+    #[test]
+    fn persist_thread_history_caches_when_adapter_sets_persist_thread_history_flag() {
+        // 1:1 with upstream "caches incoming messages when adapter
+        // sets persistThreadHistory".
+        let state = Arc::new(HistoryRecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(HistoryAdapter {
+            persist_thread: true,
+            persist_message: false,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
+        )
+        .unwrap();
+        let appends = state.appends.lock().unwrap();
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].0, "msg-history:whatsapp:phone:user1");
+        assert_eq!(appends[0].1["id"], serde_json::json!("msg-1"));
+    }
+
+    #[test]
+    fn persist_thread_history_caches_when_adapter_sets_deprecated_persist_message_history_flag() {
+        // 1:1 with upstream "caches incoming messages when adapter
+        // sets the deprecated persistMessageHistory flag".
+        let state = Arc::new(HistoryRecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(HistoryAdapter {
+            persist_thread: false,
+            persist_message: true, // deprecated alias still opts in
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
+        )
+        .unwrap();
+        let appends = state.appends.lock().unwrap();
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].0, "msg-history:whatsapp:phone:user1");
+        assert_eq!(appends[0].1["id"], serde_json::json!("msg-1"));
+    }
+
+    #[test]
+    fn persist_thread_history_does_not_cache_when_adapter_sets_neither_flag() {
+        // 1:1 with upstream "does not cache when adapter sets
+        // neither flag". The dispatcher must not invoke
+        // append_to_list when the adapter doesn't opt in.
+        let state = Arc::new(HistoryRecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-2", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert!(state.appends.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn persist_thread_history_honors_message_history_when_thread_history_is_not_set() {
+        // 1:1 with upstream "honors top-level config.messageHistory
+        // (deprecated alias) when threadHistory is not set". The
+        // dispatcher passes the message_history caps to
+        // append_to_list (5 / 12_345 in this test).
+        let state = Arc::new(HistoryRecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(HistoryAdapter {
+            persist_thread: true,
+            persist_message: false,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            message_history: Some(crate::thread_history::ThreadHistoryConfig {
+                max_messages: Some(5),
+                ttl_ms: Some(12_345),
+            }),
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
+        )
+        .unwrap();
+        let appends = state.appends.lock().unwrap();
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].2, Some(5));
+        assert_eq!(appends[0].3, Some(12_345));
+    }
+
+    #[test]
+    fn persist_thread_history_takes_precedence_over_message_history_when_both_set() {
+        // 1:1 with upstream "threadHistory takes precedence when
+        // both threadHistory and messageHistory are set".
+        let state = Arc::new(HistoryRecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(HistoryAdapter {
+            persist_thread: true,
+            persist_message: false,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            thread_history: Some(crate::thread_history::ThreadHistoryConfig {
+                max_messages: Some(5),
+                ttl_ms: Some(1_000),
+            }),
+            message_history: Some(crate::thread_history::ThreadHistoryConfig {
+                max_messages: Some(999),
+                ttl_ms: Some(999_999),
+            }),
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
+        )
+        .unwrap();
+        let appends = state.appends.lock().unwrap();
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].2, Some(5));
+        assert_eq!(appends[0].3, Some(1_000));
+    }
+
+    #[test]
+    fn persist_thread_history_persists_when_both_adapter_flags_set() {
+        // 1:1 with upstream "persists when both
+        // persistThreadHistory and persistMessageHistory are set on
+        // the adapter". Either flag (or both) opts in; the
+        // dispatcher fires append_to_list exactly once.
+        let state = Arc::new(HistoryRecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(HistoryAdapter {
+            persist_thread: true,
+            persist_message: true,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
+        )
+        .unwrap();
+        let appends = state.appends.lock().unwrap();
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].1["id"], serde_json::json!("msg-1"));
     }
 
     #[test]

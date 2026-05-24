@@ -1344,6 +1344,24 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Whether the adapter wants per-thread message history cached
+    /// on every incoming-message dispatch. 1:1 with upstream
+    /// optional `persistThreadHistory?: boolean` (defaults to
+    /// `false`). When `true`, the dispatcher appends each
+    /// incoming message to `msg-history:<thread_id>` via
+    /// [`StateAdapter::append_to_list`] using the per-Chat
+    /// [`crate::thread_history::ThreadHistoryConfig`] caps.
+    fn persist_thread_history(&self) -> bool {
+        false
+    }
+
+    /// Deprecated alias for [`Self::persist_thread_history`]. 1:1
+    /// with upstream optional `persistMessageHistory?: boolean`.
+    /// Either flag (or both) opts the adapter in to history caching.
+    fn persist_message_history(&self) -> bool {
+        false
+    }
+
     /// Tear down any adapter-side resources (sockets, intervals, in-
     /// flight retries). 1:1 with upstream `disconnect?: () =>
     /// Promise<void>`. The default no-op makes this opt-in for
