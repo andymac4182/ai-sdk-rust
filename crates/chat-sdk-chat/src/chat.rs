@@ -541,6 +541,11 @@ pub struct Chat {
     /// instance-level value when the adapter doesn't supply one
     /// (slice 425).
     user_name: Option<String>,
+    /// Per-instance dedupe TTL. 1:1 with upstream
+    /// `ChatConfig.dedupeTtlMs`. Defaults to [`DEDUPE_TTL_MS`]
+    /// (5 minutes); callers can lower or raise it via
+    /// [`ChatOptions::dedupe_ttl_ms`] (slice 426).
+    dedupe_ttl_ms: u64,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -605,6 +610,10 @@ pub struct ChatOptions {
     /// the dispatching adapter doesn't supply `user_name()`,
     /// `detect_mention` falls back to this value.
     pub user_name: Option<String>,
+    /// Per-instance dedupe TTL override. 1:1 with upstream
+    /// `ChatConfig.dedupeTtlMs`. When `None`, uses
+    /// [`DEDUPE_TTL_MS`] (5 minutes).
+    pub dedupe_ttl_ms: Option<u64>,
 }
 
 impl Default for ChatOptions {
@@ -617,6 +626,7 @@ impl Default for ChatOptions {
             transcripts: None,
             identity: None,
             user_name: None,
+            dedupe_ttl_ms: None,
         }
     }
 }
@@ -712,6 +722,7 @@ impl Chat {
             identity: options.identity,
             handlers: ChatHandlers::default(),
             user_name: options.user_name,
+            dedupe_ttl_ms: options.dedupe_ttl_ms.unwrap_or(DEDUPE_TTL_MS),
         })
     }
 
@@ -1354,7 +1365,7 @@ impl Chat {
             .set_if_not_exists(
                 &dedupe_key,
                 serde_json::Value::Bool(true),
-                Some(DEDUPE_TTL_MS),
+                Some(self.dedupe_ttl_ms),
             )
             .await?;
         if !is_first {
@@ -2311,6 +2322,7 @@ mod tests {
             transcripts: Some(TranscriptsConfig::default()),
             identity: None,
             user_name: None,
+            dedupe_ttl_ms: None,
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2324,6 +2336,7 @@ mod tests {
             transcripts: None,
             identity: None,
             user_name: None,
+            dedupe_ttl_ms: None,
         });
         assert!(result.is_ok());
     }
@@ -2336,6 +2349,7 @@ mod tests {
             transcripts: None,
             identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
             user_name: None,
+            dedupe_ttl_ms: None,
         });
         assert!(result.is_ok());
     }
@@ -2349,6 +2363,7 @@ mod tests {
             transcripts: None,
             identity: None,
             user_name: None,
+            dedupe_ttl_ms: None,
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -2363,6 +2378,7 @@ mod tests {
             transcripts: Some(TranscriptsConfig::default()),
             identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
             user_name: None,
+            dedupe_ttl_ms: None,
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -4696,6 +4712,168 @@ mod tests {
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(msg.is_mention, Some(true));
+    }
+
+    // ---------- describe("message deduplication") — slice 426 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("message
+    // deduplication")`. Slice 415's first test already covered the
+    // "should skip duplicate messages" case. Slice 426 adds:
+    // - default dedupe TTL of 5 minutes (300_000 ms) passed to
+    //   set_if_not_exists
+    // - custom dedupe_ttl_ms via ChatOptions.dedupe_ttl_ms
+    // - atomic set_if_not_exists (no separate get + set)
+    //
+    // The 4th upstream case ("should handle concurrent duplicates
+    // atomically") is deferred — it depends on race semantics that
+    // the InMemoryState mock + block_on don't naturally simulate.
+
+    /// State adapter that records every set_if_not_exists call with
+    /// its TTL so tests can assert the dispatcher's call signature.
+    /// Always returns Ok(true) for the first call to a given key.
+    #[derive(Debug, Default)]
+    struct RecordingState {
+        set_if_not_exists_calls: Mutex<Vec<(String, Option<u64>)>>,
+        get_calls: Mutex<Vec<String>>,
+        set_calls: Mutex<Vec<(String, Option<u64>)>>,
+        seen: Mutex<std::collections::HashSet<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for RecordingState {
+        async fn get(&self, key: &str) -> StateResult<Option<serde_json::Value>> {
+            self.get_calls.lock().unwrap().push(key.to_string());
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            key: &str,
+            _value: serde_json::Value,
+            ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            self.set_calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), ttl_ms));
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+        async fn set_if_not_exists(
+            &self,
+            key: &str,
+            _value: serde_json::Value,
+            ttl_ms: Option<u64>,
+        ) -> StateResult<bool> {
+            self.set_if_not_exists_calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), ttl_ms));
+            let mut seen = self.seen.lock().unwrap();
+            if seen.contains(key) {
+                return Ok(false);
+            }
+            seen.insert(key.to_string());
+            Ok(true)
+        }
+    }
+
+    fn chat_with_recording_state() -> (Chat, Arc<RecordingState>, Arc<dyn Adapter>) {
+        let state = Arc::new(RecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        (chat, state, adapter)
+    }
+
+    #[test]
+    fn message_deduplication_uses_default_ttl_of_5_minutes() {
+        // 1:1 with upstream "should use default dedupe TTL of 5
+        // minutes". The dispatcher should pass `DEDUPE_TTL_MS`
+        // (300_000 ms) to set_if_not_exists.
+        let (chat, state, adapter) = chat_with_recording_state();
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        let calls = state.set_if_not_exists_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "dedupe:slack:msg-1");
+        assert_eq!(calls[0].1, Some(DEDUPE_TTL_MS));
+        assert_eq!(calls[0].1, Some(300_000));
+    }
+
+    #[test]
+    fn message_deduplication_uses_custom_dedupe_ttl_when_configured() {
+        // 1:1 with upstream "should use custom dedupeTtlMs when
+        // configured". The dispatcher should pass the
+        // ChatOptions.dedupe_ttl_ms value instead of the default.
+        let state = Arc::new(RecordingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            dedupe_ttl_ms: Some(60_000), // 1 minute override
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("msg-2", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        let calls = state.set_if_not_exists_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "dedupe:slack:msg-2");
+        assert_eq!(calls[0].1, Some(60_000));
+    }
+
+    #[test]
+    fn message_deduplication_uses_atomic_set_if_not_exists_not_get_plus_set() {
+        // 1:1 with upstream "should use atomic setIfNotExists for
+        // deduplication". The dispatcher must invoke
+        // `set_if_not_exists` (atomic) instead of a separate
+        // `get` + `set` pair. Verified by asserting no `get` call
+        // landed on the dedupe key.
+        let (chat, state, adapter) = chat_with_recording_state();
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(state.set_if_not_exists_calls.lock().unwrap().len(), 1);
+        // No get call should target the dedupe key.
+        let get_calls = state.get_calls.lock().unwrap();
+        assert!(
+            !get_calls.iter().any(|k| k.starts_with("dedupe:")),
+            "dispatcher should not call get on dedupe keys; got: {get_calls:?}"
+        );
     }
 
     #[test]
