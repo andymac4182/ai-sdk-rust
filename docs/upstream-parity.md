@@ -1433,6 +1433,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   parts, provider-executed tool-call flags are preserved alongside paired tool
   results, and assistant file base64 data, filenames, and provider options
   keep the upstream provider-facing shape.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` tool-message
+  parity added named Rust counterparts for the portable upstream
+  `prompt/convert-to-language-model-prompt.test.ts` tool-message cases:
+  `convert_to_language_model_message_tool_should_convert_basic_tool_result_message`,
+  `convert_to_language_model_message_tool_should_convert_tool_result_with_provider_metadata`,
+  and
+  `convert_to_language_model_message_tool_should_include_error_flag`.
+  Rust proves tool-role result messages preserve JSON output payloads and
+  provider options. The upstream "error flag" case currently expects the same
+  provider-facing shape as the basic result case, so the Rust counterpart
+  deliberately locks that duplicate snapshot behavior.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

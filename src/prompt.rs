@@ -2761,6 +2761,115 @@ mod tests {
     }
 
     #[test]
+    fn convert_to_language_model_message_tool_should_convert_basic_tool_result_message() {
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_convert_tool_result_with_provider_metadata() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+                )
+                .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        },
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_include_error_flag() {
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn convert_to_language_model_prompt_validation_should_pass_for_provider_executed_tools_deferred_results()
      {
         let result = convert_to_language_model_prompt(StandardizedPrompt::new(
