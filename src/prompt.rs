@@ -1925,6 +1925,141 @@ mod tests {
     }
 
     #[test]
+    fn convert_to_language_model_prompt_should_pass_through_provider_reference_for_image_parts_without_conversion()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[
+                                ("anthropic", "file-xyz789"),
+                                ("openai", "file-abc123"),
+                            ]),
+                        },
+                        "image/png",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "anthropic": "file-xyz789",
+                                    "openai": "file-abc123"
+                                }
+                            },
+                            "mediaType": "image/png"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_handle_file_parts_with_filename() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("SGVsbG8sIFdvcmxkIQ==".to_string()),
+                        },
+                        "text/plain",
+                    )
+                    .with_filename("hello.txt"),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "filename": "hello.txt",
+                            "data": {
+                                "type": "data",
+                                "data": "SGVsbG8sIFdvcmxkIQ=="
+                            },
+                            "mediaType": "text/plain"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_pass_through_provider_reference_for_file_parts_without_conversion()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[
+                                ("anthropic", "file-xyz789"),
+                                ("openai", "file-abc123"),
+                            ]),
+                        },
+                        "application/pdf",
+                    )
+                    .with_filename("doc.pdf"),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "filename": "doc.pdf",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "anthropic": "file-xyz789",
+                                    "openai": "file-abc123"
+                                }
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_to_language_model_prompt_validation_should_pass_for_provider_executed_tools_deferred_results()
      {
         let result = convert_to_language_model_prompt(StandardizedPrompt::new(

@@ -1375,6 +1375,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   Rust proves these at the provider-facing prompt boundary: supported URL file
   data remains a tagged URL part, base64 data remains a tagged data part, and
   byte data preserves the upstream `Uint8Array` payload as bytes.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` provider-reference
+  and filename parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` image/file reference and
+  filename cases:
+  `convert_to_language_model_prompt_should_pass_through_provider_reference_for_image_parts_without_conversion`,
+  `convert_to_language_model_prompt_should_handle_file_parts_with_filename`,
+  and
+  `convert_to_language_model_prompt_should_pass_through_provider_reference_for_file_parts_without_conversion`.
+  These prove provider references stay tagged reference file data for image and
+  file parts, and user-supplied filenames are preserved.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
