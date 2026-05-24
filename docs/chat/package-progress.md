@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 68.6%
-- Portable package average: 62.3%
+- Average estimated completion: 70.6%
+- Portable package average: 64.7%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -24,19 +24,19 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 630 chat tests. Phase 1.5 complete. Slice 278 closes callback-url with... |
-| `@chat-sdk/adapter-slack` | 84% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject + slice 160 edit/delete/react/typing + slice 169... |
-| `@chat-sdk/adapter-teams` | 62% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message + slice 167 edit/delete/react/typing + slice 172 errors + slice 217... |
-| `@chat-sdk/adapter-gchat` | 72% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message + slice 168 edit/delete/react/typing + slice 190 markdown converter +... |
-| `@chat-sdk/adapter-discord` | 70% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit/delete/react/typing + slice 197 webhook Ed25519 + slice... |
-| `@chat-sdk/adapter-linear` | 55% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message + slice 166 edit/delete/react/typing + slice 171 utils + slice 177 cards +... |
-| `@chat-sdk/adapter-github` | 54% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit/delete/react/typing... |
-| `@chat-sdk/adapter-messenger` | 68% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react/typing + slice 173 wire-format correction +... |
-| `@chat-sdk/adapter-telegram` | 69% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject + slice 161 edit/delete/react/typing + slice 178... |
-| `@chat-sdk/adapter-whatsapp` | 69% | In progress | adapter package | Slice 133 scaffold + slice 148 post_message + slice 164 edit/delete/react/typing + slice 179 cards + slice 189... |
-| `@chat-sdk/state-redis` | 11% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 14 tests. redis-rs wire-up... |
-| `@chat-sdk/state-ioredis` | 11% | In progress | state backend (ioredis) | Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter. 15 tests. redis-rs... |
-| `@chat-sdk/state-pg` | 11% | In progress | state backend (Postgres) | Crate scaffold (slice 142): PgStateAdapter impl StateAdapter. 13 tests. tokio-postgres/sqlx wire-up deferred. Slice... |
+| `@chat-sdk/chat` | 99% | In progress | core SDK package | chat-sdk-chat 799 colocated tests across 19 modules. Slices 354..387 add: Thread::post_ephemeral + 5 cases (slice... |
+| `@chat-sdk/adapter-slack` | 85% | In progress | adapter package | chat-sdk-adapter-slack 203 tests (slice 355 adds post_ephemeral pure helpers + 5 cases, slice 366 adds Adapter trait... |
+| `@chat-sdk/adapter-teams` | 65% | In progress | adapter package | chat-sdk-adapter-teams 107 tests (slice 365 adds channel_id_from_thread_id helper + 2 cases, slice 366 adds Adapter... |
+| `@chat-sdk/adapter-gchat` | 75% | In progress | adapter package | chat-sdk-adapter-gchat 134 tests (slice 357 adds post_ephemeral via privateMessageViewer pure helpers + 4 cases, slice... |
+| `@chat-sdk/adapter-discord` | 75% | In progress | adapter package | chat-sdk-adapter-discord 162 tests (slice 360 splits channelIdFromThreadId into 3 1:1, slice 363 adds 3... |
+| `@chat-sdk/adapter-linear` | 60% | In progress | adapter package | chat-sdk-adapter-linear 111 tests (slice 366 adds Adapter trait impls). Remaining: post_object + parseMessage +... |
+| `@chat-sdk/adapter-github` | 60% | In progress | adapter package | chat-sdk-adapter-github 106 tests (slice 368 splits bundled emojiToGitHubReaction into 16 explicit 1:1 cases, +15... |
+| `@chat-sdk/adapter-messenger` | 70% | In progress | adapter package | chat-sdk-adapter-messenger 102 tests (slice 369 adds normalize_thread_id helper, slice 370 adds Adapter::open_dm trait... |
+| `@chat-sdk/adapter-telegram` | 72% | In progress | adapter package | chat-sdk-adapter-telegram 133 tests (slice 370 adds Adapter::open_dm trait impl). Helpers: applyTelegramEntities... |
+| `@chat-sdk/adapter-whatsapp` | 70% | In progress | adapter package | chat-sdk-adapter-whatsapp 106 tests (slice 370 adds Adapter::open_dm trait impl). splitMessage 8/8, channelId+isDM,... |
+| `@chat-sdk/state-redis` | 13% | In progress | state backend (Redis) | chat-sdk-state-redis 17 tests (slice 361 adds method-existence mappings + 3 new NotConnected smoke tests). redis-rs... |
+| `@chat-sdk/state-ioredis` | 13% | In progress | state backend (ioredis) | chat-sdk-state-ioredis 18 tests (slice 362 adds method-existence mappings + 3 new NotConnected smoke tests). redis-rs... |
+| `@chat-sdk/state-pg` | 13% | In progress | state backend (Postgres) | chat-sdk-state-pg 16 tests (slice 362 adds ensureConnected mappings + 3 new NotConnected smoke tests).... |
 
 ## Not Started
 
