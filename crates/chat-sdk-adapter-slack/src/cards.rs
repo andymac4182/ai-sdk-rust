@@ -15,10 +15,11 @@ use chat_sdk_adapter_shared::card_utils::{
 };
 use chat_sdk_chat::cards::{
     ActionsChild, ActionsElement, ButtonElement, CardChild, CardElement, DividerElement,
-    FieldsElement, ImageElement, LinkButtonElement, LinkElement, SectionElement, TextElement,
-    TextStyle,
+    FieldsElement, ImageElement, LinkButtonElement, LinkElement, SectionElement, TableElement,
+    TextElement, TextStyle,
 };
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
+use chat_sdk_chat::markdown::table_element_to_ascii;
 use serde_json::{Value, json};
 
 /// Convert emoji placeholders for Slack mrkdwn (`{{emoji:wave}}` ->
@@ -38,10 +39,19 @@ fn markdown_to_mrkdwn(text: &str) -> String {
 /// { block_id?; type; [key: string]: unknown }`.
 pub type SlackBlock = Value;
 
-/// 1:1 port of upstream `cardToBlockKit(card)`. Partial: handles
-/// title / subtitle / imageUrl / Text / Image / Divider / Link
-/// children. Action Row + Fields + Section + Table + Select /
-/// RadioSelect branches are deferred to follow-up slices.
+/// Per-card renderer state. 1:1 with upstream's inline `state = {
+/// usedNativeTable: false }` flag — Slack allows at most one
+/// `table` block per message, so the second and subsequent tables
+/// must fall back to ASCII inside a code block.
+#[derive(Debug, Default, Clone, Copy)]
+struct RenderState {
+    used_native_table: bool,
+}
+
+/// 1:1 port of upstream `cardToBlockKit(card)`. Handles title /
+/// subtitle / imageUrl / Text / Image / Divider / Actions / Section
+/// / Fields / Link / Table children. Select / RadioSelect children
+/// inside Actions are deferred to a follow-up slice.
 pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
     let mut blocks: Vec<SlackBlock> = Vec::new();
 
@@ -78,28 +88,28 @@ pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
         }));
     }
 
+    let mut state = RenderState::default();
     for child in &card.children {
-        blocks.extend(convert_child_to_blocks(child));
+        blocks.extend(convert_child_to_blocks(child, &mut state));
     }
 
     blocks
 }
 
-/// 1:1 port of upstream `convertChildToBlocks(child, state)` — the
-/// supported-child subset. Returns an empty Vec for any child whose
-/// renderer branch is still deferred.
-fn convert_child_to_blocks(child: &CardChild) -> Vec<SlackBlock> {
+/// 1:1 port of upstream `convertChildToBlocks(child, state)`.
+/// Returns an empty Vec for any child whose renderer branch is
+/// still deferred (Select / RadioSelect inside Actions handled by
+/// `convertActionsToBlock` directly).
+fn convert_child_to_blocks(child: &CardChild, state: &mut RenderState) -> Vec<SlackBlock> {
     match child {
         CardChild::Text(t) => vec![convert_text_to_block(t)],
         CardChild::Image(i) => vec![convert_image_to_block(i)],
         CardChild::Divider(d) => vec![convert_divider_to_block(d)],
         CardChild::Actions(a) => vec![convert_actions_to_block(a)],
-        CardChild::Section(s) => convert_section_to_blocks(s),
+        CardChild::Section(s) => convert_section_to_blocks(s, state),
         CardChild::Fields(f) => vec![convert_fields_to_block(f)],
         CardChild::Link(l) => vec![convert_link_to_block(l)],
-        // Table + Select / RadioSelect branches land in follow-up
-        // slices.
-        _ => Vec::new(),
+        CardChild::Table(t) => convert_table_to_blocks(t, state),
     }
 }
 
@@ -230,12 +240,73 @@ fn convert_link_button_to_element(button: &LinkButtonElement) -> Value {
 
 /// 1:1 with upstream `convertSectionToBlocks(element, state)`.
 /// Recursively flattens section children into the parent block list.
-fn convert_section_to_blocks(element: &SectionElement) -> Vec<SlackBlock> {
+fn convert_section_to_blocks(element: &SectionElement, state: &mut RenderState) -> Vec<SlackBlock> {
     let mut blocks: Vec<SlackBlock> = Vec::new();
     for child in &element.children {
-        blocks.extend(convert_child_to_blocks(child));
+        blocks.extend(convert_child_to_blocks(child, state));
     }
     blocks
+}
+
+/// Slack Block Kit table limits — 100 rows, 20 columns. 1:1 with
+/// upstream's `MAX_ROWS = 100` / `MAX_COLS = 20` literals.
+const SLACK_TABLE_MAX_ROWS: usize = 100;
+const SLACK_TABLE_MAX_COLS: usize = 20;
+
+/// 1:1 with upstream `convertTableToBlocks(element, state)`. Emits
+/// a native `table` block when within Slack's limits AND no native
+/// table has been used yet in this message; otherwise falls back to
+/// an ASCII table inside a code-block `section` (since Slack allows
+/// at most one native `table` block per message). Empty cells
+/// become a single space character to satisfy the Slack API
+/// (rejects empty `text` fields).
+fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> Vec<SlackBlock> {
+    if state.used_native_table
+        || element.rows.len() > SLACK_TABLE_MAX_ROWS
+        || element.headers.len() > SLACK_TABLE_MAX_COLS
+    {
+        return vec![json!({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": format!(
+                    "```\n{}\n```",
+                    table_element_to_ascii(&element.headers, &element.rows),
+                ),
+            },
+        })];
+    }
+
+    state.used_native_table = true;
+
+    let header_row: Vec<Value> = element
+        .headers
+        .iter()
+        .map(|h| {
+            let converted = convert_emoji(h);
+            let text = if converted.is_empty() { " ".to_string() } else { converted };
+            json!({ "type": "raw_text", "text": text })
+        })
+        .collect();
+
+    let mut rows: Vec<Value> = Vec::with_capacity(1 + element.rows.len());
+    rows.push(Value::Array(header_row));
+    for row in &element.rows {
+        let cells: Vec<Value> = row
+            .iter()
+            .map(|cell| {
+                let converted = convert_emoji(cell);
+                let text = if converted.is_empty() { " ".to_string() } else { converted };
+                json!({ "type": "raw_text", "text": text })
+            })
+            .collect();
+        rows.push(Value::Array(cells));
+    }
+
+    vec![json!({
+        "type": "table",
+        "rows": rows,
+    })]
 }
 
 /// 1:1 with upstream `convertFieldsToBlock(element)`. Emits a single
@@ -757,5 +828,271 @@ mod tests {
                 },
             })
         );
+    }
+
+    // ---------- describe("markdown bold to Slack mrkdwn conversion") (9 cases) ----------
+
+    #[test]
+    fn block_kit_converts_double_asterisk_bold_to_single_in_card_text_content() {
+        let c = card(None, None, vec![text("The **domain** is example.com")]);
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(
+            blocks[0],
+            json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": "The *domain* is example.com" },
+            })
+        );
+    }
+
+    #[test]
+    fn block_kit_converts_multiple_bold_segments_in_one_card_text() {
+        let c = card(
+            None,
+            None,
+            vec![text(
+                "**Project**: my-app, **Status**: active, **Branch**: main",
+            )],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(
+            blocks[0]["text"]["text"],
+            "*Project*: my-app, *Status*: active, *Branch*: main"
+        );
+    }
+
+    #[test]
+    fn block_kit_converts_bold_across_multiple_lines() {
+        let c = card(
+            None,
+            None,
+            vec![text(
+                "**Domain**: example.com\n**Project**: my-app\n**Status**: deployed",
+            )],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(
+            blocks[0]["text"]["text"],
+            "*Domain*: example.com\n*Project*: my-app\n*Status*: deployed"
+        );
+    }
+
+    #[test]
+    fn block_kit_preserves_existing_single_asterisk_formatting() {
+        let c = card(None, None, vec![text("Already *bold* in Slack format")]);
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks[0]["text"]["text"], "Already *bold* in Slack format");
+    }
+
+    #[test]
+    fn block_kit_handles_text_with_no_markdown_formatting() {
+        let c = card(None, None, vec![text("Plain text with no formatting")]);
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks[0]["text"]["text"], "Plain text with no formatting");
+    }
+
+    #[test]
+    fn block_kit_converts_bold_in_muted_style_card_text() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Text(TextElement {
+                content: "Info about **thing**".to_string(),
+                style: Some(TextStyle::Muted),
+                kind: TextKind::Text,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(
+            blocks[0],
+            json!({
+                "type": "context",
+                "elements": [{ "type": "mrkdwn", "text": "Info about *thing*" }],
+            })
+        );
+    }
+
+    #[test]
+    fn block_kit_converts_bold_in_field_values() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Fields(FieldsElement {
+                children: vec![FieldElement {
+                    label: "Status".to_string(),
+                    value: "**Active**".to_string(),
+                    kind: FieldKind::Field,
+                }],
+                kind: FieldsKind::Fields,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let text = blocks[0]["fields"][0]["text"].as_str().unwrap();
+        assert!(text.contains("*Active*"), "got: {text}");
+        assert!(!text.contains("**Active**"), "got: {text}");
+    }
+
+    #[test]
+    fn block_kit_does_not_convert_empty_double_asterisks() {
+        // `****` has nothing between the bold markers; upstream's
+        // `**(.+?)**` regex requires at least one char, so no
+        // conversion occurs.
+        let c = card(None, None, vec![text("text **** more")]);
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks[0]["text"]["text"], "text **** more");
+    }
+
+    #[test]
+    fn block_kit_handles_bold_at_start_and_end_of_content() {
+        let c = card(None, None, vec![text("**Start** and **end**")]);
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks[0]["text"]["text"], "*Start* and *end*");
+    }
+
+    // ---------- describe("cardToBlockKit with CardLink") (2 cases) ----------
+
+    #[test]
+    fn block_kit_converts_cardlink_to_mrkdwn_section_with_slack_link_syntax() {
+        // CardLink is a LinkElement (type "link"), so this exercises
+        // the Link branch with the upstream test shape.
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Link(LinkElement {
+                label: "Click here".to_string(),
+                kind: LinkKind::Link,
+                url: "https://example.com".to_string(),
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0],
+            json!({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "<https://example.com|Click here>",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn block_kit_converts_cardlink_alongside_other_children() {
+        let c = CardElement {
+            title: Some("Test".to_string()),
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                text("Hello"),
+                CardChild::Link(LinkElement {
+                    label: "Link".to_string(),
+                    kind: LinkKind::Link,
+                    url: "https://example.com".to_string(),
+                }),
+            ],
+        };
+        let blocks = card_to_block_kit(&c);
+        // header + text section + link section
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks[2],
+            json!({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "<https://example.com|Link>",
+                },
+            })
+        );
+    }
+
+    // ---------- describe Table renderer (3 cases) ----------
+
+    fn table(headers: Vec<&str>, rows: Vec<Vec<&str>>) -> CardChild {
+        use chat_sdk_chat::cards::{TableElement, TableKind};
+        CardChild::Table(TableElement {
+            align: None,
+            headers: headers.iter().map(|s| s.to_string()).collect(),
+            rows: rows
+                .iter()
+                .map(|r| r.iter().map(|s| s.to_string()).collect())
+                .collect(),
+            kind: TableKind::Table,
+        })
+    }
+
+    #[test]
+    fn block_kit_converts_a_card_with_table_element_to_block_kit_table() {
+        let c = card(
+            None,
+            None,
+            vec![table(vec!["Name", "Age"], vec![vec!["Alice", "30"], vec!["Bob", "25"]])],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "table");
+        assert_eq!(
+            blocks[0]["rows"],
+            json!([
+                [
+                    { "type": "raw_text", "text": "Name" },
+                    { "type": "raw_text", "text": "Age" },
+                ],
+                [
+                    { "type": "raw_text", "text": "Alice" },
+                    { "type": "raw_text", "text": "30" },
+                ],
+                [
+                    { "type": "raw_text", "text": "Bob" },
+                    { "type": "raw_text", "text": "25" },
+                ],
+            ])
+        );
+    }
+
+    #[test]
+    fn block_kit_falls_back_to_ascii_for_second_table_in_same_card() {
+        let c = card(
+            None,
+            None,
+            vec![
+                table(vec!["A"], vec![vec!["1"]]),
+                table(vec!["B"], vec![vec!["2"]]),
+            ],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "table");
+        assert_eq!(blocks[1]["type"], "section");
+        let fallback_text = blocks[1]["text"]["text"].as_str().unwrap();
+        assert!(fallback_text.contains("```"), "got: {fallback_text}");
+    }
+
+    #[test]
+    fn block_kit_replaces_empty_table_cells_with_a_space_to_satisfy_slack_api() {
+        let c = card(
+            None,
+            None,
+            vec![table(
+                vec!["Kind", ""],
+                vec![vec!["FORM", "Form Submission"], vec!["and more...", ""]],
+            )],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks[0]["type"], "table");
+        let rows = blocks[0]["rows"].as_array().unwrap();
+        for row in rows {
+            for cell in row.as_array().unwrap() {
+                let text = cell["text"].as_str().unwrap();
+                assert!(!text.is_empty(), "cell empty: {cell:?}");
+            }
+        }
+        // Empty header cell -> single space
+        assert_eq!(rows[0][1]["text"], " ");
+        // Empty data cell -> single space
+        assert_eq!(rows[2][1]["text"], " ");
     }
 }
