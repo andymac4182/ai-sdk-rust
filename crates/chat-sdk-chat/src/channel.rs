@@ -249,6 +249,20 @@ impl Channel {
         }
     }
 
+    /// 1:1 port of upstream `Channel.startTyping(status?)`. Delegates
+    /// to [`Adapter::start_typing`] with the bound channel id.
+    pub async fn start_typing(&self, status: Option<&str>) -> AdapterResult<()> {
+        self.adapter.start_typing(&self.channel_id, status).await
+    }
+
+    /// 1:1 port of upstream `Channel.mentionUser(userId)`. Returns
+    /// the Slack-style mention syntax `<@userId>` (upstream hard-codes
+    /// the angle-bracket wrapper independent of platform; per-adapter
+    /// renderers translate to the platform-native form downstream).
+    pub fn mention_user(&self, user_id: &str) -> String {
+        format!("<@{user_id}>")
+    }
+
     /// 1:1 port of upstream `Channel.postEphemeral(user, message, options)`.
     /// Mirrors [`crate::thread::Thread::post_ephemeral`] semantics:
     /// tries native ephemeral via [`Adapter::post_ephemeral`]; on
@@ -386,6 +400,7 @@ mod tests {
         post_object_unsupported: bool,
         post_channel_message: Mutex<Vec<(String, String)>>,
         post_channel_message_unsupported: bool,
+        start_typing_calls: Mutex<Vec<(String, Option<String>)>>,
     }
 
     #[async_trait::async_trait]
@@ -428,6 +443,17 @@ mod tests {
                 .unwrap()
                 .push((channel_id.to_string(), text.to_string()));
             Ok("channel-msg-id".to_string())
+        }
+        async fn start_typing(
+            &self,
+            thread_id: &str,
+            status: Option<&str>,
+        ) -> AdapterResult<()> {
+            self.start_typing_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), status.map(str::to_string)));
+            Ok(())
         }
     }
 
@@ -1011,6 +1037,49 @@ mod tests {
         assert_eq!(result.id, "msg-1");
         assert_eq!(result.thread_id, "slack:DU456:");
         assert!(result.used_fallback);
+    }
+
+    // ---------- describe("ChannelImpl.startTyping") (2 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("ChannelImpl.startTyping")`.
+
+    #[test]
+    fn channel_start_typing_calls_adapter_start_typing_with_channel_id() {
+        let adapter = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        block_on(channel.start_typing(None)).unwrap();
+        let calls = adapter.start_typing_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], ("slack:C123".to_string(), None));
+    }
+
+    #[test]
+    fn channel_start_typing_passes_status_to_adapter_start_typing() {
+        let adapter = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        block_on(channel.start_typing(Some("thinking..."))).unwrap();
+        let calls = adapter.start_typing_calls.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            ("slack:C123".to_string(), Some("thinking...".to_string()))
+        );
+    }
+
+    // ---------- describe("ChannelImpl.mentionUser") (2 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("ChannelImpl.mentionUser")`.
+
+    #[test]
+    fn channel_mention_user_returns_formatted_mention_string() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter, "slack:C123");
+        assert_eq!(channel.mention_user("U456"), "<@U456>");
+    }
+
+    #[test]
+    fn channel_mention_user_handles_different_user_id_formats() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter, "slack:C123");
+        assert_eq!(channel.mention_user("UABC123DEF"), "<@UABC123DEF>");
+        assert_eq!(channel.mention_user("bot-user"), "<@bot-user>");
     }
 
     #[test]
