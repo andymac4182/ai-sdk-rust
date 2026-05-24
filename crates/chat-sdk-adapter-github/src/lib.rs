@@ -44,6 +44,10 @@ pub const THREAD_ID_PREFIX: &str = "github:";
 /// `const DEFAULT_API_BASE = "https://api.github.com"`.
 pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 
+/// Default `userName`. 1:1 with upstream
+/// `config.userName ?? "github-bot"`.
+pub const DEFAULT_USER_NAME: &str = "github-bot";
+
 /// GitHub App credentials. 1:1 with upstream
 /// `{ appId, privateKey, installationId? }` triple on
 /// `GithubAdapterOptions`.
@@ -171,6 +175,17 @@ impl GithubAdapter {
     /// 1:1 with upstream `readonly botUserId?: string`.
     pub fn bot_user_id(&self) -> Option<&str> {
         self.options.bot_user_id.as_deref()
+    }
+
+    /// 1:1 with upstream `protected readonly webhookSecret?: string`.
+    pub fn webhook_secret(&self) -> Option<&str> {
+        self.options.webhook_secret.as_deref()
+    }
+
+    /// 1:1 with upstream `protected readonly apiUrl: string` —
+    /// the configured base URL (with default applied).
+    pub fn api_url(&self) -> &str {
+        self.api_base()
     }
 
     /// Override the HTTP client (mostly useful for tests).
@@ -538,6 +553,141 @@ pub fn emoji_to_github_reaction(emoji: &str) -> &'static str {
         "eyes" => "eyes",
         _ => "+1",
     }
+}
+
+/// 1:1 with upstream `interface GitHubAdapterConfig` — all fields
+/// optional so the factory can fall back to environment variables.
+/// Used by [`try_create_github_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct GithubCreateOptions {
+    /// Personal access token / installation token. Falls back to
+    /// `GITHUB_TOKEN`.
+    pub token: Option<String>,
+    /// GitHub App id. Falls back to `GITHUB_APP_ID`.
+    pub app_id: Option<String>,
+    /// GitHub App private key (PEM). Falls back to `GITHUB_PRIVATE_KEY`.
+    pub private_key: Option<String>,
+    /// Installation id (single-tenant App). Falls back to
+    /// `GITHUB_INSTALLATION_ID`. When absent (and app credentials
+    /// are supplied), the adapter runs in multi-tenant mode.
+    pub installation_id: Option<u64>,
+    /// Webhook signing secret. Falls back to `GITHUB_WEBHOOK_SECRET`.
+    pub webhook_secret: Option<String>,
+    /// Display name override. Falls back to `GITHUB_BOT_USERNAME`,
+    /// then [`DEFAULT_USER_NAME`].
+    pub user_name: Option<String>,
+    /// Numeric bot user id (stringified to match upstream's
+    /// `botUserId: string` shape).
+    pub bot_user_id: Option<u64>,
+    /// GitHub Enterprise API base URL. Falls back to `GITHUB_API_URL`,
+    /// then [`DEFAULT_API_BASE`].
+    pub api_url: Option<String>,
+}
+
+/// Errors returned by [`try_create_github_adapter`]. 1:1 with
+/// upstream's `throw new ValidationError("github", "...")` cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubCreateError {
+    /// `webhookSecret` missing and `GITHUB_WEBHOOK_SECRET` not set.
+    WebhookSecretRequired,
+    /// No usable auth resolved from config or environment.
+    AuthenticationRequired,
+}
+
+impl std::fmt::Display for GithubCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WebhookSecretRequired => write!(
+                f,
+                "webhookSecret is required. Set GITHUB_WEBHOOK_SECRET or provide it in config."
+            ),
+            Self::AuthenticationRequired => write!(
+                f,
+                "Authentication is required. Provide a token or App credentials, or set GITHUB_TOKEN / GITHUB_APP_ID + GITHUB_PRIVATE_KEY."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GithubCreateError {}
+
+/// 1:1 with upstream `createGitHubAdapter(config)` env-var-resolution
+/// path. Prefer explicit options; otherwise fall through to the
+/// supplied `env` reader.
+///
+/// Auth-resolution priority matches upstream:
+/// 1. `opts.token` (PAT) — takes precedence outright
+/// 2. `opts.app_id` + `opts.private_key` (App, single- or
+///    multi-tenant depending on `installation_id`)
+/// 3. `env("GITHUB_TOKEN")`
+/// 4. `env("GITHUB_APP_ID")` + `env("GITHUB_PRIVATE_KEY")`
+///
+/// **Important**: if the explicit `opts` has any auth field set
+/// (token / app_id / private_key / installation_id), env auth is
+/// skipped entirely — partial config (e.g. only `app_id`) yields
+/// `AuthenticationRequired` rather than falling through to env.
+/// This matches upstream's "don't mix auth modes" behavior.
+///
+/// The `env` reader is a closure rather than `std::env::var` so
+/// tests don't have to mutate process-global state (unsafe in Rust
+/// 2024 edition).
+pub fn try_create_github_adapter(
+    opts: GithubCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<GithubAdapter, GithubCreateError> {
+    let webhook_secret = opts
+        .webhook_secret
+        .or_else(|| env("GITHUB_WEBHOOK_SECRET"))
+        .ok_or(GithubCreateError::WebhookSecretRequired)?;
+
+    let user_name = opts
+        .user_name
+        .or_else(|| env("GITHUB_BOT_USERNAME"))
+        .or_else(|| Some(DEFAULT_USER_NAME.to_string()));
+    let api_url = opts.api_url.or_else(|| env("GITHUB_API_URL"));
+    let bot_user_id = opts.bot_user_id.map(|n| n.to_string());
+
+    let has_config_auth = opts.token.is_some()
+        || opts.app_id.is_some()
+        || opts.private_key.is_some()
+        || opts.installation_id.is_some();
+
+    let auth = if has_config_auth {
+        if let Some(tok) = opts.token {
+            GithubAuth::Token(tok)
+        } else if let (Some(app_id), Some(private_key)) = (opts.app_id, opts.private_key) {
+            GithubAuth::App(GithubAppCredentials {
+                app_id,
+                private_key,
+                installation_id: opts.installation_id,
+            })
+        } else {
+            // Partial config (e.g. appId only) — don't fall through
+            // to env, matching upstream's "don't mix auth modes".
+            return Err(GithubCreateError::AuthenticationRequired);
+        }
+    } else if let Some(tok) = env("GITHUB_TOKEN") {
+        GithubAuth::Token(tok)
+    } else if let (Some(app_id), Some(private_key)) =
+        (env("GITHUB_APP_ID"), env("GITHUB_PRIVATE_KEY"))
+    {
+        let installation_id = env("GITHUB_INSTALLATION_ID").and_then(|s| s.parse::<u64>().ok());
+        GithubAuth::App(GithubAppCredentials {
+            app_id,
+            private_key,
+            installation_id,
+        })
+    } else {
+        return Err(GithubCreateError::AuthenticationRequired);
+    };
+
+    Ok(GithubAdapter::new(GithubAdapterOptions {
+        auth,
+        api_base: api_url,
+        webhook_secret: Some(webhook_secret),
+        user_name,
+        bot_user_id,
+    }))
 }
 
 /// Encode a GitHub thread id. 1:1 with upstream's inline format:
@@ -1000,5 +1150,235 @@ mod tests {
         let opts = GithubAdapterOptions::new("ghp_abc");
         let a = GithubAdapter::new(opts);
         assert!(a.bot_user_id().is_none());
+    }
+
+    // ---------- createGitHubAdapter describe block (13 cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("createGitHubAdapter")`.
+    // Env reader injected as a closure (Rust 2024 makes `set_var`
+    // unsafe; parallel tests on `process.env` are racy).
+
+    fn empty_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn create_github_adapter_should_create_with_explicit_pat_config() {
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                token: Some("ghp_test".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                user_name: Some("bot".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("PAT config is valid");
+        assert_eq!(a.user_name(), Some("bot"));
+    }
+
+    #[test]
+    fn create_github_adapter_should_create_with_explicit_app_config_single_tenant() {
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                app_id: Some("123".to_string()),
+                private_key: Some(
+                    "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                        .to_string(),
+                ),
+                installation_id: Some(456),
+                webhook_secret: Some("secret".to_string()),
+                user_name: Some("bot[bot]".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("App + installationId is single-tenant");
+        assert!(!a.is_multi_tenant());
+    }
+
+    #[test]
+    fn create_github_adapter_should_create_in_multi_tenant_mode_when_no_installation_id() {
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                app_id: Some("123".to_string()),
+                private_key: Some(
+                    "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                        .to_string(),
+                ),
+                webhook_secret: Some("secret".to_string()),
+                user_name: Some("bot[bot]".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("App without installationId is multi-tenant");
+        assert!(a.is_multi_tenant());
+    }
+
+    #[test]
+    fn create_github_adapter_should_throw_when_webhook_secret_missing() {
+        let err = try_create_github_adapter(
+            GithubCreateOptions {
+                token: Some("ghp_test".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("missing webhook secret");
+        assert_eq!(err, GithubCreateError::WebhookSecretRequired);
+        assert!(err.to_string().contains("webhookSecret is required"));
+    }
+
+    #[test]
+    fn create_github_adapter_should_throw_when_no_auth_is_provided() {
+        let err = try_create_github_adapter(
+            GithubCreateOptions {
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("no auth available");
+        assert_eq!(err, GithubCreateError::AuthenticationRequired);
+        assert!(err.to_string().contains("Authentication is required"));
+    }
+
+    #[test]
+    fn create_github_adapter_should_fall_back_to_env_vars_for_token() {
+        let env = |key: &str| match key {
+            "GITHUB_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "GITHUB_TOKEN" => Some("env-token".to_string()),
+            "GITHUB_BOT_USERNAME" => Some("env-bot".to_string()),
+            _ => None,
+        };
+        let a = try_create_github_adapter(GithubCreateOptions::default(), env)
+            .expect("env-only PAT");
+        assert_eq!(a.user_name(), Some("env-bot"));
+        assert!(matches!(a.auth(), GithubAuth::Token(t) if t == "env-token"));
+    }
+
+    #[test]
+    fn create_github_adapter_should_fall_back_to_env_vars_for_app_credentials() {
+        let env = |key: &str| match key {
+            "GITHUB_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "GITHUB_APP_ID" => Some("env-app-id".to_string()),
+            "GITHUB_PRIVATE_KEY" => Some(
+                "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                    .to_string(),
+            ),
+            "GITHUB_INSTALLATION_ID" => Some("789".to_string()),
+            _ => None,
+        };
+        let a = try_create_github_adapter(GithubCreateOptions::default(), env)
+            .expect("env-only app credentials");
+        assert!(!a.is_multi_tenant());
+        match a.auth() {
+            GithubAuth::App(creds) => {
+                assert_eq!(creds.app_id, "env-app-id");
+                assert_eq!(creds.installation_id, Some(789));
+            }
+            other => panic!("expected App auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_github_adapter_should_not_mix_auth_modes_when_explicit_config_has_auth_fields() {
+        // Upstream: providing `app_id` explicitly skips env-token
+        // resolution; missing privateKey/installationId yields a
+        // ValidationError "Authentication is required".
+        let env = |key: &str| match key {
+            "GITHUB_TOKEN" => Some("env-token".to_string()),
+            "GITHUB_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            _ => None,
+        };
+        let err = try_create_github_adapter(
+            GithubCreateOptions {
+                app_id: Some("123".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect_err("partial app config skips env auth");
+        assert_eq!(err, GithubCreateError::AuthenticationRequired);
+    }
+
+    #[test]
+    fn create_github_adapter_should_use_default_user_name_when_not_provided() {
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                token: Some("ghp_test".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("default user name applied");
+        assert_eq!(a.user_name(), Some("github-bot"));
+    }
+
+    #[test]
+    fn create_github_adapter_should_pass_bot_user_id_to_adapter() {
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                token: Some("ghp_test".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                bot_user_id: Some(42),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("bot user id passed through");
+        // Upstream stringifies the numeric input.
+        assert_eq!(a.bot_user_id(), Some("42"));
+    }
+
+    #[test]
+    fn create_github_adapter_should_accept_api_url_config_for_github_enterprise() {
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                token: Some("ghp_test".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                api_url: Some("https://github.example.com/api/v3".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("apiUrl config accepted");
+        assert_eq!(a.api_url(), "https://github.example.com/api/v3");
+    }
+
+    #[test]
+    fn create_github_adapter_should_resolve_api_url_from_github_api_url_env_var() {
+        let env = |key: &str| match key {
+            "GITHUB_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "GITHUB_TOKEN" => Some("env-token".to_string()),
+            "GITHUB_API_URL" => Some("https://github.example.com/api/v3".to_string()),
+            _ => None,
+        };
+        let a = try_create_github_adapter(GithubCreateOptions::default(), env)
+            .expect("env api url resolves");
+        assert_eq!(a.api_url(), "https://github.example.com/api/v3");
+    }
+
+    #[test]
+    fn create_github_adapter_should_prefer_api_url_config_over_github_api_url_env_var() {
+        let env = |key: &str| match key {
+            "GITHUB_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "GITHUB_TOKEN" => Some("env-token".to_string()),
+            "GITHUB_API_URL" => Some("https://env-github.example.com/api/v3".to_string()),
+            _ => None,
+        };
+        let a = try_create_github_adapter(
+            GithubCreateOptions {
+                token: Some("ghp_test".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                api_url: Some("https://config-github.example.com/api/v3".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config api url wins");
+        assert_eq!(a.api_url(), "https://config-github.example.com/api/v3");
     }
 }
