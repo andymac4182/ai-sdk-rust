@@ -740,17 +740,36 @@ mod tests {
     }
 
     #[test]
-    fn decode_thread_id_returns_none_for_other_prefixes() {
+    fn decode_thread_id_returns_none_for_invalid_prefix() {
+        // 1:1 with upstream `decodeThreadId > should throw on invalid
+        // prefix` (e.g. `slack:C123:ts123`). The Rust port maps the
+        // throw to None per the Option<DecodedWhatsappThreadId> shape.
+        assert!(decode_thread_id("slack:C123:ts123").is_none());
         assert!(decode_thread_id("messenger:PAGE:USER").is_none());
         assert!(decode_thread_id("telegram:123").is_none());
         assert!(decode_thread_id("").is_none());
     }
 
     #[test]
-    fn decode_thread_id_returns_none_for_missing_components() {
+    fn decode_thread_id_returns_none_for_empty_after_prefix() {
+        // 1:1 with upstream `decodeThreadId > should throw on empty
+        // after prefix` — `whatsapp:` (bare prefix with no segments).
+        assert!(decode_thread_id("whatsapp:").is_none());
+        // Also: `whatsapp` (no colon at all).
+        assert!(decode_thread_id("whatsapp").is_none());
+        // Also: `whatsapp:onlyone` (only 1 of 2 required segments).
         assert!(decode_thread_id("whatsapp:onlyone").is_none());
-        assert!(decode_thread_id("whatsapp::15551234567").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_missing_user_wa_id() {
+        // 1:1 with upstream `decodeThreadId > should throw on missing
+        // userWaId` — `whatsapp:123456789:` (trailing colon, empty
+        // 2nd segment).
+        assert!(decode_thread_id("whatsapp:123456789:").is_none());
         assert!(decode_thread_id("whatsapp:PNID:").is_none());
+        // Symmetric additive coverage: empty 1st segment also rejected.
+        assert!(decode_thread_id("whatsapp::15551234567").is_none());
     }
 
     #[test]
