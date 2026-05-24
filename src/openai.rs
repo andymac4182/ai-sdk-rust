@@ -2740,6 +2740,138 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_extract_logprobs_provider_metadata() {
+        let logprobs = openai_chat_logprobs();
+        let provider = openai_chat_test_provider_with_json_response(json!({
+            "id": "chatcmpl-logprobs",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "logprobs": {
+                        "content": logprobs.clone()
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 30,
+                "total_tokens": 34
+            }
+        }));
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_generate(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("logprobs")),
+            Some(&logprobs)
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_extract_logprobs_provider_metadata() {
+        let logprobs = openai_chat_logprobs();
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chatcmpl-logprobs-stream",
+                "object": "chat.completion.chunk",
+                "created": 1711115037,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "Hello"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-logprobs-stream",
+                "object": "chat.completion.chunk",
+                "created": 1711115037,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "logprobs": {
+                            "content": logprobs.clone()
+                        },
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-logprobs-stream",
+                "object": "chat.completion.chunk",
+                "created": 1711115037,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 30,
+                    "total_tokens": 34
+                }
+            }),
+        ]));
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream finish part is present");
+        assert_eq!(
+            finish
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("logprobs")),
+            Some(&logprobs)
+        );
+    }
+
+    #[test]
     fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
@@ -6514,6 +6646,14 @@ mod tests {
         (captured_json_body(&captured_requests), result.warnings)
     }
 
+    fn openai_chat_user_prompt() -> Vec<LanguageModelMessage> {
+        vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))]
+    }
+
     fn openai_chat_system_and_user_prompt() -> Vec<LanguageModelMessage> {
         vec![
             LanguageModelMessage::System(LanguageModelSystemMessage::new(
@@ -6559,6 +6699,39 @@ mod tests {
                         }
                     })
                     .to_string(),
+                ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+    }
+
+    fn openai_chat_test_provider_with_json_response(response_body: JsonValue) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+    }
+
+    fn openai_chat_test_provider_with_stream_response(
+        response_body: impl Into<String>,
+    ) -> OpenAIProvider {
+        let response_body = response_body.into();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.clone(),
                 ))))
             });
 
@@ -6736,6 +6909,31 @@ mod tests {
                 { ".": -0.10247037 }
             ]
         })
+    }
+
+    fn openai_chat_logprobs() -> JsonValue {
+        json!([
+            {
+                "token": "Hello",
+                "logprob": -0.0009994634,
+                "top_logprobs": [
+                    {
+                        "token": "Hello",
+                        "logprob": -0.0009994634
+                    }
+                ]
+            },
+            {
+                "token": "!",
+                "logprob": -0.13410144,
+                "top_logprobs": [
+                    {
+                        "token": "!",
+                        "logprob": -0.13410144
+                    }
+                ]
+            }
+        ])
     }
 
     fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {

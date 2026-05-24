@@ -2688,6 +2688,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   flex/priority serialization, `logitBias` to `logit_bias`,
   `parallelToolCalls` to `parallel_tool_calls`, `user`, and
   `logprobs`/`top_logprobs` option shaping through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat logprobs provider-metadata parity added
+  `openai_chat_should_extract_logprobs_provider_metadata` and
+  `openai_chat_stream_should_extract_logprobs_provider_metadata`, mapping
+  upstream `openai-chat-language-model.test.ts` non-streaming
+  `should extract logprobs` and streaming `should stream text deltas`
+  provider-metadata assertions by storing `choice.logprobs.content` under
+  `providerMetadata.openai.logprobs` for OpenAI chat generate and stream
+  results.
 - 2026-05-24: OpenAI chat model-specific request rule parity added
   `openai_chat_reasoning_model_should_clear_unsupported_standard_settings`,
   `openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens`,

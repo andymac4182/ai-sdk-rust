@@ -3819,6 +3819,7 @@ async fn openai_compatible_provider_metadata(
         response.get("usage"),
         true,
     );
+    add_openai_compatible_chat_logprobs_metadata(provider_name, &mut metadata, response);
 
     metadata
 }
@@ -3967,6 +3968,7 @@ fn openai_compatible_stream_result_from_response(
         raw: None,
     };
     let mut usage = None::<JsonValue>;
+    let mut logprobs = None::<JsonValue>;
     let mut is_first_chunk = true;
     let mut is_active_reasoning = false;
     let mut is_active_text = false;
@@ -4027,6 +4029,11 @@ fn openai_compatible_stream_result_from_response(
 
                 if let Some(raw_finish_reason) = choice.get("finish_reason") {
                     finish_reason = openai_compatible_finish_reason(Some(raw_finish_reason));
+                }
+
+                if let Some(choice_logprobs) = openai_compatible_chat_logprobs_content(Some(choice))
+                {
+                    logprobs = Some(choice_logprobs);
                 }
 
                 let Some(delta) = choice.get("delta") else {
@@ -4191,6 +4198,7 @@ fn openai_compatible_stream_result_from_response(
                 provider_name,
                 usage.as_ref(),
                 extracted_metadata,
+                logprobs,
             )),
     ));
 
@@ -4324,10 +4332,43 @@ fn openai_compatible_stream_provider_metadata(
     provider_name: &str,
     usage: Option<&JsonValue>,
     extracted_metadata: Option<ProviderMetadata>,
+    logprobs: Option<JsonValue>,
 ) -> ProviderMetadata {
     let mut metadata = extracted_metadata.unwrap_or_default();
     add_openai_compatible_provider_prediction_metadata(provider_name, &mut metadata, usage, true);
+    if let Some(logprobs) = logprobs {
+        metadata
+            .entry(provider_name.to_string())
+            .or_default()
+            .insert("logprobs".to_string(), logprobs);
+    }
     metadata
+}
+
+fn add_openai_compatible_chat_logprobs_metadata(
+    provider_name: &str,
+    metadata: &mut ProviderMetadata,
+    response: &JsonValue,
+) {
+    let choice = response
+        .get("choices")
+        .and_then(JsonValue::as_array)
+        .and_then(|choices| choices.first());
+
+    if let Some(logprobs) = openai_compatible_chat_logprobs_content(choice) {
+        metadata
+            .entry(provider_name.to_string())
+            .or_default()
+            .insert("logprobs".to_string(), logprobs);
+    }
+}
+
+fn openai_compatible_chat_logprobs_content(choice: Option<&JsonValue>) -> Option<JsonValue> {
+    choice?
+        .get("logprobs")?
+        .get("content")
+        .filter(|value| !value.is_null())
+        .cloned()
 }
 
 fn add_openai_compatible_provider_prediction_metadata(
