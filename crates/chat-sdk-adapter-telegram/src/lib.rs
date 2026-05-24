@@ -871,18 +871,27 @@ mod tests {
     //! async runtime; these tests lock in the pure config + thread-id
     //! helpers.
     //!
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (2) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream `index.test.ts` cases are enumerated as
+    //! js-only-documented here because they exercise behavior
+    //! unrepresentable in the Rust port by construction:
     //!
-    //! - `should expose protected members and methods to subclasses`:
-    //!   TypeScript-class-`protected` access modifier check. Rust
-    //!   doesn't use class inheritance; `pub(crate)` visibility +
-    //!   trait composition provide the same modularity surface but
-    //!   the protected-member-leaks-to-subclass test is unrepresentable
-    //!   in Rust by construction (no JS prototype-chain access).
+    //! 1. `describe("subclass extensibility") > should expose
+    //!    protected members and methods to subclasses` —
+    //!    TypeScript `protected` access modifier check. Rust
+    //!    uses `pub(crate)` visibility + trait composition rather
+    //!    than class inheritance.
+    //!
+    //! 2. `describe("constructor env var resolution") > should
+    //!    default logger when not provided` — asserts the
+    //!    constructor falls back to a default `Logger` instance
+    //!    when none is supplied. Rust adapters do not take a
+    //!    `Logger` as a first-class adapter dependency (logging
+    //!    is plumbed via the `log` crate's static dispatch
+    //!    elsewhere); the constructor-default-logger fallback
+    //!    shape is moot.
     use super::*;
     use futures_executor::block_on;
 

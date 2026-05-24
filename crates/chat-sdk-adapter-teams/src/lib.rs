@@ -452,9 +452,9 @@ pub fn is_teams_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (2) ----------
+    //! ---------- upstream js-only-documented cases (3) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, 2 upstream
+    //! Per the slice-380 type-system-impossible pattern, 3 upstream
     //! `index.test.ts` cases are enumerated as js-only-documented:
     //!
     //! - `describe("subclass extensibility") > should expose protected
@@ -473,6 +473,14 @@ mod tests {
     //!   resolved at compile time via Cargo + `mod` declarations.
     //!   Adapter-teams is the only upstream adapter that has this
     //!   test (slice 414 audited cross-package).
+    //!
+    //! - `describe("constructor env var resolution") > should default
+    //!   logger when not provided` — asserts the constructor falls
+    //!   back to a default `Logger` instance when none is supplied.
+    //!   Rust adapters do not take a `Logger` as a first-class
+    //!   adapter dependency (logging is plumbed via the `log` crate's
+    //!   static dispatch elsewhere); the constructor-default-logger
+    //!   fallback shape is moot.
     use super::*;
     use futures_executor::block_on;
 
