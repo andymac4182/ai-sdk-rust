@@ -3956,6 +3956,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_should_add_denied_tool_approval_response_with_reason_to_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            user_text_message("user-1", "What is the weather in Tokyo?"),
+            UiMessage::new("assistant-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "toolCallId": "call-1",
+                    "state": "approval-requested",
+                    "input": { "city": "Tokyo" },
+                    "approval": { "id": "approval-1" }
+                })),
+        ]);
+
+        chat.add_tool_approval_response(
+            "approval-1",
+            false,
+            Some("User denied weather lookup".to_string()),
+        )
+        .expect("approval response is added");
+
+        assert_eq!(chat.transport().captured_sends().len(), 0);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "approval-responded",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": false,
+                                "reason": "User denied weather lookup"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
     fn assert_chat_tool_approval_response_forwards_follow_up_options() {
         let transport = RecordingChatTransport::new([
             UiMessageChunk::tool_output_available(

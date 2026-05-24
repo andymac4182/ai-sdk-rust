@@ -2360,14 +2360,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   follow-up gate boundary.
 - 2026-05-25: `packages/ai` `Chat.addToolApprovalResponse` approved-flow
   parity added `chat_should_add_tool_approval_response_to_the_latest_assistant_message`
+  and
+  `chat_should_add_denied_tool_approval_response_with_reason_to_latest_assistant_message`,
   `chat_should_submit_message_when_a_tool_approval_response_is_added`,
   `chat_approved_auto_send_should_update_tool_invocation_to_show_approval_response`,
   and
   `chat_add_tool_approval_response_should_forward_options_to_make_request_when_auto_sending`,
   covering the portable upstream `ui/chat.test.ts` approval response state
-  mutation, approved automatic follow-up body/header option forwarding, and
-  response folding that turns the approved tool part into `output-available`
-  while appending the follow-up assistant text to the same message.
+  mutation, denied response reasons, approved automatic follow-up body/header
+  option forwarding, and response folding that turns the approved tool part
+  into `output-available` while appending the follow-up assistant text to the
+  same message.
 - 2026-05-25: `packages/ai` `Chat.addToolResult` alias parity added
   `chat_should_submit_message_when_a_tool_result_is_added`, covering the
   portable upstream `ui/chat.test.ts` deprecated `addToolResult` flow by
