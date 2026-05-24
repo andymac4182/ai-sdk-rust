@@ -179,6 +179,15 @@ impl Adapter for TeamsAdapter {
         ADAPTER_NAME
     }
 
+    /// Derive the channel-level thread id from a Teams thread id.
+    /// 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`.
+    /// Delegates to [`crate::thread_id::channel_id_from_thread_id`]
+    /// which strips any `;messageid=…` suffix from the decoded
+    /// `conversation_id` and re-encodes.
+    fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        Some(crate::thread_id::channel_id_from_thread_id(thread_id))
+    }
+
     /// Post a text message via the Bot Framework `activities` API.
     /// 1:1 with upstream's `adapter.postMessage`:
     ///
