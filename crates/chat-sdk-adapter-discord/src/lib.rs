@@ -785,17 +785,29 @@ pub fn is_discord_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (2) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream cases are enumerated as js-only-documented
+    //! here because they exercise behavior that is unrepresentable
+    //! in the Rust port by construction:
     //!
-    //! - `should expose protected members and methods to subclasses`:
-    //!   TypeScript-class-`protected` access modifier check. Rust
-    //!   uses `pub(crate)` visibility + trait composition rather
-    //!   than class inheritance — the subclass-protected-leak test
-    //!   is unrepresentable by construction.
+    //! 1. `index.test.ts > describe("subclass extensibility") >
+    //!    should expose protected members and methods to subclasses`
+    //!    — TypeScript `protected` access modifier check. Rust
+    //!    uses `pub(crate)` visibility + trait composition rather
+    //!    than class inheritance.
+    //!
+    //! 2. `gateway.test.ts > describe("Gateway client
+    //!    configuration") > includes Partials.Channel for DM
+    //!    support` — asserts the discord.js `Client` was constructed
+    //!    with `partials: [Partials.Channel]`. The Rust port has
+    //!    no discord.js `Client` (the gateway connection is a
+    //!    WebSocket the adapter manages directly, not via
+    //!    discord.js's wrapper), and the `Partials` enum is
+    //!    discord.js-specific. DM support in the Rust gateway is
+    //!    surfaced via channel-type dispatch in the event handler,
+    //!    not via a partials-enum opt-in.
     use super::*;
     use futures_executor::block_on;
 
