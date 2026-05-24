@@ -6806,6 +6806,46 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_keeps_existing_message_id_from_start_chunk() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_message_id("response-message-id")
+                .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)
+                    .with_part(json!({ "type": "text", "text": "0a" }))])
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::start_with_message_id("existing-message-id"));
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(&chunks).expect("chunks serialize"),
+            json!([{ "type": "start", "messageId": "existing-message-id" }])
+        );
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "user-1");
+        assert_eq!(finish_events[0].response_message.id, "existing-message-id");
+        assert!(finish_events[0].response_message.parts.is_empty());
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
     fn create_ui_message_stream_adds_error_chunk_when_execute_returns_error() {
         let chunks = create_ui_message_stream_with_result(
             CreateUiMessageStreamOptions::new().with_on_error(|error| format!("masked {error}")),

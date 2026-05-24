@@ -2696,14 +2696,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   honor `toUIMessageStream` options.
 - 2026-05-20: UI-message stream creation and step-finish persistence parity
   added `create_ui_message_stream_invokes_step_and_finish_callbacks` and
+  `create_ui_message_stream_keeps_existing_message_id_from_start_chunk`,
   `create_ui_message_stream_adds_error_chunk_when_execute_returns_error`,
   `create_ui_message_stream_should_add_error_parts_when_execute_throws`, plus
   `create_ui_message_stream_adds_error_chunk_when_merged_stream_errors` in
   `src/ui_message_stream.rs`, covering a Rust-native writer/write/merge flow,
-  generated response-id injection, `onStepFinish` snapshots across multi-step
-  streams, final `onFinish` persisted-message reconstruction, finish reason
-  propagation, exact execute-error-only output, and custom `onError` masking
-  for fallible execute callbacks and merged-stream failures.
+  generated response-id injection, preservation of an existing start-chunk
+  message id, `onStepFinish` snapshots across multi-step streams, final
+  `onFinish` persisted-message reconstruction, finish reason propagation,
+  exact execute-error-only output, and custom `onError` masking for fallible
+  execute callbacks and merged-stream failures.
 - 2026-05-19: Gateway image-model request/response metadata parity added
   `gateway_image_model_maps_upstream_request_response_and_metadata` in
   `crates/ai-sdk-gateway`, covering upstream-style max image splitting behavior,
