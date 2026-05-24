@@ -144,6 +144,29 @@ impl DiscordAdapter {
         format!("{}/channels/{channel_id}/messages", self.api_base())
     }
 
+    /// Build the per-emoji reaction URL for a message. 1:1 with
+    /// upstream's inline `<api_base>/channels/<target>/messages/
+    /// <message_id>/reactions/<url-encoded-emoji>/@me`. `target` is
+    /// the sub-thread id when the thread id encodes one,
+    /// otherwise the channel id. Returns `None` when `thread_id`
+    /// isn't Discord-encoded.
+    pub fn reaction_url(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        let target = decoded.thread_id.as_deref().unwrap_or(&decoded.channel_id);
+        Some(format!(
+            "{}/channels/{}/messages/{}/reactions/{}/@me",
+            self.api_base(),
+            target,
+            message_id,
+            url_encode_emoji(emoji),
+        ))
+    }
+
     /// Derive channel id from a Discord thread id. 1:1 with upstream
     /// `adapter.channelIdFromThreadId(threadId)` — splits on `:` and
     /// joins the first 3 parts: `discord:<guild_id>:<channel_id>`.
@@ -487,6 +510,46 @@ impl Adapter for DiscordAdapter {
             .put(&url)
             .header("Authorization", format!("Bot {}", self.bot_token()))
             .header("Content-Length", "0")
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Remove a reaction via DELETE `/channels/<target>/messages/
+    /// <message_id>/reactions/<url-encoded-emoji>/@me`. 1:1 with
+    /// upstream's `adapter.removeReaction`. Like `add_reaction` but
+    /// uses DELETE; `target` is the sub-thread id when the thread
+    /// id encodes one (`discord:<guild>:<channel>:<sub-thread>`),
+    /// otherwise the channel id (`discord:<guild>:<channel>`).
+    async fn remove_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let url = self
+            .reaction_url(thread_id, message_id, emoji)
+            .ok_or_else(|| {
+                AdapterError::InvalidPayload(format!(
+                    "thread_id {thread_id:?} is not Discord-encoded"
+                ))
+            })?;
+
+        let response = self
+            .http
+            .delete(&url)
+            .header("Authorization", format!("Bot {}", self.bot_token()))
             .send()
             .await
             .map_err(|err| AdapterError::Io(Box::new(err)))?;
@@ -1105,5 +1168,65 @@ mod tests {
             adapter.api_base(),
             "https://config-url.example.com/api/v10"
         );
+    }
+
+    // ---------- describe("removeReaction") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("removeReaction")`.
+    // Upstream asserts the DELETE URL contains the expected channel
+    // / thread / message / "/@me" path segments. The Rust port
+    // exposes a pure `reaction_url` helper so the URL construction
+    // can be tested without HTTP-mocking the full Adapter::remove_reaction
+    // round-trip.
+
+    #[test]
+    fn discord_remove_reaction_url_uses_channel_id_for_top_level_thread() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .reaction_url("discord:guild1:channel456", "msg001", "thumbs_up")
+            .unwrap();
+        assert!(
+            url.contains("/channels/channel456/messages/msg001/reactions/"),
+            "URL was {url}"
+        );
+        assert!(url.ends_with("/@me"), "URL was {url}");
+    }
+
+    #[test]
+    fn discord_remove_reaction_url_routes_through_sub_thread_when_encoded() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .reaction_url("discord:guild1:channel456:thread789", "msg001", "fire")
+            .unwrap();
+        assert!(
+            url.contains("/channels/thread789/messages/msg001/reactions/"),
+            "URL was {url}"
+        );
+    }
+
+    #[test]
+    fn discord_remove_reaction_url_returns_none_for_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        assert!(adapter.reaction_url("slack:C123:1.0", "msg001", "fire").is_none());
     }
 }
