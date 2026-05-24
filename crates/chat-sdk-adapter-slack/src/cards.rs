@@ -20,6 +20,7 @@ use chat_sdk_chat::cards::{
 };
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use chat_sdk_chat::markdown::table_element_to_ascii;
+use chat_sdk_chat::modals::{RadioSelectElement, SelectElement, SelectOptionElement};
 use serde_json::{Value, json};
 
 /// Convert emoji placeholders for Slack mrkdwn (`{{emoji:wave}}` ->
@@ -167,19 +168,16 @@ fn convert_link_to_block(element: &LinkElement) -> SlackBlock {
 
 /// 1:1 with upstream `convertActionsToBlock(element)`. Iterates the
 /// children union (Button / LinkButton / Select / RadioSelect) and
-/// dispatches per `child.type`. Select / RadioSelect are deferred to
-/// follow-up slices and omitted here (any non-button child is
-/// silently dropped, matching upstream's plain `if/else if/return
-/// convertButton...` chain).
+/// dispatches per `child.type`.
 fn convert_actions_to_block(element: &ActionsElement) -> SlackBlock {
     let elements: Vec<Value> = element
         .children
         .iter()
-        .filter_map(|child| match child {
-            ActionsChild::Button(b) => Some(convert_button_to_element(b)),
-            ActionsChild::LinkButton(b) => Some(convert_link_button_to_element(b)),
-            // Select / RadioSelect land in a follow-up slice.
-            _ => None,
+        .map(|child| match child {
+            ActionsChild::Button(b) => convert_button_to_element(b),
+            ActionsChild::LinkButton(b) => convert_link_button_to_element(b),
+            ActionsChild::Select(s) => convert_select_to_element(s),
+            ActionsChild::RadioSelect(r) => convert_radio_select_to_element(r),
         })
         .collect();
 
@@ -236,6 +234,100 @@ fn convert_link_button_to_element(button: &LinkButtonElement) -> Value {
     }
 
     element
+}
+
+/// 1:1 with upstream `convertSelectToElement(select)`. Emits a
+/// `static_select` element with `plain_text` option labels.
+/// `placeholder` is set only when provided. `initial_option` is set
+/// when `initialOption` (the option value) matches one of the
+/// options.
+fn convert_select_to_element(select: &SelectElement) -> Value {
+    let options: Vec<Value> = select
+        .options
+        .iter()
+        .map(|opt| build_option(opt, OptionTextKind::PlainText))
+        .collect();
+
+    let mut element = json!({
+        "type": "static_select",
+        "action_id": select.id,
+        "options": options,
+    });
+
+    if let Some(placeholder) = select.placeholder.as_deref().filter(|p| !p.is_empty()) {
+        element["placeholder"] = json!({
+            "type": "plain_text",
+            "text": convert_emoji(placeholder),
+        });
+    }
+
+    if let Some(initial_value) = select.initial_option.as_deref() {
+        if let Some(initial) = options.iter().find(|o| o["value"] == *initial_value) {
+            element["initial_option"] = initial.clone();
+        }
+    }
+
+    element
+}
+
+/// 1:1 with upstream `convertRadioSelectToElement(radioSelect)`.
+/// Slices options to at most 10 (Slack's `radio_buttons` cap), then
+/// emits `mrkdwn`-typed option labels and descriptions.
+fn convert_radio_select_to_element(radio: &RadioSelectElement) -> Value {
+    let limited: Vec<&SelectOptionElement> = radio.options.iter().take(10).collect();
+    let options: Vec<Value> = limited
+        .iter()
+        .map(|opt| build_option(opt, OptionTextKind::Mrkdwn))
+        .collect();
+
+    let mut element = json!({
+        "type": "radio_buttons",
+        "action_id": radio.id,
+        "options": options,
+    });
+
+    if let Some(initial_value) = radio.initial_option.as_deref() {
+        if let Some(initial) = options.iter().find(|o| o["value"] == *initial_value) {
+            element["initial_option"] = initial.clone();
+        }
+    }
+
+    element
+}
+
+/// Whether a select-option's `text` (and `description`) should be
+/// emitted as `plain_text` or `mrkdwn`. Select uses plain_text;
+/// RadioSelect uses mrkdwn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionTextKind {
+    PlainText,
+    Mrkdwn,
+}
+
+impl OptionTextKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PlainText => "plain_text",
+            Self::Mrkdwn => "mrkdwn",
+        }
+    }
+}
+
+/// 1:1 with upstream's inline `options.map((opt) => ...)` builders
+/// in both Select and RadioSelect converters. Common shape:
+/// `{ text: { type, text }, value, description? }`.
+fn build_option(opt: &SelectOptionElement, kind: OptionTextKind) -> Value {
+    let mut option = json!({
+        "text": { "type": kind.as_str(), "text": convert_emoji(&opt.label) },
+        "value": opt.value,
+    });
+    if let Some(desc) = opt.description.as_deref().filter(|d| !d.is_empty()) {
+        option["description"] = json!({
+            "type": kind.as_str(),
+            "text": convert_emoji(desc),
+        });
+    }
+    option
 }
 
 /// 1:1 with upstream `convertSectionToBlocks(element, state)`.
@@ -1094,5 +1186,317 @@ mod tests {
         assert_eq!(rows[0][1]["text"], " ");
         // Empty data cell -> single space
         assert_eq!(rows[2][1]["text"], " ");
+    }
+
+    // ---------- describe("cardToBlockKit with select elements") (3 cases) ----------
+
+    use chat_sdk_chat::modals::{
+        RadioSelectElement, RadioSelectKind, SelectElement, SelectKind, SelectOptionElement,
+    };
+
+    fn opt(label: &str, value: &str) -> SelectOptionElement {
+        SelectOptionElement {
+            description: None,
+            label: label.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    fn opt_with_desc(label: &str, value: &str, description: &str) -> SelectOptionElement {
+        SelectOptionElement {
+            description: Some(description.to_string()),
+            label: label.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    fn select(
+        id: &str,
+        label: &str,
+        placeholder: Option<&str>,
+        options: Vec<SelectOptionElement>,
+        initial: Option<&str>,
+    ) -> SelectElement {
+        SelectElement {
+            id: id.to_string(),
+            initial_option: initial.map(str::to_owned),
+            label: label.to_string(),
+            optional: None,
+            options,
+            placeholder: placeholder.map(str::to_owned),
+            kind: SelectKind::Select,
+        }
+    }
+
+    fn radio_select(
+        id: &str,
+        label: &str,
+        options: Vec<SelectOptionElement>,
+        initial: Option<&str>,
+    ) -> RadioSelectElement {
+        RadioSelectElement {
+            id: id.to_string(),
+            initial_option: initial.map(str::to_owned),
+            label: label.to_string(),
+            optional: None,
+            options,
+            kind: RadioSelectKind::RadioSelect,
+        }
+    }
+
+    #[test]
+    fn block_kit_converts_actions_with_select_element() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Select(select(
+                    "priority",
+                    "Priority",
+                    Some("Select priority"),
+                    vec![opt("High", "high"), opt("Medium", "medium"), opt("Low", "low")],
+                    Some("medium"),
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "actions");
+        let elements = blocks[0]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["type"], "static_select");
+        assert_eq!(elements[0]["action_id"], "priority");
+        assert_eq!(
+            elements[0]["placeholder"],
+            json!({ "type": "plain_text", "text": "Select priority" })
+        );
+        let options = elements[0]["options"].as_array().unwrap();
+        assert_eq!(options.len(), 3);
+        assert_eq!(
+            options[0],
+            json!({ "text": { "type": "plain_text", "text": "High" }, "value": "high" })
+        );
+        assert_eq!(
+            elements[0]["initial_option"],
+            json!({ "text": { "type": "plain_text", "text": "Medium" }, "value": "medium" })
+        );
+    }
+
+    #[test]
+    fn block_kit_converts_actions_with_mixed_buttons_and_selects() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Select(select(
+                        "status",
+                        "Status",
+                        None,
+                        vec![opt("Open", "open"), opt("Closed", "closed")],
+                        None,
+                    )),
+                    ActionsChild::Button(button(
+                        "submit",
+                        "Submit",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    )),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        let elements = blocks[0]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0]["type"], "static_select");
+        assert_eq!(elements[0]["action_id"], "status");
+        assert_eq!(elements[1]["type"], "button");
+        assert_eq!(elements[1]["action_id"], "submit");
+    }
+
+    #[test]
+    fn block_kit_converts_select_without_placeholder_or_initial_option() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Select(select(
+                    "category",
+                    "Category",
+                    None,
+                    vec![opt("Bug", "bug"), opt("Feature", "feature")],
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let element = &blocks[0]["elements"][0];
+        assert_eq!(element["type"], "static_select");
+        assert!(element.get("placeholder").is_none());
+        assert!(element.get("initial_option").is_none());
+    }
+
+    // ---------- describe("cardToBlockKit with radio select elements") (3 cases) ----------
+
+    #[test]
+    fn block_kit_converts_actions_with_radio_select_element() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::RadioSelect(radio_select(
+                    "plan",
+                    "Choose Plan",
+                    vec![
+                        opt("Basic", "basic"),
+                        opt("Pro", "pro"),
+                        opt("Enterprise", "enterprise"),
+                    ],
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "actions");
+        let elements = blocks[0]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["type"], "radio_buttons");
+        assert_eq!(elements[0]["action_id"], "plan");
+        assert_eq!(elements[0]["options"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn block_kit_uses_mrkdwn_type_for_radio_select_labels() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::RadioSelect(radio_select(
+                    "option",
+                    "Choose",
+                    vec![opt("Option A", "a")],
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let options = blocks[0]["elements"][0]["options"].as_array().unwrap();
+        assert_eq!(options[0]["text"]["type"], "mrkdwn");
+        assert_eq!(options[0]["text"]["text"], "Option A");
+    }
+
+    #[test]
+    fn block_kit_limits_radio_select_options_to_10() {
+        let options: Vec<SelectOptionElement> = (1..=15)
+            .map(|i| opt(&format!("Option {i}"), &format!("opt{i}")))
+            .collect();
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::RadioSelect(radio_select(
+                    "many_options",
+                    "Many Options",
+                    options,
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let options = blocks[0]["elements"][0]["options"].as_array().unwrap();
+        assert_eq!(options.len(), 10);
+    }
+
+    // ---------- describe("cardToBlockKit with select option descriptions") (3 cases) ----------
+
+    #[test]
+    fn block_kit_includes_description_in_select_options_with_plain_text_type() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Select(select(
+                    "plan",
+                    "Plan",
+                    None,
+                    vec![
+                        opt_with_desc("Basic", "basic", "For individuals"),
+                        opt_with_desc("Pro", "pro", "For teams"),
+                    ],
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let options = blocks[0]["elements"][0]["options"].as_array().unwrap();
+        assert_eq!(
+            options[0]["description"],
+            json!({ "type": "plain_text", "text": "For individuals" })
+        );
+        assert_eq!(
+            options[1]["description"],
+            json!({ "type": "plain_text", "text": "For teams" })
+        );
+    }
+
+    #[test]
+    fn block_kit_includes_description_in_radio_select_options_with_mrkdwn_type() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::RadioSelect(radio_select(
+                    "plan",
+                    "Plan",
+                    vec![
+                        opt_with_desc("Basic", "basic", "For *individuals*"),
+                        opt_with_desc("Pro", "pro", "For _teams_"),
+                    ],
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let options = blocks[0]["elements"][0]["options"].as_array().unwrap();
+        assert_eq!(
+            options[0]["description"],
+            json!({ "type": "mrkdwn", "text": "For *individuals*" })
+        );
+        assert_eq!(
+            options[1]["description"],
+            json!({ "type": "mrkdwn", "text": "For _teams_" })
+        );
+    }
+
+    #[test]
+    fn block_kit_omits_description_when_not_provided() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Select(select(
+                    "category",
+                    "Category",
+                    None,
+                    vec![opt("Bug", "bug"), opt("Feature", "feature")],
+                    None,
+                ))],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        let options = blocks[0]["elements"][0]["options"].as_array().unwrap();
+        assert!(options[0].get("description").is_none());
+        assert!(options[1].get("description").is_none());
     }
 }
