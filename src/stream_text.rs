@@ -4486,7 +4486,7 @@ fn append_stream_text_user_agent(call_options: &mut LanguageModelCallOptions) {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
+    use std::future::{Future, ready};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -4516,7 +4516,10 @@ mod tests {
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
-    use crate::provider_utils::{Schema, Tool, ToolExecutionError, ValidationResult};
+    use crate::provider_utils::{
+        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool,
+        ToolExecutionError, ValidationResult,
+    };
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
@@ -4553,6 +4556,31 @@ mod tests {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
         ]))
+    }
+
+    #[derive(Debug)]
+    struct TestSandbox {
+        description: String,
+    }
+
+    impl TestSandbox {
+        fn new(description: impl Into<String>) -> Self {
+            Self {
+                description: description.into(),
+            }
+        }
+    }
+
+    impl ExperimentalSandbox for TestSandbox {
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn run_command(&self, options: SandboxCommandOptions) -> SandboxRunCommandFuture {
+            Box::pin(ready(
+                SandboxCommandResult::new(0).with_stdout(options.command),
+            ))
+        }
     }
 
     fn usage() -> LanguageModelUsage {
@@ -5919,6 +5947,82 @@ mod tests {
         );
         assert_eq!(step_start_events[0].runtime_context, step_runtime_context);
         assert_eq!(step_start_events[0].tools_context, step_tools_context);
+    }
+
+    #[test]
+    fn stream_text_prepare_step_sandbox_override_reaches_tool_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{ "city": "Brisbane" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let default_sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(TestSandbox::new("default sandbox"));
+        let step_sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("step sandbox"));
+        let prepare_sandbox_descriptions = Arc::new(Mutex::new(Vec::new()));
+        let prepare_sandbox_descriptions_for_callback = Arc::clone(&prepare_sandbox_descriptions);
+        let step_sandbox_for_callback = Arc::clone(&step_sandbox);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_experimental_sandbox(Arc::clone(&default_sandbox))
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, options| async move {
+                        let sandbox = options
+                            .experimental_sandbox
+                            .expect("sandbox is passed to tool execution");
+                        let command_result =
+                            sandbox.run_command(SandboxCommandOptions::new("pwd")).await;
+
+                        Ok(json!({
+                            "description": sandbox.description(),
+                            "stdout": command_result.stdout
+                        }))
+                    },
+                ))
+                .with_prepare_step(move |options| {
+                    let descriptions = Arc::clone(&prepare_sandbox_descriptions_for_callback);
+                    let step_sandbox = Arc::clone(&step_sandbox_for_callback);
+
+                    async move {
+                        descriptions.lock().expect("descriptions lock").push(
+                            options
+                                .experimental_sandbox
+                                .as_ref()
+                                .map(|sandbox| sandbox.description().to_string()),
+                        );
+
+                        PrepareStepResult::new().with_experimental_sandbox(step_sandbox)
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            *prepare_sandbox_descriptions
+                .lock()
+                .expect("descriptions lock"),
+            vec![Some("default sandbox".to_string())]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["description"], "step sandbox");
+        assert_eq!(result.tool_results[0].output["stdout"], "pwd");
     }
 
     #[test]

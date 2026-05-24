@@ -4818,10 +4818,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    array element output, and empty element streams for non-array outputs.
    The upstream `streamText` `prepareStep` type-level shape now has a runtime
    Rust counterpart in
-   `stream_text_prepare_step_overrides_step_settings_and_carries_contexts`,
+   `stream_text_prepare_step_overrides_step_settings_and_carries_contexts` and
+   `stream_text_prepare_step_sandbox_override_reaches_tool_execution`,
    covering prepare-step access to messages, initial messages, accumulated
    response messages, runtime/tool contexts, and per-step overrides for prompt,
-   runtime/tool contexts, tool choice, and provider options.
+   runtime/tool contexts, tool choice, provider options, and sandbox execution.
    The upstream `generate-object.test-d.ts` and `stream-object.test-d.ts`
    unsupported timeout-option assertions now have named Rust counterparts in
    `generate_object_type_counterpart_does_not_accept_timeout_option` and
