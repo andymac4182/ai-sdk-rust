@@ -1246,6 +1246,18 @@ where
     chunks
 }
 
+/// Decodes byte text-stream chunks and calls the provided text-part callback.
+pub fn process_text_stream<I, B, F>(stream: I, mut on_text_part: F)
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut(String),
+{
+    for chunk in stream {
+        on_text_part(String::from_utf8_lossy(chunk.as_ref()).into_owned());
+    }
+}
+
 /// Applies UI-message stream chunks and returns cloned message states after writes.
 pub fn process_ui_message_stream<I>(
     state: &mut StreamingUiMessageState,
@@ -2545,6 +2557,32 @@ mod tests {
                 { "type": "finish" }
             ])
         );
+    }
+
+    #[test]
+    fn process_text_stream_should_process_stream_chunks_correctly() {
+        let mut chunks = Vec::new();
+
+        process_text_stream(
+            [b"Hello".as_slice(), b" ".as_slice(), b"World".as_slice()],
+            |chunk| {
+                chunks.push(chunk);
+            },
+        );
+
+        assert_eq!(chunks, vec!["Hello", " ", "World"]);
+    }
+
+    #[test]
+    fn process_text_stream_should_handle_empty_streams() {
+        let calls = Rc::new(Cell::new(0usize));
+        let callback_calls = Rc::clone(&calls);
+
+        process_text_stream(Vec::<Vec<u8>>::new(), move |_| {
+            callback_calls.set(callback_calls.get() + 1);
+        });
+
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]
