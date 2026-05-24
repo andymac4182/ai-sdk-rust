@@ -1709,6 +1709,8 @@ pub struct StreamingUiMessageState {
     active_text_parts: BTreeMap<String, usize>,
     active_reasoning_parts: BTreeMap<String, usize>,
     active_tool_input_parts: BTreeSet<String>,
+    tool_part_indices: BTreeMap<String, usize>,
+    tool_input_text: BTreeMap<String, String>,
     data_part_indices: BTreeMap<String, usize>,
 }
 
@@ -1728,6 +1730,8 @@ impl StreamingUiMessageState {
             active_text_parts: BTreeMap::new(),
             active_reasoning_parts: BTreeMap::new(),
             active_tool_input_parts: BTreeSet::new(),
+            tool_part_indices: BTreeMap::new(),
+            tool_input_text: BTreeMap::new(),
             data_part_indices: BTreeMap::new(),
         }
     }
@@ -2132,20 +2136,36 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                 state.active_reasoning_parts.remove(&id);
                 updates.push(state.message.clone());
             }
-            ref chunk @ UiMessageChunk::ToolInputStart {
-                ref tool_call_id, ..
+            UiMessageChunk::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
             } => {
                 state.active_tool_input_parts.insert(tool_call_id.clone());
-                state.message.parts.push(
-                    serde_json::to_value(chunk)
-                        .expect("ui-message stream chunk serializes to a JSON part"),
+                state.tool_input_text.remove(&tool_call_id);
+                let index = upsert_tool_part(
+                    state,
+                    &tool_call_id,
+                    Some(&tool_name),
+                    dynamic,
+                    provider_executed,
+                    title,
+                );
+                update_tool_part_input_streaming(
+                    &mut state.message.parts[index],
+                    provider_metadata,
+                    None,
                 );
                 updates.push(state.message.clone());
             }
-            ref chunk @ UiMessageChunk::ToolInputDelta {
-                ref tool_call_id, ..
+            UiMessageChunk::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
             } => {
-                if !state.active_tool_input_parts.contains(tool_call_id) {
+                if !state.active_tool_input_parts.contains(&tool_call_id) {
                     return Err(UiMessageStreamProcessError::new(
                         "tool-input-delta",
                         tool_call_id.clone(),
@@ -2156,20 +2176,150 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                     ));
                 }
 
-                state.message.parts.push(
-                    serde_json::to_value(chunk)
-                        .expect("ui-message stream chunk serializes to a JSON part"),
+                let buffer = state
+                    .tool_input_text
+                    .entry(tool_call_id.clone())
+                    .or_default();
+                buffer.push_str(&input_text_delta);
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    let parsed_input = serde_json::from_str::<JsonValue>(buffer).ok();
+                    update_tool_part_input_streaming(
+                        &mut state.message.parts[index],
+                        None,
+                        parsed_input.or_else(|| Some(JsonValue::String(buffer.clone()))),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => {
+                state.active_tool_input_parts.remove(&tool_call_id);
+                state.tool_input_text.remove(&tool_call_id);
+                let index = upsert_tool_part(
+                    state,
+                    &tool_call_id,
+                    Some(&tool_name),
+                    dynamic,
+                    provider_executed,
+                    title,
                 );
+                update_tool_part_input_available(
+                    &mut state.message.parts[index],
+                    input,
+                    provider_metadata,
+                    tool_metadata,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => {
+                state.active_tool_input_parts.remove(&tool_call_id);
+                state.tool_input_text.remove(&tool_call_id);
+                let index = upsert_tool_part(
+                    state,
+                    &tool_call_id,
+                    Some(&tool_name),
+                    dynamic,
+                    provider_executed,
+                    title,
+                );
+                update_tool_part_input_error(
+                    &mut state.message.parts[index],
+                    input,
+                    error_text,
+                    provider_metadata,
+                    tool_metadata,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            } => {
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_output_available(
+                        &mut state.message.parts[index],
+                        output,
+                        provider_executed,
+                        provider_metadata,
+                        tool_metadata,
+                        preliminary,
+                        dynamic,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolOutputAvailable {
+                            tool_call_id,
+                            output,
+                            provider_executed,
+                            provider_metadata,
+                            tool_metadata,
+                            preliminary,
+                            dynamic,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            } => {
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_output_error(
+                        &mut state.message.parts[index],
+                        error_text,
+                        provider_executed,
+                        provider_metadata,
+                        tool_metadata,
+                        dynamic,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolOutputError {
+                            tool_call_id,
+                            error_text,
+                            provider_executed,
+                            provider_metadata,
+                            tool_metadata,
+                            dynamic,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
                 updates.push(state.message.clone());
             }
             chunk @ (UiMessageChunk::File { .. }
             | UiMessageChunk::ReasoningFile { .. }
             | UiMessageChunk::SourceUrl { .. }
             | UiMessageChunk::SourceDocument { .. }
-            | UiMessageChunk::ToolInputAvailable { .. }
-            | UiMessageChunk::ToolInputError { .. }
-            | UiMessageChunk::ToolOutputAvailable { .. }
-            | UiMessageChunk::ToolOutputError { .. }
             | UiMessageChunk::ToolApprovalRequest { .. }
             | UiMessageChunk::ToolApprovalResponse { .. }
             | UiMessageChunk::ToolOutputDenied { .. }
@@ -2243,6 +2393,7 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                 state.active_text_parts.clear();
                 state.active_reasoning_parts.clear();
                 state.active_tool_input_parts.clear();
+                state.tool_input_text.clear();
             }
             UiMessageChunk::Finish {
                 finish_reason,
@@ -2754,6 +2905,231 @@ fn streaming_text_like_part(
     }
 
     JsonValue::Object(object)
+}
+
+fn upsert_tool_part(
+    state: &mut StreamingUiMessageState,
+    tool_call_id: &str,
+    tool_name: Option<&str>,
+    dynamic: Option<bool>,
+    provider_executed: Option<bool>,
+    title: Option<String>,
+) -> usize {
+    if let Some(index) = state.tool_part_indices.get(tool_call_id).copied() {
+        let part = &mut state.message.parts[index];
+        update_tool_part_identity(part, tool_name, dynamic, provider_executed, title);
+        return index;
+    }
+
+    let mut object = JsonObject::new();
+    let is_dynamic = dynamic.unwrap_or(false);
+    let part_type = if is_dynamic {
+        "dynamic-tool".to_string()
+    } else {
+        format!("tool-{}", tool_name.unwrap_or(""))
+    };
+    object.insert("type".to_string(), JsonValue::String(part_type));
+    object.insert(
+        "toolCallId".to_string(),
+        JsonValue::String(tool_call_id.to_string()),
+    );
+    if is_dynamic {
+        if let Some(tool_name) = tool_name {
+            object.insert(
+                "toolName".to_string(),
+                JsonValue::String(tool_name.to_string()),
+            );
+        }
+    }
+    insert_optional_bool(&mut object, "providerExecuted", provider_executed);
+    insert_optional_string(&mut object, "title", title);
+
+    let index = state.message.parts.len();
+    state.message.parts.push(JsonValue::Object(object));
+    state
+        .tool_part_indices
+        .insert(tool_call_id.to_string(), index);
+    index
+}
+
+fn update_tool_part_identity(
+    part: &mut JsonValue,
+    tool_name: Option<&str>,
+    dynamic: Option<bool>,
+    provider_executed: Option<bool>,
+    title: Option<String>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        if dynamic.unwrap_or(false) {
+            object.insert(
+                "type".to_string(),
+                JsonValue::String("dynamic-tool".to_string()),
+            );
+            if let Some(tool_name) = tool_name {
+                object.insert(
+                    "toolName".to_string(),
+                    JsonValue::String(tool_name.to_string()),
+                );
+            }
+        }
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+        insert_optional_string(object, "title", title);
+    }
+}
+
+fn update_tool_part_input_streaming(
+    part: &mut JsonValue,
+    provider_metadata: Option<ProviderMetadata>,
+    input: Option<JsonValue>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("input-streaming".to_string()),
+        );
+        if let Some(input) = input {
+            object.insert("input".to_string(), input);
+            object.remove("rawInput");
+        }
+        insert_call_provider_metadata(object, provider_metadata);
+    }
+}
+
+fn update_tool_part_input_available(
+    part: &mut JsonValue,
+    input: JsonValue,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("input-available".to_string()),
+        );
+        object.insert("input".to_string(), input);
+        object.remove("rawInput");
+        object.remove("errorText");
+        insert_call_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+    }
+}
+
+fn update_tool_part_input_error(
+    part: &mut JsonValue,
+    input: JsonValue,
+    error_text: String,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-error".to_string()),
+        );
+        object.insert("rawInput".to_string(), input);
+        object.remove("input");
+        object.insert("errorText".to_string(), JsonValue::String(error_text));
+        insert_call_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+    }
+}
+
+fn update_tool_part_output_available(
+    part: &mut JsonValue,
+    output: JsonValue,
+    provider_executed: Option<bool>,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+    preliminary: Option<bool>,
+    dynamic: Option<bool>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-available".to_string()),
+        );
+        object.insert("output".to_string(), output);
+        object.remove("errorText");
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+        insert_result_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+        insert_optional_bool(object, "preliminary", preliminary);
+        if dynamic.unwrap_or(false) {
+            object.insert(
+                "type".to_string(),
+                JsonValue::String("dynamic-tool".to_string()),
+            );
+        }
+    }
+}
+
+fn update_tool_part_output_error(
+    part: &mut JsonValue,
+    error_text: String,
+    provider_executed: Option<bool>,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+    dynamic: Option<bool>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-error".to_string()),
+        );
+        object.insert("errorText".to_string(), JsonValue::String(error_text));
+        object.remove("output");
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+        insert_result_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+        if dynamic.unwrap_or(false) {
+            object.insert(
+                "type".to_string(),
+                JsonValue::String("dynamic-tool".to_string()),
+            );
+        }
+    }
+}
+
+fn insert_call_provider_metadata(
+    object: &mut JsonObject,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let Some(provider_metadata) = provider_metadata {
+        object.insert(
+            "callProviderMetadata".to_string(),
+            provider_metadata_to_json(provider_metadata),
+        );
+    }
+}
+
+fn insert_result_provider_metadata(
+    object: &mut JsonObject,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let Some(provider_metadata) = provider_metadata {
+        object.insert(
+            "resultProviderMetadata".to_string(),
+            provider_metadata_to_json(provider_metadata),
+        );
+    }
+}
+
+fn insert_optional_bool(object: &mut JsonObject, key: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::Bool(value));
+    }
+}
+
+fn insert_optional_string(object: &mut JsonObject, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::String(value));
+    }
+}
+
+fn insert_optional_object(object: &mut JsonObject, key: &str, value: Option<JsonObject>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::Object(value));
+    }
 }
 
 fn append_ui_message_part_text(part: &mut JsonValue, delta: &str) {
@@ -3502,7 +3878,7 @@ mod tests {
     }
 
     #[test]
-    fn process_ui_message_stream_preserves_portable_non_text_chunks_as_parts() {
+    fn process_ui_message_stream_folds_tool_chunks_into_ui_tool_parts() {
         let messages = read_ui_message_stream(ReadUiMessageStreamOptions::new([
             UiMessageChunk::start_with_message_id("msg-123"),
             UiMessageChunk::start_step(),
@@ -3522,17 +3898,250 @@ mod tests {
             Some(vec![
                 json!({ "type": "step-start" }),
                 json!({
-                    "type": "tool-input-available",
+                    "type": "tool-getWeather",
                     "toolCallId": "call-1",
-                    "toolName": "getWeather",
-                    "input": { "city": "Brisbane" }
-                }),
-                json!({
-                    "type": "tool-output-available",
-                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "city": "Brisbane" },
                     "output": { "temperature": 22 }
                 }),
             ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_folds_provider_executed_static_tools() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::tool_input_delta("tool-call-1", r#"{ "query": "test" }"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    output: json!({ "result": "provider-result" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: None,
+                },
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-2".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id: "tool-call-2".to_string(),
+                    error_text: "error-text".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("provider-executed static tools process");
+
+        assert_eq!(messages.len(), 6);
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool-name",
+                    "toolCallId": "tool-call-1",
+                    "state": "output-available",
+                    "input": { "query": "test" },
+                    "output": { "result": "provider-result" },
+                    "providerExecuted": true
+                },
+                {
+                    "type": "tool-tool-name",
+                    "toolCallId": "tool-call-2",
+                    "state": "output-error",
+                    "input": { "query": "test" },
+                    "errorText": "error-text",
+                    "providerExecuted": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_folds_provider_executed_dynamic_tools() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::tool_input_delta("tool-call-1", r#"{ "query": "test" }"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    output: json!({ "result": "provider-result" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: Some(true),
+                },
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-2".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id: "tool-call-2".to_string(),
+                    error_text: "error-text".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("provider-executed dynamic tools process");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool-name",
+                    "toolCallId": "tool-call-1",
+                    "state": "output-available",
+                    "input": { "query": "test" },
+                    "output": { "result": "provider-result" },
+                    "providerExecuted": true
+                },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool-name",
+                    "toolCallId": "tool-call-2",
+                    "state": "output-error",
+                    "input": { "query": "test" },
+                    "errorText": "error-text",
+                    "providerExecuted": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_tool_call_and_result_metadata() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let mut call_metadata = ProviderMetadata::new();
+        call_metadata.insert(
+            "testProvider".to_string(),
+            JsonObject::from_iter([("itemId".to_string(), json!("call-item"))]),
+        );
+        let mut result_metadata = ProviderMetadata::new();
+        result_metadata.insert(
+            "testProvider".to_string(),
+            JsonObject::from_iter([("itemId".to_string(), json!("result-item"))]),
+        );
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: Some(call_metadata),
+                    tool_metadata: Some(JsonObject::from_iter([(
+                        "clientName".to_string(),
+                        json!("MyMCPClient"),
+                    )])),
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id: "tool-call-1".to_string(),
+                    error_text: "error-text".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: Some(result_metadata),
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                },
+            ],
+            false,
+        )
+        .expect("tool metadata processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool-name",
+                "toolCallId": "tool-call-1",
+                "state": "output-error",
+                "input": { "query": "test" },
+                "errorText": "error-text",
+                "providerExecuted": true,
+                "toolMetadata": { "clientName": "MyMCPClient" },
+                "callProviderMetadata": { "testProvider": { "itemId": "call-item" } },
+                "resultProviderMetadata": { "testProvider": { "itemId": "result-item" } }
+            })
         );
     }
 
