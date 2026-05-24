@@ -46,6 +46,10 @@ pub struct Thread {
     /// without calling the state adapter — set by the chat event
     /// dispatcher when invoking `onSubscribedMessage` handlers.
     is_subscribed_context: bool,
+    /// 1:1 with upstream `recentMessages: Message[]`. Wrapped in
+    /// `Arc<Mutex>` so the handle remains `Clone` while allowing
+    /// `set_recent_messages` to mutate the underlying buffer.
+    recent_messages: Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -68,6 +72,7 @@ impl Thread {
             thread_id: thread_id.into(),
             state_adapter: None,
             is_subscribed_context: false,
+            recent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -85,6 +90,7 @@ impl Thread {
             thread_id: thread_id.into(),
             state_adapter: Some(state_adapter),
             is_subscribed_context: false,
+            recent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -97,6 +103,34 @@ impl Thread {
     pub fn with_subscribed_context(mut self) -> Self {
         self.is_subscribed_context = true;
         self
+    }
+
+    /// Builder: seed the handle with an initial message. 1:1 with
+    /// upstream `new ThreadImpl({ initialMessage })` constructor
+    /// option — the chat dispatcher seeds the incoming message so
+    /// `recent_messages` reflects the current event when handlers
+    /// fire.
+    pub fn with_initial_message(self, message: crate::message::Message) -> Self {
+        {
+            let mut buf = self.recent_messages.lock().unwrap();
+            buf.push(message);
+        }
+        self
+    }
+
+    /// 1:1 with upstream `get recentMessages(): Message[]`. Returns
+    /// a snapshot clone (upstream returns a live array reference; the
+    /// Rust port returns a clone to avoid exposing the internal
+    /// `Mutex`).
+    pub fn recent_messages(&self) -> Vec<crate::message::Message> {
+        self.recent_messages.lock().unwrap().clone()
+    }
+
+    /// 1:1 with upstream `set recentMessages(value: Message[])`.
+    /// Replaces the buffer atomically.
+    pub fn set_recent_messages(&self, messages: Vec<crate::message::Message>) {
+        let mut buf = self.recent_messages.lock().unwrap();
+        *buf = messages;
     }
 
     /// Borrow the bound state adapter, if any. Returns `None` when
@@ -706,6 +740,85 @@ mod tests {
         block_on(thread.unsubscribe()).unwrap();
         let result = block_on(thread.is_subscribed()).unwrap();
         assert!(!result);
+    }
+
+    // ---------- describe("recentMessages getter/setter") (4 cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("recentMessages
+    // getter/setter")`.
+
+    fn sample_message(id: &str, text: &str) -> crate::message::Message {
+        use crate::markdown::root;
+        use crate::types::{Author, BotStatus, MessageMetadata};
+        crate::message::Message::new(
+            id,
+            "slack:C123:1234.5678",
+            text,
+            root(vec![]),
+            serde_json::json!({}),
+            Author {
+                user_id: "U_AUTHOR".to_string(),
+                user_name: "author".to_string(),
+                full_name: "Author".to_string(),
+                is_bot: BotStatus::Known(false),
+                is_me: false,
+            },
+            MessageMetadata {
+                date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+                edited: false,
+                edited_at: None,
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn thread_recent_messages_should_start_with_empty_array_by_default() {
+        let (thread, _state) = thread_with_state();
+        assert!(thread.recent_messages().is_empty());
+    }
+
+    #[test]
+    fn thread_recent_messages_should_initialize_with_initial_message_when_provided() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_initial_message(sample_message("msg-1", "Initial"));
+        let msgs = thread.recent_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "Initial");
+    }
+
+    #[test]
+    fn thread_recent_messages_should_allow_setting() {
+        let (thread, _state) = thread_with_state();
+        thread.set_recent_messages(vec![
+            sample_message("msg-1", "First"),
+            sample_message("msg-2", "Second"),
+        ]);
+        let msgs = thread.recent_messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].text, "First");
+        assert_eq!(msgs[1].text, "Second");
+    }
+
+    #[test]
+    fn thread_recent_messages_should_allow_replacing() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_initial_message(sample_message("msg-1", "Initial"));
+        thread.set_recent_messages(vec![sample_message("msg-2", "Replaced")]);
+        let msgs = thread.recent_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "Replaced");
     }
 
     #[test]
