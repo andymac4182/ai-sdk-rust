@@ -1203,17 +1203,32 @@ mod tests {
         assert!(adapter.channel_id_from_thread_id("").is_none());
     }
 
+    // ---------- describe("isDM") (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("isDM")`. Previously
+    // the C-prefix and G-prefix cases were bundled into a single
+    // `is_dm_false_for_c_and_g_prefixed_channels` test; per the
+    // slice-451 split-and-rename pattern they're now split into one
+    // Rust test per upstream case.
+
     #[test]
-    fn is_dm_true_for_d_prefixed_channels() {
+    fn is_dm_returns_true_for_dm_channels_d_prefix() {
+        // 1:1 with upstream `isDM > returns true for DM channels (D prefix)`.
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
         assert_eq!(adapter.is_dm("slack:DABC:1.0"), Some(true));
         assert_eq!(adapter.is_dm("slack:D1:1.0"), Some(true));
     }
 
     #[test]
-    fn is_dm_false_for_c_and_g_prefixed_channels() {
+    fn is_dm_returns_false_for_public_channels_c_prefix() {
+        // 1:1 with upstream `isDM > returns false for public channels (C prefix)`.
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
         assert_eq!(adapter.is_dm("slack:C123:1.0"), Some(false));
+    }
+
+    #[test]
+    fn is_dm_returns_false_for_private_channels_g_prefix() {
+        // 1:1 with upstream `isDM > returns false for private channels (G prefix)`.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
         assert_eq!(adapter.is_dm("slack:G123:1.0"), Some(false));
     }
 
