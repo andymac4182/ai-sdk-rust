@@ -11,8 +11,7 @@ use chat_sdk_adapter_shared::card_utils::render_gfm_table;
 use chat_sdk_adapter_shared::errors::AdapterError;
 use chat_sdk_chat::cards::{
     ActionsChild, ActionsElement, ButtonElement, ButtonStyle, CardChild, CardElement,
-    FieldsElement, LinkButtonElement, SectionElement, TableElement,
-    card_child_to_fallback_text,
+    FieldsElement, LinkButtonElement, SectionElement, TableElement, card_child_to_fallback_text,
 };
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use chat_sdk_chat::markdown::table_element_to_ascii;
@@ -39,7 +38,10 @@ fn validate_discord_custom_id(custom_id: &str) -> Result<(), AdapterError> {
 /// component `custom_id`, joining with `\n` when a value is provided.
 /// Returns `ValidationError` when the resulting string is empty or
 /// exceeds 100 chars.
-pub fn encode_discord_custom_id(action_id: &str, value: Option<&str>) -> Result<String, AdapterError> {
+pub fn encode_discord_custom_id(
+    action_id: &str,
+    value: Option<&str>,
+) -> Result<String, AdapterError> {
     match value {
         None | Some("") => {
             validate_discord_custom_id(action_id)?;
@@ -306,7 +308,9 @@ fn convert_text_element(element: &chat_sdk_chat::cards::TextElement) -> String {
 /// action rows of at most 5. Returns `Err` if any
 /// [`convert_button_element`] call rejects an id/value pair (matches
 /// upstream's bubbling throw from `encodeDiscordCustomId`).
-fn convert_actions_to_rows(element: &ActionsElement) -> Result<Vec<DiscordActionRow>, AdapterError> {
+fn convert_actions_to_rows(
+    element: &ActionsElement,
+) -> Result<Vec<DiscordActionRow>, AdapterError> {
     let mut buttons: Vec<DiscordButton> = Vec::new();
     for child in &element.children {
         match child {
@@ -336,7 +340,9 @@ fn convert_button_element(button: &ButtonElement) -> Result<DiscordButton, Adapt
         label: button.label.clone(),
         custom_id: Some(custom_id),
         url: None,
-        disabled: button.disabled.and_then(|d| if d { Some(true) } else { None }),
+        disabled: button
+            .disabled
+            .and_then(|d| if d { Some(true) } else { None }),
     })
 }
 
@@ -465,9 +471,10 @@ fn child_to_fallback_text(child: &CardChild) -> Option<String> {
 mod tests {
     use super::*;
     use chat_sdk_chat::cards::{
-        ActionsChild, ActionsElement, ActionsKind, ButtonElement, ButtonKind, ButtonStyle, CardKind,
-        DividerElement, DividerKind, FieldElement, FieldKind, FieldsElement, FieldsKind, LinkKind,
-        LinkButtonElement, LinkButtonKind, SectionElement, SectionKind, TextElement, TextKind,
+        ActionsChild, ActionsElement, ActionsKind, ButtonElement, ButtonKind, ButtonStyle,
+        CardKind, DividerElement, DividerKind, FieldElement, FieldKind, FieldsElement, FieldsKind,
+        LinkButtonElement, LinkButtonKind, LinkKind, SectionElement, SectionKind, TextElement,
+        TextKind,
     };
 
     fn card(title: Option<&str>, subtitle: Option<&str>, children: Vec<CardChild>) -> CardElement {
@@ -506,15 +513,21 @@ mod tests {
 
     #[test]
     fn converts_a_card_with_title_and_subtitle() {
-        let c = card(Some("Order Update"), Some("Your order is on its way"), vec![]);
+        let c = card(
+            Some("Order Update"),
+            Some("Your order is on its way"),
+            vec![],
+        );
         let payload = card_to_discord_payload(&c).unwrap();
         assert_eq!(payload.embeds.len(), 1);
         assert_eq!(payload.embeds[0].title.as_deref(), Some("Order Update"));
-        assert!(payload.embeds[0]
-            .description
-            .as_deref()
-            .unwrap_or("")
-            .contains("Your order is on its way"));
+        assert!(
+            payload.embeds[0]
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("Your order is on its way")
+        );
     }
 
     #[test]
@@ -609,7 +622,12 @@ mod tests {
 
     // ---------- cardToDiscordPayload Action Row + Section + Fields (8 cases) ----------
 
-    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+    fn button(
+        id: &str,
+        label: &str,
+        style: Option<ButtonStyle>,
+        value: Option<&str>,
+    ) -> ButtonElement {
         ButtonElement {
             action_type: None,
             callback_url: None,
@@ -629,8 +647,18 @@ mod tests {
             None,
             vec![CardChild::Actions(ActionsElement {
                 children: vec![
-                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
-                    ActionsChild::Button(button("reject", "Reject", Some(ButtonStyle::Danger), Some("data-123"))),
+                    ActionsChild::Button(button(
+                        "approve",
+                        "Approve",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    )),
+                    ActionsChild::Button(button(
+                        "reject",
+                        "Reject",
+                        Some(ButtonStyle::Danger),
+                        Some("data-123"),
+                    )),
                     ActionsChild::Button(button("skip", "Skip", None, None)),
                 ],
                 kind: ActionsKind::Actions,
@@ -869,7 +897,10 @@ mod tests {
         let c = card(None, None, vec![text("Just content")]);
         let payload = card_to_discord_payload(&c).unwrap();
         assert!(payload.embeds[0].title.is_none());
-        assert_eq!(payload.embeds[0].description.as_deref(), Some("Just content"));
+        assert_eq!(
+            payload.embeds[0].description.as_deref(),
+            Some("Just content")
+        );
     }
 
     #[test]
@@ -914,7 +945,12 @@ mod tests {
         // decodeDiscordCustomId > throws when a button value makes
         // custom_id too long`. id is 90 chars + value 20 chars +
         // delimiter = 111 chars, exceeds the 100-char cap.
-        let mut b = button(&"x".repeat(90), "Approve", None, Some("__cb:1234567890abcdef"));
+        let mut b = button(
+            &"x".repeat(90),
+            "Approve",
+            None,
+            Some("__cb:1234567890abcdef"),
+        );
         b.value = Some("__cb:1234567890abcdef".to_string());
         let c = card(
             None,
@@ -976,9 +1012,15 @@ mod tests {
         );
         let payload = card_to_discord_payload(&c).unwrap();
         let description = payload.embeds[0].description.as_deref().unwrap_or("");
-        assert!(description.contains("| Name | Status |"), "got: {description}");
+        assert!(
+            description.contains("| Name | Status |"),
+            "got: {description}"
+        );
         assert!(description.contains("| --- | --- |"), "got: {description}");
-        assert!(description.contains("| Alpha | Active |"), "got: {description}");
+        assert!(
+            description.contains("| Alpha | Active |"),
+            "got: {description}"
+        );
         // Pipes inside cells must be escaped; newlines collapsed to space.
         assert!(
             description.contains("| Beta \\| Pipe | Idle Wrap |"),

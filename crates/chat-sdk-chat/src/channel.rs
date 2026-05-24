@@ -276,7 +276,11 @@ impl Channel {
         text: &str,
         options: PostEphemeralOptions,
     ) -> AdapterResult<Option<EphemeralMessage>> {
-        match self.adapter.post_ephemeral(&self.channel_id, user_id, text).await {
+        match self
+            .adapter
+            .post_ephemeral(&self.channel_id, user_id, text)
+            .await
+        {
             Ok(msg) => return Ok(Some(msg)),
             Err(AdapterError::Unsupported(_)) => {}
             Err(other) => return Err(other),
@@ -444,11 +448,7 @@ mod tests {
                 .push((channel_id.to_string(), text.to_string()));
             Ok("channel-msg-id".to_string())
         }
-        async fn start_typing(
-            &self,
-            thread_id: &str,
-            status: Option<&str>,
-        ) -> AdapterResult<()> {
+        async fn start_typing(&self, thread_id: &str, status: Option<&str>) -> AdapterResult<()> {
             self.start_typing_calls
                 .lock()
                 .unwrap()
@@ -614,11 +614,8 @@ mod tests {
     fn channel_with_state() -> (Channel, Arc<MockState>) {
         let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
         let state = Arc::new(MockState::default());
-        let channel = Channel::with_state_adapter(
-            adapter,
-            "C123",
-            state.clone() as Arc<dyn StateAdapter>,
-        );
+        let channel =
+            Channel::with_state_adapter(adapter, "C123", state.clone() as Arc<dyn StateAdapter>);
         (channel, state)
     }
 
@@ -643,7 +640,10 @@ mod tests {
         block_on(channel.set_state(serde_json::json!({ "topic": "x" }))).unwrap();
         block_on(channel.set_state(serde_json::json!({ "members": 5 }))).unwrap();
         let value = block_on(channel.state()).unwrap();
-        assert_eq!(value, Some(serde_json::json!({ "topic": "x", "members": 5 })));
+        assert_eq!(
+            value,
+            Some(serde_json::json!({ "topic": "x", "members": 5 }))
+        );
     }
 
     #[test]
@@ -945,7 +945,9 @@ mod tests {
         let result = block_on(channel.post_ephemeral(
             "U456",
             "Secret!",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap()
         .expect("Expected Some(EphemeralMessage)");
@@ -982,7 +984,9 @@ mod tests {
         block_on(channel.post_ephemeral_for_author(
             &author,
             "Hello!",
-            PostEphemeralOptions { fallback_to_dm: false },
+            PostEphemeralOptions {
+                fallback_to_dm: false,
+            },
         ))
         .unwrap()
         .expect("Expected Some(EphemeralMessage)");
@@ -999,7 +1003,8 @@ mod tests {
     }
 
     #[test]
-    fn channel_post_ephemeral_should_return_null_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_false() {
+    fn channel_post_ephemeral_should_return_null_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_false()
+     {
         let adapter = Arc::new(EphemeralAdapter {
             supports_ephemeral: false,
             supports_open_dm: true,
@@ -1009,7 +1014,9 @@ mod tests {
         let result = block_on(channel.post_ephemeral(
             "U456",
             "Secret!",
-            PostEphemeralOptions { fallback_to_dm: false },
+            PostEphemeralOptions {
+                fallback_to_dm: false,
+            },
         ))
         .unwrap();
         assert!(result.is_none());
@@ -1018,7 +1025,8 @@ mod tests {
     }
 
     #[test]
-    fn channel_post_ephemeral_should_fallback_to_dm_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_true() {
+    fn channel_post_ephemeral_should_fallback_to_dm_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_true()
+     {
         let adapter = Arc::new(EphemeralAdapter {
             supports_ephemeral: false,
             supports_open_dm: true,
@@ -1028,7 +1036,9 @@ mod tests {
         let result = block_on(channel.post_ephemeral(
             "U456",
             "Secret!",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap()
         .expect("Expected Some(EphemeralMessage) via DM fallback");
@@ -1089,7 +1099,8 @@ mod tests {
     }
 
     #[test]
-    fn channel_post_ephemeral_should_return_null_when_no_post_ephemeral_no_open_dm_and_fallback_to_dm_is_true() {
+    fn channel_post_ephemeral_should_return_null_when_no_post_ephemeral_no_open_dm_and_fallback_to_dm_is_true()
+     {
         let adapter = Arc::new(EphemeralAdapter {
             supports_ephemeral: false,
             supports_open_dm: false,
@@ -1099,7 +1110,9 @@ mod tests {
         let result = block_on(channel.post_ephemeral(
             "U456",
             "Secret!",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap();
         assert!(result.is_none());

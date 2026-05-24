@@ -706,7 +706,10 @@ mod tests {
 
         r.push("|:---|:---:|---:|\n");
         let result = r.render();
-        assert!(result.contains("| Left | Center | Right |"), "got: {result}");
+        assert!(
+            result.contains("| Left | Center | Right |"),
+            "got: {result}"
+        );
         assert!(result.contains("|:---|:---:|---:|"), "got: {result}");
     }
 
@@ -932,7 +935,8 @@ mod tests {
     }
 
     #[test]
-    fn streaming_renderer_should_render_real_world_table_with_single_dash_separators_progressively() {
+    fn streaming_renderer_should_render_real_world_table_with_single_dash_separators_progressively()
+    {
         let mut r = StreamingMarkdownRenderer::default();
 
         r.push("Here's a table with 20 rows of sample data:\n\n");
@@ -948,7 +952,9 @@ mod tests {
         assert!(result.contains("| ID |"), "got: {result}");
         assert!(result.contains("| - |"), "got: {result}");
 
-        r.push("| 1 | Sarah Johnson | Engineering | 32 | $95,000 | Seattle | 2019-03-15 | Active |\n");
+        r.push(
+            "| 1 | Sarah Johnson | Engineering | 32 | $95,000 | Seattle | 2019-03-15 | Active |\n",
+        );
         let result = r.render();
         assert!(result.contains("Sarah Johnson"), "got: {result}");
 

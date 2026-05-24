@@ -641,8 +641,7 @@ mod tests {
         // `serde_json::from_str` round-trip).
         let serialized = sample_message().to_serialized();
         let text = serde_json::to_string(&serialized).expect("serialize");
-        let _parsed: serde_json::Value =
-            serde_json::from_str(&text).expect("re-parse round-trips");
+        let _parsed: serde_json::Value = serde_json::from_str(&text).expect("re-parse round-trips");
     }
 
     // ---------- from_serialized ----------
@@ -1150,7 +1149,10 @@ mod tests {
         let adapter = NoFetchSubjectAdapter;
         let msg = make_message("m1", "slack:C1");
         let value = block_on(resolver.resolve(&adapter, &msg)).unwrap();
-        assert!(value.is_none(), "expected None for Unsupported adapter, got {value:?}");
+        assert!(
+            value.is_none(),
+            "expected None for Unsupported adapter, got {value:?}"
+        );
         // Second call uses cache, never hits the adapter.
         block_on(resolver.resolve(&adapter, &msg)).unwrap();
     }

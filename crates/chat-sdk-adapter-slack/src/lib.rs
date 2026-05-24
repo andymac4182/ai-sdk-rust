@@ -115,8 +115,7 @@ pub struct SlackAdapter {
     /// webhook/conversations.info handlers (deferred in the Rust
     /// port); consulted by [`get_channel_visibility`] /
     /// [`is_external_channel`].
-    external_channels:
-        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    external_channels: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl SlackAdapter {
@@ -369,12 +368,8 @@ impl Adapter for SlackAdapter {
         })?;
 
         let url = self.method_url("chat.postEphemeral");
-        let body = slack_post_ephemeral_payload(
-            &decoded.channel_id,
-            &decoded.thread_ts,
-            user_id,
-            text,
-        );
+        let body =
+            slack_post_ephemeral_payload(&decoded.channel_id, &decoded.thread_ts, user_id, text);
 
         let response = self
             .http
@@ -1007,7 +1002,6 @@ mod tests {
     // 1:1 with upstream's `getChannelVisibility(threadId)` behavior:
     // external if `_externalChannels.has(channel)`, else private for
     // G/D prefixes, workspace for C, unknown otherwise.
-
     #[test]
     fn get_channel_visibility_returns_workspace_for_public_channels() {
         use chat_sdk_chat::types::ChannelVisibility;
@@ -1470,23 +1464,15 @@ mod tests {
         // (channel decoded from the slack: thread id, thread_ts
         // preserved when non-empty), and the parsed response surfaces
         // id/threadId/usedFallback=false.
-        let body = slack_post_ephemeral_payload(
-            "C123",
-            "1234567890.000000",
-            "U_USER_1",
-            "Ephemeral text",
-        );
+        let body =
+            slack_post_ephemeral_payload("C123", "1234567890.000000", "U_USER_1", "Ephemeral text");
         assert_eq!(body["channel"], "C123");
         assert_eq!(body["user"], "U_USER_1");
         assert_eq!(body["text"], "Ephemeral text");
         assert_eq!(body["thread_ts"], "1234567890.000000");
 
-        let response =
-            serde_json::json!({ "ok": true, "message_ts": "1234567890.888888" });
-        let parsed = parse_slack_post_ephemeral_response(
-            &response,
-            "slack:C123:1234567890.000000",
-        );
+        let response = serde_json::json!({ "ok": true, "message_ts": "1234567890.888888" });
+        let parsed = parse_slack_post_ephemeral_response(&response, "slack:C123:1234567890.000000");
         assert_eq!(parsed.id, "1234567890.888888");
         assert_eq!(parsed.thread_id, "slack:C123:1234567890.000000");
         assert!(!parsed.used_fallback);
@@ -1515,10 +1501,7 @@ mod tests {
         // omits message_ts on success, the EphemeralMessage.id is the
         // empty string rather than a typed error.
         let response = serde_json::json!({ "ok": true });
-        let parsed = parse_slack_post_ephemeral_response(
-            &response,
-            "slack:C123:1234567890.000000",
-        );
+        let parsed = parse_slack_post_ephemeral_response(&response, "slack:C123:1234567890.000000");
         assert_eq!(parsed.id, "");
         assert_eq!(parsed.thread_id, "slack:C123:1234567890.000000");
         assert!(!parsed.used_fallback);

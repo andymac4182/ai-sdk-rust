@@ -102,9 +102,7 @@ pub fn revive_value(value: Value) -> Revived {
 /// until their reviver branches land.
 pub fn revive_walk(value: Value) -> Value {
     match value {
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(revive_walk).collect())
-        }
+        Value::Array(items) => Value::Array(items.into_iter().map(revive_walk).collect()),
         Value::Object(map) => {
             let mut walked = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
@@ -120,8 +118,7 @@ pub fn revive_walk(value: Value) -> Value {
                 .and_then(Value::as_str)
                 == Some("chat:Message")
             {
-                if let Ok(serialized) =
-                    serde_json::from_value::<SerializedMessage>(walked.clone())
+                if let Ok(serialized) = serde_json::from_value::<SerializedMessage>(walked.clone())
                 {
                     let revived = Message::from_serialized(serialized);
                     return serde_json::to_value(revived.to_serialized()).unwrap_or(walked);

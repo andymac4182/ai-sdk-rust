@@ -294,7 +294,10 @@ impl TranscriptsApiImpl {
             entries.retain(|e| roles.contains(&e.role));
         }
 
-        let limit = query.limit.map(|n| n as usize).unwrap_or(DEFAULT_LIST_LIMIT);
+        let limit = query
+            .limit
+            .map(|n| n as usize)
+            .unwrap_or(DEFAULT_LIST_LIMIT);
         if entries.len() > limit {
             // Keep the newest `limit`, preserving chronological order.
             let drop_count = entries.len() - limit;
@@ -656,7 +659,13 @@ mod tests {
     // ---------- list_query filters (3 upstream cases) ----------
     // 1:1 with upstream `list` describe block's filter cases.
 
-    fn input_for_thread(user: &str, platform: &str, thread_id: &str, role: TranscriptRole, text: &str) -> AppendTranscriptInput {
+    fn input_for_thread(
+        user: &str,
+        platform: &str,
+        thread_id: &str,
+        role: TranscriptRole,
+        text: &str,
+    ) -> AppendTranscriptInput {
         AppendTranscriptInput {
             formatted: None,
             platform: platform.to_string(),
@@ -673,8 +682,14 @@ mod tests {
         let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
         let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
 
-        block_on(api.append(input_for_thread("u1", "slack", "slack:C:T", TranscriptRole::User, "from slack")))
-            .unwrap();
+        block_on(api.append(input_for_thread(
+            "u1",
+            "slack",
+            "slack:C:T",
+            TranscriptRole::User,
+            "from slack",
+        )))
+        .unwrap();
         block_on(api.append(input_for_thread(
             "u1",
             "discord",
@@ -701,10 +716,22 @@ mod tests {
         let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
         let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
 
-        block_on(api.append(input_for_thread("u1", "slack", "slack:C:A", TranscriptRole::User, "thread A")))
-            .unwrap();
-        block_on(api.append(input_for_thread("u1", "slack", "slack:C:B", TranscriptRole::User, "thread B")))
-            .unwrap();
+        block_on(api.append(input_for_thread(
+            "u1",
+            "slack",
+            "slack:C:A",
+            TranscriptRole::User,
+            "thread A",
+        )))
+        .unwrap();
+        block_on(api.append(input_for_thread(
+            "u1",
+            "slack",
+            "slack:C:B",
+            TranscriptRole::User,
+            "thread B",
+        )))
+        .unwrap();
 
         let only_a = block_on(api.list_query(&crate::types::ListQuery {
             limit: None,
@@ -931,7 +958,9 @@ mod tests {
         let api = TranscriptsApiImpl::new(
             state,
             TranscriptsConfig {
-                retention: Some(crate::types::RetentionPolicy::Duration("7d".parse().unwrap())),
+                retention: Some(crate::types::RetentionPolicy::Duration(
+                    "7d".parse().unwrap(),
+                )),
                 ..Default::default()
             },
         );
@@ -975,7 +1004,10 @@ mod tests {
         // `parse::<DurationString>()`. Malformed strings fail
         // parsing — Err, never reach the constructor.
         let err = "7days".parse::<crate::types::DurationString>();
-        assert!(err.is_err(), "expected '7days' to fail DurationString parse");
+        assert!(
+            err.is_err(),
+            "expected '7days' to fail DurationString parse"
+        );
         // Valid forms still parse.
         assert!("7d".parse::<crate::types::DurationString>().is_ok());
         assert!("30m".parse::<crate::types::DurationString>().is_ok());

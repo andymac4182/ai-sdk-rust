@@ -312,7 +312,11 @@ impl Thread {
         text: &str,
         options: PostEphemeralOptions,
     ) -> AdapterResult<Option<EphemeralMessage>> {
-        match self.adapter.post_ephemeral(&self.thread_id, user_id, text).await {
+        match self
+            .adapter
+            .post_ephemeral(&self.thread_id, user_id, text)
+            .await
+        {
             Ok(msg) => return Ok(Some(msg)),
             Err(AdapterError::Unsupported(_)) => {}
             Err(other) => return Err(other),
@@ -590,12 +594,12 @@ impl ScheduledMessageHandle {
             .await
         {
             Ok(()) => Ok(()),
-            Err(crate::types::AdapterError::Unsupported(_)) => Err(
-                crate::errors::ChatError::not_implemented_feature(
+            Err(crate::types::AdapterError::Unsupported(_)) => {
+                Err(crate::errors::ChatError::not_implemented_feature(
                     "Scheduled message cancellation is not supported by this adapter",
                     "scheduling",
-                ),
-            ),
+                ))
+            }
             Err(other) => Err(crate::errors::ChatError::new(
                 format!("{other}"),
                 "ADAPTER_ERROR",
@@ -745,11 +749,7 @@ mod tests {
             self.fetch_subject_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.subject_result.clone())
         }
-        async fn start_typing(
-            &self,
-            thread_id: &str,
-            status: Option<&str>,
-        ) -> AdapterResult<()> {
+        async fn start_typing(&self, thread_id: &str, status: Option<&str>) -> AdapterResult<()> {
             self.start_typing
                 .lock()
                 .unwrap()
@@ -779,11 +779,7 @@ mod tests {
             ));
             Ok(message_id.to_string())
         }
-        async fn delete_message(
-            &self,
-            thread_id: &str,
-            message_id: &str,
-        ) -> AdapterResult<()> {
+        async fn delete_message(&self, thread_id: &str, message_id: &str) -> AdapterResult<()> {
             self.delete_message
                 .lock()
                 .unwrap()
@@ -973,14 +969,10 @@ mod tests {
     #[test]
     fn per_thread_state_returns_stored_state() {
         let (thread, state) = thread_with_state();
-        state
-            .cache
-            .lock()
-            .unwrap()
-            .insert(
-                "thread-state:slack:C123:1234.5678".to_string(),
-                serde_json::json!({ "aiMode": true }),
-            );
+        state.cache.lock().unwrap().insert(
+            "thread-state:slack:C123:1234.5678".to_string(),
+            serde_json::json!({ "aiMode": true }),
+        );
         let value = block_on(thread.state()).unwrap();
         assert_eq!(value, Some(serde_json::json!({ "aiMode": true })));
     }
@@ -999,7 +991,10 @@ mod tests {
         block_on(thread.set_state(serde_json::json!({ "aiMode": true }))).unwrap();
         block_on(thread.set_state(serde_json::json!({ "counter": 5 }))).unwrap();
         let value = block_on(thread.state()).unwrap();
-        assert_eq!(value, Some(serde_json::json!({ "aiMode": true, "counter": 5 })));
+        assert_eq!(
+            value,
+            Some(serde_json::json!({ "aiMode": true, "counter": 5 }))
+        );
     }
 
     #[test]
@@ -1008,7 +1003,10 @@ mod tests {
         block_on(thread.set_state(serde_json::json!({ "aiMode": true, "counter": 1 }))).unwrap();
         block_on(thread.set_state(serde_json::json!({ "counter": 10 }))).unwrap();
         let value = block_on(thread.state()).unwrap();
-        assert_eq!(value, Some(serde_json::json!({ "aiMode": true, "counter": 10 })));
+        assert_eq!(
+            value,
+            Some(serde_json::json!({ "aiMode": true, "counter": 10 }))
+        );
     }
 
     #[test]
@@ -1036,7 +1034,10 @@ mod tests {
         let (thread, state) = thread_with_state();
         block_on(thread.state()).unwrap();
         let get_calls = state.get_calls.lock().unwrap();
-        assert_eq!(get_calls.last().unwrap(), "thread-state:slack:C123:1234.5678");
+        assert_eq!(
+            get_calls.last().unwrap(),
+            "thread-state:slack:C123:1234.5678"
+        );
     }
 
     // ---------- describe("startTyping") (2 upstream cases) + describe("mentionUser") (2 cases) ----------
@@ -1132,7 +1133,10 @@ mod tests {
         );
         block_on(thread.subscribe()).unwrap();
         let set_calls = state.set_calls.lock().unwrap();
-        assert_eq!(set_calls.last().unwrap().0, "subscribed:slack:C123:1234.5678");
+        assert_eq!(
+            set_calls.last().unwrap().0,
+            "subscribed:slack:C123:1234.5678"
+        );
     }
 
     #[test]
@@ -1420,8 +1424,7 @@ mod tests {
         let thread = Thread::new(adapter, "slack:C123:1234.5678").with_channel_id("C123");
         let json = thread.to_json();
         let text = serde_json::to_string(&json).expect("serialize");
-        let _parsed: serde_json::Value =
-            serde_json::from_str(&text).expect("re-parse round-trips");
+        let _parsed: serde_json::Value = serde_json::from_str(&text).expect("re-parse round-trips");
     }
 
     #[test]
@@ -1431,13 +1434,10 @@ mod tests {
         // round-trips through the JSON shape.
         let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
         let state = Arc::new(MockState::default());
-        let thread = Thread::with_state_adapter(
-            adapter,
-            "slack:DU123:",
-            state as Arc<dyn StateAdapter>,
-        )
-        .with_channel_id("DU123")
-        .with_is_dm(true);
+        let thread =
+            Thread::with_state_adapter(adapter, "slack:DU123:", state as Arc<dyn StateAdapter>)
+                .with_channel_id("DU123")
+                .with_is_dm(true);
         let json = thread.to_json();
         assert_eq!(json["_type"], "chat:Thread");
         assert_eq!(json["id"], "slack:DU123:");
@@ -1558,7 +1558,9 @@ mod tests {
         assert!(result);
         let get_calls = state.get_calls.lock().unwrap();
         assert!(
-            !get_calls.iter().any(|k| k == "subscribed:slack:C123:1234.5678"),
+            !get_calls
+                .iter()
+                .any(|k| k == "subscribed:slack:C123:1234.5678"),
             "state.get should NOT be called when subscribed context is set"
         );
     }
@@ -1929,10 +1931,10 @@ mod tests {
             channel_id: &str,
             scheduled_message_id: &str,
         ) -> AdapterResult<()> {
-            self.cancel_calls.lock().unwrap().push((
-                channel_id.to_string(),
-                scheduled_message_id.to_string(),
-            ));
+            self.cancel_calls
+                .lock()
+                .unwrap()
+                .push((channel_id.to_string(), scheduled_message_id.to_string()));
             if let Some(msg) = self.cancel_should_fail_with {
                 return Err(AdapterError::Io(std::io::Error::other(msg).into()));
             }
@@ -2092,7 +2094,9 @@ mod tests {
         let result = block_on(thread.post_ephemeral(
             "U456",
             "Secret message",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap()
         .expect("Expected Some(EphemeralMessage)");
@@ -2132,7 +2136,9 @@ mod tests {
         block_on(thread.post_ephemeral_for_author(
             &author,
             "Secret message",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap()
         .expect("Expected Some(EphemeralMessage)");
@@ -2149,7 +2155,8 @@ mod tests {
     }
 
     #[test]
-    fn thread_post_ephemeral_should_fallback_to_dm_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_true() {
+    fn thread_post_ephemeral_should_fallback_to_dm_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_true()
+     {
         let adapter = Arc::new(EphemeralAdapter {
             supports_ephemeral: false,
             supports_open_dm: true,
@@ -2159,7 +2166,9 @@ mod tests {
         let result = block_on(thread.post_ephemeral(
             "U456",
             "Secret message",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap()
         .expect("Expected Some(EphemeralMessage) via DM fallback");
@@ -2180,7 +2189,8 @@ mod tests {
     }
 
     #[test]
-    fn thread_post_ephemeral_should_return_null_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_false() {
+    fn thread_post_ephemeral_should_return_null_when_adapter_has_no_post_ephemeral_and_fallback_to_dm_is_false()
+     {
         let adapter = Arc::new(EphemeralAdapter {
             supports_ephemeral: false,
             supports_open_dm: true,
@@ -2190,7 +2200,9 @@ mod tests {
         let result = block_on(thread.post_ephemeral(
             "U456",
             "Secret message",
-            PostEphemeralOptions { fallback_to_dm: false },
+            PostEphemeralOptions {
+                fallback_to_dm: false,
+            },
         ))
         .unwrap();
         assert!(result.is_none());
@@ -2210,7 +2222,9 @@ mod tests {
         let result = block_on(thread.post_ephemeral(
             "U456",
             "Secret message",
-            PostEphemeralOptions { fallback_to_dm: true },
+            PostEphemeralOptions {
+                fallback_to_dm: true,
+            },
         ))
         .unwrap();
         assert!(result.is_none());

@@ -132,8 +132,13 @@ pub struct MessengerGenericElement {
 /// array; `"button"` carries flat `text` + `buttons`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessengerTemplatePayload {
-    Generic { elements: Vec<MessengerGenericElement> },
-    Button { text: String, buttons: Vec<MessengerButton> },
+    Generic {
+        elements: Vec<MessengerGenericElement>,
+    },
+    Button {
+        text: String,
+        buttons: Vec<MessengerButton>,
+    },
 }
 
 /// Result of [`card_to_messenger`]. 1:1 with upstream's
@@ -209,9 +214,10 @@ fn has_unsupported_elements(children: &[CardChild]) -> bool {
             CardChild::Table(_) => return true,
             CardChild::Section(s) if has_unsupported_elements(&s.children) => return true,
             CardChild::Actions(a) => {
-                if a.children.iter().any(|c| {
-                    matches!(c, ActionsChild::Select(_) | ActionsChild::RadioSelect(_))
-                }) {
+                if a.children
+                    .iter()
+                    .any(|c| matches!(c, ActionsChild::Select(_) | ActionsChild::RadioSelect(_)))
+                {
                     return true;
                 }
             }
@@ -279,7 +285,10 @@ fn convert_link_button(button: &LinkButtonElement) -> MessengerButton {
 /// when the card has a title AND non-empty body text (in which case
 /// the body text becomes the subtitle). Title falls back to the
 /// body text, then to `"Menu"` if neither is present.
-fn build_generic_template(card: &CardElement, buttons: Vec<MessengerButton>) -> MessengerTemplatePayload {
+fn build_generic_template(
+    card: &CardElement,
+    buttons: Vec<MessengerButton>,
+) -> MessengerTemplatePayload {
     let body_text = build_body_text(card);
     let raw_title = card
         .title
@@ -302,7 +311,11 @@ fn build_generic_template(card: &CardElement, buttons: Vec<MessengerButton>) -> 
         None
     };
 
-    let image_url = card.image_url.as_deref().filter(|u| !u.is_empty()).map(str::to_owned);
+    let image_url = card
+        .image_url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .map(str::to_owned);
 
     MessengerTemplatePayload::Generic {
         elements: vec![MessengerGenericElement {
@@ -357,7 +370,11 @@ fn child_to_plain_text(child: &CardChild) -> Option<String> {
         CardChild::Actions(_) => None,
         CardChild::Section(s) => {
             let parts: Vec<String> = s.children.iter().filter_map(child_to_plain_text).collect();
-            if parts.is_empty() { None } else { Some(parts.join("\n")) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
         }
         CardChild::Link(l) => Some(format!("{}: {}", l.label, l.url)),
         _ => None,
@@ -927,7 +944,10 @@ mod tests {
             children: vec![
                 text_child("What would you like to do?"),
                 CardChild::Actions(ActionsElement {
-                    children: vec![button_action("btn_yes", "Yes"), button_action("btn_no", "No")],
+                    children: vec![
+                        button_action("btn_yes", "Yes"),
+                        button_action("btn_no", "No"),
+                    ],
                     kind: ActionsKind::Actions,
                 }),
             ],
@@ -1045,8 +1065,14 @@ mod tests {
                 payload: MessengerTemplatePayload::Generic { elements },
             } => {
                 assert_eq!(elements[0].buttons.len(), 2);
-                assert!(matches!(elements[0].buttons[0], MessengerButton::Postback { .. }));
-                assert!(matches!(elements[0].buttons[1], MessengerButton::WebUrl { .. }));
+                assert!(matches!(
+                    elements[0].buttons[0],
+                    MessengerButton::Postback { .. }
+                ));
+                assert!(matches!(
+                    elements[0].buttons[1],
+                    MessengerButton::WebUrl { .. }
+                ));
             }
             other => panic!("expected Generic Template, got {other:?}"),
         }
@@ -1095,7 +1121,10 @@ mod tests {
             vec![
                 text_child("Please select an option:"),
                 CardChild::Actions(ActionsElement {
-                    children: vec![button_action("opt1", "Option 1"), button_action("opt2", "Option 2")],
+                    children: vec![
+                        button_action("opt1", "Option 1"),
+                        button_action("opt2", "Option 2"),
+                    ],
                     kind: ActionsKind::Actions,
                 }),
             ],
@@ -1235,7 +1264,10 @@ mod tests {
                 }),
             ],
         );
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1248,7 +1280,10 @@ mod tests {
                 kind: ActionsKind::Actions,
             })],
         );
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1280,7 +1315,10 @@ mod tests {
             Some("Long titles"),
             None,
             vec![CardChild::Actions(ActionsElement {
-                children: vec![button_action("btn_long", "This is a very long button title")],
+                children: vec![button_action(
+                    "btn_long",
+                    "This is a very long button title",
+                )],
                 kind: ActionsKind::Actions,
             })],
         );
@@ -1302,7 +1340,10 @@ mod tests {
     #[test]
     fn falls_back_to_text_for_cards_without_buttons() {
         let c = card(Some("Info only"), None, vec![text_child("Just some info")]);
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1318,7 +1359,10 @@ mod tests {
         // Body text is empty (no text/fields/link children) so even
         // though there's a valid link button, the Button Template
         // branch needs body text — falls back to text fallback.
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1331,7 +1375,10 @@ mod tests {
                 kind: ActionsKind::Actions,
             })],
         );
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1344,7 +1391,10 @@ mod tests {
                 kind: ActionsKind::Actions,
             })],
         );
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1365,7 +1415,10 @@ mod tests {
                 }),
             ],
         );
-        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+        assert!(matches!(
+            card_to_messenger(&c),
+            MessengerCardResult::Text { .. }
+        ));
     }
 
     #[test]
@@ -1475,10 +1528,7 @@ mod tests {
                 payload: MessengerTemplatePayload::Generic { elements },
             } => match &elements[0].buttons[0] {
                 MessengerButton::Postback { payload, .. } => {
-                    assert_eq!(
-                        payload,
-                        &encode_messenger_callback_data("action_id", None)
-                    );
+                    assert_eq!(payload, &encode_messenger_callback_data("action_id", None));
                 }
                 other => panic!("expected Postback, got {other:?}"),
             },

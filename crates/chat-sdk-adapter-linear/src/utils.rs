@@ -79,8 +79,9 @@ pub fn render_message_to_linear_markdown(
                 // throws here, but the Rust parser exposes errors
                 // explicitly).
                 .unwrap_or_else(|_| m.markdown.clone()),
-            AdapterPostableMessage::Ast(a) => converter
-                .render_postable_ast(&chat_sdk_chat::markdown::Node::Root(a.ast.clone())),
+            AdapterPostableMessage::Ast(a) => {
+                converter.render_postable_ast(&chat_sdk_chat::markdown::Node::Root(a.ast.clone()))
+            }
             AdapterPostableMessage::Card(_) | AdapterPostableMessage::CardElement(_) => {
                 // Already handled by the `extract_card` branch above
                 // — these arms are unreachable for `Card` variants.
@@ -210,10 +211,7 @@ mod tests {
     fn render_message_to_linear_markdown_handles_plain_text() {
         let converter = LinearFormatConverter::new();
         let msg = AdapterPostableMessage::Text("hello".to_string());
-        assert_eq!(
-            render_message_to_linear_markdown(&msg, &converter),
-            "hello"
-        );
+        assert_eq!(render_message_to_linear_markdown(&msg, &converter), "hello");
     }
 
     #[test]

@@ -24,11 +24,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// - Length-mismatched signatures are rejected before the compare
 ///   (upstream's `timingSafeEqual` throws on length mismatch and
 ///   the catch swallows it; both branches return `false`).
-pub fn verify_github_signature(
-    body: &str,
-    webhook_secret: &str,
-    signature: Option<&str>,
-) -> bool {
+pub fn verify_github_signature(body: &str, webhook_secret: &str, signature: Option<&str>) -> bool {
     let Some(signature) = signature.filter(|s| !s.is_empty()) else {
         return false;
     };
@@ -112,7 +108,9 @@ mod tests {
         // constant-time comparison (mirrors upstream Buffer compare).
         let body = "x";
         let secret = "s";
-        let sig = sign(body, secret).to_uppercase().replace("SHA256=", "sha256=");
+        let sig = sign(body, secret)
+            .to_uppercase()
+            .replace("SHA256=", "sha256=");
         assert!(!verify_github_signature(body, secret, Some(&sig)));
     }
 }

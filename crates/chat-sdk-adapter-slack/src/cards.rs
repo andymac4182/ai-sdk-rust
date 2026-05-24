@@ -376,7 +376,11 @@ fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> V
         .iter()
         .map(|h| {
             let converted = convert_emoji(h);
-            let text = if converted.is_empty() { " ".to_string() } else { converted };
+            let text = if converted.is_empty() {
+                " ".to_string()
+            } else {
+                converted
+            };
             json!({ "type": "raw_text", "text": text })
         })
         .collect();
@@ -388,7 +392,11 @@ fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> V
             .iter()
             .map(|cell| {
                 let converted = convert_emoji(cell);
-                let text = if converted.is_empty() { " ".to_string() } else { converted };
+                let text = if converted.is_empty() {
+                    " ".to_string()
+                } else {
+                    converted
+                };
                 json!({ "type": "raw_text", "text": text })
             })
             .collect();
@@ -570,7 +578,11 @@ mod tests {
 
     #[test]
     fn block_kit_converts_a_card_with_title_and_subtitle() {
-        let c = card(Some("Order Update"), Some("Your order is on its way"), vec![]);
+        let c = card(
+            Some("Order Update"),
+            Some("Your order is on its way"),
+            vec![],
+        );
         let blocks = card_to_block_kit(&c);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "header");
@@ -694,7 +706,12 @@ mod tests {
 
     use chat_sdk_chat::cards::{ButtonStyle, LinkButtonKind, SectionKind};
 
-    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+    fn button(
+        id: &str,
+        label: &str,
+        style: Option<ButtonStyle>,
+        value: Option<&str>,
+    ) -> ButtonElement {
         ButtonElement {
             action_type: None,
             callback_url: None,
@@ -714,7 +731,12 @@ mod tests {
             None,
             vec![CardChild::Actions(ActionsElement {
                 children: vec![
-                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
+                    ActionsChild::Button(button(
+                        "approve",
+                        "Approve",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    )),
                     ActionsChild::Button(button(
                         "reject",
                         "Reject",
@@ -1121,7 +1143,10 @@ mod tests {
         let c = card(
             None,
             None,
-            vec![table(vec!["Name", "Age"], vec![vec!["Alice", "30"], vec!["Bob", "25"]])],
+            vec![table(
+                vec!["Name", "Age"],
+                vec![vec!["Alice", "30"], vec!["Bob", "25"]],
+            )],
         );
         let blocks = card_to_block_kit(&c);
         assert_eq!(blocks.len(), 1);
@@ -1254,7 +1279,11 @@ mod tests {
                     "priority",
                     "Priority",
                     Some("Select priority"),
-                    vec![opt("High", "high"), opt("Medium", "medium"), opt("Low", "low")],
+                    vec![
+                        opt("High", "high"),
+                        opt("Medium", "medium"),
+                        opt("Low", "low"),
+                    ],
                     Some("medium"),
                 ))],
                 kind: ActionsKind::Actions,

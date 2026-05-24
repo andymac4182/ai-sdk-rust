@@ -40,6 +40,14 @@ allowed_path() {
     src/provider_utils.rs | src/util.rs)
       return 0
       ;;
+    crates/chat-sdk-adapter-gchat/src/thread_utils.rs)
+      # Mirrors upstream packages/adapter-gchat/src/thread-utils.ts.
+      return 0
+      ;;
+    crates/chat-sdk-adapter-linear/src/utils.rs)
+      # Mirrors upstream packages/adapter-linear/src/utils.ts.
+      return 0
+      ;;
     *)
       return 1
       ;;
@@ -49,6 +57,15 @@ allowed_path() {
 allowed_identifier_token() {
   local name="$1"
   local token="$2"
+  local origin="${3:-}"
+
+  # The Linear adapter's `utils` module mirrors upstream
+  # packages/adapter-linear/src/utils.ts. Allow the bare `utils`
+  # identifier only at its declaring lib.rs site.
+  if [[ "$token" == "utils" && "$name" == "utils" &&
+        "$origin" == *chat-sdk-adapter-linear/src/lib.rs* ]]; then
+    return 0
+  fi
 
   if [[ "$token" == "utils" && ( "$name" == *provider_utils* || "$name" == *provider-utils* ) ]]; then
     return 0
@@ -57,8 +74,15 @@ allowed_identifier_token() {
   if [[ "$token" == "utils" && (
         "$name" == *adapter_utils* || "$name" == *adapter-utils* ||
         "$name" == *buffer_utils*  || "$name" == *buffer-utils*  ||
-        "$name" == *card_utils*    || "$name" == *card-utils*
+        "$name" == *card_utils*    || "$name" == *card-utils*  ||
+        "$name" == *thread_utils*  || "$name" == *thread-utils*
       ) ]]; then
+    return 0
+  fi
+
+  # `mdast_util_to_markdown` mirrors the upstream `mdast-util-to-markdown`
+  # npm package name referenced in chat-sdk markdown porting notes.
+  if [[ "$token" == "util" && "$name" == *mdast_util_to_markdown* ]]; then
     return 0
   fi
 
@@ -98,7 +122,7 @@ check_identifier() {
   local name="$2"
 
   while IFS= read -r token; do
-    if is_banned_token "$token" && ! allowed_identifier_token "$name" "$token"; then
+    if is_banned_token "$token" && ! allowed_identifier_token "$name" "$token" "$origin"; then
       add_failure "$origin: '$name' uses vague token '$token'"
     fi
   done < <(identifier_tokens "$name")

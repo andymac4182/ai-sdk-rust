@@ -288,7 +288,9 @@ mod tests {
     #[test]
     fn should_output_url_directly_when_link_text_matches_url() {
         let c = GoogleChatFormatConverter::new();
-        let ast = c.to_ast("[https://example.com](https://example.com)").unwrap();
+        let ast = c
+            .to_ast("[https://example.com](https://example.com)")
+            .unwrap();
         let result = c.from_ast(&ast);
         assert!(result.contains("https://example.com"));
     }
@@ -349,7 +351,9 @@ mod tests {
     #[test]
     fn should_indent_nested_unordered_lists() {
         let c = GoogleChatFormatConverter::new();
-        let result = c.from_markdown("- parent\n  - child 1\n  - child 2").unwrap();
+        let result = c
+            .from_markdown("- parent\n  - child 1\n  - child 2")
+            .unwrap();
         assert!(result.contains("• parent"));
         assert!(result.contains("  • child 1"));
         assert!(result.contains("  • child 2"));
@@ -370,7 +374,9 @@ mod tests {
     #[test]
     fn should_handle_deeply_nested_lists() {
         let c = GoogleChatFormatConverter::new();
-        let result = c.from_markdown("- level 1\n  - level 2\n    - level 3").unwrap();
+        let result = c
+            .from_markdown("- level 1\n  - level 2\n    - level 3")
+            .unwrap();
         assert!(result.contains("• level 1"));
         assert!(result.contains("  • level 2"));
         assert!(result.contains("    • level 3"));
@@ -500,9 +506,7 @@ mod tests {
     fn should_render_markdown_tables_as_code_blocks() {
         let c = GoogleChatFormatConverter::new();
         let result = c
-            .render_postable_markdown(
-                "| Col1 | Col2 |\n|------|------|\n| a    | b    |",
-            )
+            .render_postable_markdown("| Col1 | Col2 |\n|------|------|\n| a    | b    |")
             .unwrap();
         assert!(result.contains("```"));
         assert!(result.contains("Col1"));

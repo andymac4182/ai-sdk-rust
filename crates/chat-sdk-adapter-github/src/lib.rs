@@ -887,9 +887,7 @@ mod tests {
             Some("github:vercel/chat")
         );
         assert_eq!(
-            adapter
-                .channel_id_from_thread_id("github:a/b:1")
-                .as_deref(),
+            adapter.channel_id_from_thread_id("github:a/b:1").as_deref(),
             Some("github:a/b")
         );
     }
@@ -927,7 +925,11 @@ mod tests {
     #[test]
     fn channel_id_from_thread_id_returns_none_for_non_github_ids() {
         let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
-        assert!(adapter.channel_id_from_thread_id("gitlab:foo/bar:1").is_none());
+        assert!(
+            adapter
+                .channel_id_from_thread_id("gitlab:foo/bar:1")
+                .is_none()
+        );
         assert!(adapter.channel_id_from_thread_id("").is_none());
     }
 
@@ -1220,9 +1222,8 @@ mod tests {
         let opts = GithubAdapterOptions {
             auth: GithubAuth::App(GithubAppCredentials {
                 app_id: "12345".to_string(),
-                private_key:
-                    "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
-                        .to_string(),
+                private_key: "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                    .to_string(),
                 installation_id: Some(99),
             }),
             api_base: None,
@@ -1239,9 +1240,8 @@ mod tests {
         let opts = GithubAdapterOptions {
             auth: GithubAuth::App(GithubAppCredentials {
                 app_id: "12345".to_string(),
-                private_key:
-                    "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
-                        .to_string(),
+                private_key: "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                    .to_string(),
                 installation_id: None,
             }),
             api_base: None,
@@ -1374,8 +1374,8 @@ mod tests {
             "GITHUB_BOT_USERNAME" => Some("env-bot".to_string()),
             _ => None,
         };
-        let a = try_create_github_adapter(GithubCreateOptions::default(), env)
-            .expect("env-only PAT");
+        let a =
+            try_create_github_adapter(GithubCreateOptions::default(), env).expect("env-only PAT");
         assert_eq!(a.user_name(), Some("env-bot"));
         assert!(matches!(a.auth(), GithubAuth::Token(t) if t == "env-token"));
     }
@@ -1386,8 +1386,7 @@ mod tests {
             "GITHUB_WEBHOOK_SECRET" => Some("env-secret".to_string()),
             "GITHUB_APP_ID" => Some("env-app-id".to_string()),
             "GITHUB_PRIVATE_KEY" => Some(
-                "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
-                    .to_string(),
+                "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----".to_string(),
             ),
             "GITHUB_INSTALLATION_ID" => Some("789".to_string()),
             _ => None,

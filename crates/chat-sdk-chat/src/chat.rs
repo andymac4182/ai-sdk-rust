@@ -116,7 +116,10 @@ impl fmt::Display for GetUserError {
             Self::UnknownUserIdFormat(id) => {
                 write!(f, "Cannot infer adapter from userId \"{id}\"")
             }
-            Self::AmbiguousUserId { user_id, candidates } => write!(
+            Self::AmbiguousUserId {
+                user_id,
+                candidates,
+            } => write!(
                 f,
                 "Numeric userId \"{user_id}\" is ambiguous between adapters: {}. Call the platform's adapter directly (e.g. `adapter.getUser(userId)`).",
                 candidates.join(", ")
@@ -148,6 +151,48 @@ pub const MODAL_CONTEXT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// upstream's `modal-context:<contextId>` shape (slice 429).
 pub const MODAL_CONTEXT_KEY_PREFIX: &str = "modal-context:";
 
+/// 1:1 with upstream `LockScope` union (`"thread" | "channel" |
+/// async ({isDM}) => "thread" | "channel"`). Determines which key
+/// the dispatcher acquires the per-thread lock on:
+/// - `Thread` (default): use the full `thread_id`.
+/// - `Channel`: derive the channel id via
+///   [`crate::channel::derive_channel_id`].
+/// - `Resolver(fn)`: per-message async callback returning Thread or
+///   Channel.
+#[derive(Clone)]
+pub enum LockScope {
+    /// 1:1 with upstream `"thread"` literal.
+    Thread,
+    /// 1:1 with upstream `"channel"` literal.
+    Channel,
+    /// 1:1 with upstream `(ctx) => Promise<"thread" | "channel">`
+    /// callback. The closure receives the active adapter +
+    /// thread/channel ids + is_dm so adopters can route differently
+    /// per platform / per channel type.
+    Resolver(
+        Arc<dyn Fn(crate::types::LockScopeContext) -> LockScopeFuture + Send + Sync + 'static>,
+    ),
+}
+
+/// Boxed async future returned by a [`LockScope::Resolver`] callback.
+pub type LockScopeFuture = std::pin::Pin<Box<dyn std::future::Future<Output = LockScope> + Send>>;
+
+impl Default for LockScope {
+    fn default() -> Self {
+        Self::Thread
+    }
+}
+
+impl std::fmt::Debug for LockScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thread => f.write_str("LockScope::Thread"),
+            Self::Channel => f.write_str("LockScope::Channel"),
+            Self::Resolver(_) => f.write_str("LockScope::Resolver(<closure>)"),
+        }
+    }
+}
+
 /// Resolution returned by [`OnLockConflict::Callback`] when a lock
 /// conflict occurs. 1:1 with upstream string union `"drop" | "force"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,9 +204,8 @@ pub enum LockConflictResolution {
 }
 
 /// Boxed async future returned by an [`OnLockConflict::Callback`].
-pub type LockConflictFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = LockConflictResolution> + Send>,
->;
+pub type LockConflictFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = LockConflictResolution> + Send>>;
 
 /// 1:1 with upstream `ChatConfig.onLockConflict`. Determines how the
 /// dispatcher handles per-thread lock conflicts.
@@ -177,12 +221,7 @@ pub enum OnLockConflict {
     /// is async to match upstream's `Promise<"drop" | "force">`
     /// return type.
     Callback(
-        Arc<
-            dyn Fn(&str, &crate::message::Message) -> LockConflictFuture
-                + Send
-                + Sync
-                + 'static,
-        >,
+        Arc<dyn Fn(&str, &crate::message::Message) -> LockConflictFuture + Send + Sync + 'static>,
     ),
 }
 
@@ -209,7 +248,9 @@ impl std::fmt::Debug for OnLockConflict {
 /// `adapterFor(userId)` router to dispatch to the Slack adapter.
 pub fn is_slack_user_id(user_id: &str) -> bool {
     let mut chars = user_id.chars();
-    let Some(first) = chars.next() else { return false };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if first != 'U' && first != 'W' {
         return false;
     }
@@ -267,18 +308,16 @@ pub type HandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> 
 /// receives a [`Thread`] handle bound to the matched adapter + a clone
 /// of the message; the upstream third `context` parameter is deferred
 /// behind a `MessageContext` port.
-pub type MentionHandler = Arc<
-    dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
->;
+pub type MentionHandler =
+    Arc<dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static>;
 
 /// 1:1 with upstream `SubscribedMessageHandler<TState>` — invoked for
 /// every message in a thread previously subscribed via
 /// `thread.subscribe()`. Subscribed handlers take priority over
 /// mention handlers; in a subscribed thread, even an `@bot` mention
 /// fires the subscribed handler (not the mention handler).
-pub type SubscribedMessageHandler = Arc<
-    dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
->;
+pub type SubscribedMessageHandler =
+    Arc<dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static>;
 
 /// 1:1 with upstream `DirectMessageHandler<TState>` — invoked for
 /// every message in a DM thread (`adapter.is_dm(thread_id) == true`)
@@ -299,9 +338,8 @@ pub type DirectMessageHandler = Arc<
 /// in unsubscribed threads whose text matches a registered regex
 /// pattern. Pattern handlers fire only when no higher-priority
 /// branch (DM / subscribed / mention) handled the message.
-pub type MessageHandler = Arc<
-    dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
->;
+pub type MessageHandler =
+    Arc<dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static>;
 
 /// Stored regex+handler pair for [`Chat::on_new_message`].
 struct MessagePattern {
@@ -381,8 +419,7 @@ impl From<&str> for EmojiFilter {
 
 /// 1:1 with upstream `ReactionHandler` — invoked once per filtered
 /// reaction event.
-pub type ReactionHandler =
-    Arc<dyn Fn(ReactionEvent) -> HandlerFuture + Send + Sync + 'static>;
+pub type ReactionHandler = Arc<dyn Fn(ReactionEvent) -> HandlerFuture + Send + Sync + 'static>;
 
 /// Stored filter+handler pair for [`Chat::on_reaction_filtered`].
 struct ReactionRegistration {
@@ -430,8 +467,7 @@ pub struct ActionEvent {
 
 /// 1:1 with upstream `ActionHandler` — invoked per matching action
 /// event. Receives the dispatcher-constructed [`ActionEvent`].
-pub type ActionHandler =
-    Arc<dyn Fn(ActionEvent) -> HandlerFuture + Send + Sync + 'static>;
+pub type ActionHandler = Arc<dyn Fn(ActionEvent) -> HandlerFuture + Send + Sync + 'static>;
 
 /// Stored filter+handler pair for [`Chat::on_action_filtered`].
 struct ActionRegistration {
@@ -531,9 +567,8 @@ pub struct OptionsLoadEvent {
 /// Returning `Ok(serde_json::Value::Null)` is interpreted as "no
 /// options" — the dispatcher proceeds to the next handler. Returning
 /// `Err` logs the error and the dispatcher also proceeds.
-pub type OptionsLoadHandler = Arc<
-    dyn Fn(OptionsLoadEvent) -> OptionsLoadFuture + Send + Sync + 'static,
->;
+pub type OptionsLoadHandler =
+    Arc<dyn Fn(OptionsLoadEvent) -> OptionsLoadFuture + Send + Sync + 'static>;
 
 /// Boxed future returned by an [`OptionsLoadHandler`]. Carries the
 /// `Result<serde_json::Value, Box<dyn Error>>` instead of `()` so
@@ -542,10 +577,7 @@ pub type OptionsLoadHandler = Arc<
 pub type OptionsLoadFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Result<
-                    serde_json::Value,
-                    Box<dyn std::error::Error + Send + Sync>,
-                >,
+                Output = Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>,
             > + Send,
     >,
 >;
@@ -613,6 +645,11 @@ pub struct Chat {
     /// `ChatConfig.onLockConflict`. Defaults to
     /// [`OnLockConflict::Drop`] (slice 431).
     on_lock_conflict: OnLockConflict,
+    /// Per-instance lock-scope. 1:1 with upstream
+    /// `ChatConfig.lockScope`. Resolution order:
+    /// `adapter.lock_scope()` > `Chat.lock_scope` > Thread.
+    /// (slice 434).
+    lock_scope: LockScope,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -693,6 +730,11 @@ pub struct ChatOptions {
     /// `ChatConfig.onLockConflict`. Defaults to
     /// [`OnLockConflict::Drop`] when unset (slice 431).
     pub on_lock_conflict: OnLockConflict,
+    /// Per-instance lock-scope. 1:1 with upstream
+    /// `ChatConfig.lockScope`. Resolution at dispatch time:
+    /// `adapter.lock_scope()` first, then this field, then default
+    /// [`LockScope::Thread`]. (slice 434)
+    pub lock_scope: LockScope,
 }
 
 impl Default for ChatOptions {
@@ -709,6 +751,7 @@ impl Default for ChatOptions {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::default(),
+            lock_scope: LockScope::default(),
         }
     }
 }
@@ -811,6 +854,7 @@ impl Chat {
             // alias.
             thread_history: options.thread_history.or(options.message_history),
             on_lock_conflict: options.on_lock_conflict,
+            lock_scope: options.lock_scope,
         })
     }
 
@@ -864,11 +908,7 @@ impl Chat {
         // open (upstream logs and proceeds).
         let _ = self
             .state
-            .set(
-                &key,
-                context_value,
-                Some(MODAL_CONTEXT_TTL_MS),
-            )
+            .set(&key, context_value, Some(MODAL_CONTEXT_TTL_MS))
             .await;
 
         // Call adapter.open_modal. Detect Unsupported → log
@@ -967,7 +1007,11 @@ impl Chat {
     where
         F: Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
     {
-        self.handlers.mention.lock().unwrap().push(Arc::new(handler));
+        self.handlers
+            .mention
+            .lock()
+            .unwrap()
+            .push(Arc::new(handler));
     }
 
     /// 1:1 port of upstream `chat.onSubscribedMessage(handler)`.
@@ -1025,10 +1069,14 @@ impl Chat {
     where
         F: Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
     {
-        self.handlers.message_patterns.lock().unwrap().push(MessagePattern {
-            pattern,
-            handler: Arc::new(handler),
-        });
+        self.handlers
+            .message_patterns
+            .lock()
+            .unwrap()
+            .push(MessagePattern {
+                pattern,
+                handler: Arc::new(handler),
+            });
     }
 
     /// 1:1 port of upstream `chat.onReaction(handler)` no-filter
@@ -1038,10 +1086,14 @@ impl Chat {
     where
         F: Fn(ReactionEvent) -> HandlerFuture + Send + Sync + 'static,
     {
-        self.handlers.reaction.lock().unwrap().push(ReactionRegistration {
-            filters: None,
-            handler: Arc::new(handler),
-        });
+        self.handlers
+            .reaction
+            .lock()
+            .unwrap()
+            .push(ReactionRegistration {
+                filters: None,
+                handler: Arc::new(handler),
+            });
     }
 
     /// 1:1 port of upstream `chat.onReaction(emojiFilters, handler)`
@@ -1057,10 +1109,14 @@ impl Chat {
         E: Into<EmojiFilter>,
     {
         let filters: Vec<EmojiFilter> = filters.into_iter().map(Into::into).collect();
-        self.handlers.reaction.lock().unwrap().push(ReactionRegistration {
-            filters: Some(filters),
-            handler: Arc::new(handler),
-        });
+        self.handlers
+            .reaction
+            .lock()
+            .unwrap()
+            .push(ReactionRegistration {
+                filters: Some(filters),
+                handler: Arc::new(handler),
+            });
     }
 
     /// 1:1 port of upstream `chat.processReaction(event)`. Dispatches
@@ -1076,10 +1132,14 @@ impl Chat {
     where
         F: Fn(ActionEvent) -> HandlerFuture + Send + Sync + 'static,
     {
-        self.handlers.action.lock().unwrap().push(ActionRegistration {
-            filters: None,
-            handler: Arc::new(handler),
-        });
+        self.handlers
+            .action
+            .lock()
+            .unwrap()
+            .push(ActionRegistration {
+                filters: None,
+                handler: Arc::new(handler),
+            });
     }
 
     /// 1:1 port of upstream `chat.onAction(actionIds, handler)`
@@ -1095,10 +1155,14 @@ impl Chat {
         S: Into<String>,
     {
         let filters: Vec<String> = action_ids.into_iter().map(Into::into).collect();
-        self.handlers.action.lock().unwrap().push(ActionRegistration {
-            filters: Some(filters),
-            handler: Arc::new(handler),
-        });
+        self.handlers
+            .action
+            .lock()
+            .unwrap()
+            .push(ActionRegistration {
+                filters: Some(filters),
+                handler: Arc::new(handler),
+            });
     }
 
     /// 1:1 port of upstream `chat.processAction(event)`. Dispatches
@@ -1130,7 +1194,9 @@ impl Chat {
         for (filters, handler) in handlers_snapshot {
             let matches = match filters {
                 None => true,
-                Some(filters) => filters.iter().any(|f| f.as_str() == event.action_id.as_str()),
+                Some(filters) => filters
+                    .iter()
+                    .any(|f| f.as_str() == event.action_id.as_str()),
             };
             if !matches {
                 continue;
@@ -1313,7 +1379,10 @@ impl Chat {
         // matches event.action_id).
         for (filters, handler) in registrations.iter() {
             let Some(filters) = filters else { continue };
-            if !filters.iter().any(|f| f.as_str() == event.action_id.as_str()) {
+            if !filters
+                .iter()
+                .any(|f| f.as_str() == event.action_id.as_str())
+            {
                 continue;
             }
             match handler(event.clone()).await {
@@ -1568,11 +1637,9 @@ impl Chat {
         // ChatOptions.thread_history ?? message_history ?? default).
         if adapter.persist_thread_history() || adapter.persist_message_history() {
             let history_key = crate::thread_history::history_key(_thread_id);
-            let cfg = self
-                .thread_history
-                .unwrap_or_default();
-            let serialized = serde_json::to_value(message.to_serialized())
-                .unwrap_or(serde_json::Value::Null);
+            let cfg = self.thread_history.unwrap_or_default();
+            let serialized =
+                serde_json::to_value(message.to_serialized()).unwrap_or(serde_json::Value::Null);
             // Best-effort write; failures don't block dispatch.
             let _ = self
                 .state
@@ -1584,6 +1651,51 @@ impl Chat {
                 )
                 .await;
         }
+
+        // 1:1 with upstream `resolveLockScope` (slice 434). Resolution
+        // order: `adapter.lock_scope()` (string, parsed to LockScope)
+        // > `Chat.lock_scope` > [`LockScope::Thread`] default. When
+        // the resolved scope is `Channel`, the lock key is the
+        // channel id derived via [`crate::channel::derive_channel_id`]
+        // (which falls back to the thread id when the adapter doesn't
+        // implement `channel_id_from_thread_id`). When the resolved
+        // scope is `Resolver`, the closure is awaited with a
+        // [`crate::types::LockScopeContext`] holding the active
+        // adapter, channel id, is_dm flag, and thread id.
+        let adapter_arc_for_lock = self.adapters.get(adapter.name()).cloned();
+        let lock_scope = match adapter.lock_scope() {
+            Some("channel") => LockScope::Channel,
+            Some("thread") => LockScope::Thread,
+            _ => self.lock_scope.clone(),
+        };
+        let resolved_scope = match lock_scope {
+            LockScope::Resolver(resolver) => {
+                if let Some(adapter_arc) = adapter_arc_for_lock.as_ref() {
+                    let channel_id = crate::channel::derive_channel_id(&**adapter_arc, _thread_id);
+                    let is_dm = adapter.is_dm(_thread_id).unwrap_or(false);
+                    let ctx = crate::types::LockScopeContext {
+                        adapter: adapter_arc.clone(),
+                        channel_id,
+                        is_dm,
+                        thread_id: _thread_id.to_string(),
+                    };
+                    resolver(ctx).await
+                } else {
+                    LockScope::Thread
+                }
+            }
+            other => other,
+        };
+        let lock_key: String = match resolved_scope {
+            LockScope::Channel => adapter_arc_for_lock
+                .as_ref()
+                .map(|a| crate::channel::derive_channel_id(&**a, _thread_id))
+                .unwrap_or_else(|| _thread_id.to_string()),
+            // Resolver is collapsed above; remaining Resolver here is
+            // unreachable (fallback already mapped to Thread). Treat
+            // as Thread for safety.
+            LockScope::Thread | LockScope::Resolver(_) => _thread_id.to_string(),
+        };
 
         // 1:1 with upstream `handleDrop` lock-acquire dance (slice
         // 431). Acquire a per-thread lock before dispatching
@@ -1599,7 +1711,7 @@ impl Chat {
         // null).
         let lock_acquired = self
             .state
-            .acquire_lock(_thread_id, DEFAULT_LOCK_TTL_MS)
+            .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
             .await
             .unwrap_or(None);
         let lock = match lock_acquired {
@@ -1663,10 +1775,10 @@ impl Chat {
                     // dispatcher to return Err here).
                 }
                 OnLockConflict::Force => {
-                    let _ = self.state.force_release_lock(_thread_id).await;
+                    let _ = self.state.force_release_lock(&lock_key).await;
                     effective_lock = self
                         .state
-                        .acquire_lock(_thread_id, DEFAULT_LOCK_TTL_MS)
+                        .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
                         .await
                         .unwrap_or(None);
                 }
@@ -1674,17 +1786,17 @@ impl Chat {
                     let resolution = cb(_thread_id, message).await;
                     match resolution {
                         LockConflictResolution::Force => {
-                            let _ = self.state.force_release_lock(_thread_id).await;
+                            let _ = self.state.force_release_lock(&lock_key).await;
                             effective_lock = self
                                 .state
-                                .acquire_lock(_thread_id, DEFAULT_LOCK_TTL_MS)
+                                .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
                                 .await
                                 .unwrap_or(None);
                         }
                         LockConflictResolution::Drop => {
                             return Err(crate::types::StateAdapterError::Io(
                                 format!(
-                                    "Could not acquire lock on thread {_thread_id}. \
+                                    "Could not acquire lock on thread {lock_key}. \
                                      Another instance may be processing."
                                 )
                                 .into(),
@@ -1762,11 +1874,7 @@ impl Chat {
             message.is_mention = Some(true);
         }
 
-        let is_subscribed = self
-            .state
-            .is_subscribed(thread_id)
-            .await
-            .unwrap_or(false);
+        let is_subscribed = self.state.is_subscribed(thread_id).await.unwrap_or(false);
 
         if is_subscribed {
             let handlers_snapshot: Vec<SubscribedMessageHandler> =
@@ -2154,7 +2262,6 @@ mod tests {
     // exercised through the router which needs ChatImpl + multiple
     // adapter registrations to wire up. Test the predicates directly
     // so future router slices can rely on them.
-
     #[test]
     fn is_slack_user_id_accepts_u_and_w_prefixed_uppercase_alphanum() {
         assert!(is_slack_user_id("U0123ABC"));
@@ -2435,7 +2542,10 @@ mod tests {
         }
     }
 
-    fn make_shutdown_chat(adapter_names: &[&'static str], fail: &[&'static str]) -> (Chat, Vec<Arc<ShutdownAdapter>>, Arc<ShutdownState>) {
+    fn make_shutdown_chat(
+        adapter_names: &[&'static str],
+        fail: &[&'static str],
+    ) -> (Chat, Vec<Arc<ShutdownAdapter>>, Arc<ShutdownState>) {
         SHUTDOWN_ORDER.lock().unwrap().clear();
         let mut adapter_handles: Vec<Arc<ShutdownAdapter>> = Vec::new();
         let mut adapters: Vec<Arc<dyn Adapter>> = Vec::new();
@@ -2527,8 +2637,7 @@ mod tests {
             self.platform_name
         }
         async fn initialize(&self) -> AdapterResult<()> {
-            self.initialize_calls
-                .fetch_add(1, AtomicOrdering::SeqCst);
+            self.initialize_calls.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(())
         }
     }
@@ -2628,6 +2737,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2645,6 +2755,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         });
         assert!(result.is_ok());
     }
@@ -2661,6 +2772,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         });
         assert!(result.is_ok());
     }
@@ -2678,6 +2790,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -2696,6 +2809,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -2870,8 +2984,7 @@ mod tests {
 
     #[test]
     fn chat_get_user_should_throw_when_adapter_does_not_support_get_user() {
-        let (chat, _adapter) =
-            chat_with_get_user_adapter(GetUserAdapter::unsupported("slack"));
+        let (chat, _adapter) = chat_with_get_user_adapter(GetUserAdapter::unsupported("slack"));
         let err = futures_executor::block_on(chat.get_user("U123456")).unwrap_err();
         assert!(matches!(err, GetUserError::AdapterError(ref msg) if msg.contains("get_user")));
     }
@@ -2945,11 +3058,10 @@ mod tests {
     #[test]
     fn chat_get_user_should_infer_linear_adapter_from_a_uuid() {
         let (chat, _adapter) = chat_with_named_get_user_adapter("linear");
-        let user = futures_executor::block_on(
-            chat.get_user("8f1f3c7e-d4e1-4f9a-bf2b-1c3d4e5f6a7b"),
-        )
-        .unwrap()
-        .unwrap();
+        let user =
+            futures_executor::block_on(chat.get_user("8f1f3c7e-d4e1-4f9a-bf2b-1c3d4e5f6a7b"))
+                .unwrap()
+                .unwrap();
         // Routes to the only registered adapter (linear) since the
         // UUID shape matches `is_linear_uuid`.
         assert_eq!(user.full_name, "Alice Smith");
@@ -2962,7 +3074,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(user.full_name, "Alice Smith");
-        assert_eq!(adapter.calls.lock().unwrap().as_slice(), &["12345".to_string()]);
+        assert_eq!(
+            adapter.calls.lock().unwrap().as_slice(),
+            &["12345".to_string()]
+        );
     }
 
     #[test]
@@ -2972,7 +3087,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(user.full_name, "Alice Smith");
-        assert_eq!(adapter.calls.lock().unwrap().as_slice(), &["12345".to_string()]);
+        assert_eq!(
+            adapter.calls.lock().unwrap().as_slice(),
+            &["12345".to_string()]
+        );
     }
 
     #[test]
@@ -3006,7 +3124,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_get_user_should_throw_ambiguous_user_id_when_numeric_id_matches_multiple_registered_adapters() {
+    fn chat_get_user_should_throw_ambiguous_user_id_when_numeric_id_matches_multiple_registered_adapters()
+     {
         // 1:1 with upstream `it("should throw AMBIGUOUS_USER_ID
         // when numeric id matches multiple registered adapters")`.
         // Registers both telegram + github so a numeric id matches
@@ -3042,7 +3161,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_get_user_should_infer_discord_for_17_to_19_digit_snowflake_when_only_discord_is_registered() {
+    fn chat_get_user_should_infer_discord_for_17_to_19_digit_snowflake_when_only_discord_is_registered()
+     {
         let (chat, adapter) = chat_with_named_get_user_adapter("discord");
         let user = futures_executor::block_on(chat.get_user("123456789012345678"))
             .unwrap()
@@ -3187,9 +3307,12 @@ mod tests {
     fn chat_handle_incoming_message_should_skip_messages_from_self() {
         let (chat, adapter) = chat_with_in_memory_state();
         let mut msg = dispatched_message("msg-1", true);
-        let dispatched =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
-                .unwrap();
+        let dispatched = futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "T1",
+            &mut msg,
+        ))
+        .unwrap();
         // is_me=true → early-exit, returns false (not dispatched).
         assert!(!dispatched);
     }
@@ -3199,14 +3322,20 @@ mod tests {
         let (chat, adapter) = chat_with_in_memory_state();
         let mut msg = dispatched_message("msg-1", false);
         // First call: passes both gates, returns true.
-        let first =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
-                .unwrap();
+        let first = futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "T1",
+            &mut msg,
+        ))
+        .unwrap();
         assert!(first);
         // Second call (same id): dedupe gate trips, returns false.
-        let second =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
-                .unwrap();
+        let second = futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "T1",
+            &mut msg,
+        ))
+        .unwrap();
         assert!(!second);
     }
 
@@ -3217,9 +3346,12 @@ mod tests {
         // every message.
         let (chat, adapter) = chat_with_in_memory_state();
         let mut msg = dispatched_message("new-msg", false);
-        let dispatched =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
-                .unwrap();
+        let dispatched = futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "T1",
+            &mut msg,
+        ))
+        .unwrap();
         assert!(dispatched);
     }
 
@@ -3254,18 +3386,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl IdentityResolver for FixedIdentityResolver {
-        async fn user_key_for(
-            &self,
-            _message: &crate::message::Message,
-        ) -> Option<String> {
+        async fn user_key_for(&self, _message: &crate::message::Message) -> Option<String> {
             self.calls.fetch_add(1, AtomicOrdering::SeqCst);
             self.result.clone()
         }
     }
 
-    fn chat_with_identity(
-        identity: Arc<FixedIdentityResolver>,
-    ) -> (Chat, Arc<dyn Adapter>) {
+    fn chat_with_identity(identity: Arc<FixedIdentityResolver>) -> (Chat, Arc<dyn Adapter>) {
         let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
         let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
             name: "slack".to_string(),
@@ -3287,9 +3414,11 @@ mod tests {
         });
         let (chat, adapter) = chat_with_identity(resolver.clone());
         let mut msg = dispatched_message("msg-1", false);
-        let dispatched = futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
-        )
+        let dispatched = futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "T1",
+            &mut msg,
+        ))
         .unwrap();
         assert!(dispatched);
         assert_eq!(resolver.calls.load(AtomicOrdering::SeqCst), 1);
@@ -3304,10 +3433,8 @@ mod tests {
         });
         let (chat, adapter) = chat_with_identity(resolver.clone());
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
-        )
-        .unwrap();
+        futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
+            .unwrap();
         assert_eq!(resolver.calls.load(AtomicOrdering::SeqCst), 1);
         assert!(msg.user_key.is_none());
     }
@@ -3320,10 +3447,8 @@ mod tests {
         });
         let (chat, adapter) = chat_with_identity(resolver.clone());
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
-        )
-        .unwrap();
+        futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
+            .unwrap();
         assert_eq!(resolver.calls.load(AtomicOrdering::SeqCst), 1);
         assert!(msg.user_key.is_none());
     }
@@ -3332,10 +3457,8 @@ mod tests {
     fn chat_handle_incoming_should_not_call_the_resolver_when_no_identity_configured() {
         let (chat, adapter) = chat_with_in_memory_state();
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
-        )
-        .unwrap();
+        futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
+            .unwrap();
         // No identity configured → user_key stays None and no
         // resolver invocation can happen (no resolver to invoke).
         assert!(msg.user_key.is_none());
@@ -3367,9 +3490,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(invocations.load(AtomicOrdering::SeqCst), 1);
     }
@@ -3389,9 +3514,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(invocations.load(AtomicOrdering::SeqCst), 0);
     }
@@ -3413,9 +3540,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         // is_mention deliberately left as None (default)
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(invocations.load(AtomicOrdering::SeqCst), 0);
     }
@@ -3451,9 +3580,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
     }
@@ -3475,9 +3606,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(observed.lock().unwrap().as_deref(), Some("slack"));
     }
@@ -3524,9 +3657,11 @@ mod tests {
         futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 0);
@@ -3558,9 +3693,11 @@ mod tests {
         // No state.subscribe() call — thread is unsubscribed.
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 0);
@@ -3583,9 +3720,11 @@ mod tests {
         futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 1);
     }
@@ -3606,9 +3745,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 0);
     }
@@ -3636,9 +3777,11 @@ mod tests {
         });
         futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
@@ -3702,9 +3845,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true); // even with mention, DM wins
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:DU123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(dm_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 0);
@@ -3734,9 +3879,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:DU123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
     }
@@ -3766,9 +3913,11 @@ mod tests {
         });
         futures_executor::block_on(chat.state.subscribe("slack:DU123:1234.5678")).unwrap();
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:DU123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(dm_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 0);
@@ -3798,9 +3947,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(dm_calls.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
@@ -3826,9 +3977,11 @@ mod tests {
             })
         });
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:DU123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
@@ -3861,9 +4014,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "Can someone help me?".to_string();
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
     }
@@ -3883,9 +4038,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "hello everyone".to_string();
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
     }
@@ -3917,9 +4074,11 @@ mod tests {
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "hello everyone".to_string();
         msg.is_mention = Some(false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(pattern_calls.load(AtomicOrdering::SeqCst), 1);
@@ -3950,9 +4109,11 @@ mod tests {
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "hello bot".to_string();
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(pattern_calls.load(AtomicOrdering::SeqCst), 0);
@@ -3987,9 +4148,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "hello world".to_string();
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         // patterns 1 + 2 match; 3 ("foo") does not.
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
@@ -4013,9 +4176,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-1", false);
         msg.is_mention = Some(false); // dispatcher overrides to true
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:DU123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
         // The dispatcher mutated message.is_mention to true.
@@ -4170,15 +4335,12 @@ mod tests {
         let (chat, adapter) = chat_with_in_memory_state();
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
-        chat.on_reaction_filtered(
-            ["thumbs_up", "heart", "fire", "rocket"],
-            move |_event| {
-                let c = c.clone();
-                Box::pin(async move {
-                    c.fetch_add(1, AtomicOrdering::SeqCst);
-                })
-            },
-        );
+        chat.on_reaction_filtered(["thumbs_up", "heart", "fire", "rocket"], move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
         let event = make_reaction_event("thumbs_up", "like", false);
         futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
@@ -4691,8 +4853,7 @@ mod tests {
             })
         });
         let event = make_options_event("person_select", "mar");
-        let result =
-            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        let result = futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
         let obs = observed.lock().unwrap();
         assert_eq!(
             obs.as_ref().map(|(a, q)| (a.as_str(), q.as_str())),
@@ -4729,8 +4890,7 @@ mod tests {
             })
         });
         let event = make_options_event("person_select", "mar");
-        let result =
-            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        let result = futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
         assert_eq!(specific_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(catchall_calls.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(
@@ -4755,8 +4915,7 @@ mod tests {
             })
         });
         let event = make_options_event("unknown_select", "test");
-        let result =
-            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        let result = futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(
             result.unwrap(),
@@ -4790,8 +4949,7 @@ mod tests {
             })
         });
         let event = make_options_event("person_select", "mar");
-        let result =
-            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        let result = futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
         assert_eq!(failing_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(fallback_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(
@@ -4820,8 +4978,7 @@ mod tests {
         });
         let event = make_options_event("user_select", "");
         let result =
-            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event))
-                .unwrap();
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event)).unwrap();
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["label"], "Recent");
@@ -4833,13 +4990,10 @@ mod tests {
         // succeeds, process_options_load returns None.
         let (chat, adapter) = chat_with_in_memory_state();
         chat.on_options_load_filtered(["specific_only"], move |_event| {
-            Box::pin(async move {
-                Ok(serde_json::json!([{"label": "X", "value": "x"}]))
-            })
+            Box::pin(async move { Ok(serde_json::json!([{"label": "X", "value": "x"}])) })
         });
         let event = make_options_event("unknown_select", "test");
-        let result =
-            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        let result = futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
         assert!(result.is_none());
     }
 
@@ -4998,9 +5152,11 @@ mod tests {
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "Hey @slack-bot help me".to_string();
         msg.is_mention = None; // walker should compute true
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(msg.is_mention, Some(true));
@@ -5023,9 +5179,11 @@ mod tests {
         let mut msg = dispatched_message("msg-1", false);
         msg.text = "no mention here".to_string();
         msg.is_mention = Some(true); // gateway already decided
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(msg.is_mention, Some(true));
@@ -5133,9 +5291,11 @@ mod tests {
         // (300_000 ms) to set_if_not_exists.
         let (chat, state, adapter) = chat_with_recording_state();
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         let calls = state.set_if_not_exists_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -5161,9 +5321,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-2", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         let calls = state.set_if_not_exists_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -5180,9 +5342,11 @@ mod tests {
         // landed on the dedupe key.
         let (chat, state, adapter) = chat_with_recording_state();
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(state.set_if_not_exists_calls.lock().unwrap().len(), 1);
         // No get call should target the dedupe key.
@@ -5230,9 +5394,12 @@ mod tests {
                 modal.callback_id.clone(),
                 context_id.to_string(),
             ));
-            Ok(self.result.clone().unwrap_or(crate::types::OpenModalResult {
-                view_id: "V_FROM_ADAPTER".to_string(),
-            }))
+            Ok(self
+                .result
+                .clone()
+                .unwrap_or(crate::types::OpenModalResult {
+                    view_id: "V_FROM_ADAPTER".to_string(),
+                }))
         }
     }
 
@@ -5367,8 +5534,14 @@ mod tests {
             modal_context_entry.1["thread"],
             serde_json::json!("slack:C123:1234.5678")
         );
-        assert_eq!(modal_context_entry.1["adapterName"], serde_json::json!("slack"));
-        assert_eq!(modal_context_entry.1["callbackId"], serde_json::json!("test_modal"));
+        assert_eq!(
+            modal_context_entry.1["adapterName"],
+            serde_json::json!("slack")
+        );
+        assert_eq!(
+            modal_context_entry.1["callbackId"],
+            serde_json::json!("test_modal")
+        );
     }
 
     #[test]
@@ -5460,12 +5633,10 @@ mod tests {
             max_length: Option<usize>,
             ttl_ms: Option<u64>,
         ) -> StateResult<()> {
-            self.appends.lock().unwrap().push((
-                key.to_string(),
-                value.clone(),
-                max_length,
-                ttl_ms,
-            ));
+            self.appends
+                .lock()
+                .unwrap()
+                .push((key.to_string(), value.clone(), max_length, ttl_ms));
             self.cache
                 .lock()
                 .unwrap()
@@ -5479,7 +5650,13 @@ mod tests {
             key: &str,
             _limit: Option<usize>,
         ) -> StateResult<Vec<serde_json::Value>> {
-            Ok(self.cache.lock().unwrap().get(key).cloned().unwrap_or_default())
+            Ok(self
+                .cache
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .unwrap_or_default())
         }
     }
 
@@ -5499,9 +5676,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "whatsapp:phone:user1",
+            &mut msg,
+        ))
         .unwrap();
         let appends = state.appends.lock().unwrap();
         assert_eq!(appends.len(), 1);
@@ -5525,9 +5704,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "whatsapp:phone:user1",
+            &mut msg,
+        ))
         .unwrap();
         let appends = state.appends.lock().unwrap();
         assert_eq!(appends.len(), 1);
@@ -5551,9 +5732,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-2", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert!(state.appends.lock().unwrap().is_empty());
     }
@@ -5580,9 +5763,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "whatsapp:phone:user1",
+            &mut msg,
+        ))
         .unwrap();
         let appends = state.appends.lock().unwrap();
         assert_eq!(appends.len(), 1);
@@ -5614,9 +5799,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "whatsapp:phone:user1",
+            &mut msg,
+        ))
         .unwrap();
         let appends = state.appends.lock().unwrap();
         assert_eq!(appends.len(), 1);
@@ -5642,9 +5829,11 @@ mod tests {
             ..Default::default()
         });
         let mut msg = dispatched_message("msg-1", false);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "whatsapp:phone:user1", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "whatsapp:phone:user1",
+            &mut msg,
+        ))
         .unwrap();
         let appends = state.appends.lock().unwrap();
         assert_eq!(appends.len(), 1);
@@ -5723,7 +5912,10 @@ mod tests {
             thread_id: &str,
             _ttl_ms: u64,
         ) -> StateResult<Option<crate::types::Lock>> {
-            self.acquire_calls.lock().unwrap().push(thread_id.to_string());
+            self.acquire_calls
+                .lock()
+                .unwrap()
+                .push(thread_id.to_string());
             let mut held = self.held.lock().unwrap();
             if held.contains(thread_id) {
                 Ok(None)
@@ -5768,11 +5960,9 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             state: state_dyn,
             adapters: vec![adapter.clone()],
-            on_lock_conflict: OnLockConflict::Callback(Arc::new(
-                |_thread_id, _message| {
-                    Box::pin(async move { LockConflictResolution::Drop })
-                },
-            )),
+            on_lock_conflict: OnLockConflict::Callback(Arc::new(|_thread_id, _message| {
+                Box::pin(async move { LockConflictResolution::Drop })
+            })),
             ..Default::default()
         });
         let calls = Arc::new(AtomicUsize::new(0));
@@ -5847,11 +6037,9 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             state: state_dyn,
             adapters: vec![adapter.clone()],
-            on_lock_conflict: OnLockConflict::Callback(Arc::new(
-                |_thread_id, _message| {
-                    Box::pin(async move { LockConflictResolution::Force })
-                },
-            )),
+            on_lock_conflict: OnLockConflict::Callback(Arc::new(|_thread_id, _message| {
+                Box::pin(async move { LockConflictResolution::Force })
+            })),
             ..Default::default()
         });
         let calls = Arc::new(AtomicUsize::new(0));
@@ -5887,11 +6075,9 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             state: state_dyn,
             adapters: vec![adapter.clone()],
-            on_lock_conflict: OnLockConflict::Callback(Arc::new(
-                |_thread_id, _message| {
-                    Box::pin(async move { LockConflictResolution::Drop })
-                },
-            )),
+            on_lock_conflict: OnLockConflict::Callback(Arc::new(|_thread_id, _message| {
+                Box::pin(async move { LockConflictResolution::Drop })
+            })),
             ..Default::default()
         });
         let calls = Arc::new(AtomicUsize::new(0));
@@ -5927,16 +6113,14 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             state: state_dyn,
             adapters: vec![adapter.clone()],
-            on_lock_conflict: OnLockConflict::Callback(Arc::new(
-                |_thread_id, _message| {
-                    Box::pin(async move {
-                        // Simulated async work — the closure's Future
-                        // shape is what upstream's "async callback"
-                        // case asserts; no nested block_on needed.
-                        LockConflictResolution::Force
-                    })
-                },
-            )),
+            on_lock_conflict: OnLockConflict::Callback(Arc::new(|_thread_id, _message| {
+                Box::pin(async move {
+                    // Simulated async work — the closure's Future
+                    // shape is what upstream's "async callback"
+                    // case asserts; no nested block_on needed.
+                    LockConflictResolution::Force
+                })
+            })),
             ..Default::default()
         });
         let calls = Arc::new(AtomicUsize::new(0));
@@ -5956,6 +6140,182 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    // ---------- describe("lockScope") — slice 434 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("lockScope")`. The
+    // dispatcher resolves the lock key from (in priority):
+    // `adapter.lock_scope()` > `Chat.lock_scope` > `LockScope::Thread`.
+    // When `Channel`, the key is derived via
+    // `crate::channel::derive_channel_id` (first two `:`-segments
+    // for the well-known adapter prefixes; falls back to the full
+    // thread id otherwise). When the scope is a `Resolver` closure,
+    // the dispatcher awaits it with a `LockScopeContext` holding
+    // adapter / channel_id / is_dm / thread_id.
+    //
+    // Upstream ships 5 cases. The 5th ("should queue on
+    // channel-scoped lock key") depends on the concurrency=queue
+    // dispatcher (deferred — tracked under "concurrency strategies"
+    // in the parity ledger); the other 4 are 1:1 ported here.
+
+    /// Adapter that returns "channel" from `lock_scope` and splits
+    /// the thread id on `:` into channel id = `prefix:segment2`.
+    /// Mirrors upstream's `channelIdFromThreadId` for telegram /
+    /// slack mock adapters used in the lockScope describe block.
+    #[derive(Debug)]
+    struct LockScopeAdapter {
+        name: String,
+        scope: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for LockScopeAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn lock_scope(&self) -> Option<&str> {
+            self.scope.as_deref()
+        }
+        fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+            let mut parts = thread_id.splitn(3, ':');
+            let p1 = parts.next()?;
+            let p2 = parts.next()?;
+            Some(format!("{p1}:{p2}"))
+        }
+    }
+
+    #[test]
+    fn lock_scope_default_thread_uses_thread_id_as_lock_key() {
+        // 1:1 with upstream "should use threadId as lock key with
+        // default (thread) scope".
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "slack".to_string(),
+            scope: None,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["slack:C123:1234.5678"]
+        );
+    }
+
+    #[test]
+    fn lock_scope_channel_on_adapter_uses_channel_id_as_lock_key() {
+        // 1:1 with upstream "should use channelId as lock key with
+        // channel scope on adapter".
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "telegram".to_string(),
+            scope: Some("channel".to_string()),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-2", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "telegram:C123:topic456",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["telegram:C123"]
+        );
+    }
+
+    #[test]
+    fn lock_scope_channel_on_config_uses_channel_id_as_lock_key() {
+        // 1:1 with upstream "should use channelId as lock key with
+        // channel scope on config" — adapter has no override; the
+        // per-chat `LockScope::Channel` config takes effect.
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "slack".to_string(),
+            scope: None,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            lock_scope: LockScope::Channel,
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-3", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["slack:C123"]
+        );
+    }
+
+    #[test]
+    fn lock_scope_async_resolver_callback_resolves_channel_for_non_dm() {
+        // 1:1 with upstream "should support async lockScope resolver
+        // function". The resolver receives `LockScopeContext` and
+        // returns `LockScope::Channel` for non-DM threads. The
+        // dispatcher acquires on the channel-derived key.
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "telegram".to_string(),
+            scope: None,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            lock_scope: LockScope::Resolver(Arc::new(|ctx| {
+                Box::pin(async move {
+                    if ctx.is_dm {
+                        LockScope::Thread
+                    } else {
+                        LockScope::Channel
+                    }
+                })
+            })),
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-4", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "telegram:C123:topic456",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["telegram:C123"]
+        );
     }
 
     // ---------- describe("thread.isSubscribed()") — slice 432 ----------
@@ -6041,9 +6401,11 @@ mod tests {
         });
         let mut msg = dispatched_message("msg-self", true);
         msg.is_mention = Some(true);
-        futures_executor::block_on(
-            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
-        )
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
         .unwrap();
         assert_eq!(invocations.load(AtomicOrdering::SeqCst), 0);
     }

@@ -12,9 +12,7 @@
 //! landed yet; they're deferred to a follow-up slice on
 //! chat-sdk-chat.
 
-use chat_sdk_chat::markdown::{
-    Node, ParseMarkdownError, parse_markdown, stringify_markdown,
-};
+use chat_sdk_chat::markdown::{Node, ParseMarkdownError, parse_markdown, stringify_markdown};
 
 /// 1:1 port of upstream `class LinearFormatConverter extends
 /// BaseFormatConverter`. The converter is stateless; the methods
