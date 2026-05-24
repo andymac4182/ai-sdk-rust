@@ -24,8 +24,8 @@ use crate::language_model::{
     LanguageModelToolChoice,
 };
 use crate::prompt::{Instructions, Prompt, PromptInput, TimeoutConfiguration};
-use crate::provider::{InvalidPromptError, ProviderOptions};
-use crate::provider_utils::ExperimentalSandbox;
+use crate::provider::{InvalidPromptError, ProviderOptions, TypeValidationContext};
+use crate::provider_utils::{ExperimentalSandbox, FlexibleSchema, validate_types};
 use crate::stream_text::{
     StreamTextOptions, StreamTextResult, StreamTextUiMessageStreamOptions, stream_text,
 };
@@ -75,7 +75,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
         &self,
         options: impl Into<ToolLoopAgentCallOptions<'a, M>>,
     ) -> Result<GenerateTextResult, InvalidPromptError> {
-        let prepared = self.prepare_call(options.into());
+        let prepared = self.prepare_call(options.into())?;
         let options = generate_options_from_prepared(prepared)?;
         Ok(generate_text(options).await)
     }
@@ -88,7 +88,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
     where
         M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
     {
-        let prepared = self.prepare_call(options.into());
+        let prepared = self.prepare_call(options.into())?;
         let options = stream_options_from_prepared(prepared)?;
         Ok(stream_text(options).await)
     }
@@ -96,10 +96,15 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
     fn prepare_call(
         &self,
         options: ToolLoopAgentCallOptions<'a, M>,
-    ) -> ToolLoopAgentPreparedCall<'a, M> {
+    ) -> Result<ToolLoopAgentPreparedCall<'a, M>, InvalidPromptError> {
+        let call_options = validate_agent_call_options(
+            options.call_options,
+            self.settings.call_options_schema.as_ref(),
+        )?;
         let mut prepared = ToolLoopAgentPreparedCall {
             model: options.model.unwrap_or(self.settings.model),
             prompt: options.prompt,
+            call_options,
             instructions: options
                 .instructions
                 .or_else(|| self.settings.instructions.clone()),
@@ -169,7 +174,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
             prepared = prepare_call.prepare(prepared);
         }
 
-        prepared
+        Ok(prepared)
     }
 }
 
@@ -303,6 +308,9 @@ pub struct ToolLoopAgentSettings<'a, M: LanguageModel + ?Sized> {
     /// Tool-specific context keyed by tool name.
     pub tools_context: JsonObject,
 
+    /// Schema used to validate per-call agent options before model invocation.
+    pub call_options_schema: Option<FlexibleSchema<JsonValue>>,
+
     /// Experimental sandbox passed through to local Rust tool execution.
     pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
 
@@ -363,6 +371,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
             tools: Vec::new(),
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
+            call_options_schema: None,
             experimental_sandbox: None,
             active_tools: None,
             tool_approval: None,
@@ -409,6 +418,15 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
     /// Sets tool-specific context for every call.
     pub fn with_tools_context(mut self, tools_context: JsonObject) -> Self {
         self.tools_context = tools_context;
+        self
+    }
+
+    /// Sets the schema used to validate per-call agent options.
+    pub fn with_call_options_schema(
+        mut self,
+        call_options_schema: impl Into<FlexibleSchema<JsonValue>>,
+    ) -> Self {
+        self.call_options_schema = Some(call_options_schema.into());
         self
     }
 
@@ -756,6 +774,7 @@ impl ToolLoopAgentModelSettings {
 pub struct ToolLoopAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub model: Option<&'a M>,
     pub prompt: Prompt,
+    pub call_options: Option<JsonValue>,
     pub instructions: Option<Instructions>,
     pub model_settings: ToolLoopAgentModelSettings,
     pub tools: Vec<GenerateTextTool>,
@@ -786,6 +805,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
         Self {
             model: None,
             prompt,
+            call_options: None,
             instructions: None,
             model_settings: ToolLoopAgentModelSettings::default(),
             tools: Vec::new(),
@@ -824,6 +844,12 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
     /// Overrides the model for this call.
     pub fn with_model(mut self, model: &'a M) -> Self {
         self.model = Some(model);
+        self
+    }
+
+    /// Sets per-call agent options validated by the configured call-options schema.
+    pub fn with_options(mut self, options: impl Into<JsonValue>) -> Self {
+        self.call_options = Some(options.into());
         self
     }
 
@@ -1033,6 +1059,7 @@ impl<'a, M: LanguageModel + ?Sized> From<Prompt> for ToolLoopAgentCallOptions<'a
 pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub model: &'a M,
     pub prompt: Prompt,
+    pub call_options: Option<JsonValue>,
     pub instructions: Option<Instructions>,
     pub model_settings: ToolLoopAgentModelSettings,
     pub tools: Vec<GenerateTextTool>,
@@ -1200,6 +1227,26 @@ fn apply_stream_prepared_options<'a, M: LanguageModel + ?Sized>(
     options
 }
 
+fn validate_agent_call_options(
+    call_options: Option<JsonValue>,
+    schema: Option<&FlexibleSchema<JsonValue>>,
+) -> Result<Option<JsonValue>, InvalidPromptError> {
+    let Some(call_options) = call_options else {
+        return Ok(None);
+    };
+    let Some(schema) = schema else {
+        return Ok(Some(call_options));
+    };
+
+    validate_types(
+        call_options,
+        schema.clone(),
+        Some(TypeValidationContext::new().with_field("options")),
+    )
+    .map(Some)
+    .map_err(|error| InvalidPromptError::new(JsonValue::Null, error.message()))
+}
+
 fn prompt_with_instructions(mut prompt: Prompt, instructions: Option<Instructions>) -> Prompt {
     if prompt.instructions.is_none() && prompt.system.is_none() {
         prompt.instructions = instructions;
@@ -1364,7 +1411,8 @@ mod tests {
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::TimeoutConfigurationOptions;
     use crate::provider_utils::{
-        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Tool,
+        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool,
+        ValidationResult,
     };
     use crate::stream_text::TextStreamPart;
     use crate::telemetry::{
@@ -1407,6 +1455,33 @@ mod tests {
         .as_object()
         .expect("schema is an object")
         .clone()
+    }
+
+    fn legal_topic_options_schema() -> FlexibleSchema<JsonValue> {
+        FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "topic": { "enum": ["legal", "medical"] }
+                    },
+                    "required": ["topic"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if matches!(
+                    value.get("topic").and_then(JsonValue::as_str),
+                    Some("legal" | "medical")
+                ) {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("Expected 'legal' | 'medical'")
+                }
+            }),
+        )
     }
 
     fn text_result(text: &str) -> LanguageModelGenerateResult {
@@ -1910,6 +1985,53 @@ mod tests {
                 }))
                 .expect("provider options")
             )
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_rejects_invalid_call_options_schema_before_model_call() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_call_options_schema(legal_topic_options_schema()),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("hi").with_options(json!({ "topic": "evil" }));
+
+        let error = poll_ready(agent.generate(options)).expect_err("options are invalid");
+
+        assert!(
+            error
+                .message()
+                .contains("Type validation failed for options"),
+            "{}",
+            error.message()
+        );
+        assert!(model.generate_calls().is_empty());
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_valid_call_options_schema() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let recorded_options = Rc::new(RefCell::new(None::<JsonValue>));
+        let recorded_options_for_prepare_call = Rc::clone(&recorded_options);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_call_options_schema(legal_topic_options_schema())
+                .with_prepare_call(move |prepared| {
+                    *recorded_options_for_prepare_call.borrow_mut() = prepared.call_options.clone();
+                    prepared
+                }),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("hi").with_options(json!({ "topic": "legal" }));
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            recorded_options.borrow().as_ref(),
+            Some(&json!({ "topic": "legal" }))
         );
     }
 
