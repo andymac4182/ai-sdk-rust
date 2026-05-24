@@ -58,6 +58,26 @@ pub enum LinearAuth {
     OAuth(LinearOAuthCredentials),
 }
 
+/// Default user name. 1:1 with upstream `userName ?? "linear-bot"`.
+pub const DEFAULT_USER_NAME: &str = "linear-bot";
+
+/// 1:1 with upstream `mode: "comments" | "agent-sessions"`. The
+/// adapter routes incoming events differently depending on the mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearMode {
+    /// Issue-comment routing (default). 1:1 with `"comments"`.
+    Comments,
+    /// Agent-session routing (multi-tenant agents). 1:1 with
+    /// `"agent-sessions"`.
+    AgentSessions,
+}
+
+impl Default for LinearMode {
+    fn default() -> Self {
+        Self::Comments
+    }
+}
+
 /// Options for [`LinearAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct LinearAdapterOptions {
@@ -69,6 +89,12 @@ pub struct LinearAdapterOptions {
     pub webhook_secret: Option<String>,
     /// Display name used as the bot identity.
     pub user_name: Option<String>,
+    /// Optional Linear API base URL (upstream `apiUrl`). Separate
+    /// from `graphql_url` — this is the host-only base passed to
+    /// LinearClient; the GraphQL endpoint is derived by the SDK.
+    pub api_url: Option<String>,
+    /// Routing mode. 1:1 with upstream `config.mode ?? "comments"`.
+    pub mode: LinearMode,
 }
 
 impl LinearAdapterOptions {
@@ -80,6 +106,8 @@ impl LinearAdapterOptions {
             graphql_url: None,
             webhook_secret: None,
             user_name: None,
+            api_url: None,
+            mode: LinearMode::Comments,
         }
     }
 
@@ -158,9 +186,28 @@ impl LinearAdapter {
         self.options.is_multi_tenant()
     }
 
-    /// 1:1 with upstream `readonly userName?: string`.
+    /// 1:1 with upstream `readonly userName?: string`. Returns the
+    /// configured value, or [`DEFAULT_USER_NAME`] when the factory
+    /// applied the default fall-through.
     pub fn user_name(&self) -> Option<&str> {
         self.options.user_name.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly mode: "comments" | "agent-sessions"`.
+    pub fn mode(&self) -> LinearMode {
+        self.options.mode
+    }
+
+    /// 1:1 with upstream `protected readonly apiUrl?: string` —
+    /// the base URL passed through to LinearClient when configured.
+    pub fn api_url(&self) -> Option<&str> {
+        self.options.api_url.as_deref()
+    }
+
+    /// Borrow the webhook signing secret when configured. 1:1 with
+    /// upstream `protected readonly webhookSecret: string`.
+    pub fn webhook_secret(&self) -> Option<&str> {
+        self.options.webhook_secret.as_deref()
     }
 
     /// Effective GraphQL URL.
@@ -469,6 +516,161 @@ impl LinearAdapter {
     }
 }
 
+/// 1:1 with upstream `interface LinearAdapterConfig` — all fields
+/// optional so the factory can fall back to environment variables.
+/// Used by [`try_create_linear_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct LinearCreateOptions {
+    /// Personal Linear API key. Falls back to `LINEAR_API_KEY`.
+    pub api_key: Option<String>,
+    /// OAuth2 access token (single-tenant). Falls back to
+    /// `LINEAR_ACCESS_TOKEN`.
+    pub access_token: Option<String>,
+    /// OAuth2 app credentials (multi-tenant). Falls back to
+    /// `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID` /
+    /// `LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET`, then
+    /// `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`.
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Webhook signing secret. Falls back to `LINEAR_WEBHOOK_SECRET`.
+    pub webhook_secret: Option<String>,
+    /// Display name override. Falls back to `LINEAR_BOT_USERNAME`,
+    /// then [`DEFAULT_USER_NAME`].
+    pub user_name: Option<String>,
+    /// Routing mode. Defaults to [`LinearMode::Comments`].
+    pub mode: Option<LinearMode>,
+    /// Linear API base URL override. Falls back to `LINEAR_API_URL`.
+    pub api_url: Option<String>,
+}
+
+/// Errors returned by [`try_create_linear_adapter`] when required
+/// configuration cannot be resolved. 1:1 with upstream
+/// `throw new ValidationError("linear", "... is required")`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearCreateError {
+    /// `webhookSecret` missing and `LINEAR_WEBHOOK_SECRET` not set.
+    WebhookSecretRequired,
+    /// No auth method resolved from config or environment.
+    AuthenticationRequired,
+    /// Multi-tenant OAuth requested but `clientId` and `clientSecret`
+    /// weren't both provided. 1:1 with upstream's
+    /// `"clientId and clientSecret are required together"` throw.
+    OAuthClientCredentialsIncomplete,
+}
+
+impl std::fmt::Display for LinearCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WebhookSecretRequired => write!(
+                f,
+                "webhookSecret is required. Set LINEAR_WEBHOOK_SECRET or provide it in config."
+            ),
+            Self::AuthenticationRequired => write!(
+                f,
+                "Authentication is required. Set LINEAR_API_KEY, LINEAR_ACCESS_TOKEN, LINEAR_CLIENT_CREDENTIALS_CLIENT_ID/LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET, or LINEAR_CLIENT_ID/LINEAR_CLIENT_SECRET, or provide auth in config."
+            ),
+            Self::OAuthClientCredentialsIncomplete => write!(
+                f,
+                "clientId and clientSecret are required together for multi-tenant OAuth."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LinearCreateError {}
+
+/// 1:1 with upstream `createLinearAdapter(config)` env-var
+/// resolution path. Prefer explicit options; otherwise fall through
+/// to the supplied `env` reader. Auth-resolution priority matches
+/// upstream:
+///
+/// 1. `opts.api_key` (single-tenant)
+/// 2. `opts.access_token` (single-tenant OAuth)
+/// 3. `opts.client_id` + `opts.client_secret` (multi-tenant OAuth)
+/// 4. `env("LINEAR_API_KEY")`
+/// 5. `env("LINEAR_ACCESS_TOKEN")`
+/// 6. `env("LINEAR_CLIENT_CREDENTIALS_CLIENT_ID")` +
+///    `env("LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET")`
+/// 7. `env("LINEAR_CLIENT_ID")` + `env("LINEAR_CLIENT_SECRET")`
+///
+/// When config has any auth field set, env auth is ignored entirely
+/// (1:1 with upstream's "if (...) return" short-circuits).
+///
+/// The `env` reader is a closure rather than `std::env::var` so
+/// tests don't have to mutate process-global state (unsafe in Rust
+/// 2024 edition).
+pub fn try_create_linear_adapter(
+    opts: LinearCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<LinearAdapter, LinearCreateError> {
+    let webhook_secret = opts
+        .webhook_secret
+        .or_else(|| env("LINEAR_WEBHOOK_SECRET"))
+        .ok_or(LinearCreateError::WebhookSecretRequired)?;
+
+    let mode = opts.mode.unwrap_or_default();
+    let user_name = opts
+        .user_name
+        .or_else(|| env("LINEAR_BOT_USERNAME"))
+        .or_else(|| Some(DEFAULT_USER_NAME.to_string()));
+    let api_url = opts.api_url.or_else(|| env("LINEAR_API_URL"));
+
+    // Resolve auth — config wins outright if any auth field is set;
+    // otherwise fall through to the upstream env-var priority chain.
+    let has_config_auth = opts.api_key.is_some()
+        || opts.access_token.is_some()
+        || opts.client_id.is_some()
+        || opts.client_secret.is_some();
+
+    let auth = if has_config_auth {
+        if let Some(key) = opts.api_key {
+            LinearAuth::ApiKey(key)
+        } else if let Some(tok) = opts.access_token {
+            LinearAuth::AccessToken(tok)
+        } else {
+            match (opts.client_id, opts.client_secret) {
+                (Some(client_id), Some(client_secret)) => {
+                    LinearAuth::OAuth(LinearOAuthCredentials {
+                        client_id,
+                        client_secret,
+                    })
+                }
+                _ => return Err(LinearCreateError::OAuthClientCredentialsIncomplete),
+            }
+        }
+    } else if let Some(key) = env("LINEAR_API_KEY") {
+        LinearAuth::ApiKey(key)
+    } else if let Some(tok) = env("LINEAR_ACCESS_TOKEN") {
+        LinearAuth::AccessToken(tok)
+    } else if let (Some(cid), Some(csec)) = (
+        env("LINEAR_CLIENT_CREDENTIALS_CLIENT_ID"),
+        env("LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET"),
+    ) {
+        LinearAuth::OAuth(LinearOAuthCredentials {
+            client_id: cid,
+            client_secret: csec,
+        })
+    } else if let (Some(cid), Some(csec)) =
+        (env("LINEAR_CLIENT_ID"), env("LINEAR_CLIENT_SECRET"))
+    {
+        LinearAuth::OAuth(LinearOAuthCredentials {
+            client_id: cid,
+            client_secret: csec,
+        })
+    } else {
+        return Err(LinearCreateError::AuthenticationRequired);
+    };
+
+    Ok(LinearAdapter::new(LinearAdapterOptions {
+        auth,
+        graphql_url: None,
+        webhook_secret: Some(webhook_secret),
+        user_name,
+        api_url,
+        mode,
+    }))
+}
+
 /// Encode a Linear thread id. 1:1 with upstream's inline format:
 /// `linear:<team_key>:<issue_id>`.
 pub fn encode_thread_id(team_key: &str, issue_id: &str) -> String {
@@ -766,6 +968,8 @@ mod tests {
             graphql_url: None,
             webhook_secret: Some("secret".to_string()),
             user_name: Some("my-bot".to_string()),
+            api_url: None,
+            mode: LinearMode::Comments,
         };
         let adapter = LinearAdapter::new(opts);
         assert_eq!(adapter.name(), "linear");
@@ -780,6 +984,8 @@ mod tests {
             graphql_url: None,
             webhook_secret: Some("secret".to_string()),
             user_name: Some("my-bot".to_string()),
+            api_url: None,
+            mode: LinearMode::Comments,
         };
         let adapter = LinearAdapter::new(opts);
         assert_eq!(adapter.name(), "linear");
@@ -796,9 +1002,295 @@ mod tests {
             graphql_url: None,
             webhook_secret: Some("secret".to_string()),
             user_name: Some("my-bot".to_string()),
+            api_url: None,
+            mode: LinearMode::Comments,
         };
         let adapter = LinearAdapter::new(opts);
         assert_eq!(adapter.name(), "linear");
         assert!(adapter.is_multi_tenant());
+    }
+
+    // ---------- createLinearAdapter describe block (19 cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("createLinearAdapter")`.
+    // The env reader is an injected closure to avoid `unsafe` `set_var`
+    // (Rust 2024) and process-global racing across parallel tests.
+
+    fn empty_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn create_linear_adapter_should_create_with_api_key_config() {
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("lin_api_123".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("api key + secret is valid config");
+        assert_eq!(adapter.name(), "linear");
+    }
+
+    #[test]
+    fn create_linear_adapter_should_create_with_access_token_config() {
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                access_token: Some("lin_oauth_123".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("access token is valid auth");
+        assert!(matches!(adapter.auth(), LinearAuth::AccessToken(_)));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_create_with_client_id_client_secret_config() {
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                client_id: Some("client-id".to_string()),
+                client_secret: Some("client-secret".to_string()),
+                mode: Some(LinearMode::AgentSessions),
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("client id + client secret is multi-tenant OAuth");
+        assert!(adapter.is_multi_tenant());
+        assert_eq!(adapter.mode(), LinearMode::AgentSessions);
+    }
+
+    #[test]
+    fn create_linear_adapter_should_accept_explicit_comment_mode() {
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("lin_api_123".to_string()),
+                mode: Some(LinearMode::Comments),
+                webhook_secret: Some("secret".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("explicit comments mode");
+        assert_eq!(adapter.mode(), LinearMode::Comments);
+    }
+
+    #[test]
+    fn create_linear_adapter_should_throw_when_webhook_secret_missing_and_not_in_env() {
+        let err = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("key".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("missing webhook secret");
+        assert_eq!(err, LinearCreateError::WebhookSecretRequired);
+        assert!(err.to_string().contains("webhookSecret is required"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_use_linear_webhook_secret_env_var() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("key".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("env webhook secret resolved");
+        assert_eq!(adapter.webhook_secret(), Some("env-secret"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_use_linear_api_key_env_var_when_no_auth_config_provided() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_API_KEY" => Some("env-api-key".to_string()),
+            _ => None,
+        };
+        let adapter =
+            try_create_linear_adapter(LinearCreateOptions::default(), env).expect("env-only auth");
+        assert!(matches!(adapter.auth(), LinearAuth::ApiKey(k) if k == "env-api-key"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_use_linear_access_token_env_var_when_no_api_key() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_ACCESS_TOKEN" => Some("env-access-token".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(LinearCreateOptions::default(), env)
+            .expect("env access token");
+        assert!(matches!(adapter.auth(), LinearAuth::AccessToken(t) if t == "env-access-token"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_use_linear_client_id_secret_env_vars_when_no_other_auth() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_CLIENT_ID" => Some("env-client-id".to_string()),
+            "LINEAR_CLIENT_SECRET" => Some("env-client-secret".to_string()),
+            _ => None,
+        };
+        let adapter =
+            try_create_linear_adapter(LinearCreateOptions::default(), env).expect("env oauth");
+        assert!(adapter.is_multi_tenant());
+    }
+
+    #[test]
+    fn create_linear_adapter_should_use_client_credentials_env_vars_before_client_id_secret() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_CLIENT_CREDENTIALS_CLIENT_ID" => Some("env-cc-client-id".to_string()),
+            "LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET" => Some("env-cc-client-secret".to_string()),
+            "LINEAR_CLIENT_ID" => Some("env-oauth-client-id".to_string()),
+            "LINEAR_CLIENT_SECRET" => Some("env-oauth-client-secret".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(LinearCreateOptions::default(), env)
+            .expect("client-credentials env takes priority");
+        match adapter.auth() {
+            LinearAuth::OAuth(creds) => {
+                assert_eq!(creds.client_id, "env-cc-client-id");
+                assert_eq!(creds.client_secret, "env-cc-client-secret");
+            }
+            other => panic!("expected OAuth from client-credentials env, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_linear_adapter_should_throw_when_no_auth_is_available() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            _ => None,
+        };
+        let err = try_create_linear_adapter(LinearCreateOptions::default(), env)
+            .expect_err("no auth available");
+        assert_eq!(err, LinearCreateError::AuthenticationRequired);
+        assert!(err.to_string().contains("Authentication is required"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_use_linear_bot_username_env_var_for_user_name() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_BOT_USERNAME" => Some("custom-bot-name".to_string()),
+            "LINEAR_API_KEY" => Some("key".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(LinearCreateOptions::default(), env)
+            .expect("env bot username");
+        assert_eq!(adapter.user_name(), Some("custom-bot-name"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_default_user_name_to_linear_bot() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_API_KEY" => Some("key".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(LinearCreateOptions::default(), env)
+            .expect("default user name");
+        assert_eq!(adapter.user_name(), Some("linear-bot"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_prefer_config_user_name_over_env_var() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_BOT_USERNAME" => Some("env-name".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("key".to_string()),
+                user_name: Some("config-name".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config user name wins");
+        assert_eq!(adapter.user_name(), Some("config-name"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_not_mix_auth_modes_explicit_api_key_ignores_env_access_token() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_ACCESS_TOKEN" => Some("env-token".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("explicit-key".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("explicit api key short-circuits env auth");
+        assert!(matches!(adapter.auth(), LinearAuth::ApiKey(k) if k == "explicit-key"));
+    }
+
+    // The "should accept custom logger" upstream case is js-only —
+    // logger isn't a first-class adapter dependency in this port yet.
+    // Documented under the chat::logger module's parity row.
+
+    #[test]
+    fn create_linear_adapter_should_accept_api_url_config() {
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("lin_api_123".to_string()),
+                webhook_secret: Some("secret".to_string()),
+                api_url: Some("https://custom-linear.example.com".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("api url config");
+        assert_eq!(adapter.api_url(), Some("https://custom-linear.example.com"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_resolve_api_url_from_linear_api_url_env_var() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_API_KEY" => Some("env-key".to_string()),
+            "LINEAR_API_URL" => Some("https://custom-linear.example.com".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(LinearCreateOptions::default(), env)
+            .expect("env api url");
+        assert_eq!(adapter.api_url(), Some("https://custom-linear.example.com"));
+    }
+
+    #[test]
+    fn create_linear_adapter_should_prefer_api_url_config_over_linear_api_url_env_var() {
+        let env = |key: &str| match key {
+            "LINEAR_WEBHOOK_SECRET" => Some("env-secret".to_string()),
+            "LINEAR_API_KEY" => Some("env-key".to_string()),
+            "LINEAR_API_URL" => Some("https://env-linear.example.com".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_linear_adapter(
+            LinearCreateOptions {
+                api_key: Some("key".to_string()),
+                api_url: Some("https://config-linear.example.com".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config api url wins");
+        assert_eq!(adapter.api_url(), Some("https://config-linear.example.com"));
     }
 }
