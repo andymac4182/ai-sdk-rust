@@ -3968,6 +3968,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   warnings, max image limits, response-format defaults, response metadata,
   provider metadata, usage mapping, token-detail distribution, and multipart
   edit inputs.
+- 2026-05-24: `generateObject` callback parity split the upstream
+  `generate-object.test.ts` callback corpus into named Rust counterparts for
+  onStart ordering and event payloads, deprecated telemetry alias payload
+  isolation, onStepStart ordering/model metadata, onStepFinish raw object text,
+  usage and reasoning, onFinish parsed object/provider metadata/reasoning,
+  callback ordering, call-id correlation, and callback panic isolation.
 
 ## Next Unported Work Queue
 
@@ -4422,6 +4428,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    warning logger spy cases now have named Rust counterparts in
    `generate_object_calls_log_warnings_with_the_correct_warnings` and
    `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
+   The upstream `generateObject` callback cases now have named Rust
+   counterparts in `generate_object_on_start_*`,
+   `generate_object_on_step_start_*`, `generate_object_on_step_finish_*`,
+   `generate_object_on_finish_*`, `generate_object_callbacks_fire_in_order`,
+   `generate_object_callbacks_correlate_events_with_same_call_id`, and
+   `generate_object_callbacks_should_not_break_generation_when_callback_panics`.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
    array output. The upstream `callback ordering` call-id correlation case now

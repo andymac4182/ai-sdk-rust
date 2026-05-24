@@ -1587,6 +1587,7 @@ mod tests {
         result: LanguageModelGenerateResult,
         seen_options: Mutex<Vec<LanguageModelCallOptions>>,
         supported_urls_called: Option<Arc<Mutex<bool>>>,
+        events: Option<Arc<Mutex<Vec<&'static str>>>>,
     }
 
     impl StaticObjectModel {
@@ -1596,6 +1597,7 @@ mod tests {
                 result,
                 seen_options: Mutex::new(Vec::new()),
                 supported_urls_called: None,
+                events: None,
             }
         }
 
@@ -1606,6 +1608,11 @@ mod tests {
 
         fn with_supported_urls_called(mut self, supported_urls_called: Arc<Mutex<bool>>) -> Self {
             self.supported_urls_called = Some(supported_urls_called);
+            self
+        }
+
+        fn with_events(mut self, events: Arc<Mutex<Vec<&'static str>>>) -> Self {
+            self.events = Some(events);
             self
         }
 
@@ -1657,6 +1664,9 @@ mod tests {
         }
 
         fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            if let Some(events) = &self.events {
+                events.lock().expect("events lock").push("doGenerate");
+            }
             self.seen_options
                 .lock()
                 .expect("seen options lock is not poisoned")
@@ -1728,6 +1738,47 @@ mod tests {
                 ValidationResult::failure("answer must be a number")
             }
         })
+    }
+
+    fn content_json_schema() -> crate::json::JsonSchema {
+        serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                }
+            },
+            "required": ["content"],
+            "additionalProperties": false
+        }))
+        .expect("content schema is a JSON object")
+    }
+
+    fn content_schema() -> Schema {
+        json_schema(content_json_schema()).with_validator(|value| {
+            if value
+                .get("content")
+                .is_some_and(serde_json::Value::is_string)
+            {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("content must be a string")
+            }
+        })
+    }
+
+    fn content_object_result() -> LanguageModelGenerateResult {
+        LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                r#"{ "content": "Hello, world!" }"#,
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        )
     }
 
     #[test]
@@ -3258,5 +3309,475 @@ mod tests {
         assert_eq!(error.usage(), &object_usage());
         assert_eq!(error.finish_reason(), &FinishReason::Other);
         assert_eq!(error.response().model_id.as_deref(), Some("object-test"));
+    }
+
+    #[test]
+    fn generate_object_on_start_runs_before_model_call() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model =
+            StaticObjectModel::new(content_object_result()).with_events(Arc::clone(&events));
+        let events_for_callback = Arc::clone(&events);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_on_start(move |_| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push("onStart");
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["onStart", "doGenerate"]
+        );
+    }
+
+    #[test]
+    fn generate_object_on_start_sends_text_prompt_information() {
+        let model = StaticObjectModel::new(content_object_result()).with_model_id("test-model");
+        let start_event = Arc::new(Mutex::new(None::<GenerateObjectStartEvent>));
+        let start_event_for_callback = Arc::clone(&start_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_schema_name("test-schema")
+                .with_schema_description("A test schema")
+                .with_temperature(0.5)
+                .with_max_output_tokens(100)
+                .with_experimental_on_start(move |event| {
+                    let start_event = Arc::clone(&start_event_for_callback);
+                    async move {
+                        *start_event.lock().expect("start event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        let event = start_event
+            .lock()
+            .expect("start event lock")
+            .clone()
+            .expect("start event is recorded");
+        assert_eq!(event.operation_id, "ai.generateObject");
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "test-model");
+        assert_eq!(event.messages, prompt());
+        assert_eq!(event.temperature, Some(0.5));
+        assert_eq!(event.max_output_tokens, Some(100));
+        assert_eq!(event.max_retries, DEFAULT_MAX_RETRIES);
+        assert_eq!(event.output, GenerateObjectOutputKind::Object);
+        assert_eq!(event.schema, Some(content_json_schema()));
+        assert_eq!(event.schema_name.as_deref(), Some("test-schema"));
+        assert_eq!(event.schema_description.as_deref(), Some("A test schema"));
+        assert!(
+            event
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("user-agent"))
+                .is_some_and(|user_agent| user_agent == &format!("ai/{VERSION}"))
+        );
+    }
+
+    #[test]
+    fn generate_object_accepts_deprecated_experimental_telemetry_as_alias() {
+        let model = StaticObjectModel::new(content_object_result());
+        let start_event = Arc::new(Mutex::new(None::<GenerateObjectStartEvent>));
+        let start_event_for_callback = Arc::clone(&start_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_telemetry(
+                    TelemetryOptions::new().with_function_id("deprecated-fn"),
+                )
+                .with_experimental_on_start(move |event| {
+                    let start_event = Arc::clone(&start_event_for_callback);
+                    async move {
+                        *start_event.lock().expect("start event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        let event = start_event
+            .lock()
+            .expect("start event lock")
+            .clone()
+            .expect("start event is recorded");
+        assert_eq!(event.operation_id, "ai.generateObject");
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "object-test");
+    }
+
+    #[test]
+    fn generate_object_on_step_start_runs_before_model_call() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model =
+            StaticObjectModel::new(content_object_result()).with_events(Arc::clone(&events));
+        let events_for_callback = Arc::clone(&events);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_on_step_start(move |_| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push("onStepStart");
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["onStepStart", "doGenerate"]
+        );
+    }
+
+    #[test]
+    fn generate_object_on_step_start_provides_step_number_and_model_info() {
+        let model = StaticObjectModel::new(content_object_result()).with_model_id("test-model");
+        let step_start_event = Arc::new(Mutex::new(None::<GenerateObjectStepStartEvent>));
+        let step_start_event_for_callback = Arc::clone(&step_start_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_on_step_start(move |event| {
+                    let step_start_event = Arc::clone(&step_start_event_for_callback);
+                    async move {
+                        *step_start_event.lock().expect("step start event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        let event = step_start_event
+            .lock()
+            .expect("step start event lock")
+            .clone()
+            .expect("step start event is recorded");
+        assert_eq!(event.step_number, 0);
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "test-model");
+        assert!(!event.call_id.is_empty());
+        assert_eq!(event.prompt_messages, prompt());
+    }
+
+    #[test]
+    fn generate_object_on_step_finish_runs_after_model_call_with_raw_result() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model =
+            StaticObjectModel::new(content_object_result()).with_events(Arc::clone(&events));
+        let events_for_callback = Arc::clone(&events);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_on_step_finish(move |_| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push("onStepFinish");
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["doGenerate", "onStepFinish"]
+        );
+    }
+
+    #[test]
+    fn generate_object_on_step_finish_provides_raw_object_text_and_usage() {
+        let model = StaticObjectModel::new(content_object_result()).with_model_id("test-model");
+        let step_finish_event = Arc::new(Mutex::new(None::<GenerateObjectStepEndEvent>));
+        let step_finish_event_for_callback = Arc::clone(&step_finish_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_on_step_finish(move |event| {
+                    let step_finish_event = Arc::clone(&step_finish_event_for_callback);
+                    async move {
+                        *step_finish_event.lock().expect("step finish event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        let event = step_finish_event
+            .lock()
+            .expect("step finish event lock")
+            .clone()
+            .expect("step finish event is recorded");
+        assert_eq!(event.step_number, 0);
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "test-model");
+        assert_eq!(event.object_text, r#"{ "content": "Hello, world!" }"#);
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+        assert_eq!(event.usage, object_usage());
+        assert!(!event.call_id.is_empty());
+    }
+
+    #[test]
+    fn generate_object_on_step_finish_includes_reasoning() {
+        let result = LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new("thinking...")),
+                LanguageModelContent::Text(LanguageModelText::new(r#"{ "content": "Hello" }"#)),
+            ],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+        let step_finish_event = Arc::new(Mutex::new(None::<GenerateObjectStepEndEvent>));
+        let step_finish_event_for_callback = Arc::clone(&step_finish_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_on_step_finish(move |event| {
+                    let step_finish_event = Arc::clone(&step_finish_event_for_callback);
+                    async move {
+                        *step_finish_event.lock().expect("step finish event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            step_finish_event
+                .lock()
+                .expect("step finish event lock")
+                .as_ref()
+                .and_then(|event| event.reasoning.as_deref()),
+            Some("thinking...")
+        );
+    }
+
+    #[test]
+    fn generate_object_on_finish_runs_after_parsing_with_typed_object() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model =
+            StaticObjectModel::new(content_object_result()).with_events(Arc::clone(&events));
+        let events_for_callback = Arc::clone(&events);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_on_finish(move |_| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push("onFinish");
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["doGenerate", "onFinish"]
+        );
+    }
+
+    #[test]
+    fn generate_object_on_finish_provides_parsed_object_and_metadata() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "test": {
+                "key": "value"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let model = StaticObjectModel::new(
+            content_object_result().with_provider_metadata(provider_metadata.clone()),
+        )
+        .with_model_id("test-model");
+        let finish_event = Arc::new(Mutex::new(None::<GenerateObjectEndEvent>));
+        let finish_event_for_callback = Arc::clone(&finish_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_on_finish(move |event| {
+                    let finish_event = Arc::clone(&finish_event_for_callback);
+                    async move {
+                        *finish_event.lock().expect("finish event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        let event = finish_event
+            .lock()
+            .expect("finish event lock")
+            .clone()
+            .expect("finish event is recorded");
+        assert_eq!(event.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+        assert_eq!(event.usage, object_usage());
+        assert_eq!(event.provider_metadata, Some(provider_metadata));
+        assert!(!event.call_id.is_empty());
+    }
+
+    #[test]
+    fn generate_object_on_finish_includes_reasoning() {
+        let result = LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new("thinking...")),
+                LanguageModelContent::Text(LanguageModelText::new(r#"{ "content": "Hello" }"#)),
+            ],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+        let finish_event = Arc::new(Mutex::new(None::<GenerateObjectEndEvent>));
+        let finish_event_for_callback = Arc::clone(&finish_event);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_on_finish(move |event| {
+                    let finish_event = Arc::clone(&finish_event_for_callback);
+                    async move {
+                        *finish_event.lock().expect("finish event lock") = Some(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            finish_event
+                .lock()
+                .expect("finish event lock")
+                .as_ref()
+                .and_then(|event| event.reasoning.as_deref()),
+            Some("thinking...")
+        );
+    }
+
+    #[test]
+    fn generate_object_callbacks_fire_in_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model =
+            StaticObjectModel::new(content_object_result()).with_events(Arc::clone(&events));
+        let on_start_events = Arc::clone(&events);
+        let on_step_start_events = Arc::clone(&events);
+        let on_step_finish_events = Arc::clone(&events);
+        let on_finish_events = Arc::clone(&events);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_on_start(move |_| {
+                    let events = Arc::clone(&on_start_events);
+                    async move {
+                        events.lock().expect("events lock").push("onStart");
+                    }
+                })
+                .with_experimental_on_step_start(move |_| {
+                    let events = Arc::clone(&on_step_start_events);
+                    async move {
+                        events.lock().expect("events lock").push("onStepStart");
+                    }
+                })
+                .with_on_step_finish(move |_| {
+                    let events = Arc::clone(&on_step_finish_events);
+                    async move {
+                        events.lock().expect("events lock").push("onStepFinish");
+                    }
+                })
+                .with_on_finish(move |_| {
+                    let events = Arc::clone(&on_finish_events);
+                    async move {
+                        events.lock().expect("events lock").push("onFinish");
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            [
+                "onStart",
+                "onStepStart",
+                "doGenerate",
+                "onStepFinish",
+                "onFinish"
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_object_callbacks_correlate_events_with_same_call_id() {
+        let model = StaticObjectModel::new(content_object_result());
+        let call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let on_start_ids = Arc::clone(&call_ids);
+        let on_step_start_ids = Arc::clone(&call_ids);
+        let on_step_finish_ids = Arc::clone(&call_ids);
+        let on_finish_ids = Arc::clone(&call_ids);
+
+        poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_on_start(move |event| {
+                    let call_ids = Arc::clone(&on_start_ids);
+                    async move {
+                        call_ids.lock().expect("call ids lock").push(event.call_id);
+                    }
+                })
+                .with_experimental_on_step_start(move |event| {
+                    let call_ids = Arc::clone(&on_step_start_ids);
+                    async move {
+                        call_ids.lock().expect("call ids lock").push(event.call_id);
+                    }
+                })
+                .with_on_step_finish(move |event| {
+                    let call_ids = Arc::clone(&on_step_finish_ids);
+                    async move {
+                        call_ids.lock().expect("call ids lock").push(event.call_id);
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let call_ids = Arc::clone(&on_finish_ids);
+                    async move {
+                        call_ids.lock().expect("call ids lock").push(event.call_id);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        let call_ids = call_ids.lock().expect("call ids lock");
+        assert_eq!(call_ids.len(), 4);
+        assert!(call_ids.iter().all(|call_id| call_id == &call_ids[0]));
+    }
+
+    #[test]
+    fn generate_object_callbacks_should_not_break_generation_when_callback_panics() {
+        let model = StaticObjectModel::new(content_object_result());
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(content_schema())
+                .with_experimental_on_start(panicking_generate_object_callback)
+                .with_experimental_on_step_start(panicking_generate_object_callback)
+                .with_on_step_finish(panicking_generate_object_callback)
+                .with_on_finish(panicking_generate_object_callback),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.object, json!({ "content": "Hello, world!" }));
     }
 }
