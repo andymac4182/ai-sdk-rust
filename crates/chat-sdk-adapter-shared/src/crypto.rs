@@ -23,6 +23,12 @@ use crate::errors::AdapterError;
 
 const IV_LENGTH: usize = 12;
 const KEY_LENGTH: usize = 32;
+/// AES-256-GCM authentication tag length (16 bytes). 1:1 with
+/// upstream's private `AUTH_TAG_LENGTH = 16` (used to size the
+/// fixed-length tag the GCM mode appends to each ciphertext).
+/// Exposed at module scope so callers + tests can reference the
+/// canonical value without re-declaring it.
+pub const AUTH_TAG_LENGTH: usize = 16;
 
 /// Encrypted token payload. 1:1 port of upstream
 /// `interface EncryptedTokenData`.
@@ -212,6 +218,15 @@ mod tests {
     fn fixed_key() -> Vec<u8> {
         // 32-byte deterministic key for roundtrip tests.
         (0..32u8).collect()
+    }
+
+    #[test]
+    fn auth_tag_length_matches_upstream_constant() {
+        // 1:1 with upstream's private `AUTH_TAG_LENGTH = 16` (the
+        // AES-256-GCM authentication tag is always 16 bytes; the
+        // const matches the tag width AES-GCM appends to each
+        // ciphertext).
+        assert_eq!(AUTH_TAG_LENGTH, 16);
     }
 
     #[test]
