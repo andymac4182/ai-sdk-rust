@@ -384,6 +384,107 @@ impl Adapter for MessengerAdapter {
     }
 }
 
+/// 1:1 with upstream `interface MessengerAdapterConfig` — all
+/// fields optional so the factory can fall back to environment
+/// variables. Used by [`try_create_messenger_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct MessengerCreateOptions {
+    /// Facebook app secret. Falls back to `FACEBOOK_APP_SECRET`.
+    pub app_secret: Option<String>,
+    /// Page access token. Falls back to `FACEBOOK_PAGE_ACCESS_TOKEN`.
+    pub page_access_token: Option<String>,
+    /// Webhook verify token. Falls back to `FACEBOOK_VERIFY_TOKEN`.
+    pub verify_token: Option<String>,
+    /// Display name override. (Upstream factory does not resolve
+    /// this from env.)
+    pub user_name: Option<String>,
+    /// Graph API version override (parity-only — the current
+    /// Rust adapter still hard-codes `GRAPH_API_VERSION`).
+    pub api_version: Option<String>,
+}
+
+/// Errors returned by [`try_create_messenger_adapter`]. 1:1 with
+/// upstream `throw new ValidationError("messenger", "... is
+/// required")` cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessengerCreateError {
+    /// `appSecret` missing and `FACEBOOK_APP_SECRET` not set (or empty).
+    AppSecretRequired,
+    /// `pageAccessToken` missing and `FACEBOOK_PAGE_ACCESS_TOKEN`
+    /// not set (or empty).
+    PageAccessTokenRequired,
+    /// `verifyToken` missing and `FACEBOOK_VERIFY_TOKEN` not set
+    /// (or empty).
+    VerifyTokenRequired,
+}
+
+impl std::fmt::Display for MessengerCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AppSecretRequired => write!(
+                f,
+                "appSecret is required. Set FACEBOOK_APP_SECRET or provide it in config."
+            ),
+            Self::PageAccessTokenRequired => write!(
+                f,
+                "pageAccessToken is required. Set FACEBOOK_PAGE_ACCESS_TOKEN or provide it in config."
+            ),
+            Self::VerifyTokenRequired => write!(
+                f,
+                "verifyToken is required. Set FACEBOOK_VERIFY_TOKEN or provide it in config."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MessengerCreateError {}
+
+/// 1:1 with upstream `createMessengerAdapter(config)` env-var
+/// resolution path. The `env` reader is a closure (avoids `unsafe
+/// std::env::set_var` and parallel-test races).
+///
+/// Resolution rules (1:1 with upstream):
+/// - `app_secret` ← `opts` ?? non-empty `env("FACEBOOK_APP_SECRET")`
+/// - `page_access_token` ← `opts` ?? non-empty
+///   `env("FACEBOOK_PAGE_ACCESS_TOKEN")`
+/// - `verify_token` ← `opts` ?? non-empty
+///   `env("FACEBOOK_VERIFY_TOKEN")`
+/// - `user_name` ← `opts.user_name` (no env fallback at the factory
+///   in upstream)
+///
+/// Empty env strings are treated as missing per upstream
+/// (`process.env.FACEBOOK_APP_SECRET = ""` → throw).
+pub fn try_create_messenger_adapter(
+    opts: MessengerCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<MessengerAdapter, MessengerCreateError> {
+    let app_secret = opts
+        .app_secret
+        .or_else(|| env("FACEBOOK_APP_SECRET"))
+        .filter(|s| !s.is_empty())
+        .ok_or(MessengerCreateError::AppSecretRequired)?;
+    let page_access_token = opts
+        .page_access_token
+        .or_else(|| env("FACEBOOK_PAGE_ACCESS_TOKEN"))
+        .filter(|s| !s.is_empty())
+        .ok_or(MessengerCreateError::PageAccessTokenRequired)?;
+    let verify_token = opts
+        .verify_token
+        .or_else(|| env("FACEBOOK_VERIFY_TOKEN"))
+        .filter(|s| !s.is_empty())
+        .ok_or(MessengerCreateError::VerifyTokenRequired)?;
+
+    let _api_version_unused = opts.api_version; // Parity-only.
+
+    Ok(MessengerAdapter::new(MessengerAdapterOptions {
+        page_access_token,
+        verify_token,
+        app_secret: Some(app_secret),
+        user_name: opts.user_name,
+        graph_base: None,
+    }))
+}
+
 /// Encode a Messenger thread id. 1:1 with upstream's
 /// `encodeThreadId({recipientId}) -> "messenger:<recipientId>"`
 /// (single colon).
@@ -707,5 +808,68 @@ mod tests {
         let adapter = MessengerAdapter::new(opts);
         assert_eq!(adapter.user_name(), "custombot");
         assert_eq!(adapter.app_secret(), Some("secret"));
+    }
+
+    // ---------- createMessengerAdapter env-var resolution (4 cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("MessengerAdapter")
+    // > describe("factory function")`. Env reader injected as a
+    // closure (Rust 2024 `unsafe set_var` + parallel-test races).
+
+    #[test]
+    fn create_messenger_adapter_throws_when_app_secret_is_missing() {
+        let env = |key: &str| match key {
+            "FACEBOOK_APP_SECRET" => Some(String::new()),
+            "FACEBOOK_PAGE_ACCESS_TOKEN" => Some("token".to_string()),
+            "FACEBOOK_VERIFY_TOKEN" => Some("verify".to_string()),
+            _ => None,
+        };
+        let err = try_create_messenger_adapter(MessengerCreateOptions::default(), env)
+            .expect_err("missing appSecret");
+        assert_eq!(err, MessengerCreateError::AppSecretRequired);
+        assert!(err.to_string().contains("appSecret"));
+    }
+
+    #[test]
+    fn create_messenger_adapter_throws_when_page_access_token_is_missing() {
+        let env = |key: &str| match key {
+            "FACEBOOK_APP_SECRET" => Some("secret".to_string()),
+            "FACEBOOK_PAGE_ACCESS_TOKEN" => Some(String::new()),
+            "FACEBOOK_VERIFY_TOKEN" => Some("verify".to_string()),
+            _ => None,
+        };
+        let err = try_create_messenger_adapter(MessengerCreateOptions::default(), env)
+            .expect_err("missing pageAccessToken");
+        assert_eq!(err, MessengerCreateError::PageAccessTokenRequired);
+        assert!(err.to_string().contains("pageAccessToken"));
+    }
+
+    #[test]
+    fn create_messenger_adapter_throws_when_verify_token_is_missing() {
+        let env = |key: &str| match key {
+            "FACEBOOK_APP_SECRET" => Some("secret".to_string()),
+            "FACEBOOK_PAGE_ACCESS_TOKEN" => Some("token".to_string()),
+            "FACEBOOK_VERIFY_TOKEN" => Some(String::new()),
+            _ => None,
+        };
+        let err = try_create_messenger_adapter(MessengerCreateOptions::default(), env)
+            .expect_err("missing verifyToken");
+        assert_eq!(err, MessengerCreateError::VerifyTokenRequired);
+        assert!(err.to_string().contains("verifyToken"));
+    }
+
+    #[test]
+    fn create_messenger_adapter_uses_env_vars_when_config_is_omitted() {
+        let env = |key: &str| match key {
+            "FACEBOOK_APP_SECRET" => Some("secret".to_string()),
+            "FACEBOOK_PAGE_ACCESS_TOKEN" => Some("token".to_string()),
+            "FACEBOOK_VERIFY_TOKEN" => Some("verify".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_messenger_adapter(MessengerCreateOptions::default(), env)
+            .expect("env-only construction");
+        assert_eq!(adapter.name(), "messenger");
+        assert_eq!(adapter.app_secret(), Some("secret"));
+        assert_eq!(adapter.page_access_token(), "token");
+        assert_eq!(adapter.verify_token(), "verify");
     }
 }
