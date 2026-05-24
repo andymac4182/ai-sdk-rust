@@ -345,6 +345,22 @@ impl Adapter for TeamsAdapter {
         ))
     }
 
+    /// Not yet supported by the underlying Teams SDK. 1:1 with
+    /// upstream's `throw NotImplementedError("removeReaction is
+    /// not yet supported by the Teams SDK", "removeReaction")` —
+    /// symmetric with the unsupported `add_reaction`.
+    async fn remove_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "removeReaction is not yet supported by the Teams SDK".to_string(),
+        ))
+    }
+
     /// Send a Teams typing indicator. 1:1 with upstream's
     /// `adapter.startTyping`: POSTs `{type: "typing"}` as an
     /// activity to the conversation.
@@ -582,6 +598,23 @@ mod tests {
         let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.add_reaction("teams:CONV:MSG", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not yet supported by the Teams SDK"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_is_not_implemented() {
+        // 1:1 with upstream's `throw NotImplementedError(...)` in
+        // `adapter.removeReaction`. Upstream has no removeReaction
+        // describe block — the symmetric not-implemented surface
+        // matches the unsupported add_reaction shape.
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.remove_reaction("teams:CONV:MSG", "msg", "👍"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("not yet supported by the Teams SDK"));
