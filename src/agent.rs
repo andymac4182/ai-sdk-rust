@@ -1738,6 +1738,53 @@ mod tests {
     }
 
     #[test]
+    fn infer_agent_ui_message_should_not_contain_arbitrary_static_tools_when_no_tools_are_provided()
+    {
+        let model = MockLanguageModel::new();
+        let agent = ToolLoopAgent::for_model(&model);
+
+        assert!(agent.tools().is_empty());
+        assert!(crate::ui_message_stream::is_dynamic_tool_ui_part(&json!({
+            "type": "dynamic-tool",
+            "toolName": "runtimeTool",
+            "toolCallId": "call-1",
+            "state": "input-available",
+            "input": {}
+        })));
+        assert!(crate::ui_message_stream::is_data_ui_part(&json!({
+            "type": "data-status",
+            "data": { "state": "pending" }
+        })));
+        assert!(
+            !agent
+                .tools()
+                .iter()
+                .any(|tool| matches!(tool, GenerateTextTool::Rust(tool) if tool.name == "weather"))
+        );
+    }
+
+    #[test]
+    fn infer_agent_ui_message_should_include_metadata_when_provided() {
+        let model = MockLanguageModel::new();
+        let _agent = ToolLoopAgent::for_model(&model);
+
+        let message = UiMessage::new("msg-1", crate::ui_message_stream::UiMessageRole::User)
+            .with_metadata(json!({ "foo": "bar" }))
+            .with_part(json!({ "type": "text", "text": "hello" }));
+
+        assert_eq!(message.metadata, Some(json!({ "foo": "bar" })));
+        assert_eq!(
+            serde_json::to_value(message).expect("UI message serializes"),
+            json!({
+                "id": "msg-1",
+                "role": "user",
+                "metadata": { "foo": "bar" },
+                "parts": [{ "type": "text", "text": "hello" }]
+            })
+        );
+    }
+
+    #[test]
     fn tool_loop_agent_generate_forwards_settings_and_instructions() {
         let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
         let provider_options: ProviderOptions = serde_json::from_value(json!({

@@ -944,6 +944,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   `tool_loop_agent_generate_rejects_invalid_call_options_schema_before_model_call`
   and
   `tool_loop_agent_generate_passes_valid_call_options_schema`.
+- 2026-05-24: `packages/ai` `InferAgentUIMessage` type-level parity added
+  named Rust counterparts for upstream `infer-agent-ui-message.test-d.ts`:
+  `infer_agent_ui_message_should_not_contain_arbitrary_static_tools_when_no_tools_are_provided`
+  and `infer_agent_ui_message_should_include_metadata_when_provided`. Rust
+  proves the equivalent typed boundary by exposing no configured static tools
+  for a no-tool `ToolLoopAgent`, keeping dynamic/data UI parts representable,
+  and preserving caller-provided UI message metadata through serialization.
 - 2026-05-23: `packages/ai` `streamText` automatic tool approval stream
   parity added the named Rust counterpart
   `stream_text_automatic_tool_approval_response_streams_before_tool_result`
