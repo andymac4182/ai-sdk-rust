@@ -4800,6 +4800,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    `generate_object_on_finish_*`, `generate_object_callbacks_fire_in_order`,
    `generate_object_callbacks_correlate_events_with_same_call_id`, and
    `generate_object_callbacks_should_not_break_generation_when_callback_panics`.
+   The portable upstream `generate-text.test-d.ts` output result type
+   assertions now have Rust typed-output accessor counterparts in
+   `generate_text_type_counterpart_should_infer_text_output_type_default`,
+   `generate_text_type_counterpart_should_infer_text_output_type`,
+   `generate_text_type_counterpart_should_infer_object_output_type`,
+   `generate_text_type_counterpart_should_infer_array_output_type`,
+   `generate_text_type_counterpart_should_infer_choice_output_type`, and
+   `generate_text_type_counterpart_should_infer_json_output_type`.
    The upstream `generate-object.test-d.ts` and `stream-object.test-d.ts`
    unsupported timeout-option assertions now have named Rust counterparts in
    `generate_object_type_counterpart_does_not_accept_timeout_option` and

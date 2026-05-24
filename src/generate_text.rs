@@ -5255,6 +5255,26 @@ impl GenerateTextResult {
     pub fn into_output(self) -> Result<JsonValue, NoOutputGeneratedError> {
         self.output.ok_or_else(NoOutputGeneratedError::new)
     }
+
+    /// Deserializes the generated output into a caller-provided Rust type.
+    pub fn output_as<T>(&self) -> Result<T, NoOutputGeneratedError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let output = self.output()?;
+        serde_json::from_value(output.clone())
+            .map_err(|error| NoOutputGeneratedError::with_message(error.to_string()))
+    }
+
+    /// Consumes the result and deserializes the generated output into a Rust type.
+    pub fn into_output_as<T>(self) -> Result<T, NoOutputGeneratedError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let output = self.into_output()?;
+        serde_json::from_value(output)
+            .map_err(|error| NoOutputGeneratedError::with_message(error.to_string()))
+    }
 }
 
 /// Runs a non-streaming text generation call against a language model.
@@ -8149,6 +8169,7 @@ mod tests {
     };
     use crate::util::Callback;
     use crate::warning::Warning;
+    use serde::Deserialize;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
@@ -14444,6 +14465,13 @@ mod tests {
                 .expect("default text output exists"),
             json!("Hello world")
         );
+        let typed_output: String = result.output_as().expect("default text output is typed");
+        assert_eq!(typed_output, "Hello world");
+        let owned_typed_output: String = result
+            .clone()
+            .into_output_as()
+            .expect("owned default text output is typed");
+        assert_eq!(owned_typed_output, "Hello world");
         assert_eq!(
             result.response_messages,
             vec![LanguageModelMessage::Assistant(
@@ -14501,6 +14529,84 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    fn generate_text_result_with_output(output: JsonValue) -> GenerateTextResult {
+        let mut result = poll_ready(generate_text(GenerateTextOptions::new(
+            &FakeLanguageModel::new(),
+            vec![user_message("Say hello")],
+        )));
+        result.output = Some(output);
+        result
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_text_output_type_default() {
+        let result = generate_text_result_with_output(json!("Hello world"));
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_text_output_type() {
+        let result = generate_text_result_with_output(json!("Hello world"));
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    struct TypedObjectOutput {
+        value: String,
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_object_output_type() {
+        let result = generate_text_result_with_output(json!({ "value": "typed" }));
+        let output: TypedObjectOutput = result.output_as().expect("object output is typed");
+
+        assert_eq!(
+            output,
+            TypedObjectOutput {
+                value: "typed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_array_output_type() {
+        let result = generate_text_result_with_output(json!(["a", "b"]));
+        let output: Vec<String> = result.output_as().expect("array output is typed");
+
+        assert_eq!(output, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    enum ChoiceOutput {
+        #[serde(rename = "a")]
+        A,
+        #[serde(rename = "b")]
+        B,
+        #[serde(rename = "c")]
+        C,
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_choice_output_type() {
+        let result = generate_text_result_with_output(json!("b"));
+        let output: ChoiceOutput = result.output_as().expect("choice output is typed");
+
+        assert_eq!(output, ChoiceOutput::B);
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_json_output_type() {
+        let output_value = json!({ "value": ["anything", 1, true] });
+        let result = generate_text_result_with_output(output_value.clone());
+        let output: JsonValue = result.output_as().expect("JSON output is typed");
+
+        assert_eq!(output, output_value);
     }
 
     #[test]
