@@ -2955,16 +2955,13 @@ fn upsert_tool_part(
 fn update_tool_part_identity(
     part: &mut JsonValue,
     tool_name: Option<&str>,
-    dynamic: Option<bool>,
+    _dynamic: Option<bool>,
     provider_executed: Option<bool>,
     title: Option<String>,
 ) {
+    let is_dynamic_part = ui_message_part_type(part) == Some("dynamic-tool");
     if let Some(object) = ui_message_part_object_mut(part) {
-        if dynamic.unwrap_or(false) {
-            object.insert(
-                "type".to_string(),
-                JsonValue::String("dynamic-tool".to_string()),
-            );
+        if is_dynamic_part {
             if let Some(tool_name) = tool_name {
                 object.insert(
                     "toolName".to_string(),
@@ -3041,7 +3038,7 @@ fn update_tool_part_output_available(
     provider_metadata: Option<ProviderMetadata>,
     tool_metadata: Option<JsonObject>,
     preliminary: Option<bool>,
-    dynamic: Option<bool>,
+    _dynamic: Option<bool>,
 ) {
     if let Some(object) = ui_message_part_object_mut(part) {
         object.insert(
@@ -3054,12 +3051,6 @@ fn update_tool_part_output_available(
         insert_result_provider_metadata(object, provider_metadata);
         insert_optional_object(object, "toolMetadata", tool_metadata);
         insert_optional_bool(object, "preliminary", preliminary);
-        if dynamic.unwrap_or(false) {
-            object.insert(
-                "type".to_string(),
-                JsonValue::String("dynamic-tool".to_string()),
-            );
-        }
     }
 }
 
@@ -3069,7 +3060,7 @@ fn update_tool_part_output_error(
     provider_executed: Option<bool>,
     provider_metadata: Option<ProviderMetadata>,
     tool_metadata: Option<JsonObject>,
-    dynamic: Option<bool>,
+    _dynamic: Option<bool>,
 ) {
     if let Some(object) = ui_message_part_object_mut(part) {
         object.insert(
@@ -3081,12 +3072,6 @@ fn update_tool_part_output_error(
         insert_optional_bool(object, "providerExecuted", provider_executed);
         insert_result_provider_metadata(object, provider_metadata);
         insert_optional_object(object, "toolMetadata", tool_metadata);
-        if dynamic.unwrap_or(false) {
-            object.insert(
-                "type".to_string(),
-                JsonValue::String("dynamic-tool".to_string()),
-            );
-        }
     }
 }
 
@@ -4141,6 +4126,161 @@ mod tests {
                 "toolMetadata": { "clientName": "MyMCPClient" },
                 "callProviderMetadata": { "testProvider": { "itemId": "call-item" } },
                 "resultProviderMetadata": { "testProvider": { "itemId": "result-item" } }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_retains_tool_metadata_during_input_streaming() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let mut provider_metadata = ProviderMetadata::new();
+        provider_metadata.insert(
+            "testProvider".to_string(),
+            JsonObject::from_iter([("someKey".to_string(), json!("someValue"))]),
+        );
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-id".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    provider_executed: None,
+                    provider_metadata: Some(provider_metadata),
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::tool_input_delta("tool-call-id", r#"{"query":"#),
+                UiMessageChunk::tool_input_delta("tool-call-id", r#""test"}"#),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-id",
+                    "tool-name",
+                    json!({ "query": "test" }),
+                ),
+            ],
+            false,
+        )
+        .expect("provider metadata during input-streaming processes");
+
+        assert_eq!(
+            messages[0].parts[1],
+            json!({
+                "type": "tool-tool-name",
+                "toolCallId": "tool-call-id",
+                "state": "input-streaming",
+                "callProviderMetadata": { "testProvider": { "someKey": "someValue" } }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-tool-name",
+                "toolCallId": "tool-call-id",
+                "state": "input-available",
+                "input": { "query": "test" },
+                "callProviderMetadata": { "testProvider": { "someKey": "someValue" } }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_maps_tool_input_error_to_raw_input_output_error() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_start("call-1", "cityAttractions"),
+                UiMessageChunk::tool_input_delta("call-1", r#"{ "cities": "San Francisco" }"#),
+                UiMessageChunk::ToolInputError {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "cityAttractions".to_string(),
+                    input: json!(r#"{ "cities": "San Francisco" }"#),
+                    error_text: "Invalid input for tool cityAttractions".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::tool_output_error(
+                    "call-1",
+                    "Invalid input for tool cityAttractions",
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("tool input error processes");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-cityAttractions",
+                    "toolCallId": "call-1",
+                    "state": "output-error",
+                    "rawInput": r#"{ "cities": "San Francisco" }"#,
+                    "errorText": "Invalid input for tool cityAttractions"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_keeps_static_tool_type_on_dynamic_error_mismatch() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_start("call-1", "nonExistentTool"),
+                UiMessageChunk::tool_input_delta("call-1", r#"{ "foo": "bar" }"#),
+                UiMessageChunk::ToolInputError {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "nonExistentTool".to_string(),
+                    input: json!(r#"{ "foo": "bar" }"#),
+                    error_text: "Model tried to call unavailable tool 'nonExistentTool'."
+                        .to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::tool_output_error(
+                    "call-1",
+                    "Model tried to call unavailable tool 'nonExistentTool'.",
+                ),
+            ],
+            false,
+        )
+        .expect("dynamic mismatch tool input error processes");
+
+        let tool_parts = state
+            .message
+            .parts
+            .iter()
+            .filter(|part| part.get("toolCallId").and_then(JsonValue::as_str) == Some("call-1"))
+            .collect::<Vec<_>>();
+        assert_eq!(tool_parts.len(), 1);
+        assert_eq!(
+            serde_json::to_value(tool_parts[0]).expect("part serializes"),
+            json!({
+                "type": "tool-nonExistentTool",
+                "toolCallId": "call-1",
+                "state": "output-error",
+                "rawInput": r#"{ "foo": "bar" }"#,
+                "errorText": "Model tried to call unavailable tool 'nonExistentTool'."
             })
         );
     }
