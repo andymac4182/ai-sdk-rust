@@ -2255,6 +2255,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   retained in the submitted transport messages, request options are forwarded,
   and the chat history keeps the user metadata while folding streamed assistant
   chunks into state.
+- 2026-05-25: `packages/ai` `Chat` error-part parity added
+  `chat_should_handle_error_parts`, covering the portable upstream
+  `ui/chat.test.ts` error chunk flow where streamed `error` chunks set chat
+  status to `error` and expose the error text.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool

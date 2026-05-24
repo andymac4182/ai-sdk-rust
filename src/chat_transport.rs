@@ -2388,6 +2388,33 @@ mod tests {
     }
 
     #[test]
+    fn chat_should_handle_error_parts() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start(),
+            UiMessageChunk::error("test-error"),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let error = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("error chunk fails chat send");
+
+        assert_eq!(error, ChatError::Stream("test-error".to_string()));
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(chat.error(), Some("test-error"));
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn chat_request_options_serialize_upstream_shape() {
         let options = ChatRequestOptions::new()
             .with_header("X-Test", "yes")
