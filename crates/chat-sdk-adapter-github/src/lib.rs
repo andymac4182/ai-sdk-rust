@@ -1033,24 +1033,98 @@ mod tests {
         assert!(block_on(adapter.start_typing("anything", Some("status"))).is_ok());
     }
 
+    // ---------- describe("emojiToGitHubReaction (via addReaction)") (16 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("emojiToGitHubReaction (via addReaction)")`.
+    // Split from the prior bundled `emoji_to_github_reaction_maps_well_known_names`
+    // single-test coverage into one Rust test per upstream case to
+    // preserve the brief's "every portable upstream case has a
+    // matching Rust test" rule. Upstream tests the mapping via
+    // `adapter.addReaction(...)` calls and asserts on the
+    // `reactionsCreateForIssueComment` mock's `content` argument; the
+    // Rust port tests the pure `emoji_to_github_reaction` helper
+    // directly (the addReaction dispatcher just passes the helper's
+    // result through unchanged).
+
     #[test]
-    fn emoji_to_github_reaction_maps_well_known_names() {
+    fn github_emoji_to_github_reaction_maps_thumbs_up() {
         assert_eq!(emoji_to_github_reaction("thumbs_up"), "+1");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_plus_one() {
         assert_eq!(emoji_to_github_reaction("+1"), "+1");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_thumbs_down() {
         assert_eq!(emoji_to_github_reaction("thumbs_down"), "-1");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_minus_one() {
+        assert_eq!(emoji_to_github_reaction("-1"), "-1");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_laugh() {
         assert_eq!(emoji_to_github_reaction("laugh"), "laugh");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_smile_to_laugh() {
         assert_eq!(emoji_to_github_reaction("smile"), "laugh");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_confused() {
         assert_eq!(emoji_to_github_reaction("confused"), "confused");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_thinking_to_confused() {
         assert_eq!(emoji_to_github_reaction("thinking"), "confused");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_heart() {
         assert_eq!(emoji_to_github_reaction("heart"), "heart");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_love_eyes_to_heart() {
         assert_eq!(emoji_to_github_reaction("love_eyes"), "heart");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_hooray() {
         assert_eq!(emoji_to_github_reaction("hooray"), "hooray");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_party_to_hooray() {
         assert_eq!(emoji_to_github_reaction("party"), "hooray");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_confetti_to_hooray() {
         assert_eq!(emoji_to_github_reaction("confetti"), "hooray");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_rocket() {
         assert_eq!(emoji_to_github_reaction("rocket"), "rocket");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_maps_eyes() {
         assert_eq!(emoji_to_github_reaction("eyes"), "eyes");
-        // Unknown maps to +1 (upstream fallback).
-        assert_eq!(emoji_to_github_reaction("anything_else"), "+1");
+    }
+
+    #[test]
+    fn github_emoji_to_github_reaction_should_default_to_plus_one_for_unknown_emoji() {
+        // 1:1 with upstream "should default to +1 for unknown emoji"
+        // (the fallback case in the parametric upstream loop).
+        assert_eq!(emoji_to_github_reaction("unknown_emoji"), "+1");
     }
 
     #[test]
