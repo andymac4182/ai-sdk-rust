@@ -1711,12 +1711,12 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEnd,
-        LanguageModelReasoningStart, LanguageModelResponse, LanguageModelStreamFinish,
-        LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-        LanguageModelStreamStart, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool,
-        LanguageModelUsage,
+        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningDelta,
+        LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelResponse,
+        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+        LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelSupportedUrls,
+        LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+        LanguageModelTool, LanguageModelUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
@@ -2071,6 +2071,38 @@ mod tests {
         value.as_object().expect("value is a JSON object").clone()
     }
 
+    fn transform_tool_examples(
+        middleware: &AddToolInputExamplesMiddleware,
+        tools: Option<Vec<LanguageModelTool>>,
+    ) -> Option<Vec<LanguageModelTool>> {
+        let mut params = LanguageModelCallOptions::new(Vec::new());
+        params.tools = tools;
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Generate,
+                params,
+                &StaticLanguageModel,
+            ))
+            .expect("tool examples transform exists");
+
+        poll_ready(transformed).tools
+    }
+
+    fn transformed_function_tool(
+        middleware: &AddToolInputExamplesMiddleware,
+        tool: LanguageModelFunctionTool,
+    ) -> LanguageModelFunctionTool {
+        let tools =
+            transform_tool_examples(middleware, Some(vec![LanguageModelTool::Function(tool)]))
+                .expect("tools are retained");
+
+        let LanguageModelTool::Function(tool) = tools.into_iter().next().expect("one tool") else {
+            panic!("function tool should remain a function tool");
+        };
+
+        tool
+    }
+
     fn poll_ready<T>(mut future: Ready<T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -2318,6 +2350,124 @@ mod tests {
         assert!(!middleware.remove());
         assert_eq!(tool.description.as_deref(), Some("Examples:\n1: Brisbane"));
         assert_eq!(tool.input_examples.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_tool_without_existing_description() {
+        let tool = transformed_function_tool(
+            &add_tool_input_examples_middleware(),
+            LanguageModelFunctionTool::new("weather", object_schema())
+                .with_input_example(json_object(json!({ "city": "Berlin" }))),
+        );
+
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Input Examples:\n{\"city\":\"Berlin\"}")
+        );
+        assert_eq!(tool.input_examples, None);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_uses_default_json_stringify_format() {
+        let tool = transformed_function_tool(
+            &add_tool_input_examples_middleware(),
+            LanguageModelFunctionTool::new("search", object_schema())
+                .with_description("Search for items")
+                .with_input_example(json_object(json!({ "city": "test", "limit": 10 }))),
+        );
+
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Search for items\n\nInput Examples:\n{\"city\":\"test\",\"limit\":10}")
+        );
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_passes_through_tools_without_input_examples() {
+        let tool = LanguageModelFunctionTool::new("weather", object_schema())
+            .with_description("Get the weather");
+        let transformed =
+            transformed_function_tool(&add_tool_input_examples_middleware(), tool.clone());
+
+        assert_eq!(transformed, tool);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_passes_through_tools_with_empty_input_examples() {
+        let mut tool = LanguageModelFunctionTool::new("weather", object_schema())
+            .with_description("Get the weather");
+        tool.input_examples = Some(Vec::new());
+
+        let transformed =
+            transformed_function_tool(&add_tool_input_examples_middleware(), tool.clone());
+
+        assert_eq!(transformed, tool);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_passes_through_provider_tools_unchanged() {
+        let provider_tool = LanguageModelProviderTool::new(
+            "anthropic.web_search_20250305",
+            "web_search",
+            json_object(json!({ "maxUses": 5 })),
+        );
+
+        let tools = transform_tool_examples(
+            &add_tool_input_examples_middleware(),
+            Some(vec![LanguageModelTool::Provider(provider_tool.clone())]),
+        )
+        .expect("provider tool is retained");
+
+        assert_eq!(tools, vec![LanguageModelTool::Provider(provider_tool)]);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_multiple_tools_with_mixed_examples() {
+        let tools = transform_tool_examples(
+            &add_tool_input_examples_middleware(),
+            Some(vec![
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", object_schema())
+                        .with_description("Get the weather")
+                        .with_input_example(json_object(json!({ "city": "NYC" }))),
+                ),
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("time", object_schema())
+                        .with_description("Get the current time"),
+                ),
+            ]),
+        )
+        .expect("tools are retained");
+
+        let LanguageModelTool::Function(weather) = &tools[0] else {
+            panic!("first tool should be a function tool");
+        };
+        let LanguageModelTool::Function(time) = &tools[1] else {
+            panic!("second tool should be a function tool");
+        };
+
+        assert_eq!(
+            weather.description.as_deref(),
+            Some("Get the weather\n\nInput Examples:\n{\"city\":\"NYC\"}")
+        );
+        assert_eq!(weather.input_examples, None);
+        assert_eq!(time.description.as_deref(), Some("Get the current time"));
+        assert_eq!(time.input_examples, None);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_empty_tools_array() {
+        let tools =
+            transform_tool_examples(&add_tool_input_examples_middleware(), Some(Vec::new()));
+
+        assert_eq!(tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_undefined_tools() {
+        let tools = transform_tool_examples(&add_tool_input_examples_middleware(), None);
+
+        assert_eq!(tools, None);
     }
 
     #[test]
