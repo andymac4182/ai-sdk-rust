@@ -1216,7 +1216,8 @@ mod tests {
         LanguageModelReasoningEffort, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
         LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
         LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::provider::ProviderOptions;
@@ -2862,6 +2863,194 @@ mod tests {
                             "value": {
                                 "some": "result"
                             }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_pass_the_new_file_shape_through_unchanged() {
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Base64("dGVzdA==".to_string()),
+                            },
+                            "image/png",
+                        )
+                        .with_filename("image.png"),
+                    ),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.png").expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[("test-provider", "fileId")]),
+                        },
+                        "application/pdf",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Text {
+                            text: "inline text".to_string(),
+                        },
+                        "text/plain",
+                    )),
+                ]),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "content",
+                            "value": [
+                                {
+                                    "type": "file",
+                                    "filename": "image.png",
+                                    "data": {
+                                        "type": "data",
+                                        "data": "dGVzdA=="
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "url",
+                                        "url": "https://example.com/image.png"
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "reference",
+                                        "reference": {
+                                            "test-provider": "fileId"
+                                        }
+                                    },
+                                    "mediaType": "application/pdf"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "text",
+                                        "text": "inline text"
+                                    },
+                                    "mediaType": "text/plain"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_include_multipart_content() {
+        let custom_provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.png").expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("dGVzdA==".to_string()),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[("test-provider", "fileId")]),
+                        },
+                        "application",
+                    )),
+                    LanguageModelToolResultContentPart::Custom(
+                        LanguageModelToolResultCustomContent::new()
+                            .with_provider_options(custom_provider_options),
+                    ),
+                ]),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "content",
+                            "value": [
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "url",
+                                        "url": "https://example.com/image.png"
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "data",
+                                        "data": "dGVzdA=="
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "reference",
+                                        "reference": {
+                                            "test-provider": "fileId"
+                                        }
+                                    },
+                                    "mediaType": "application"
+                                },
+                                {
+                                    "type": "custom",
+                                    "providerOptions": {
+                                        "test-provider": {
+                                            "key-a": "test-value-1",
+                                            "key-b": "test-value-2"
+                                        }
+                                    }
+                                }
+                            ]
                         }
                     }
                 ]

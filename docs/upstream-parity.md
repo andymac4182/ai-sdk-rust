@@ -1444,6 +1444,24 @@ focused tests for each portable behavior before changing rows to `verified`.
   provider options. The upstream "error flag" case currently expects the same
   provider-facing shape as the basic result case, so the Rust counterpart
   deliberately locks that duplicate snapshot behavior.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` tool-result
+  multipart content parity added named Rust counterparts for the portable
+  current-shape upstream `prompt/convert-to-language-model-prompt.test.ts`
+  tool-result content cases:
+  `convert_to_language_model_message_tool_should_pass_the_new_file_shape_through_unchanged`
+  and `convert_to_language_model_message_tool_should_include_multipart_content`.
+  Rust proves current tagged `file` data, URL, provider-reference, text data,
+  filename, provider-options, custom content, and multipart ordering are
+  preserved at the provider-facing prompt boundary. The upstream
+  `process.emitWarning` assertions for deprecated `file-data`, `file-url`,
+  `file-reference`, `file-id`, `image-data`, `image-url`,
+  `image-file-reference`, and `image-file-id` shorthand inputs are documented
+  as JavaScript-runtime compatibility behavior: Rust does not expose
+  `process.emitWarning`, and the root prompt converter accepts the normalized
+  provider-facing content enum instead of deprecated JavaScript shorthands.
+  The legacy shorthand data shapes remain represented at the
+  `@ai-sdk/provider-utils` type boundary by the existing
+  `content_part_tool_result_legacy_variants_still_type_checks_*` Rust tests.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
