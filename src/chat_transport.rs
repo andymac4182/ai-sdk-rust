@@ -2639,6 +2639,41 @@ mod tests {
     }
 
     #[test]
+    fn chat_should_send_the_messages_to_the_api() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(captured.chat_id, "chat-1");
+        assert_eq!(captured.message_id, Some("user-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn chat_should_include_the_metadata_of_text_message() {
         let transport = RecordingChatTransport::new([
             UiMessageChunk::start_with_message_id("assistant-1"),

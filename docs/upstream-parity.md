@@ -2330,6 +2330,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   portable upstream `ui/chat.test.ts` deprecated `addToolResult` flow by
   exposing the Rust compatibility alias and proving it mutates the same tool
   output state and follow-up `submit-message` request shape as `addToolOutput`.
+- 2026-05-25: `packages/ai` `Chat.sendMessage` request-body parity added
+  `chat_should_send_the_messages_to_the_api`, covering the portable upstream
+  `ui/chat.test.ts` simple-message transport request shape by asserting the
+  `submit-message` trigger, chat id, message id, and submitted user-message
+  payload without metadata or request-option noise.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
