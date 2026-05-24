@@ -4860,3 +4860,98 @@ resolver (~5).
 
 (Unchanged from cycle 428..432 — still pending; the 4 cases
 ported in slices 434..438 do not touch the deferred surfaces.)
+
+## Cycle 441..445 (slice 446, 2026-05-25)
+
+**What landed**
+
+- Slice 441: gchat adapter test-mod header js-only-documented
+  enumeration 1 -> 2 (default-logger case).
+- Slice 442: bulk default-logger js-only-documented across 4
+  adapters (slack 6->7, discord 2->3, teams 2->3, telegram 1->2).
+- Slice 443: chat:Thread + chat:Channel reviver branches via
+  singleton-resolved adapter lookup (`try_get_chat_singleton` +
+  Revived::Thread/Channel variants). Ports 2 of 5 previously-
+  deferred chat.reviver() cases + 1 additive no-singleton fallthrough.
+  +3 lib.rs tests.
+- Slice 444: 2 portable standalone-reviver re-serialization cases
+  (Thread + Channel without singleton). +2 lib.rs tests.
+- Slice 445: 2 final reviver describe-block cases enumerated as
+  js-only-documented ("revive both Thread and Message in same
+  payload" for both chat.reviver() and standalone reviver()).
+
+**Lessons learned**
+
+1. **Default-logger js-only-documented pattern.** Several adapters
+   ship a "should default logger when not provided" constructor
+   test that asserts the typed `Logger` parameter falls back to a
+   library-default instance. Rust adapters do not take `Logger` as
+   a first-class dependency (logging is plumbed via the `log`
+   crate's static dispatch elsewhere), so the typed-parameter-with-
+   library-default shape is moot. Pattern: when an upstream
+   adapter's constructor takes a typed Logger and the Rust port
+   uses static-dispatch logging, enumerate the upstream default-
+   logger case as js-only-documented in a single sentence in the
+   test-mod header. Slices 441/442 landed this across 5 adapters
+   (gchat, slack, discord, teams, telegram); other 4 adapters
+   (linear, github, messenger, whatsapp) don't ship the case.
+
+2. **try_get_chat_singleton non-panicking accessor.** Standalone-
+   reviver-style code that depends on the chat singleton needs to
+   gracefully degrade when no singleton is registered (the
+   `JSON.parse(reviver)` posture is permissive). Added
+   `try_get_chat_singleton() -> Option<Arc<dyn ChatSingleton>>`
+   alongside the existing `get_chat_singleton()` panic-on-missing
+   accessor. Pattern: when porting upstream code that does
+   `if (hasChatSingleton()) { ... } else { fall through }`, the
+   Rust port wants the Option-returning accessor; only call sites
+   that *require* the singleton (e.g. inside an adapter's
+   thread.post()) should panic.
+
+3. **revive_value vs revive_walk dichotomy.** Rust's
+   `revive_walk(Value) -> Value` can't promote sub-trees to typed
+   Thread/Channel instances because Value is structurally untyped.
+   Upstream's `JSON.parse(reviver)` produces a heterogeneously-
+   typed object tree via JS's dynamic typing. The Rust port covers
+   the per-envelope use cases via `revive_value` (returns Revived
+   enum with Thread/Channel/Message variants) and enumerates the
+   combined-walk-typed-promotion case as js-only-documented by
+   construction. Pattern: when an upstream JSON-walking test
+   asserts a typed-instance promotion on a sub-tree, the Rust
+   equivalent uses per-envelope `revive_value` calls; the combined-
+   walk case is js-only by construction (no Rust observable
+   equivalent without restructuring the walk return type).
+
+4. **Test mock state-adapter stubs accumulating.** Slices 443/444
+   needed an inline `StateAdapter` impl for the test singleton
+   (the singleton trait requires `get_state()`). Five empty
+   trait-default impls accumulated. **Open refinement:** consider
+   exposing a `MemoryStateAdapter::no_op()` test helper from
+   `chat-sdk-state-memory` so future singleton-test sites can use
+   one line instead of 50+ lines of boilerplate impl.
+
+5. **Pipe-masks-exit-code bug surfaced in slice 441.** My merge
+   script used `cargo test ... 2>&1 | tail -3` which silently
+   discarded test failure exit codes (4 chat_shutdown_* tests
+   showed FAILED but exit code was 0; merge proceeded). Slice 442
+   onwards uses `cargo test ... >/tmp/test.log 2>&1 || { tail; exit 1; }`
+   to preserve exit codes. This is exactly the failure mode the
+   slice 108 refinement warned against. The brief is correct; my
+   ad-hoc one-liners drift from it. Lesson: always use the brief's
+   exact merge command template (`set -e` block, no piped tests).
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending codification
+  of lessons 1 (default-logger pattern) + 4 (test state stub
+  helper). Lesson 5 is already in the brief — drift on my side, not
+  a brief defect.
+
+**Open refinements deferred (unchanged)**
+
+(See cycle 434..438 entry. Slices 441..445 advance the parity
+ledger via enumeration / reviver branches but don't touch the
+deferred surfaces: action/modal callbackUrl POSTs, concurrency
+strategies, attachment rehydration, action callbackUrl error
+logging.)
