@@ -791,7 +791,8 @@ impl OpenAIProvider {
         let provider_name = openai_provider_name(&self.settings);
         let mut settings =
             OpenAICompatibleProviderSettings::new(provider_name, openai_base_url(&self.settings))
-                .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION));
+                .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION))
+                .with_supports_structured_outputs(true);
 
         for (name, value) in openai_headers(&self.settings) {
             settings = settings.with_header(name.clone(), value.clone());
@@ -2156,9 +2157,9 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelReasoningEffort, LanguageModelResponseFormat, LanguageModelStreamPart,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolChoice, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -3110,6 +3111,167 @@ mod tests {
                         }
                     }
                 ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_not_send_response_format_when_response_format_is_text() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
+                options.with_response_format(LanguageModelResponseFormat::text())
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_forward_json_response_format_as_json_object_without_schema() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
+                options.with_response_format(LanguageModelResponseFormat::json())
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_object"
+                }
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_forward_json_response_format_as_json_object_and_include_schema() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
+                options.with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_schema(openai_chat_response_format_schema()),
+                )
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "schema": openai_chat_response_format_schema(),
+                        "strict": true
+                    }
+                }
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_use_json_schema_and_strict_with_response_format_json() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
+                options.with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_schema(openai_chat_response_format_schema()),
+                )
+            });
+
+        assert_eq!(
+            body["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": openai_chat_response_format_schema(),
+                    "strict": true
+                }
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_set_name_and_description_with_response_format_json() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
+                options.with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_name("test-name")
+                        .with_description("test description")
+                        .with_schema(openai_chat_response_format_schema()),
+                )
+            });
+
+        assert_eq!(
+            body["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "test-name",
+                    "description": "test description",
+                    "schema": openai_chat_response_format_schema(),
+                    "strict": true
+                }
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_allow_undefined_schema_with_response_format_json_when_structured_outputs_are_enabled()
+     {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
+                options.with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_name("test-name")
+                        .with_description("test description"),
+                )
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_object"
+                }
             })
         );
         assert!(warnings.is_empty());
@@ -7178,6 +7340,23 @@ mod tests {
                 ]
             }
         ])
+    }
+
+    fn openai_chat_response_format_schema() -> JsonObject {
+        json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false,
+            "$schema": "http://json-schema.org/draft-07/schema#"
+        })
+        .as_object()
+        .cloned()
+        .expect("schema is an object")
     }
 
     fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {

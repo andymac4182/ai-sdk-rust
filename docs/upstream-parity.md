@@ -2703,6 +2703,20 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-chat-language-model.test.ts` `should pass tools and toolChoice` to
   the OpenAI provider facade by asserting function-tool JSON Schema request
   shaping and specific `tool_choice` serialization.
+- 2026-05-24: OpenAI chat response-format request-body parity added
+  `openai_chat_should_not_send_response_format_when_response_format_is_text`,
+  `openai_chat_should_forward_json_response_format_as_json_object_without_schema`,
+  `openai_chat_should_forward_json_response_format_as_json_object_and_include_schema`,
+  `openai_chat_should_use_json_schema_and_strict_with_response_format_json`,
+  `openai_chat_should_set_name_and_description_with_response_format_json`, and
+  `openai_chat_should_allow_undefined_schema_with_response_format_json_when_structured_outputs_are_enabled`,
+  mapping upstream `openai-chat-language-model.test.ts` response-format cases
+  for text omission, JSON object fallback, structured JSON Schema request body
+  shaping, strict schema defaulting, and name/description passthrough through
+  the OpenAI provider facade. The OpenAI facade now marks OpenAI-compatible
+  chat settings as structured-output capable so the wrapper route matches
+  upstream `@ai-sdk/openai` behavior instead of relying only on generic
+  OpenAI-compatible defaults.
 - 2026-05-24: OpenAI chat logprobs provider-metadata parity added
   `openai_chat_should_extract_logprobs_provider_metadata` and
   `openai_chat_stream_should_extract_logprobs_provider_metadata`, mapping
