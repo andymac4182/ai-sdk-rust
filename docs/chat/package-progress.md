@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 70.6%
-- Portable package average: 64.7%
+- Average estimated completion: 72.6%
+- Portable package average: 67.1%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -34,9 +34,9 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-messenger` | 70% | In progress | adapter package | chat-sdk-adapter-messenger 102 tests (slice 369 adds normalize_thread_id helper, slice 370 adds Adapter::open_dm trait... |
 | `@chat-sdk/adapter-telegram` | 72% | In progress | adapter package | chat-sdk-adapter-telegram 133 tests (slice 370 adds Adapter::open_dm trait impl). Helpers: applyTelegramEntities... |
 | `@chat-sdk/adapter-whatsapp` | 70% | In progress | adapter package | chat-sdk-adapter-whatsapp 106 tests (slice 370 adds Adapter::open_dm trait impl). splitMessage 8/8, channelId+isDM,... |
-| `@chat-sdk/state-redis` | 13% | In progress | state backend (Redis) | chat-sdk-state-redis 17 tests (slice 361 adds method-existence mappings + 3 new NotConnected smoke tests). redis-rs... |
-| `@chat-sdk/state-ioredis` | 13% | In progress | state backend (ioredis) | chat-sdk-state-ioredis 18 tests (slice 362 adds method-existence mappings + 3 new NotConnected smoke tests). redis-rs... |
-| `@chat-sdk/state-pg` | 13% | In progress | state backend (Postgres) | chat-sdk-state-pg 16 tests (slice 362 adds ensureConnected mappings + 3 new NotConnected smoke tests).... |
+| `@chat-sdk/state-redis` | 25% | In progress | state backend (Redis) | chat-sdk-state-redis 17 tests (slices 361/394). Test-parity closed: 16 Rust-mapped + 8 js-only-documented = 24/24... |
+| `@chat-sdk/state-ioredis` | 25% | In progress | state backend (ioredis) | chat-sdk-state-ioredis 18 tests (slices 362/395). Test-parity closed: 14 Rust-mapped + 4 js-only-documented = 18/18... |
+| `@chat-sdk/state-pg` | 25% | In progress | state backend (Postgres) | chat-sdk-state-pg 16 tests (slices 362/395). Test-parity closed: 16 Rust-mapped + 8 js-only-documented = 24/24... |
 
 ## Not Started
 
