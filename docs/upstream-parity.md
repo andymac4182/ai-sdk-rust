@@ -1041,6 +1041,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `tool_loop_agent_prepare_step_receives_merged_runtime_and_tools_context`,
   proving default/per-call context merging is visible to `prepare_step` and
   finish callbacks.
+  The upstream agent `toolsContext` execution-surface type cases now have the
+  named Rust counterpart
+  `tool_loop_agent_generate_passes_tools_context_to_tool_execution_surfaces`,
+  proving validated per-tool context reaches the local executor plus
+  tool-execution start/end callbacks.
 - 2026-05-24: `packages/ai` `InferAgentUIMessage` type-level parity added
   named Rust counterparts for upstream `infer-agent-ui-message.test-d.ts`:
   `infer_agent_ui_message_should_not_contain_arbitrary_static_tools_when_no_tools_are_provided`

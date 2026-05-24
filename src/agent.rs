@@ -1653,6 +1653,21 @@ mod tests {
         })
     }
 
+    fn test_value_tool_context_schema() -> Schema {
+        Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        )
+    }
+
     fn agent_lifecycle_integration(events: Arc<Mutex<Vec<&'static str>>>) -> TelemetryIntegration {
         let mut integration = TelemetryIntegration::new();
         for (kind, label) in [
@@ -3037,6 +3052,64 @@ mod tests {
         assert_eq!(event.tool_call.tool_name, "testTool");
         assert_eq!(event.tool_call.input, json!({ "value": "test" }));
         assert_eq!(event.tool_context, None);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_tools_context_to_tool_execution_surfaces() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([test_tool_call_result(), text_result("done")]);
+        let executed_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let executed_contexts_for_tool = Arc::clone(&executed_contexts);
+        let start_events = Rc::new(RefCell::new(
+            Vec::<GenerateTextToolExecutionStartEvent>::new(),
+        ));
+        let start_events_for_callback = Rc::clone(&start_events);
+        let end_events = Rc::new(RefCell::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Rc::clone(&end_events);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_tool(
+                    Tool::new("testTool", value_schema())
+                        .with_context_schema(test_value_tool_context_schema())
+                        .with_execute(move |_input, options| {
+                            let executed_contexts = Arc::clone(&executed_contexts_for_tool);
+                            async move {
+                                executed_contexts.lock().expect("context lock").push(
+                                    options.context.expect("tool execution receives context"),
+                                );
+                                Ok(json!("tool-result"))
+                            }
+                        }),
+                )
+                .with_tools_context(JsonObject::from_iter([(
+                    "testTool".to_string(),
+                    json!({ "apiKey": "secret" }),
+                )]))
+                .with_on_tool_execution_start(move |event| {
+                    start_events_for_callback.borrow_mut().push(event);
+                    ready(())
+                })
+                .with_on_tool_execution_end(move |event| {
+                    end_events_for_callback.borrow_mut().push(event);
+                    ready(())
+                }),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            executed_contexts.lock().expect("context lock").as_slice(),
+            [json!({ "apiKey": "secret" })]
+        );
+        assert_eq!(
+            start_events.borrow()[0].tool_context,
+            Some(json!({ "apiKey": "secret" }))
+        );
+        assert_eq!(
+            end_events.borrow()[0].tool_context,
+            Some(json!({ "apiKey": "secret" }))
+        );
     }
 
     #[test]
