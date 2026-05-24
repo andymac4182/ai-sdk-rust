@@ -1390,6 +1390,16 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     fn channel_id_from_thread_id(&self, _thread_id: &str) -> Option<String> {
         None
     }
+
+    /// Optional adapter-supplied channel descriptor lookup. 1:1 with
+    /// upstream optional `fetchChannelInfo?(channelId): Promise<ChannelInfo>`.
+    /// Default returns `Err(Unsupported("fetch_channel_info"))` —
+    /// [`crate::channel::Channel::fetch_metadata`] collapses that to
+    /// a synthesized basic `ChannelInfo` so callers always get
+    /// *some* descriptor back.
+    async fn fetch_channel_info(&self, _channel_id: &str) -> AdapterResult<ChannelInfo> {
+        Err(AdapterError::Unsupported("fetch_channel_info"))
+    }
 }
 
 /// Errors returned by [`Adapter`] methods. Mirrors upstream's
