@@ -78,6 +78,149 @@ fn convert_emoji(text: &str) -> String {
     convert_emoji_placeholders(text, PlaceholderPlatform::Discord, None)
 }
 
+/// Default Discord embed color (blurple). 1:1 with upstream's
+/// inline `embed.color = 0x5865f2` literal.
+pub const DISCORD_EMBED_DEFAULT_COLOR: u32 = 0x5865f2;
+
+/// Discord embed image shape. 1:1 with upstream `APIEmbedImage`
+/// (subset — only `url` is set by the renderer).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordEmbedImage {
+    pub url: String,
+}
+
+/// Discord embed shape. 1:1 with upstream `APIEmbed` (subset —
+/// the renderer only sets title, description, image, color, and
+/// fields).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordEmbed {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<DiscordEmbedImage>,
+    pub color: Option<u32>,
+    pub fields: Vec<DiscordEmbedField>,
+}
+
+/// Discord embed-field shape. 1:1 with upstream `APIEmbedField`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordEmbedField {
+    pub name: String,
+    pub value: String,
+    pub inline: Option<bool>,
+}
+
+/// Discord message-component action row (placeholder). The
+/// `cardToDiscordPayload` Action-Row rendering branch is deferred;
+/// this slice returns an empty Vec for the action-row component.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordActionRow {}
+
+/// Result of [`card_to_discord_payload`]. 1:1 with upstream
+/// `{embeds, components}` return shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordPayload {
+    pub embeds: Vec<DiscordEmbed>,
+    pub components: Vec<DiscordActionRow>,
+}
+
+/// Convert a [`CardElement`] to a Discord message payload (embeds
+/// + components). Partial 1:1 port of upstream
+/// `cardToDiscordPayload(card)`. Currently handles:
+///
+/// - `title` -> `embed.title`
+/// - `subtitle` -> `embed.description`
+/// - `imageUrl` -> `embed.image.url`
+/// - Default color = blurple [`DISCORD_EMBED_DEFAULT_COLOR`]
+/// - `Text` children -> `embed.description` (with style markers
+///   `**bold**` / `*muted*`)
+/// - `Divider` children -> horizontal line marker `"───────────"`
+/// - `Image` children -> no-op (Discord embeds support only one
+///   image at the card level)
+/// - `Fields` children -> `embed.fields`
+/// - `Link` children -> markdown `[label](url)` in description
+///
+/// **Deferred:** `Actions`/`Section`/`Table`/`CardLink` rendering
+/// and the full Action Row component output.
+pub fn card_to_discord_payload(card: &CardElement) -> DiscordPayload {
+    let mut embed = DiscordEmbed {
+        color: Some(DISCORD_EMBED_DEFAULT_COLOR),
+        ..Default::default()
+    };
+
+    if let Some(title) = card.title.as_deref().filter(|t| !t.is_empty()) {
+        embed.title = Some(convert_emoji(title));
+    }
+    if let Some(subtitle) = card.subtitle.as_deref().filter(|s| !s.is_empty()) {
+        embed.description = Some(convert_emoji(subtitle));
+    }
+    if let Some(image_url) = card.image_url.as_deref().filter(|u| !u.is_empty()) {
+        embed.image = Some(DiscordEmbedImage {
+            url: image_url.to_string(),
+        });
+    }
+
+    let mut text_parts: Vec<String> = Vec::new();
+
+    for child in &card.children {
+        process_child(child, &mut text_parts, &mut embed.fields);
+    }
+
+    if !text_parts.is_empty() {
+        let joined = text_parts.join("\n\n");
+        embed.description = Some(match embed.description.take() {
+            Some(existing) => format!("{existing}\n\n{joined}"),
+            None => joined,
+        });
+    }
+
+    DiscordPayload {
+        embeds: vec![embed],
+        components: Vec::new(),
+    }
+}
+
+fn process_child(
+    child: &CardChild,
+    text_parts: &mut Vec<String>,
+    fields: &mut Vec<DiscordEmbedField>,
+) {
+    match child {
+        CardChild::Text(t) => {
+            let converted = convert_emoji(&t.content);
+            let styled = match t.style {
+                Some(chat_sdk_chat::cards::TextStyle::Bold) => format!("**{converted}**"),
+                Some(chat_sdk_chat::cards::TextStyle::Muted) => format!("*{converted}*"),
+                _ => converted,
+            };
+            text_parts.push(styled);
+        }
+        CardChild::Image(_) => {
+            // Discord embeds support only one image (set at the
+            // card level via `imageUrl`); additional image children
+            // are silently ignored — upstream comment notes "could
+            // be added as separate embeds" but the current upstream
+            // renderer does not.
+        }
+        CardChild::Divider(_) => {
+            text_parts.push("───────────".to_string());
+        }
+        CardChild::Fields(f) => {
+            for field in &f.children {
+                fields.push(DiscordEmbedField {
+                    name: convert_emoji(&field.label),
+                    value: convert_emoji(&field.value),
+                    inline: None,
+                });
+            }
+        }
+        CardChild::Link(l) => {
+            text_parts.push(format!("[{}]({})", convert_emoji(&l.label), l.url));
+        }
+        // Actions / Section / Table / CardLink rendering deferred.
+        _ => {}
+    }
+}
+
 /// Render a [`CardElement`] as Discord markdown fallback text. 1:1
 /// port of upstream `cardToFallbackText(card)`:
 ///
@@ -176,6 +319,124 @@ mod tests {
     }
 
     // ---------- cardToFallbackText (7 upstream cases) ----------
+
+    #[test]
+    // ---------- cardToDiscordPayload (7 of 31 portable cases) ----------
+    // 1:1 with upstream `cards.test.ts > describe("cardToDiscordPayload")`.
+    // Covers the 7 cases that don't require the deferred Action-Row
+    // (buttons / sections / link-buttons / table / CardLink) renderer.
+
+    #[test]
+    fn converts_a_simple_card_with_title() {
+        let c = card(Some("Welcome"), None, vec![]);
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds.len(), 1);
+        assert_eq!(payload.embeds[0].title.as_deref(), Some("Welcome"));
+        assert_eq!(payload.components.len(), 0);
+    }
+
+    #[test]
+    fn converts_a_card_with_title_and_subtitle() {
+        let c = card(Some("Order Update"), Some("Your order is on its way"), vec![]);
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds.len(), 1);
+        assert_eq!(payload.embeds[0].title.as_deref(), Some("Order Update"));
+        assert!(payload.embeds[0]
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("Your order is on its way"));
+    }
+
+    #[test]
+    fn converts_a_card_with_header_image() {
+        let c = CardElement {
+            title: Some("Product".to_string()),
+            subtitle: None,
+            image_url: Some("https://example.com/product.png".to_string()),
+            kind: CardKind::Card,
+            children: vec![],
+        };
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds.len(), 1);
+        assert_eq!(
+            payload.embeds[0].image,
+            Some(DiscordEmbedImage {
+                url: "https://example.com/product.png".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn sets_default_color_to_discord_blurple() {
+        let c = card(Some("Test"), None, vec![]);
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds[0].color, Some(0x5865f2));
+    }
+
+    #[test]
+    fn converts_text_elements() {
+        use chat_sdk_chat::cards::TextStyle;
+        let regular = CardChild::Text(TextElement {
+            content: "Regular text".to_string(),
+            style: None,
+            kind: TextKind::Text,
+        });
+        let bold = CardChild::Text(TextElement {
+            content: "Bold text".to_string(),
+            style: Some(TextStyle::Bold),
+            kind: TextKind::Text,
+        });
+        let muted = CardChild::Text(TextElement {
+            content: "Muted text".to_string(),
+            style: Some(TextStyle::Muted),
+            kind: TextKind::Text,
+        });
+        let c = card(None, None, vec![regular, bold, muted]);
+        let payload = card_to_discord_payload(&c);
+        let description = payload.embeds[0].description.as_deref().unwrap_or("");
+        assert!(description.contains("Regular text"), "got: {description}");
+        assert!(description.contains("**Bold text**"), "got: {description}");
+        assert!(description.contains("*Muted text*"), "got: {description}");
+    }
+
+    #[test]
+    fn converts_image_elements_in_children_no_op() {
+        use chat_sdk_chat::cards::{ImageElement, ImageKind};
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Image(ImageElement {
+                url: "https://example.com/img.png".to_string(),
+                alt: Some("My image".to_string()),
+                kind: ImageKind::Image,
+            })],
+        );
+        let payload = card_to_discord_payload(&c);
+        // Image children are silently dropped (Discord embeds only
+        // support one image, at the card-level via `imageUrl`).
+        assert_eq!(payload.embeds.len(), 1);
+    }
+
+    #[test]
+    fn converts_divider_elements_to_horizontal_line_markers() {
+        let c = card(
+            None,
+            None,
+            vec![
+                text("Before"),
+                CardChild::Divider(DividerElement {
+                    kind: DividerKind::Divider,
+                }),
+                text("After"),
+            ],
+        );
+        let payload = card_to_discord_payload(&c);
+        let description = payload.embeds[0].description.as_deref().unwrap_or("");
+        assert!(description.contains("Before"), "got: {description}");
+        assert!(description.contains("───────────"), "got: {description}");
+        assert!(description.contains("After"), "got: {description}");
+    }
 
     #[test]
     fn generates_fallback_text_for_a_card() {
