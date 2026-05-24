@@ -6826,6 +6826,20 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_should_add_error_parts_when_execute_throws() {
+        let chunks = create_ui_message_stream_with_result(
+            CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
+            |_| Err("execute-error"),
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([{ "type": "error", "errorText": "error-message" }])
+        );
+    }
+
+    #[test]
     fn create_ui_message_stream_adds_error_chunk_when_merged_stream_errors() {
         let chunks = create_ui_message_stream(
             CreateUiMessageStreamOptions::new().with_on_error(|error| format!("masked {error}")),
