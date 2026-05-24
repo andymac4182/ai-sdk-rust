@@ -4955,3 +4955,82 @@ ledger via enumeration / reviver branches but don't touch the
 deferred surfaces: action/modal callbackUrl POSTs, concurrency
 strategies, attachment rehydration, action callbackUrl error
 logging.)
+
+## Cycle 446..450 (autonomous-loop low-yield phase)
+
+**Date:** 2026-05-25
+
+**Cycles covered:** slice 446 (this file's prior cycle entry +
+named default-logger pattern note in `port-chat-sdk.md`) →
+slice 447 (default-logger pattern codified as a *named section*
+in the brief, not just inline) → slice 448 (refresh
+`docs/chat/package-progress-estimates.tsv` `chat` basis line from
+903 → 908 tests, mentioning slices 443..445 reviver sweep) →
+slice 449 (enumerate 2 JSX-Card `Thread::schedule` cases as
+js-only-documented in `thread.rs` test-mod header) → slice 450
+(split Discord `render_formatted_should_render_markdown_from_ast`
+single test into 2 explicit 1:1 cases under
+`describe("renderFormatted")`: bold-strong-node + bare-mention
+conversion). chat-sdk-adapter-discord 162 → 163 tests.
+
+**What this cycle revealed**
+
+1. **The autonomous loop is now in a low-yield phase.** All
+   remaining single-slice opportunities are either (a) test-mod
+   header enumerations of upstream cases that the brief has
+   already taught the agent to recognize (subclass-extensibility,
+   default-logger, typed-client-getter, gateway-Partials) — which
+   are mostly exhausted — or (b) `describe(...)` blocks where
+   Rust has *one* test covering a generic concept while upstream
+   has 2–6 specific cases, requiring a split-and-rename pass per
+   describe block. The Discord renderFormatted split was a
+   slice-450 case of (b). Each such split nets +1 to +5 tests but
+   does not move the package-progress percentage.
+
+2. **The Stop hook keeps firing because Done is genuinely far
+   away.** 13 packages remain `in-progress` per
+   `docs/chat/upstream-parity.md`. The structural blockers (HTTP-
+   mock infrastructure for adapter integration tests like
+   parseMessage/handleWebhook/postMessage, queue concurrency
+   dispatcher, state-backend redis/pg client wire-up) each need a
+   multi-slice plan and infrastructure decision (e.g. mockito vs
+   wiremock vs hand-rolled `HttpPoster` trait, tokio-postgres vs
+   sqlx, redis-rs sync vs deadpool-redis). Single-slice ticks
+   can't move them.
+
+3. **Slice-450-style split-and-rename slices are the most
+   tractable form of per-tick incremental work right now.** They
+   cost ~5 minutes, satisfy the "every portable upstream case has
+   a matching Rust test" rule strictly, and don't risk regressions
+   (the new tests just refine the assertions of an existing
+   bundled test). They should be opportunistically applied
+   whenever a `describe(...)` block has more upstream cases than
+   Rust tests covering them. Pattern: grep for `describe("FOO")`
+   in upstream `*.test.ts`, count its `it(...)` cases, compare to
+   Rust `fn .*foo_.*\(\)` count; if the Rust count < upstream
+   count and the Rust test is a single generic test, split it.
+
+4. **Continue declaring "quiet tick" when no slice-450-style
+   opportunity is found.** The brief allows for quiet ticks; the
+   Stop hook restating the Done condition is informational, not
+   actionable. Don't conjure synthetic work; reschedule with the
+   sentinel and let the next tick check again. This cycle's
+   `slice 450 split` was a genuine find — earlier ticks in 446..449
+   correctly declared quiet when nothing was found.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending addition of
+  a *"split-and-rename describe blocks"* section codifying the
+  slice-450 pattern (lesson 3 above) as a named technique
+  alongside the slice-380 type-system-impossible enumeration
+  pattern.
+
+**Open refinements deferred (unchanged)**
+
+(See cycle 434..438 + 441..445 entries. Slices 446..450 don't
+touch the deferred surfaces: action/modal callbackUrl POSTs,
+concurrency strategies, attachment rehydration, action
+callbackUrl error logging, `MemoryStateAdapter::no_op()` test
+helper.)

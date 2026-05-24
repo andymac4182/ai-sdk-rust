@@ -1438,6 +1438,48 @@ A package can flip to **verified** when every upstream case
 documented as js-only in this pattern. The state-backends are
 currently in this position pending runtime client wire-up.
 
+## Split-and-rename describe blocks (added slice 451 from cycle 446..450)
+
+The autonomous loop frequently finds a Rust crate with one
+generic test where upstream has 2..6 specific `it(...)` cases
+under the same `describe(...)` block. Each such "split" yields a
+genuine parity gain at low cost (5 min per slice) and satisfies
+the brief's "every portable upstream case has a matching Rust
+test" rule strictly. Pattern:
+
+1. Grep upstream `*.test.ts` for `describe("FOO")`; count its
+   `it(...)` cases.
+2. Grep the corresponding Rust file for matching test names; if
+   the Rust count is fewer (often 1 generic test covering all
+   cases), this is a split candidate.
+3. Replace the single Rust test with N explicit per-case tests,
+   each with a comment `// 1:1 with upstream <file>:<line> > "<it
+   description>"`. Use the exact upstream input/expected assertion
+   per case rather than a generic pass-through (e.g. upstream
+   asserts `result === "**bold**"` from a `strong` node, not just
+   "contains 'bold'").
+4. Update the `docs/chat/upstream-parity.md` row description with
+   a brief `**Slice N splits the bundled <test_name> into N
+   explicit 1:1 cases**` annotation.
+
+Reference ports:
+- `crates/chat-sdk-adapter-discord/src/lib.rs` slice 450:
+  `render_formatted_should_render_markdown_from_ast` -> 2 cases
+  (strong-bold + bare-mention conversion).
+- `crates/chat-sdk-adapter-discord/src/lib.rs` slice 360:
+  `channel_id_from_thread_id_takes_first_three_colon_segments` ->
+  3 cases.
+- `crates/chat-sdk-adapter-slack/src/cards.rs` slice 368:
+  `emojiToGitHubReaction` -> 16 cases.
+
+When the loop tick has no other actionable slice, prefer a
+slice-450-style split over declaring a quiet tick. The Stop hook
+considers quiet ticks a no-op even when main is green; a
+split-and-rename slice strictly advances the per-test parity
+count (the package-progress percentage may not change for crates
+already past their threshold, but the upstream-parity row gains
+explicit-case mappings).
+
 ## Deferred-adapter-method port pattern (added slice 411)
 
 For optional upstream methods that need a non-trivial Rust port,
