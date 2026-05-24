@@ -385,8 +385,8 @@ pub use provider_utils::{
     with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
 };
 pub use registry::{
-    CustomProvider, NoSuchProviderError, ProviderRegistry, ProviderRegistryError,
-    ProviderRegistryOptions, create_provider_registry,
+    CustomProvider, CustomProviderWithFiles, CustomProviderWithSkills, NoSuchProviderError,
+    ProviderRegistry, ProviderRegistryError, ProviderRegistryOptions, create_provider_registry,
     create_provider_registry_with_image_model_middleware,
     create_provider_registry_with_language_model_middleware, create_provider_registry_with_options,
     custom_provider, split_registry_model_id,

@@ -1,5 +1,6 @@
 use std::{fmt, marker::PhantomData};
 
+use crate::files::Files;
 use crate::image_model::ImageModel;
 use crate::image_model_middleware::ImageModelMiddleware;
 use crate::language_model::LanguageModel;
@@ -13,6 +14,7 @@ use crate::provider_middleware::{
     WrappedProvider, WrappedProviderWithImageModelMiddleware, wrap_provider,
     wrap_provider_with_image_model_middleware,
 };
+use crate::skills::Skills;
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,6 +138,20 @@ pub struct NoFallbackProvider<LM, EM, IM> {
     _models: PhantomData<(LM, EM, IM)>,
 }
 
+/// Custom provider wrapper that exposes a direct files interface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithFiles<P, F> {
+    provider: P,
+    files: F,
+}
+
+/// Custom provider wrapper that exposes a direct skills interface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithSkills<P, S> {
+    provider: P,
+    skills: S,
+}
+
 impl<LM, EM, IM> Default for NoFallbackProvider<LM, EM, IM> {
     fn default() -> Self {
         Self {
@@ -210,6 +226,42 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
             fallback_provider,
         }
     }
+
+    /// Exposes a direct files interface on this custom provider.
+    pub fn with_files<F>(self, files: F) -> CustomProviderWithFiles<Self, F> {
+        CustomProviderWithFiles {
+            provider: self,
+            files,
+        }
+    }
+
+    /// Exposes a direct skills interface on this custom provider.
+    pub fn with_skills<S>(self, skills: S) -> CustomProviderWithSkills<Self, S> {
+        CustomProviderWithSkills {
+            provider: self,
+            skills,
+        }
+    }
+}
+
+impl<P, F> CustomProviderWithFiles<P, F> {
+    /// Exposes a direct skills interface while retaining the files interface.
+    pub fn with_skills<S>(self, skills: S) -> CustomProviderWithSkills<Self, S> {
+        CustomProviderWithSkills {
+            provider: self,
+            skills,
+        }
+    }
+}
+
+impl<P, S> CustomProviderWithSkills<P, S> {
+    /// Exposes a direct files interface while retaining the skills interface.
+    pub fn with_files<F>(self, files: F) -> CustomProviderWithFiles<Self, F> {
+        CustomProviderWithFiles {
+            provider: self,
+            files,
+        }
+    }
 }
 
 impl<LM, EM, IM> Default for CustomProvider<LM, EM, IM> {
@@ -251,6 +303,95 @@ where
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
             .map(Ok)
             .unwrap_or_else(|| self.fallback_provider.image_model(model_id))
+    }
+}
+
+impl<P, F> Provider for CustomProviderWithFiles<P, F>
+where
+    P: Provider,
+    F: Files + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, F> ProviderWithFiles for CustomProviderWithFiles<P, F>
+where
+    P: Provider,
+    F: Files + Clone,
+{
+    type Files = F;
+
+    fn files(&self) -> Self::Files {
+        self.files.clone()
+    }
+}
+
+impl<P, F, S> ProviderWithFiles for CustomProviderWithSkills<CustomProviderWithFiles<P, F>, S>
+where
+    P: Provider,
+    F: Files + Clone,
+    S: Skills + Clone,
+{
+    type Files = F;
+
+    fn files(&self) -> Self::Files {
+        self.provider.files()
+    }
+}
+
+impl<P, S> Provider for CustomProviderWithSkills<P, S>
+where
+    P: Provider,
+    S: Skills + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, S> ProviderWithSkills for CustomProviderWithSkills<P, S>
+where
+    P: Provider,
+    S: Skills + Clone,
+{
+    type Skills = S;
+
+    fn skills(&self) -> Self::Skills {
+        self.skills.clone()
     }
 }
 
@@ -1191,6 +1332,47 @@ mod tests {
                 model_id: "test-model".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn custom_provider_files_should_return_the_files_interface_if_it_exists() {
+        let files = StaticFiles {
+            provider: "mock-provider".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_files(files.clone());
+
+        assert_eq!(ProviderWithFiles::files(&provider), files);
+    }
+
+    #[test]
+    fn custom_provider_skills_should_return_the_skills_interface_if_it_exists() {
+        let skills = StaticSkills {
+            provider: "mock-provider".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_skills(skills.clone());
+
+        assert_eq!(ProviderWithSkills::skills(&provider), skills);
+    }
+
+    #[test]
+    fn custom_provider_files_and_skills_should_expose_both_interfaces_when_both_exist() {
+        let files = StaticFiles {
+            provider: "mock-provider".to_string(),
+        };
+        let skills = StaticSkills {
+            provider: "mock-provider".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_files(files.clone())
+                .with_skills(skills.clone());
+
+        assert_eq!(ProviderWithFiles::files(&provider), files);
+        assert_eq!(ProviderWithSkills::skills(&provider), skills);
     }
 
     #[derive(Clone, Debug)]
