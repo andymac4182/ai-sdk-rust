@@ -3903,3 +3903,89 @@ module-aliasing test).
 - **parse_message across 9 adapters**.
 - **State-backend client wire-up** — still blocked on workspace
   runtime decision.
+
+## Slices 347..355 refinement cycle (Chat::handle_incoming_message early-exit + Author overloads + postEphemeral end-to-end)
+
+**Scope:** slices 347..355 (9 merges, covering chat-sdk-chat
+handle_incoming_message early-exit subset, Chat::open_dm/get_user
+Author-object overloads, 6 deferred getUser inference cases,
+AMBIGUOUS_USER_ID detection, Slack-case-sensitivity final case,
+Thread::create_sent_message_from_message + SentMessage struct + 4
+capability tests, Thread::post_ephemeral runtime dispatcher with
+DM-fallback, and SlackAdapter::post_ephemeral via chat.postEphemeral
+Web API).
+
+**Pattern observations**
+
+- The `Adapter::post_ephemeral` rollout follows the same shape
+  as the `remove_reaction` sweep from slices 327..335: add the
+  optional trait method to chat-sdk-chat with `Err(Unsupported)`
+  default, then port adapter-by-adapter. Each adapter needs ~5
+  tests (1-3 upstream describe cases + per-adapter helper
+  coverage). Slack landed at slice 355; Discord/GChat/Teams/
+  Telegram/WhatsApp/Messenger/Linear/GitHub are queued.
+- The "Unsupported sentinel as 'method not implemented' marker"
+  pattern is now load-bearing across 3 dispatchers
+  (Channel::post → post_channel_message, Thread::post_object,
+  Thread::post_ephemeral). The pattern compiles cleanly and
+  matches upstream's `if (adapter.method)` runtime detection
+  via the trait default + `matches!(err, AdapterError::Unsupported(_))`
+  catch in the caller. **This is now codified as a port
+  pattern** — every new "optional adapter method" should follow
+  it rather than introduce a separate `supports_X(): bool`
+  trait method.
+- The pure-helper-pair pattern (URL helper + payload-builder +
+  response-parser per HTTP-backed adapter method) keeps the
+  HTTP-method-mocking gap from blocking porting work. Slice 355
+  validates this for chat.postEphemeral; tests use the pure
+  helpers directly to assert payload shape (channel/user/text/
+  thread_ts) and response parsing (id from message_ts or ""
+  fallback) without needing a mock HTTP layer.
+- The Author-overload sibling-method pattern (slice 348) is
+  simpler than a `Union<&str, &Author>` or Into trait. Going
+  forward, when an upstream method accepts `string | Author`,
+  add two Rust methods (`X(user_id: &str)` + `X_for_author(author: &Author)`)
+  rather than a single trait-bounded method.
+
+**Brief tightening applied**
+
+- The `scripts/codex-goal-chat/port-chat-sdk.md` brief is
+  tightened to document the "Unsupported sentinel pattern" as
+  the canonical way to port optional adapter methods. The
+  Author-overload sibling-method pattern is documented as the
+  canonical port for the `string | Author` upstream signature.
+
+**Done condition gap analysis**
+
+The terminal Done clause remains unsatisfied — 13 in-progress
+packages still need substantial work. The 9 slices in this cycle
+each ported 1-5 cases (~25 total). At this cadence, reaching
+~1200 portable cases requires ~240 more slices. **The fastest
+single lever remains the chat-sdk-chat handleIncomingMessage +
+dispatcher port**, which would unblock ~80 chat.test.ts +
+thread.test.ts cases in a single slice. The 13 in-progress
+adapter rows mostly need 4-6 per-adapter slices each (post_object,
+parse_message, post_ephemeral, remove_reaction).
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: documents the
+  Unsupported-sentinel + Author-sibling patterns.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat handleIncomingMessage + dispatcher** —
+  highest-leverage remaining work; unblocks ~80 chat.test.ts +
+  thread.test.ts cases.
+- **post_ephemeral across 8 remaining adapters** (Discord/
+  GChat/Teams/Telegram/WhatsApp/Messenger/Linear/GitHub). Slack
+  is done at slice 355.
+- **GitHub remove_reaction** — multi-step list/match/delete.
+- **GChat remove_reaction** — multi-step list/match/delete via
+  chatApi client.
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting work.
+- **parse_message across 9 adapters**.
+- **State-backend client wire-up** — still blocked on workspace
+  runtime decision.
