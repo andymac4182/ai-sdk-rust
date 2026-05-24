@@ -4650,6 +4650,45 @@ mod tests {
     }
 
     #[test]
+    fn process_ui_message_stream_replaces_object_data_parts_with_matching_id() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!({ "a": "a1", "b": "b1" }))
+                    .with_data_id("data-part-id"),
+                UiMessageChunk::data("data-test", json!({ "b": "b2", "c": "c2" }))
+                    .with_data_id("data-part-id"),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "data-test",
+                        "id": "data-part-id",
+                        "data": {
+                            "b": "b2",
+                            "c": "c2"
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn process_ui_message_stream_reports_missing_text_delta() {
         let mut state = StreamingUiMessageState::new("msg-123", None);
 
