@@ -4348,12 +4348,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    standalone providers.
    Standalone provider slices are blocked while any of these rows are not yet
    verified or explicitly documented as intentionally non-portable.
-   Within this gate, use the current hard package order: finish `packages/ai`
-   to 100% first, then `@ai-sdk/provider-utils`, then `@ai-sdk/provider`, then
-   continue the remaining first-phase rows in the most effective order. Do not
-   start a provider-utils slice while portable `packages/ai` inventory remains
-   open, and do not start a provider slice while portable provider-utils
-   inventory remains open.
+   Within this gate, use the current hard package order as the slice selection
+   rule at the start of every iteration: choose the first package below 100% in
+   this order and stay on it until it is verified or explicitly documented as
+   intentionally non-portable. Finish `packages/ai` to 100% first, then
+   `@ai-sdk/provider-utils`, then `@ai-sdk/provider`, then continue the
+   remaining first-phase rows in the most effective order. Do not start a
+   provider-utils slice while portable `packages/ai` inventory remains open,
+   and do not start a provider slice while portable provider-utils inventory
+   remains open.
 2. Treat the original upstream TypeScript tests as the non-negotiable floor for
    every slice. Each future iteration must start from the exact original
    package test list and ensure EVERY portable `it`/`test` case, table row,
@@ -4808,6 +4811,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    `generate_text_type_counterpart_should_infer_array_output_type`,
    `generate_text_type_counterpart_should_infer_choice_output_type`, and
    `generate_text_type_counterpart_should_infer_json_output_type`.
+   The portable upstream `stream-text.test-d.ts` output, partialOutputStream,
+   and elementStream result type assertions now have Rust typed accessor
+   counterparts in `stream_text_type_counterpart_should_infer_*`, covering
+   default text, explicit text, object, array, choice, JSON, partial-output,
+   array element output, and empty element streams for non-array outputs.
    The upstream `generate-object.test-d.ts` and `stream-object.test-d.ts`
    unsupported timeout-option assertions now have named Rust counterparts in
    `generate_object_type_counterpart_does_not_accept_timeout_option` and

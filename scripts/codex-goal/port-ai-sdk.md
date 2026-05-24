@@ -176,7 +176,10 @@ Bedrock, xAI, or any other unrelated provider while a common/core package row is
 still open.
 
 Within that first-phase gate, use this explicit package order unless upstream
-drift or a regression forces a narrower repair first:
+drift or a regression forces a narrower repair first. Treat this as the slice
+selection rule at the start of every iteration: inspect the progress table, pick
+the first package in this list that is not 100%, and keep working that package
+until it is verified or explicitly documented as intentionally non-portable.
 
 1. Finish `packages/ai` to 100%.
 2. Then finish `packages/provider-utils` (`@ai-sdk/provider-utils`).

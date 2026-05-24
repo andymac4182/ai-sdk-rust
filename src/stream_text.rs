@@ -1846,6 +1846,57 @@ impl StreamTextResult {
         self.steps.last()
     }
 
+    /// Deserializes the final streamed output into a caller-provided Rust type.
+    pub fn output_as<T>(&self) -> Result<T, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(stream_text_output_value(&self.text))
+    }
+
+    /// Deserializes a materialized partial-output entry into a Rust type.
+    pub fn partial_output_as<T>(partial_output: &JsonValue) -> Result<T, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(partial_output.clone())
+    }
+
+    /// Deserializes each materialized partial-output entry into Rust values.
+    pub fn partial_outputs_as<T>(&self) -> Result<Vec<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.partial_output_values()
+            .iter()
+            .map(Self::partial_output_as)
+            .collect()
+    }
+
+    /// Deserializes array-output elements from partial-output stream entries.
+    pub fn element_stream_as<T>(&self) -> Result<Vec<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let mut elements = Vec::new();
+        for partial_output in self.partial_output_values() {
+            if let JsonValue::Array(items) = partial_output {
+                for item in items {
+                    elements.push(serde_json::from_value(item.clone())?);
+                }
+            }
+        }
+        Ok(elements)
+    }
+
+    /// Returns partial-output values represented by text deltas in this result.
+    pub fn partial_output_values(&self) -> Vec<JsonValue> {
+        if self.text_stream.is_empty() {
+            return Vec::new();
+        }
+        vec![stream_text_output_value(&self.text)]
+    }
+
     /// Consumes the materialized stream result, ignoring provider error parts.
     pub fn consume_stream(&self) {
         self.consume_stream_with_on_error(|_| {});
@@ -2221,6 +2272,10 @@ impl StreamTextResult {
             TextStreamResponseOptions::from_init(self.text_stream.clone(), init),
         )
     }
+}
+
+fn stream_text_output_value(text: &str) -> JsonValue {
+    serde_json::from_str(text).unwrap_or_else(|_| JsonValue::String(text.to_string()))
 }
 
 fn stream_text_ui_message_metadata(
@@ -4393,6 +4448,7 @@ mod tests {
     };
     use crate::ui_message_stream::UiMessageRole;
     use crate::warning::Warning;
+    use serde::Deserialize;
     use url::Url;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -4456,6 +4512,200 @@ mod tests {
             &model,
             vec![user_message("test-input")],
         )))
+    }
+
+    fn stream_text_result_from_text(text: &str) -> StreamTextResult {
+        stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", text)),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ])
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_output_type_default() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_output_type() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    struct StreamTypedObjectOutput {
+        value: String,
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_object_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":"typed"}"#);
+        let output: StreamTypedObjectOutput = result.output_as().expect("object output is typed");
+
+        assert_eq!(
+            output,
+            StreamTypedObjectOutput {
+                value: "typed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_array_output_type() {
+        let result = stream_text_result_from_text(r#"["a","b"]"#);
+        let output: Vec<String> = result.output_as().expect("array output is typed");
+
+        assert_eq!(output, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    enum StreamChoiceOutput {
+        #[serde(rename = "a")]
+        A,
+        #[serde(rename = "b")]
+        B,
+        #[serde(rename = "c")]
+        C,
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_choice_output_type() {
+        let result = stream_text_result_from_text(r#""b""#);
+        let output: StreamChoiceOutput = result.output_as().expect("choice output is typed");
+
+        assert_eq!(output, StreamChoiceOutput::B);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_json_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":["anything",1,true]}"#);
+        let output: JsonValue = result.output_as().expect("JSON output is typed");
+
+        assert_eq!(output, json!({ "value": ["anything", 1, true] }));
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_partial_output_type_default() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<String> = result
+            .partial_outputs_as()
+            .expect("partial text output is typed");
+
+        assert_eq!(output, vec!["Hello world".to_string()]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_partial_output_type() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<String> = result
+            .partial_outputs_as()
+            .expect("partial text output is typed");
+
+        assert_eq!(output, vec!["Hello world".to_string()]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_object_partial_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":"partial"}"#);
+        let output: Vec<StreamTypedObjectOutput> = result
+            .partial_outputs_as()
+            .expect("partial object output is typed");
+
+        assert_eq!(
+            output,
+            vec![StreamTypedObjectOutput {
+                value: "partial".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_array_partial_output_type() {
+        let result = stream_text_result_from_text(r#"["a","b"]"#);
+        let output: Vec<Vec<String>> = result
+            .partial_outputs_as()
+            .expect("partial array output is typed");
+
+        assert_eq!(output, vec![vec!["a".to_string(), "b".to_string()]]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_choice_partial_output_type() {
+        let result = stream_text_result_from_text(r#""c""#);
+        let output: Vec<StreamChoiceOutput> = result
+            .partial_outputs_as()
+            .expect("partial choice output is typed");
+
+        assert_eq!(output, vec![StreamChoiceOutput::C]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_json_partial_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":["anything",1,true]}"#);
+        let output: Vec<JsonValue> = result
+            .partial_outputs_as()
+            .expect("partial JSON output is typed");
+
+        assert_eq!(output, vec![json!({ "value": ["anything", 1, true] })]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_element_type_for_array_output() {
+        let result = stream_text_result_from_text(r#"[{"value":"one"},{"value":"two"}]"#);
+        let output: Vec<StreamTypedObjectOutput> =
+            result.element_stream_as().expect("element output is typed");
+
+        assert_eq!(
+            output,
+            vec![
+                StreamTypedObjectOutput {
+                    value: "one".to_string()
+                },
+                StreamTypedObjectOutput {
+                    value: "two".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_empty_element_stream_for_text_output() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<JsonValue> = result
+            .element_stream_as()
+            .expect("text output has no element stream");
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_empty_element_stream_for_object_output() {
+        let result = stream_text_result_from_text(r#"{"value":"typed"}"#);
+        let output: Vec<JsonValue> = result
+            .element_stream_as()
+            .expect("object output has no element stream");
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_empty_element_stream_for_default_output() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<JsonValue> = result
+            .element_stream_as()
+            .expect("default text output has no element stream");
+
+        assert!(output.is_empty());
     }
 
     #[derive(Default)]
