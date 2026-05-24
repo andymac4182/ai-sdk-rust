@@ -1051,4 +1051,438 @@ mod tests {
             other => panic!("expected Generic Template, got {other:?}"),
         }
     }
+
+    // ---------- cardToMessenger Button Template (4 cases) ----------
+
+    fn select_action(id: &str, label: &str) -> ActionsChild {
+        use chat_sdk_chat::modals::{SelectElement, SelectKind, SelectOptionElement};
+        ActionsChild::Select(SelectElement {
+            id: id.to_string(),
+            initial_option: None,
+            label: label.to_string(),
+            optional: None,
+            options: vec![SelectOptionElement {
+                description: None,
+                label: "A".to_string(),
+                value: "a".to_string(),
+            }],
+            placeholder: None,
+            kind: SelectKind::Select,
+        })
+    }
+
+    fn radio_action(id: &str, label: &str) -> ActionsChild {
+        use chat_sdk_chat::modals::{RadioSelectElement, RadioSelectKind, SelectOptionElement};
+        ActionsChild::RadioSelect(RadioSelectElement {
+            id: id.to_string(),
+            initial_option: None,
+            label: label.to_string(),
+            optional: None,
+            options: vec![SelectOptionElement {
+                description: None,
+                label: "X".to_string(),
+                value: "x".to_string(),
+            }],
+            kind: RadioSelectKind::RadioSelect,
+        })
+    }
+
+    #[test]
+    fn button_template_for_card_without_title_with_text_and_buttons() {
+        let c = card(
+            None,
+            None,
+            vec![
+                text_child("Please select an option:"),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("opt1", "Option 1"), button_action("opt2", "Option 2")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Button { text, buttons },
+            } => {
+                assert_eq!(text, "Please select an option:");
+                assert_eq!(buttons.len(), 2);
+            }
+            other => panic!("expected Button Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn button_template_builds_body_text_from_fields_element() {
+        let c = card(
+            None,
+            None,
+            vec![
+                CardChild::Fields(FieldsElement {
+                    children: vec![
+                        FieldElement {
+                            label: "Status".to_string(),
+                            value: "Active".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                        FieldElement {
+                            label: "Priority".to_string(),
+                            value: "High".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                    ],
+                    kind: FieldsKind::Fields,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("ok", "OK")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Button { text, .. },
+            } => {
+                assert!(text.contains("Status: Active"), "got: {text}");
+                assert!(text.contains("Priority: High"), "got: {text}");
+            }
+            other => panic!("expected Button Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn button_template_builds_body_text_from_link_element() {
+        let c = card(
+            None,
+            None,
+            vec![
+                CardChild::Link(LinkElement {
+                    label: "Documentation".to_string(),
+                    kind: LinkKind::Link,
+                    url: "https://example.com/docs".to_string(),
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("view", "View")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Button { text, .. },
+            } => {
+                assert!(
+                    text.contains("Documentation: https://example.com/docs"),
+                    "got: {text}"
+                );
+            }
+            other => panic!("expected Button Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn button_template_builds_body_text_from_section_containing_fields() {
+        let c = card(
+            None,
+            None,
+            vec![
+                CardChild::Section(SectionElement {
+                    children: vec![CardChild::Fields(FieldsElement {
+                        children: vec![FieldElement {
+                            label: "Name".to_string(),
+                            value: "Test".to_string(),
+                            kind: FieldKind::Field,
+                        }],
+                        kind: FieldsKind::Fields,
+                    })],
+                    kind: SectionKind::Section,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("submit", "Submit")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Button { text, .. },
+            } => {
+                assert!(text.contains("Name: Test"), "got: {text}");
+            }
+            other => panic!("expected Button Template, got {other:?}"),
+        }
+    }
+
+    // ---------- cardToMessenger constraint handling (10 cases) ----------
+
+    #[test]
+    fn falls_back_to_text_for_table_nested_in_section() {
+        let c = card(
+            Some("Nested Table"),
+            None,
+            vec![
+                CardChild::Section(SectionElement {
+                    children: vec![CardChild::Table(TableElement {
+                        align: None,
+                        headers: vec!["A".to_string(), "B".to_string()],
+                        rows: vec![vec!["1".to_string(), "2".to_string()]],
+                        kind: TableKind::Table,
+                    })],
+                    kind: SectionKind::Section,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("btn", "Click")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_text_when_actions_contain_only_select() {
+        let c = card(
+            Some("Select Only"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![select_action("sel1", "Choose one")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn limits_to_three_buttons_max() {
+        let c = card(
+            Some("Many buttons"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    button_action("btn1", "One"),
+                    button_action("btn2", "Two"),
+                    button_action("btn3", "Three"),
+                    button_action("btn4", "Four"),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => assert_eq!(elements[0].buttons.len(), 3),
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncates_long_button_titles_to_twenty_chars() {
+        let c = card(
+            Some("Long titles"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![button_action("btn_long", "This is a very long button title")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                let title = match &elements[0].buttons[0] {
+                    MessengerButton::Postback { title, .. }
+                    | MessengerButton::WebUrl { title, .. } => title,
+                };
+                assert!(title.chars().count() <= 20, "got: {title}");
+                assert!(title.contains('\u{2026}'), "got: {title}");
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn falls_back_to_text_for_cards_without_buttons() {
+        let c = card(Some("Info only"), None, vec![text_child("Just some info")]);
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_text_for_cards_with_only_link_buttons_and_no_title() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![link_button_action("https://example.com", "Visit")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        // Body text is empty (no text/fields/link children) so even
+        // though there's a valid link button, the Button Template
+        // branch needs body text — falls back to text fallback.
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_text_for_cards_with_select_elements() {
+        let c = card(
+            Some("With select"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![select_action("sel1", "Choose")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_text_for_cards_with_radio_select_elements() {
+        let c = card(
+            Some("With radio"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![radio_action("radio1", "Pick one")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_text_for_cards_with_table_elements() {
+        let c = card(
+            Some("With table"),
+            None,
+            vec![
+                CardChild::Table(TableElement {
+                    align: None,
+                    headers: vec!["Col1".to_string(), "Col2".to_string()],
+                    rows: vec![vec!["A".to_string(), "B".to_string()]],
+                    kind: TableKind::Table,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![button_action("btn", "Click")],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        );
+        assert!(matches!(card_to_messenger(&c), MessengerCardResult::Text { .. }));
+    }
+
+    #[test]
+    fn truncates_long_subtitles_to_eighty_chars() {
+        let long_subtitle = "This is an extremely long subtitle that definitely exceeds the 80 character limit imposed by Messenger";
+        let c = CardElement {
+            title: Some("Test".to_string()),
+            subtitle: Some(long_subtitle.to_string()),
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![CardChild::Actions(ActionsElement {
+                children: vec![button_action("btn", "Click")],
+                kind: ActionsKind::Actions,
+            })],
+        };
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                let s = elements[0].subtitle.as_deref().unwrap();
+                assert!(s.chars().count() <= 80, "got: {s}");
+                assert!(s.contains('\u{2026}'), "got: {s}");
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handles_nested_actions_in_sections() {
+        let c = card(
+            Some("Nested"),
+            None,
+            vec![CardChild::Section(SectionElement {
+                children: vec![CardChild::Actions(ActionsElement {
+                    children: vec![button_action("nested", "Nested")],
+                    kind: ActionsKind::Actions,
+                })],
+                kind: SectionKind::Section,
+            })],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => {
+                assert_eq!(elements[0].buttons.len(), 1);
+                let title = match &elements[0].buttons[0] {
+                    MessengerButton::Postback { title, .. } => title,
+                    other => panic!("expected Postback, got {other:?}"),
+                };
+                assert_eq!(title, "Nested");
+            }
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    // ---------- cardToMessenger template integration (2 cases) ----------
+
+    #[test]
+    fn encodes_button_id_and_value_in_postback_payload() {
+        let mut btn = ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: "action_id".to_string(),
+            label: "Click".to_string(),
+            style: None,
+            kind: ButtonKind::Button,
+            value: Some("action_value".to_string()),
+        };
+        btn.value = Some("action_value".to_string());
+        let c = card(
+            Some("Test"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Button(btn)],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => match &elements[0].buttons[0] {
+                MessengerButton::Postback { payload, .. } => {
+                    assert_eq!(
+                        payload,
+                        &encode_messenger_callback_data("action_id", Some("action_value"))
+                    );
+                }
+                other => panic!("expected Postback, got {other:?}"),
+            },
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encodes_button_id_without_value_when_value_is_undefined() {
+        let c = card(
+            Some("Test"),
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![button_action("action_id", "Click")],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        match card_to_messenger(&c) {
+            MessengerCardResult::Template {
+                payload: MessengerTemplatePayload::Generic { elements },
+            } => match &elements[0].buttons[0] {
+                MessengerButton::Postback { payload, .. } => {
+                    assert_eq!(
+                        payload,
+                        &encode_messenger_callback_data("action_id", None)
+                    );
+                }
+                other => panic!("expected Postback, got {other:?}"),
+            },
+            other => panic!("expected Generic Template, got {other:?}"),
+        }
+    }
 }
