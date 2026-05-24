@@ -2635,6 +2635,111 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_pass_logit_bias_parallel_tool_calls_and_user_settings() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logitBias": {
+                    "50256": -100
+                },
+                "parallelToolCalls": false,
+                "user": "test-user-id"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "logit_bias": {
+                    "50256": -100
+                },
+                "parallel_tool_calls": false,
+                "user": "test-user-id"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_numeric_logprobs_as_logprobs_and_top_logprobs() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "logprobs": true,
+                "top_logprobs": 1
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_boolean_logprobs_true_with_zero_top_logprobs() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "logprobs": true,
+                "top_logprobs": 0
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_omit_boolean_logprobs_false() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
@@ -2687,6 +2792,57 @@ mod tests {
                 Warning::Unsupported { feature, details }
                     if feature == "presencePenalty"
                         && details.as_deref() == Some("presencePenalty is not supported for reasoning models")
+            )
+        }));
+    }
+
+    #[test]
+    fn openai_chat_reasoning_model_should_clear_unsupported_logit_bias_and_logprobs_settings() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logitBias": {
+                    "50256": -100
+                },
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
+                options.with_provider_options(provider_options)
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Other { message }
+                    if message == "logprobs is not supported for reasoning models"
+            )
+        }));
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Other { message }
+                    if message == "logitBias is not supported for reasoning models"
+            )
+        }));
+        assert!(warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Other { message }
+                    if message == "topLogprobs is not supported for reasoning models"
             )
         }));
     }

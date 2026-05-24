@@ -2712,31 +2712,44 @@ fn merge_openai_compatible_chat_known_options(
 
 fn merge_openai_compatible_chat_additional_options(body: &mut JsonObject, options: &JsonObject) {
     for (key, value) in options {
-        if !matches!(
-            key.as_str(),
-            "user"
-                | "reasoningEffort"
-                | "textVerbosity"
-                | "strictJsonSchema"
-                | "forceReasoning"
-                | "systemMessageMode"
-        ) {
-            body.insert(
-                openai_compatible_chat_body_option_name(key).to_string(),
-                value.clone(),
-            );
+        match key.as_str() {
+            "user" | "reasoningEffort" | "textVerbosity" | "strictJsonSchema"
+            | "forceReasoning" | "systemMessageMode" => {}
+            "logprobs" => merge_openai_compatible_chat_logprobs(body, value),
+            _ => {
+                body.insert(
+                    openai_compatible_chat_body_option_name(key).to_string(),
+                    value.clone(),
+                );
+            }
         }
     }
 }
 
 fn openai_compatible_chat_body_option_name(name: &str) -> &str {
     match name {
+        "logitBias" => "logit_bias",
         "maxCompletionTokens" => "max_completion_tokens",
+        "parallelToolCalls" => "parallel_tool_calls",
         "promptCacheKey" => "prompt_cache_key",
         "promptCacheRetention" => "prompt_cache_retention",
         "safetyIdentifier" => "safety_identifier",
         "serviceTier" => "service_tier",
         _ => name,
+    }
+}
+
+fn merge_openai_compatible_chat_logprobs(body: &mut JsonObject, value: &JsonValue) {
+    match value {
+        JsonValue::Bool(true) => {
+            body.insert("logprobs".to_string(), JsonValue::Bool(true));
+            body.insert("top_logprobs".to_string(), json!(0));
+        }
+        JsonValue::Number(_) => {
+            body.insert("logprobs".to_string(), JsonValue::Bool(true));
+            body.insert("top_logprobs".to_string(), value.clone());
+        }
+        _ => {}
     }
 }
 
@@ -2840,6 +2853,11 @@ fn apply_openai_chat_model_request_rules(
                     details: Some("topP is not supported for reasoning models".to_string()),
                 });
             }
+            if body.remove("logprobs").is_some() {
+                warnings.push(Warning::Other {
+                    message: "logprobs is not supported for reasoning models".to_string(),
+                });
+            }
         }
 
         if body.remove("frequency_penalty").is_some() {
@@ -2852,6 +2870,16 @@ fn apply_openai_chat_model_request_rules(
             warnings.push(Warning::Unsupported {
                 feature: "presencePenalty".to_string(),
                 details: Some("presencePenalty is not supported for reasoning models".to_string()),
+            });
+        }
+        if body.remove("logit_bias").is_some() {
+            warnings.push(Warning::Other {
+                message: "logitBias is not supported for reasoning models".to_string(),
+            });
+        }
+        if body.remove("top_logprobs").is_some() {
+            warnings.push(Warning::Other {
+                message: "topLogprobs is not supported for reasoning models".to_string(),
             });
         }
 

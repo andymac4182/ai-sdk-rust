@@ -2677,11 +2677,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai_chat_should_send_prompt_cache_retention_extension_value`,
   `openai_chat_should_send_safety_identifier_extension_value`,
   `openai_chat_should_send_service_tier_flex_processing_setting`, and
-  `openai_chat_should_send_service_tier_priority_processing_setting`, mapping
+  `openai_chat_should_send_service_tier_priority_processing_setting`, plus
+  `openai_chat_should_pass_logit_bias_parallel_tool_calls_and_user_settings`,
+  `openai_chat_should_send_numeric_logprobs_as_logprobs_and_top_logprobs`,
+  `openai_chat_should_send_boolean_logprobs_true_with_zero_top_logprobs`, and
+  `openai_chat_should_omit_boolean_logprobs_false`, mapping
   upstream `openai-chat-language-model.test.ts` chat extension request-body
   cases for `maxCompletionTokens`, `prediction`, `store`, `metadata`,
-  prompt-cache settings, `safetyIdentifier`, and basic `serviceTier`
-  flex/priority serialization through the OpenAI provider facade.
+  prompt-cache settings, `safetyIdentifier`, basic `serviceTier`
+  flex/priority serialization, `logitBias` to `logit_bias`,
+  `parallelToolCalls` to `parallel_tool_calls`, `user`, and
+  `logprobs`/`top_logprobs` option shaping through the OpenAI provider facade.
 - 2026-05-24: OpenAI chat model-specific request rule parity added
   `openai_chat_reasoning_model_should_clear_unsupported_standard_settings`,
   `openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens`,
@@ -2689,10 +2695,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai_chat_should_still_clear_temperature_when_reasoning_none_on_o4_mini`,
   `openai_chat_should_allow_forcing_reasoning_behavior_for_unrecognized_model_ids`,
   `openai_chat_should_remove_temperature_setting_for_search_preview_models`, and
-  `openai_chat_should_warn_and_remove_unsupported_service_tier_settings`, mapping
+  `openai_chat_should_warn_and_remove_unsupported_service_tier_settings`, plus
+  `openai_chat_reasoning_model_should_clear_unsupported_logit_bias_and_logprobs_settings`, mapping
   upstream `openai-chat-language-model.test.ts` reasoning-model, search-preview,
-  forced-reasoning, and service-tier request pruning/warning cases for the
-  non-Responses OpenAI chat facade.
+  forced-reasoning, logprobs/logit-bias/top-logprobs pruning warnings, and
+  service-tier request pruning/warning cases for the non-Responses OpenAI chat
+  facade.
 - 2026-05-24: OpenAI chat system-message mode parity added
   `openai_chat_should_default_system_message_mode_to_developer_when_forcing_reasoning`,
   `openai_chat_should_use_developer_messages_for_o1`,
