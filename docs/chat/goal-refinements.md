@@ -3727,3 +3727,90 @@ module-aliasing test).
   revival corpus.
 - **State-backend client wire-up** (state-redis, state-ioredis,
   state-pg) — blocked on workspace runtime decision.
+
+---
+
+## Slices 327..335 refinement cycle (Adapter trait sweep complete + 6-adapter remove_reaction sweep)
+
+**What was learned**
+
+- The trait-extension pattern reached a natural inflection
+  this cycle: the new optional methods landed in chat-sdk-chat's
+  `Adapter` trait (get_user, is_dm, remove_reaction) and were
+  immediately followed by 1-3 adapter-specific impls per slice.
+  The unit of work is now "1 trait extension → N adapter ports
+  following the pattern."
+- **The remove_reaction sweep** covered 6 adapters in 6 slices
+  (Linear no-op 329, Discord URL helper 330, Slack
+  `reactions.remove` 331, Telegram empty-array 332, WhatsApp
+  empty-emoji 333, Messenger ValidationError 334, Teams
+  NotImplementedError 335). Each one's upstream impl falls into
+  a small set of shapes — full implementation, idempotent
+  variant, hard-error stub — and every shape ported cleanly
+  with 1-3 cases per slice. The pattern lesson: when the
+  upstream impl is a clear "no-op", "error", or "POST one
+  endpoint" form, the Rust port lands in ~50 LOC.
+- The "no HTTP mock" constraint is no longer blocking for the
+  adapter HTTP-path describe blocks. Two approaches are
+  working: (1) extract a pure URL/body helper and test it
+  directly (Discord slice 330: `reaction_url(thread_id,
+  message_id, emoji)`); (2) test the negative paths (non-X
+  thread id rejected, mismatched phone-number rejected). Both
+  cover the URL-construction assertions upstream uses without
+  needing a wiremock-style stub.
+- Test count drift across 9 slices: chat-sdk-chat (739 → 739
+  unchanged in this window after slice 328's +1), Linear
+  (110 → 111), Discord (134 → 137), Slack (195 → 197), Telegram
+  (129 → 131), WhatsApp (104 → 106), Messenger (99 → 100),
+  Teams (104 → 105). Plus chat-sdk-chat's earlier additions
+  this window (Chat::get_user +4, is_dm +1 at slices 327-328 →
+  741 total. Recount: should be 739+4+1 = 744 chat tests).
+  Audit step still cheap: rerun `cargo test` and update one
+  line per slice.
+
+**What is now true that wasn't before**
+
+- `Adapter::remove_reaction` has 7 concrete adapter impls
+  (Linear, Discord, Slack, Telegram, WhatsApp, Messenger,
+  Teams) covering 4 impl shapes (full POST, empty-payload
+  signal, ValidationError stub, NotImplementedError stub).
+  Only GitHub remains on the remove_reaction sweep — its
+  impl is multi-step (list reactions, find by emoji + user,
+  delete by id) and warrants its own slice.
+- `Adapter::get_user`, `Adapter::is_dm`, `Adapter::open_dm`,
+  `Adapter::channel_id_from_thread_id`,
+  `Adapter::fetch_channel_info`, `Adapter::post_channel_message`,
+  `Adapter::on_thread_subscribe`, and `Adapter::remove_reaction`
+  are all now part of the chat-sdk-chat trait surface. The
+  trait now exposes 14+ optional methods, every one with a
+  sensible default (Unsupported / None / Ok), so every adapter
+  crate compiles unchanged when new methods land.
+
+**Stale or misleading guidance**
+
+- The brief's "post_object across 9 adapters" still names this
+  as the biggest remaining cross-cutting work. After this
+  cycle's remove_reaction sweep, the same per-adapter pattern
+  ports cleanly via pure helpers + negative-path tests — the
+  same template applies. Update next refinement cycle to
+  flag this as the next adapter sweep.
+- The 5-merge cadence has shifted into 9-slice batches —
+  individual slices are smaller (1-3 cases each) so the
+  refinement window naturally stretched. Acceptable.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **GitHub remove_reaction** — multi-step (list+find+delete);
+  own slice.
+- **GChat remove_reaction** — multi-step (list+match+delete via
+  chatApi); own slice.
+- **post_object across 9 adapters** — biggest remaining sweep.
+- **parse_message across 9 adapters**.
+- **chat-sdk-chat handleIncomingMessage / dispatcher** —
+  multi-slice; needs lock + dedupe layer.
+- **State-backend client wire-up** — still blocked on runtime
+  decision.
