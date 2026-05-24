@@ -1,10 +1,13 @@
 use std::fmt;
 
+use crate::language_model::LanguageModel;
+use crate::language_model_middleware::LanguageModelMiddleware;
 use crate::provider::{
     ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
     ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
     ProviderWithVideoModel,
 };
+use crate::provider_middleware::{WrappedProvider, wrap_provider};
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -273,6 +276,33 @@ where
     ProviderRegistry::with_options(providers, options)
 }
 
+/// Creates a provider registry that wraps every language model lookup with middleware.
+///
+/// This mirrors upstream `createProviderRegistry(..., { languageModelMiddleware })`
+/// while keeping the Rust return type explicit.
+pub fn create_provider_registry_with_language_model_middleware<I, K, P, LW>(
+    providers: I,
+    language_model_middleware: LW,
+    options: ProviderRegistryOptions,
+) -> ProviderRegistry<WrappedProvider<P, LW>>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+    P: Provider,
+    P::LanguageModel: LanguageModel + Sync,
+    LW: LanguageModelMiddleware<P::LanguageModel> + Clone + Sync,
+{
+    ProviderRegistry::with_options(
+        providers.into_iter().map(|(id, provider)| {
+            (
+                id,
+                wrap_provider(provider, language_model_middleware.clone()),
+            )
+        }),
+        options,
+    )
+}
+
 /// Splits a registry model id into its provider id and provider-specific model id.
 pub fn split_registry_model_id<'a>(
     id: &'a str,
@@ -403,6 +433,7 @@ fn no_such_provider_default_message(provider_id: &str, available_providers: &[St
 mod tests {
     use super::{
         NoSuchProviderError, ProviderRegistryOptions, create_provider_registry,
+        create_provider_registry_with_language_model_middleware,
         create_provider_registry_with_options, split_registry_model_id,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
@@ -416,6 +447,9 @@ mod tests {
         LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamPart,
         LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
         LanguageModelUsage,
+    };
+    use crate::language_model_middleware::{
+        LanguageModelMiddleware, LanguageModelMiddlewareModelOptions,
     };
     use crate::provider::{
         ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
@@ -856,6 +890,39 @@ mod tests {
             .expect("provider reference is valid")
     }
 
+    #[derive(Clone, Debug)]
+    struct PrefixLanguageModelIdMiddleware;
+
+    impl LanguageModelMiddleware<StaticLanguageModel> for PrefixLanguageModelIdMiddleware {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+
+        fn override_model_id(
+            &self,
+            options: LanguageModelMiddlewareModelOptions<'_, StaticLanguageModel>,
+        ) -> Option<String> {
+            Some(format!("override-{}", options.model.model_id()))
+        }
+    }
+
     #[test]
     fn registry_options_default_to_upstream_separator() {
         assert_eq!(ProviderRegistryOptions::new().separator(), ":");
@@ -1018,6 +1085,41 @@ mod tests {
 
         assert_eq!(registry.options().separator(), "::");
         assert_eq!(model.model_id(), "chat");
+    }
+
+    #[test]
+    fn create_provider_registry_should_wrap_all_language_models_accessed_through_the_provider_registry()
+     {
+        let registry = create_provider_registry_with_language_model_middleware(
+            [
+                ("provider1", StaticProvider { id: "provider1" }),
+                ("provider2", StaticProvider { id: "provider2" }),
+            ],
+            PrefixLanguageModelIdMiddleware,
+            ProviderRegistryOptions::new(),
+        );
+
+        assert_eq!(
+            registry
+                .language_model("provider1:model-1")
+                .expect("first provider model resolves")
+                .model_id(),
+            "override-model-1"
+        );
+        assert_eq!(
+            registry
+                .language_model("provider1:model-2")
+                .expect("second model resolves")
+                .model_id(),
+            "override-model-2"
+        );
+        assert_eq!(
+            registry
+                .language_model("provider2:model-3")
+                .expect("second provider model resolves")
+                .model_id(),
+            "override-model-3"
+        );
     }
 
     #[test]
