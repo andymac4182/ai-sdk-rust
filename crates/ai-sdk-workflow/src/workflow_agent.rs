@@ -2837,6 +2837,28 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_use_constructor_active_tools_when_not_specified_in_stream() {
+        let tools = [
+            Tool::new("tool1", object_schema()),
+            Tool::new("tool2", object_schema()),
+        ];
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tools(tools)
+                .with_active_tools(["tool1".to_string()]),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls[0].tools.len(), 1);
+        assert!(calls[0].tools.contains_key("tool1"));
+        assert!(!calls[0].tools.contains_key("tool2"));
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function() {
         let received_messages = Arc::new(Mutex::new(None));
         let received_tool_call_id = Arc::new(Mutex::new(None));

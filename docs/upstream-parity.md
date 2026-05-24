@@ -1641,6 +1641,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   `workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator`,
   `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice`,
   and `workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified`.
+- 2026-05-24: WorkflowAgent constructor default active-tools parity added
+  `workflow_agent_upstream_should_use_constructor_active_tools_when_not_specified_in_stream`,
+  mirroring upstream `workflow-agent.test.ts` `should use constructor
+  activeTools when not specified in stream()`.
 - 2026-05-22: WorkflowAgent ToolLoop compatibility finish-callback parity
   fixed constructor/stream callback merging so constructor callbacks run before
   per-stream callbacks, with named Rust counterparts for upstream
