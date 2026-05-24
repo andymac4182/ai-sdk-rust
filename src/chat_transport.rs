@@ -260,7 +260,7 @@ impl From<ChatTransportError> for ChatError {
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub message_id: Option<String>,
 
     pub text: String,
 
@@ -274,7 +274,7 @@ pub struct ChatMessageInput {
 impl ChatMessageInput {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
-            id: None,
+            message_id: None,
             text: text.into(),
             metadata: None,
             request: ChatRequestOptions::default(),
@@ -282,7 +282,12 @@ impl ChatMessageInput {
     }
 
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
+        self.message_id = Some(id.into());
+        self
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
         self
     }
 
@@ -346,13 +351,22 @@ impl<T: ChatTransport> Chat<T> {
     }
 
     pub fn send_message(&mut self, input: ChatMessageInput) -> Result<Vec<UiMessage>, ChatError> {
-        let message_id = input.id.unwrap_or_else(|| self.generate_message_id());
+        let message_id = input
+            .message_id
+            .unwrap_or_else(|| self.generate_message_id());
         let mut user_message = UiMessage::new(message_id.clone(), UiMessageRole::User)
             .with_part(json_text_part(input.text));
         if let Some(metadata) = input.metadata {
             user_message = user_message.with_metadata(metadata);
         }
 
+        if let Some(index) = self
+            .messages
+            .iter()
+            .position(|message| message.role == UiMessageRole::User && message.id == message_id)
+        {
+            self.messages.truncate(index);
+        }
         self.messages.push(user_message);
         self.status = ChatStatus::Submitted;
         self.error = None;
@@ -2409,6 +2423,63 @@ mod tests {
                     "id": "user-1",
                     "role": "user",
                     "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_replace_an_existing_user_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-new"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            UiMessage::new("user-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hi!" })),
+            UiMessage::new("assistant-old", UiMessageRole::Assistant).with_part(
+                json!({ "type": "text", "text": "How can I help you?", "state": "done" }),
+            ),
+        ]);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_message_id("user-1"))
+            .expect("message sends");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.message_id, Some("user-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-new",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello, world.", "state": "done" }
+                    ]
                 }
             ])
         );

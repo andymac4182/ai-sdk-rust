@@ -2259,6 +2259,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `chat_should_handle_error_parts`, covering the portable upstream
   `ui/chat.test.ts` error chunk flow where streamed `error` chunks set chat
   status to `error` and expose the error text.
+- 2026-05-25: `packages/ai` `Chat` replacement parity added
+  `chat_should_replace_an_existing_user_message`, covering the portable
+  upstream `ui/chat.test.ts` `messageId` flow where sending a replacement user
+  message truncates prior assistant history, submits only the replacement
+  message, and folds the new assistant response into state.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
