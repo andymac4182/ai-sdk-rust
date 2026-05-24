@@ -4661,6 +4661,39 @@ mod tests {
     }
 
     #[test]
+    fn direct_chat_transport_sends_reasoning_when_enabled() {
+        let model = MockLanguageModel::new().with_stream_result(reasoning_stream_result());
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::with_options(
+            DirectChatTransportOptions::new(&agent).with_ui_message_stream_options(
+                StreamTextUiMessageStreamOptions::new().with_send_reasoning(true),
+            ),
+        );
+
+        let chunks = poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")]),
+            ),
+        )
+        .expect("direct transport streams");
+
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk, UiMessageChunk::ReasoningStart { id, .. } if id == "r1")
+            )
+        );
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, UiMessageChunk::ReasoningDelta { id, delta, .. } if id == "r1" && delta == "thinking...")
+        ));
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk, UiMessageChunk::ReasoningEnd { id, .. } if id == "r1")
+            )
+        );
+    }
+
+    #[test]
     fn direct_chat_transport_converts_ui_messages_to_model_messages_in_order() {
         let model = MockLanguageModel::new().with_stream_result(text_stream_result(["response"]));
         let agent = ToolLoopAgent::for_model(&model);

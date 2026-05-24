@@ -2711,13 +2711,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   `direct_chat_transport_passes_abort_signal_to_agent`,
   `direct_chat_transport_passes_prepared_agent_options`,
   `direct_chat_transport_applies_ui_message_stream_options`,
+  `direct_chat_transport_sends_reasoning_when_enabled`,
   `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`,
   `direct_chat_transport_rejects_invalid_ui_message_part_shape`, and
   `direct_chat_transport_reconnect_returns_none` in `src/chat_transport.rs`,
   covering upstream `DirectChatTransport`'s portable in-process agent bridge,
   UI-message text conversion, native Rust abort-signal forwarding to the agent
-  and model call, Rust agent option forwarding, UI-message stream options,
-  validation errors, and reconnect-null behavior.
+  and model call, Rust agent option forwarding, enabled and disabled
+  UI-message stream reasoning options, validation errors, and reconnect-null
+  behavior.
 - 2026-05-19: Assistant tool-history UI-to-model conversion parity added
   `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`,
   `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`,
