@@ -124,13 +124,13 @@ Per the slice-59 refinement, classify each `packages/chat/src/*.test.ts` by depe
 | `callback-url.test.ts` | 5/17 portable pure helpers + 5 additive (is_callback_value, callback_cache_key, empty-token round-trip) | state (12 remaining cases) | `chat-sdk-chat::callback_url` |
 | `message.test.ts` | 12/19 portable subset (incl. buffer-strip) | adapter (5 subject getter cases) + js-only (2 WORKFLOW_SERIALIZE Symbol cases) | `chat-sdk-chat::message` |
 | `from-full-stream.test.ts` | 16/16 portable 1:1 + 1 additive | pure | `chat-sdk-chat::from_full_stream` |
-| `thread-history.test.ts` | constants + key formatter only | state (all 7 cases) + class (Message instances) | `chat-sdk-chat::thread_history` |
-| `transcripts.test.ts` | parseDuration + constants additive | state + class (Message/Postable) | `chat-sdk-chat::transcripts` |
-| `transcripts-wiring.test.ts` | not started | state + adapter (Chat-instance wiring) | n/a |
-| `channel.test.ts` | not started | class (Channel) + adapter | n/a |
-| `chat.test.ts` | not started | class (Chat singleton + ChatInstance) + adapter | n/a |
-| `thread.test.ts` | not started | class (Thread) + adapter + state | n/a |
-| `serialization.test.ts` | not started | class (all serialized types) | n/a |
+| `thread-history.test.ts` | 7/8 portable (1 JS-only re-exports) | state (all 7 cases) + class (Message instances) | `chat-sdk-chat::thread_history` |
+| `transcripts.test.ts` | 24/25 portable (slices 289..294, 384) + 9 additive parseDuration | state + class (Message/Postable) | `chat-sdk-chat::transcripts` |
+| `transcripts-wiring.test.ts` | 5/11 portable (5 construction cases via slice 286; 6 dispatch-hook cases deferred until full handleIncomingMessage dispatcher lands) | state + adapter (Chat-instance wiring) | `chat-sdk-chat::chat` |
+| `channel.test.ts` | partial (basic-props 2/2, state-management 5/5, fetchMetadata 2/2, post 2/3, serialization 2/2, derive_channel_id 2/2, ChannelImpl.postEphemeral 5/5, ChannelImpl.startTyping 2/2, ChannelImpl.mentionUser 2/2; remaining deferred behind SentMessage refactor + Stream + ChannelImpl.post error cases) | class (Channel) + adapter | `chat-sdk-chat::channel` |
+| `chat.test.ts` | partial (thread 4/4, openDM 4/4, getUser 10/10, isDM 1/3, message-deduplication early-exit 2 cases; remaining deferred behind full handleIncomingMessage dispatcher) | class (Chat singleton + ChatInstance) + adapter | `chat-sdk-chat::chat` |
+| `thread.test.ts` | partial (Per-thread state 8/8, startTyping 2/2, mentionUser 2/2, subscribe/unsubscribe 4/4, isSubscribed 4/4, recentMessages 4/4, serialization 7/8, createSentMessageFromMessage 5/5, postEphemeral 5/5, schedule 3/?, remaining deferred behind Stream / Plan / dispatcher) | class (Thread) + adapter + state | `chat-sdk-chat::thread` |
+| `serialization.test.ts` | partial (Thread.toJSON 4/6, Thread.fromJSON 4/8, Message.toJSON 8/9, Message.fromJSON 4/5, chat.reviver 3/5, standalone reviver 3/8; remaining deferred behind Thread reviver + adapter-lookup singleton wiring) | class (all serialized types) | `chat-sdk-chat::{thread,message,reviver}` |
 | `streaming-markdown.test.ts` | not started | external (depends on `remend` npm package; needs a Rust streaming markdown renderer or skip) | n/a |
 | `jsx-react.test.tsx` | js-only | js-only (JSX runtime) | n/a |
 | `jsx-runtime.test.ts` | js-only | js-only (JSX runtime) | n/a |
