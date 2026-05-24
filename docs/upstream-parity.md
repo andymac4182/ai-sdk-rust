@@ -2715,6 +2715,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   the OpenAI provider facade for generated text content, usage accounting, raw
   request body capture, response id/timestamp/model/body metadata, response
   headers, model/message request shaping, and provider/request header merging.
+- 2026-05-24: OpenAI chat finish/tool-result parity added
+  `openai_chat_should_support_partial_usage`,
+  `openai_chat_should_extract_finish_reason`,
+  `openai_chat_should_support_unknown_finish_reason`, and
+  `openai_chat_should_parse_tool_results`, mapping upstream
+  `openai-chat-language-model.test.ts` partial usage, known and unknown finish
+  reason, and generated tool-call parsing cases through the OpenAI provider
+  facade.
 - 2026-05-24: OpenAI chat annotation/citation parity added
   `openai_chat_should_parse_annotations_and_citations`, mapping upstream
   `openai-chat-language-model.test.ts` `should parse annotations/citations` by

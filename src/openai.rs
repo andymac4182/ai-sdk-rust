@@ -3205,6 +3205,86 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_support_partial_usage() {
+        let provider = openai_chat_test_provider_with_json_response(json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 20,
+                "total_tokens": 20
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        }));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.input_tokens.cache_write, None);
+        assert_eq!(result.usage.input_tokens.no_cache, Some(20));
+        assert_eq!(result.usage.output_tokens.total, Some(0));
+        assert_eq!(result.usage.output_tokens.text, Some(0));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            result.usage.raw,
+            json!({
+                "prompt_tokens": 20,
+                "total_tokens": 20
+            })
+            .as_object()
+            .cloned()
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_extract_finish_reason() {
+        let provider = openai_chat_test_provider_with_json_response(
+            openai_chat_response_with_finish_reason("stop"),
+        );
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn openai_chat_should_support_unknown_finish_reason() {
+        let provider = openai_chat_test_provider_with_json_response(
+            openai_chat_response_with_finish_reason("eos"),
+        );
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Other);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("eos"));
+    }
+
+    #[test]
     fn openai_chat_should_send_request_body() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let provider = openai_chat_test_provider(Arc::clone(&captured_requests));
@@ -3381,6 +3461,20 @@ mod tests {
                 .get("user-agent")
                 .is_some_and(|value| value.contains("ai-sdk/openai/0.1.0"))
         );
+    }
+
+    #[test]
+    fn openai_chat_should_parse_tool_results() {
+        let provider =
+            openai_chat_test_provider_with_json_response(openai_chat_tool_call_response());
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_openai_chat_tool_call_content(&result.content);
     }
 
     #[test]
@@ -8013,6 +8107,31 @@ mod tests {
                         ]
                     },
                     "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        })
+    }
+
+    fn openai_chat_response_with_finish_reason(finish_reason: &str) -> JsonValue {
+        json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "finish_reason": finish_reason
                 }
             ],
             "usage": {
