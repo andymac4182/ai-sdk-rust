@@ -22,6 +22,9 @@ pub const THREAD_ID_PREFIX: &str = "whatsapp:";
 /// Default WhatsApp Cloud API base URL (the Meta Graph endpoint).
 pub const DEFAULT_GRAPH_BASE: &str = "https://graph.facebook.com";
 
+/// 1:1 with upstream's default `userName ?? "bot"` constant.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`WhatsappAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct WhatsappAdapterOptions {
@@ -31,6 +34,11 @@ pub struct WhatsappAdapterOptions {
     pub access_token: String,
     /// Webhook verify token.
     pub verify_token: String,
+    /// Optional Facebook app secret used by
+    /// [`crate::webhook::verify_whatsapp_signature`].
+    pub app_secret: Option<String>,
+    /// Optional display name (defaults to [`DEFAULT_USER_NAME`]).
+    pub user_name: Option<String>,
     /// Optional Graph API base URL override.
     pub graph_base: Option<String>,
 }
@@ -47,6 +55,8 @@ impl WhatsappAdapterOptions {
             phone_number_id: phone_number_id.into(),
             access_token: access_token.into(),
             verify_token: verify_token.into(),
+            app_secret: None,
+            user_name: None,
             graph_base: None,
         }
     }
@@ -60,6 +70,11 @@ impl WhatsappAdapterOptions {
     /// Effective Graph API base URL with default applied.
     pub fn effective_graph_base(&self) -> &str {
         self.graph_base.as_deref().unwrap_or(DEFAULT_GRAPH_BASE)
+    }
+
+    /// Effective `userName` with default applied.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -107,6 +122,16 @@ impl WhatsappAdapter {
     /// Effective Graph API base URL.
     pub fn graph_base(&self) -> &str {
         self.options.effective_graph_base()
+    }
+
+    /// 1:1 with upstream `readonly appSecret?: string`.
+    pub fn app_secret(&self) -> Option<&str> {
+        self.options.app_secret.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly userName: string` (with default).
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
     }
 
     /// Build the Cloud API send URL. 1:1 with upstream's inline
@@ -783,5 +808,32 @@ mod tests {
         assert_eq!(adapter.access_token(), "access-tok");
         assert_eq!(adapter.verify_token(), "verify-tok");
         assert_eq!(adapter.graph_base(), "https://example.test");
+    }
+
+    // ---------- createWhatsAppAdapter create-instance (2 cases) ----------
+    // 1:1 with portable subset of upstream `index.test.ts >
+    // describe("createWhatsAppAdapter")`. Env-var-driven "throws
+    // when X is missing" cases need an env-var-resolution factory;
+    // documented as deferred.
+
+    #[test]
+    fn whatsapp_adapter_creates_an_instance() {
+        let opts = WhatsappAdapterOptions::new("123456789", "test-token", "test-verify-token");
+        let adapter = WhatsappAdapter::new(opts);
+        assert_eq!(adapter.name(), "whatsapp");
+        // Default userName = "bot".
+        assert_eq!(adapter.user_name(), "bot");
+        // app_secret defaults to None.
+        assert!(adapter.app_secret().is_none());
+    }
+
+    #[test]
+    fn whatsapp_adapter_uses_provided_user_name_and_app_secret() {
+        let mut opts = WhatsappAdapterOptions::new("123456789", "test-token", "test-verify-token");
+        opts.user_name = Some("test-bot".to_string());
+        opts.app_secret = Some("test-secret".to_string());
+        let adapter = WhatsappAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "test-bot");
+        assert_eq!(adapter.app_secret(), Some("test-secret"));
     }
 }
