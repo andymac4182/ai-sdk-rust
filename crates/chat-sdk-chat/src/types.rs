@@ -1268,6 +1268,14 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     /// implement this; there is no sensible default.
     fn name(&self) -> &str;
 
+    /// Tear down any adapter-side resources (sockets, intervals, in-
+    /// flight retries). 1:1 with upstream `disconnect?: () =>
+    /// Promise<void>`. The default no-op makes this opt-in for
+    /// adapters that don't hold long-lived resources.
+    async fn disconnect(&self) -> AdapterResult<()> {
+        Ok(())
+    }
+
     /// Fetch the subject of a thread (the channel topic or DM partner
     /// label). 1:1 with upstream `fetchSubject(threadId): Promise<string
     /// | null>`. The default returns `Ok(None)` so adapters that don't
@@ -1415,6 +1423,13 @@ pub type AdapterResult<T> = Result<T, AdapterError>;
 /// trait.
 #[async_trait::async_trait]
 pub trait StateAdapter: Send + Sync + std::fmt::Debug {
+    /// Tear down state-backend resources (connection pool, scheduled
+    /// expirations). 1:1 with upstream `disconnect?: () =>
+    /// Promise<void>`. Default no-op for in-memory backends.
+    async fn disconnect(&self) -> StateResult<()> {
+        Ok(())
+    }
+
     /// Read a value out of the key/value cache. 1:1 with upstream
     /// `get<T>(key: string): Promise<T | null>`. Returns `Ok(None)`
     /// when the key is unset or expired (matching upstream's

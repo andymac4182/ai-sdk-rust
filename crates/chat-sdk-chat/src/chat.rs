@@ -258,6 +258,20 @@ impl Chat {
     pub fn has_singleton() -> bool {
         crate::chat_singleton::has_chat_singleton()
     }
+
+    /// 1:1 port of upstream `Chat.shutdown()`. Tears down each
+    /// registered adapter via [`Adapter::disconnect`] in arbitrary
+    /// order, then tears down the [`StateAdapter`]. An adapter
+    /// disconnect failure is logged and swallowed (matches
+    /// upstream's `await Promise.allSettled([...])` + ignore-
+    /// failures semantics); the state-adapter disconnect always
+    /// runs after every adapter disconnect attempt.
+    pub async fn shutdown(&self) {
+        for adapter in self.adapters.values() {
+            let _ = adapter.disconnect().await;
+        }
+        let _ = self.state.disconnect().await;
+    }
 }
 
 impl ChatSingleton for Chat {
@@ -278,7 +292,7 @@ mod tests {
     //! packages ship.
     use super::*;
     use crate::chat_singleton::{clear_chat_singleton, get_chat_singleton};
-    use crate::types::{Adapter, AdapterResult, StateAdapter, StateResult};
+    use crate::types::{Adapter, AdapterError, AdapterResult, StateAdapter, StateResult};
     use std::sync::Mutex;
 
     static SINGLETON_LOCK: Mutex<()> = Mutex::new(());
@@ -551,5 +565,165 @@ mod tests {
         let cloned = chat.clone();
         // Both clones see the same Arc<HashMap>.
         assert!(Arc::ptr_eq(&chat.adapters, &cloned.adapters));
+    }
+
+    // ---------- shutdown (5 upstream cases) ----------
+
+    use futures_executor::block_on;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    static SHUTDOWN_ORDER: StdMutex<Vec<&'static str>> = StdMutex::new(Vec::new());
+
+    #[derive(Debug, Default)]
+    struct ShutdownAdapter {
+        platform_name: &'static str,
+        disconnect_calls: AtomicUsize,
+        fail: bool,
+    }
+
+    impl ShutdownAdapter {
+        fn new(name: &'static str, fail: bool) -> Self {
+            Self {
+                platform_name: name,
+                disconnect_calls: AtomicUsize::new(0),
+                fail,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for ShutdownAdapter {
+        fn name(&self) -> &str {
+            self.platform_name
+        }
+        async fn disconnect(&self) -> AdapterResult<()> {
+            self.disconnect_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            SHUTDOWN_ORDER.lock().unwrap().push("adapter");
+            if self.fail {
+                return Err(AdapterError::Unsupported("disconnect"));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ShutdownState {
+        disconnect_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for ShutdownState {
+        async fn disconnect(&self) -> StateResult<()> {
+            self.disconnect_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            SHUTDOWN_ORDER.lock().unwrap().push("state");
+            Ok(())
+        }
+        async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn make_shutdown_chat(adapter_names: &[&'static str], fail: &[&'static str]) -> (Chat, Vec<Arc<ShutdownAdapter>>, Arc<ShutdownState>) {
+        SHUTDOWN_ORDER.lock().unwrap().clear();
+        let mut adapter_handles: Vec<Arc<ShutdownAdapter>> = Vec::new();
+        let mut adapters: Vec<Arc<dyn Adapter>> = Vec::new();
+        for name in adapter_names {
+            let a = Arc::new(ShutdownAdapter::new(name, fail.contains(name)));
+            adapter_handles.push(a.clone());
+            adapters.push(a as Arc<dyn Adapter>);
+        }
+        let state = Arc::new(ShutdownState::default());
+        let chat = Chat::new(ChatOptions {
+            adapters,
+            state: state.clone(),
+        });
+        (chat, adapter_handles, state)
+    }
+
+    #[test]
+    fn chat_shutdown_disconnects_adapters() {
+        let (chat, handles, state) = make_shutdown_chat(&["slack"], &[]);
+        block_on(chat.shutdown());
+        assert_eq!(handles[0].disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(state.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn chat_shutdown_disconnects_adapter_before_state_adapter() {
+        let (chat, _handles, _state) = make_shutdown_chat(&["slack"], &[]);
+        block_on(chat.shutdown());
+        let order = SHUTDOWN_ORDER.lock().unwrap();
+        assert_eq!(order.first().copied(), Some("adapter"));
+        assert_eq!(order.last().copied(), Some("state"));
+    }
+
+    #[test]
+    fn chat_shutdown_allows_adapters_without_explicit_disconnect() {
+        // The trait default `disconnect` returns Ok(()) — adapters
+        // that don't override it are silently fine. State is still
+        // torn down.
+        #[derive(Debug, Default)]
+        struct BareAdapter;
+        #[async_trait::async_trait]
+        impl Adapter for BareAdapter {
+            fn name(&self) -> &str {
+                "slack"
+            }
+        }
+        let state = Arc::new(ShutdownState::default());
+        let chat = Chat::new(ChatOptions {
+            adapters: vec![Arc::new(BareAdapter) as Arc<dyn Adapter>],
+            state: state.clone(),
+        });
+        block_on(chat.shutdown());
+        assert_eq!(state.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn chat_shutdown_disconnects_all_registered_adapters() {
+        let (chat, handles, state) = make_shutdown_chat(&["slack", "discord"], &[]);
+        block_on(chat.shutdown());
+        for h in &handles {
+            assert_eq!(h.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+        }
+        assert_eq!(state.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn chat_shutdown_continues_even_if_an_adapter_disconnect_fails() {
+        let (chat, handles, state) = make_shutdown_chat(&["slack", "discord"], &["slack"]);
+        block_on(chat.shutdown()); // should not panic
+        // Both adapters get a disconnect attempt; state still runs.
+        assert_eq!(handles[0].disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(handles[1].disconnect_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(state.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
     }
 }
