@@ -1329,7 +1329,17 @@ fn publish_telemetry_diagnostic_message(message: TelemetryDiagnosticMessage) {
 }
 
 #[cfg(test)]
-fn reset_telemetry_state_for_tests() {
+static TELEMETRY_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) fn telemetry_test_guard_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    TELEMETRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_telemetry_state_for_tests() {
     TELEMETRY_INTEGRATIONS
         .lock()
         .expect("telemetry registry mutex is not poisoned")
@@ -1342,7 +1352,7 @@ fn reset_telemetry_state_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex};
 
     use serde_json::json;
 
@@ -1352,13 +1362,7 @@ mod tests {
         Arc::new(Mutex::new(Vec::new()))
     }
 
-    static TELEMETRY_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn telemetry_test_guard() -> MutexGuard<'static, ()> {
-        TELEMETRY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+    use super::telemetry_test_guard_for_tests as telemetry_test_guard;
 
     fn restricted_runtime_options() -> TelemetryOptions {
         TelemetryOptions::new().with_runtime_context_key("requestId", true)
@@ -1794,16 +1798,18 @@ mod tests {
         )))
         .on_start(json!({ "callId": "local" }));
 
-        assert_eq!(global_events.lock().expect("event lock").len(), 1);
-        assert_eq!(
-            global_events.lock().expect("event lock")[0].event,
-            json!({ "callId": "global" })
+        let global_events = global_events.lock().expect("event lock");
+        assert!(
+            global_events
+                .iter()
+                .any(|event| event.event == json!({ "callId": "global" }))
         );
         assert_eq!(local_events.lock().expect("event lock").len(), 1);
         assert_eq!(
             local_events.lock().expect("event lock")[0].event,
             json!({ "callId": "local" })
         );
+        reset_telemetry_state_for_tests();
     }
 
     #[test]

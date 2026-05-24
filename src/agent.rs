@@ -1367,7 +1367,10 @@ mod tests {
         SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Tool,
     };
     use crate::stream_text::TextStreamPart;
-    use crate::telemetry::{TelemetryEventKind, TelemetryIntegration};
+    use crate::telemetry::{
+        TelemetryEvent, TelemetryEventKind, TelemetryIntegration, register_telemetry_integration,
+        reset_telemetry_state_for_tests, telemetry_test_guard_for_tests,
+    };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -3760,5 +3763,393 @@ mod tests {
                 "onEnd",
             ]
         );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_calls_globally_registered_integration_listeners() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut integration = TelemetryIntegration::new();
+        for (kind, label) in [
+            (TelemetryEventKind::OnStart, "global-onStart"),
+            (TelemetryEventKind::OnStepFinish, "global-onStepFinish"),
+            (TelemetryEventKind::OnEnd, "global-onEnd"),
+        ] {
+            let events = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |_event| {
+                events.lock().expect("event lock").push(label);
+            });
+        }
+        register_telemetry_integration(integration);
+        let model = MockLanguageModel::new().with_generate_result(text_result("Hello!"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "Hello!");
+        let events = events.lock().expect("event lock");
+        assert!(events.contains(&"global-onStart"));
+        assert!(events.contains(&"global-onStepFinish"));
+        assert!(events.contains(&"global-onEnd"));
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_calls_globally_registered_integration_listeners() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut integration = TelemetryIntegration::new();
+        for (kind, label) in [
+            (TelemetryEventKind::OnStart, "global-onStart"),
+            (TelemetryEventKind::OnStepFinish, "global-onStepFinish"),
+            (TelemetryEventKind::OnEnd, "global-onEnd"),
+        ] {
+            let events = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |_event| {
+                events.lock().expect("event lock").push(label);
+            });
+        }
+        register_telemetry_integration(integration);
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("Hello!"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "Hello!");
+        let events = events.lock().expect("event lock");
+        assert!(events.contains(&"global-onStart"));
+        assert!(events.contains(&"global-onStepFinish"));
+        assert!(events.contains(&"global-onEnd"));
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_includes_configured_runtime_context_properties_in_telemetry() {
+        let callback_contexts = Rc::new(RefCell::new(Vec::<JsonValue>::new()));
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let callback_contexts_for_start = Rc::clone(&callback_contexts);
+        let callback_contexts_for_step_finish = Rc::clone(&callback_contexts);
+        let callback_contexts_for_finish = Rc::clone(&callback_contexts);
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let telemetry_contexts = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event: TelemetryEvent| {
+                telemetry_contexts
+                    .lock()
+                    .expect("event lock")
+                    .push(event.event["runtimeContext"].clone());
+            });
+        }
+        let runtime_context = JsonObject::from_iter([
+            ("userId".to_string(), json!("user-123")),
+            ("requestId".to_string(), json!("request-123")),
+        ]);
+        let model = MockLanguageModel::new().with_generate_result(text_result("Hello!"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_runtime_context(runtime_context.clone())
+                .with_on_start(move |event| {
+                    let callback_contexts = Rc::clone(&callback_contexts_for_start);
+                    async move {
+                        callback_contexts
+                            .borrow_mut()
+                            .push(json!(event.runtime_context));
+                    }
+                })
+                .with_on_step_finish(move |step| {
+                    let callback_contexts = Rc::clone(&callback_contexts_for_step_finish);
+                    async move {
+                        callback_contexts
+                            .borrow_mut()
+                            .push(json!(step.runtime_context));
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let callback_contexts = Rc::clone(&callback_contexts_for_finish);
+                    async move {
+                        callback_contexts
+                            .borrow_mut()
+                            .push(json!(event.runtime_context));
+                    }
+                })
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_runtime_context_key("requestId", true)
+                        .with_integration(integration),
+                ),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            &*callback_contexts.borrow(),
+            &[
+                json!(runtime_context),
+                json!(runtime_context),
+                json!(runtime_context),
+            ]
+        );
+        assert_eq!(
+            &*telemetry_contexts.lock().expect("event lock"),
+            &[
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_includes_configured_runtime_context_properties_in_telemetry() {
+        let callback_contexts = Rc::new(RefCell::new(Vec::<JsonValue>::new()));
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let callback_contexts_for_start = Rc::clone(&callback_contexts);
+        let callback_contexts_for_step_finish = Rc::clone(&callback_contexts);
+        let callback_contexts_for_finish = Rc::clone(&callback_contexts);
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let telemetry_contexts = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event: TelemetryEvent| {
+                telemetry_contexts
+                    .lock()
+                    .expect("event lock")
+                    .push(event.event["runtimeContext"].clone());
+            });
+        }
+        let runtime_context = JsonObject::from_iter([
+            ("userId".to_string(), json!("user-123")),
+            ("requestId".to_string(), json!("request-123")),
+        ]);
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("Hello!"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_runtime_context(runtime_context.clone())
+                .with_on_start(move |event| {
+                    let callback_contexts = Rc::clone(&callback_contexts_for_start);
+                    async move {
+                        callback_contexts
+                            .borrow_mut()
+                            .push(json!(event.runtime_context));
+                    }
+                })
+                .with_on_step_finish(move |step| {
+                    let callback_contexts = Rc::clone(&callback_contexts_for_step_finish);
+                    async move {
+                        callback_contexts
+                            .borrow_mut()
+                            .push(json!(step.runtime_context));
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let callback_contexts = Rc::clone(&callback_contexts_for_finish);
+                    async move {
+                        callback_contexts
+                            .borrow_mut()
+                            .push(json!(event.runtime_context));
+                    }
+                })
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_runtime_context_key("requestId", true)
+                        .with_integration(integration),
+                ),
+        );
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            &*callback_contexts.borrow(),
+            &[
+                json!(runtime_context),
+                json!(runtime_context),
+                json!(runtime_context),
+            ]
+        );
+        assert_eq!(
+            &*telemetry_contexts.lock().expect("event lock"),
+            &[
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_calls_integration_listeners_alongside_agent_callbacks() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let agent_start_events = Arc::clone(&events);
+        let agent_step_finish_events = Arc::clone(&events);
+        let agent_finish_events = Arc::clone(&events);
+        let mut integration = TelemetryIntegration::new();
+        for (kind, label) in [
+            (TelemetryEventKind::OnStart, "integration-onStart"),
+            (TelemetryEventKind::OnStepFinish, "integration-onStepFinish"),
+            (TelemetryEventKind::OnEnd, "integration-onEnd"),
+        ] {
+            let events = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |_event| {
+                events.lock().expect("event lock").push(label);
+            });
+        }
+        let model = MockLanguageModel::new().with_generate_result(text_result("Hello!"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_on_start(move |_event| {
+                    let events = Arc::clone(&agent_start_events);
+                    async move {
+                        events.lock().expect("event lock").push("agent-onStart");
+                    }
+                })
+                .with_on_step_finish(move |_step| {
+                    let events = Arc::clone(&agent_step_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("event lock")
+                            .push("agent-onStepFinish");
+                    }
+                })
+                .with_on_finish(move |_event| {
+                    let events = Arc::clone(&agent_finish_events);
+                    async move {
+                        events.lock().expect("event lock").push("agent-onFinish");
+                    }
+                })
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            &*events.lock().expect("event lock"),
+            &[
+                "agent-onStart",
+                "integration-onStart",
+                "agent-onStepFinish",
+                "integration-onStepFinish",
+                "agent-onFinish",
+                "integration-onEnd",
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_calls_integration_listeners_alongside_agent_callbacks() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let agent_start_events = Arc::clone(&events);
+        let agent_step_finish_events = Arc::clone(&events);
+        let agent_finish_events = Arc::clone(&events);
+        let mut integration = TelemetryIntegration::new();
+        for (kind, label) in [
+            (TelemetryEventKind::OnStart, "integration-onStart"),
+            (TelemetryEventKind::OnStepFinish, "integration-onStepFinish"),
+            (TelemetryEventKind::OnEnd, "integration-onEnd"),
+        ] {
+            let events = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |_event| {
+                events.lock().expect("event lock").push(label);
+            });
+        }
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("Hello!"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_on_start(move |_event| {
+                    let events = Arc::clone(&agent_start_events);
+                    async move {
+                        events.lock().expect("event lock").push("agent-onStart");
+                    }
+                })
+                .with_on_step_finish(move |_step| {
+                    let events = Arc::clone(&agent_step_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("event lock")
+                            .push("agent-onStepFinish");
+                    }
+                })
+                .with_on_finish(move |_event| {
+                    let events = Arc::clone(&agent_finish_events);
+                    async move {
+                        events.lock().expect("event lock").push("agent-onFinish");
+                    }
+                })
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        );
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "Hello!");
+        assert_eq!(
+            &*events.lock().expect("event lock"),
+            &[
+                "agent-onStart",
+                "integration-onStart",
+                "agent-onStepFinish",
+                "integration-onStepFinish",
+                "agent-onFinish",
+                "integration-onEnd",
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_does_not_break_when_an_integration_listener_panics() {
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            integration = integration.with_callback(kind, move |_event| {
+                panic!("integration error");
+            });
+        }
+        let model = MockLanguageModel::new().with_generate_result(text_result("Hello!"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "Hello!");
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_does_not_break_when_an_integration_listener_panics() {
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            integration = integration.with_callback(kind, move |_event| {
+                panic!("integration error");
+            });
+        }
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("Hello!"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        );
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "Hello!");
     }
 }
