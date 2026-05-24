@@ -1268,6 +1268,7 @@ mod tests {
     use std::convert::Infallible;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
@@ -1290,6 +1291,8 @@ mod tests {
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+        register_telemetry_integration, reset_telemetry_state_for_tests,
+        telemetry_test_guard_for_tests,
     };
     use url::Url;
 
@@ -4235,6 +4238,294 @@ mod tests {
         assert_eq!(
             events[3].event["object"],
             json!({ "content": "Hello, world!" })
+        );
+    }
+
+    #[test]
+    fn stream_object_calls_globally_registered_integration_listeners() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_start_events = Arc::clone(&events);
+        let global_step_finish_events = Arc::clone(&events);
+        let global_end_events = Arc::clone(&events);
+        let global_start_seen = Arc::new(AtomicBool::new(false));
+        let global_step_finish_seen = Arc::new(AtomicBool::new(false));
+        let global_end_seen = Arc::new(AtomicBool::new(false));
+        let global_start_seen_for_callback = Arc::clone(&global_start_seen);
+        let global_step_finish_seen_for_callback = Arc::clone(&global_step_finish_seen);
+        let global_end_seen_for_callback = Arc::clone(&global_end_seen);
+        register_telemetry_integration(
+            TelemetryIntegration::new()
+                .with_callback(TelemetryEventKind::OnStart, move |_| {
+                    if !global_start_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_start_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onStart".to_string());
+                    }
+                })
+                .with_callback(TelemetryEventKind::OnObjectStepFinish, move |_| {
+                    if !global_step_finish_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_step_finish_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onObjectStepFinish".to_string());
+                    }
+                })
+                .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                    if !global_end_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_end_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onEnd".to_string());
+                    }
+                }),
+        );
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            [
+                "global-onStart".to_string(),
+                "global-onObjectStepFinish".to_string(),
+                "global-onEnd".to_string()
+            ]
+        );
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn stream_object_prefers_per_call_integrations_over_global_integrations() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_events = Arc::clone(&events);
+        register_telemetry_integration(TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnStart,
+            move |event| {
+                if event.function_id.as_deref() == Some("stream-object-per-call-precedence") {
+                    global_events
+                        .lock()
+                        .expect("telemetry event lock")
+                        .push("global".to_string());
+                }
+            },
+        ));
+        let per_call_events = Arc::clone(&events);
+        let per_call =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                per_call_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("per-call".to_string());
+            });
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("stream-object-per-call-precedence")
+                        .with_integration(per_call),
+                ),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["per-call".to_string()]
+        );
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn stream_object_calls_integration_listeners_alongside_user_callbacks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let user_start_events = Arc::clone(&events);
+        let user_step_finish_events = Arc::clone(&events);
+        let user_finish_events = Arc::clone(&events);
+        let integration_start_events = Arc::clone(&events);
+        let integration_step_finish_events = Arc::clone(&events);
+        let integration_end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnStart, move |_| {
+                integration_start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onStart".to_string());
+            })
+            .with_callback(TelemetryEventKind::OnObjectStepFinish, move |_| {
+                integration_step_finish_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onObjectStepFinish".to_string());
+            })
+            .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                integration_end_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onEnd".to_string());
+            });
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_start(move |_| {
+                    let events = Arc::clone(&user_start_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("user-onStart".to_string());
+                    }
+                })
+                .with_on_step_finish(move |_| {
+                    let events = Arc::clone(&user_step_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("user-onStepFinish".to_string());
+                    }
+                })
+                .with_on_finish(move |_| {
+                    let events = Arc::clone(&user_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("user-onFinish".to_string());
+                    }
+                })
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            [
+                "user-onStart".to_string(),
+                "integration-onStart".to_string(),
+                "user-onStepFinish".to_string(),
+                "integration-onObjectStepFinish".to_string(),
+                "user-onFinish".to_string(),
+                "integration-onEnd".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_does_not_break_when_integration_listener_panics() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnStart, |_| {
+                panic!("integration error");
+            })
+            .with_callback(TelemetryEventKind::OnObjectStepFinish, |_| {
+                panic!("integration error");
+            })
+            .with_callback(TelemetryEventKind::OnEnd, |_| {
+                panic!("integration error");
+            });
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+    }
+
+    #[test]
+    fn stream_object_supports_multiple_per_call_telemetry_integrations_as_array() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_events = Arc::clone(&events);
+        let second_events = Arc::clone(&events);
+        let first =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                first_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("first".to_string());
+            });
+        let second =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                second_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("second".to_string());
+            });
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_telemetry(TelemetryOptions::new().with_integrations([first, second])),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["first".to_string(), "second".to_string()]
         );
     }
 
