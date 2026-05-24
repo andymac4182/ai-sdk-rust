@@ -1255,6 +1255,69 @@ mod tests {
     }
 
     #[test]
+    fn thread_serialization_should_serialize_dm_thread_correctly() {
+        // 1:1 with upstream `describe("ThreadImpl.toJSON()") >
+        // it("should serialize DM thread correctly")` — `isDM: true`
+        // round-trips through the JSON shape.
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:DU123:",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("DU123")
+        .with_is_dm(true);
+        let json = thread.to_json();
+        assert_eq!(json["_type"], "chat:Thread");
+        assert_eq!(json["id"], "slack:DU123:");
+        assert_eq!(json["channelId"], "DU123");
+        assert_eq!(json["isDM"], true);
+    }
+
+    #[test]
+    fn thread_serialization_should_default_isdm_to_false_when_omitted() {
+        // 1:1 with upstream "should default isDM to false when not
+        // provided" — Thread constructor defaults `is_dm` to false
+        // when no `with_is_dm(_)` builder call is made.
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C1:1.0");
+        let json = thread.to_json();
+        assert_eq!(json["isDM"], false);
+    }
+
+    #[test]
+    fn thread_serialization_fromjson_should_default_isdm_to_false_when_omitted() {
+        // 1:1 with upstream `describe("ThreadImpl.fromJSON()") >
+        // it("should default isDM to false when not present in JSON")`.
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "slack:C1:1.0",
+            "channelId": "C1",
+            "adapterName": "recording",
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::from_json(&json, adapter);
+        assert!(!thread.is_dm());
+    }
+
+    #[test]
+    fn thread_serialization_fromjson_should_set_isdm_to_true_when_present() {
+        // 1:1 with upstream `describe("ThreadImpl.fromJSON()") >
+        // it("should set isDM to true when present in JSON")`.
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "slack:DU1:",
+            "channelId": "DU1",
+            "isDM": true,
+            "adapterName": "recording",
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::from_json(&json, adapter);
+        assert!(thread.is_dm());
+    }
+
+    #[test]
     fn thread_serialization_should_serialize_with_current_message() {
         let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
         let state = Arc::new(MockState::default());
