@@ -3164,3 +3164,92 @@ module-aliasing test).
 - **All adapter `index.test.ts` integration suites** still
   unblocked but most are large (~150-3000 LOC each) and need
   per-adapter HTTP-mocking infrastructure decisions.
+
+---
+
+## Slices 281..286 refinement cycle (chat-core trait extensions + streaming-markdown)
+
+**What was learned**
+
+- Slack-style "test extracts trait methods that don't exist yet"
+  (slice 281: `Adapter::disconnect` + `StateAdapter::disconnect`;
+  slice 282: `Adapter::initialize` + `StateAdapter::connect`) is a
+  cheap way to make `Chat::shutdown`/`Chat::initialize` portable
+  without breaking existing adapter impls: add the methods as
+  default no-op trait methods, then test the orchestration with a
+  tracking mock that overrides them. Every existing adapter
+  crate compiles unchanged.
+- `StreamingMarkdownRenderer` had a hard external dependency
+  (the `remend` npm package) that doesn't translate to Rust. The
+  right call was: port everything else (table-buffer, code-fence
+  tracking, wrap-tables-for-append), mark the 13 remend-dependent
+  tests as `js-only-documented` in the module header, and move
+  on. 38/51 portable cases now ported across slices 283/284/285.
+  Future ports of multi-source TypeScript modules should split
+  similar dependency-driven branches into "ports cleanly" /
+  "needs JS lib equivalent" / "deferred until [dep] decided"
+  upfront.
+- The `simulate_append_stream` test helper that upstream
+  `streaming-markdown.test.ts` builds inline ports cleanly as a
+  free function inside `#[cfg(test)]`. Pattern reusable for
+  every other upstream test that defines a `function` outside
+  `describe(...)` blocks — port them as test-only helpers under
+  `mod tests`.
+- `Chat::try_new` returning `Result<Self, ChatBuildError>` +
+  `Chat::new` as panicking wrapper (slice 286) is the right way
+  to port upstream constructors that `throw` for invalid config.
+  Adopters get both shapes: `new(...)` matches the upstream
+  ergonomics (and shape of `it("throws at construction")`
+  tests), while `try_new(...)` is the idiomatic Rust path. Same
+  pattern when extending `Chat` further (e.g. adding
+  `webhooks`, `onNewMention` callbacks).
+
+**What is now true that wasn't before**
+
+- chat-sdk-chat at 679 tests across 21 modules.
+- 5 adapter `cards.test.ts` files fully ported (Discord, Slack,
+  Teams, GChat, Messenger).
+- `Chat::shutdown` + `Chat::initialize` + `Chat::transcripts` +
+  `Chat::try_new` form a small but coherent "lifecycle" surface
+  that callsites can rely on.
+- `StreamingMarkdownRenderer` has feature parity for everything
+  except inline-marker healing. Adopters who don't need
+  `getCommittableText` healing get a fully-working streaming
+  renderer.
+
+**Stale or misleading guidance**
+
+- The brief's "stay strictly inside owned files" hard rule had
+  one near-violation risk: when adding a trait method to
+  `Adapter` (slice 281), every adapter crate in the workspace
+  compiles via that trait. The Rust compiler caught it
+  automatically — added the method as a default no-op so existing
+  adapter impls compile unchanged. Worth highlighting this is
+  fine *as long as default impls are provided* — without them,
+  adding a trait method would break every adapter without an
+  edit. The brief doesn't currently state this nuance.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** Streaming /
+  post-with-different-formats / handleIncomingMessage / dedup
+  describe blocks — multi-slice, gated on `Adapter::stream` +
+  `Adapter::edit_message` trait extensions.
+- **State backend client wire-up** (redis/ioredis/pg) — still
+  blocked on workspace runtime decision; current crates are
+  scaffold-only.
+- **Adapter `index.test.ts` integration suites** — all 9
+  adapters' index.test.ts files use `vi.spyOn(fetch)` for HTTP
+  mocking. Direct 1:1 ports need an HTTP-mock trait per adapter
+  (or a workspace-wide `HttpClient` trait). Slice 278's
+  `HttpPoster` pattern is a starting point but needs broader
+  refactor of each adapter's internal HTTP calls behind the
+  trait first.
+- **State-pg / state-redis / state-ioredis** ports — these need
+  the workspace to decide on `sqlx` vs `tokio-postgres` vs
+  `deadpool` etc. Picking a backend would unlock ~50 tests per
+  crate.
