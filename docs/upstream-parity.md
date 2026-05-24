@@ -4968,6 +4968,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    execution, produce a tool-error result, update full-stream parts, and emit
    raw tool input/output error text into UI-message chunks while provider
    stream errors remain masked by default.
+   The upstream `streamText` single tool preliminary-result full-stream,
+   UI-message stream, final-result content, and step-content cases now have
+   the named Rust counterpart
+   `stream_text_streams_preliminary_tool_results_before_final_result`,
+   proving local streaming tool executors emit preliminary tool-result parts
+   before the repeated final result while `result.tool_results` and step
+   tool-results retain only the final output.
    The upstream automatic approval and automatic denial tool-approval stream
    cases now have Rust coverage in
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`

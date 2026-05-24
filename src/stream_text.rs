@@ -74,6 +74,7 @@ use crate::ui_message_stream::{
     create_ui_message_stream_response, get_response_ui_message_id, handle_ui_message_stream_finish,
     pipe_ui_message_stream_to_response,
 };
+use crate::util::Callback;
 use crate::warning::Warning;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2696,6 +2697,19 @@ where
             .filter(|tool_call| !provider_result_tool_call_ids.contains(&tool_call.tool_call_id))
             .cloned()
             .collect::<Vec<_>>();
+        let preliminary_tool_results =
+            Arc::new(std::sync::Mutex::new(Vec::<GenerateTextToolResult>::new()));
+        let preliminary_tool_results_for_callback = Arc::clone(&preliminary_tool_results);
+        let on_preliminary_tool_result =
+            Callback::infallible(move |result: GenerateTextToolResult| {
+                let preliminary_tool_results = Arc::clone(&preliminary_tool_results_for_callback);
+                async move {
+                    preliminary_tool_results
+                        .lock()
+                        .expect("preliminary tool results lock")
+                        .push(result);
+                }
+            });
         let (local_tool_results, tool_execution_ms) = execute_tool_calls(
             &call_id,
             &step_tools,
@@ -2708,7 +2722,7 @@ where
                 step_call_options.abort_signal.as_ref(),
                 timeout.as_ref(),
                 None,
-                None,
+                Some(&on_preliminary_tool_result),
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
                 Some(&telemetry_dispatcher),
@@ -2728,6 +2742,21 @@ where
         }
         let local_tool_results =
             apply_stream_text_transforms_to_tool_results(local_tool_results, &transforms);
+        let preliminary_tool_results = apply_stream_text_transforms_to_tool_results(
+            preliminary_tool_results
+                .lock()
+                .expect("preliminary tool results lock")
+                .clone(),
+            &transforms,
+        );
+        for tool_result in &preliminary_tool_results {
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolResult(tool_result.clone()),
+                on_chunk.as_ref(),
+            )
+            .await;
+        }
         for tool_result in &local_tool_results {
             push_text_stream_part(
                 &mut parts,
@@ -4500,7 +4529,7 @@ fn sync_stream_text_tool_parts(
                     *part = tool_call.clone();
                 }
             }
-            TextStreamPart::ToolResult(part) => {
+            TextStreamPart::ToolResult(part) if part.preliminary != Some(true) => {
                 if let Some(tool_result) = tool_results
                     .iter()
                     .find(|tool_result| tool_result.tool_call_id == part.tool_call_id)
@@ -4617,8 +4646,8 @@ mod tests {
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider_utils::{
-        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool,
-        ToolExecutionError, ValidationResult,
+        ExecuteToolOutput, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
+        Schema, Tool, ToolExecutionError, ValidationResult,
     };
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
@@ -11362,6 +11391,153 @@ mod tests {
                 .any(|chunk| chunk["type"] == "tool-output-error"
                     && chunk["toolCallId"] == "call-1"
                     && chunk["errorText"] == error_text)
+        );
+    }
+
+    #[test]
+    fn stream_text_streams_preliminary_tool_results_before_final_result() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "cityAttractions",
+                    r#"{ "city": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("cityAttractions", input_schema).with_execute_outputs(
+                    |input, _options| {
+                        ready(Ok(vec![
+                            ExecuteToolOutput::preliminary(json!({
+                                "status": "loading",
+                                "text": format!(
+                                    "Getting weather for {}",
+                                    input["city"].as_str().unwrap_or_default()
+                                )
+                            })),
+                            ExecuteToolOutput::preliminary(json!({
+                                "status": "success",
+                                "text": format!(
+                                    "The weather in {} is 72°F",
+                                    input["city"].as_str().unwrap_or_default()
+                                ),
+                                "temperature": 72
+                            })),
+                        ]))
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].preliminary, None);
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({
+                "status": "success",
+                "text": "The weather in San Francisco is 72°F",
+                "temperature": 72
+            })
+        );
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_results, result.tool_results);
+
+        let streamed_tool_results = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some((part.preliminary, part.output.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            streamed_tool_results,
+            vec![
+                (
+                    Some(true),
+                    json!({
+                        "status": "loading",
+                        "text": "Getting weather for San Francisco"
+                    })
+                ),
+                (
+                    Some(true),
+                    json!({
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    })
+                ),
+                (
+                    None,
+                    json!({
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    })
+                ),
+            ]
+        );
+
+        let ui_chunks = serde_json::to_value(result.to_ui_message_stream())
+            .expect("ui message stream serializes");
+        let tool_output_chunks = ui_chunks
+            .as_array()
+            .expect("ui chunks are an array")
+            .iter()
+            .filter(|chunk| chunk["type"] == "tool-output-available")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_output_chunks,
+            vec![
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": {
+                        "status": "loading",
+                        "text": "Getting weather for San Francisco"
+                    },
+                    "preliminary": true
+                }),
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": {
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    },
+                    "preliminary": true
+                }),
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": {
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    }
+                }),
+            ]
         );
     }
 
