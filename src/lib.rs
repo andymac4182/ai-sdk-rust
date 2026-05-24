@@ -571,6 +571,7 @@ mod tests {
 
         assert_type::<ToolApprovalRequest>();
         assert_type::<ToolApprovalResponse>();
+        assert_type::<AgentUiStreamResponseOptions<'static, 'static, MockLanguageModel>>();
         assert_type::<GenerateTextResult>();
         assert_type::<StreamTextResult>();
         assert_type::<GenerateObjectResult>();
@@ -583,6 +584,12 @@ mod tests {
         assert_type::<TranscriptionResult>();
         assert_type::<Prompt>();
         assert_type::<ProviderRegistry<MockProvider>>();
+        assert_type::<ToolLoopAgent<'static, MockLanguageModel>>();
+        assert_type::<ToolLoopAgentCallOptions<'static, MockLanguageModel>>();
+        assert_type::<ToolLoopAgentModelSettings>();
+        assert_type::<ToolLoopAgentPrepareCall<'static, MockLanguageModel>>();
+        assert_type::<ToolLoopAgentPreparedCall<'static, MockLanguageModel>>();
+        assert_type::<ToolLoopAgentSettings<'static, MockLanguageModel>>();
         assert_type::<TelemetryOptions>();
         assert_type::<TextStreamPart>();
         assert_type::<UiMessage>();
