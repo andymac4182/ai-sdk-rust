@@ -535,10 +535,58 @@ pub use warning::Warning;
 
 #[cfg(test)]
 mod tests {
-    use super::VERSION;
+    use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn exposes_crate_version() {
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn root_facade_reexports_upstream_index_surface() {
+        fn assert_type<T>() {}
+
+        let _gateway_model: GatewayLanguageModel = gateway("openai/gpt-4o-mini");
+        let _gateway_provider: GatewayProvider = create_gateway(GatewayProviderSettings::new());
+        let object_schema = json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" }
+            },
+            "required": ["location"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let _schema: Schema = json_schema(object_schema.clone());
+        let _tool: Tool = tool("weather", object_schema.clone());
+        let _dynamic_tool: Tool = dynamic_tool("dynamic-weather", object_schema);
+        let _generated_id = generate_id();
+        let id_generator =
+            create_id_generator(IdGeneratorOptions::new()).expect("id generator builds");
+        let _generated_custom_id = id_generator();
+
+        assert_type::<ToolApprovalRequest>();
+        assert_type::<ToolApprovalResponse>();
+        assert_type::<GenerateTextResult>();
+        assert_type::<StreamTextResult>();
+        assert_type::<GenerateObjectResult>();
+        assert_type::<StreamObjectResult>();
+        assert_type::<EmbedResult>();
+        assert_type::<GenerateImageResult>();
+        assert_type::<GenerateSpeechOptions<'static, MockSpeechModel>>();
+        assert_type::<GenerateVideoOptions<'static, MockVideoModel>>();
+        assert_type::<RerankResult>();
+        assert_type::<TranscriptionResult>();
+        assert_type::<Prompt>();
+        assert_type::<ProviderRegistry<MockProvider>>();
+        assert_type::<TelemetryOptions>();
+        assert_type::<TextStreamPart>();
+        assert_type::<UiMessage>();
+        assert_type::<UploadFileOptions>();
+        assert_type::<UploadSkillOptions>();
+        assert_type::<AsyncIterableStream<JsonValue, VecAsyncIterableStreamSource<JsonValue>>>();
     }
 }

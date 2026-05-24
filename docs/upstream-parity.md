@@ -4839,6 +4839,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    array output. The upstream `callback ordering` call-id correlation case now
    has the named Rust counterpart
    `stream_object_callbacks_correlate_all_events_with_same_call_id`.
+   The upstream `packages/ai/src/index.ts` root facade export shape now has the
+   named Rust counterpart `root_facade_reexports_upstream_index_surface`,
+   proving root access to Gateway, provider-utils helpers, high-level
+   generation APIs, prompt/registry/telemetry/text-stream/UI/upload/util
+   surfaces, and mock provider-v4 fixtures without moving package-owned
+   implementation code back into the root crate.
    The upstream callback error-handling case now has the named Rust counterpart
    `stream_object_callback_panics_do_not_break_stream`.
    The upstream warning logger spy cases now have named Rust counterparts in
