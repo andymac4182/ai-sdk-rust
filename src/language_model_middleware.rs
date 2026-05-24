@@ -1711,17 +1711,18 @@ mod tests {
         extract_reasoning_middleware, simulate_streaming_middleware, wrap_language_model,
     };
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningDelta,
-        LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelResponse,
-        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-        LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelSupportedUrls,
-        LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-        LanguageModelTool, LanguageModelToolCall, LanguageModelToolInputDelta,
-        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelUsage,
+        FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions,
+        LanguageModelContent, LanguageModelFinishReason, LanguageModelFunctionTool,
+        LanguageModelGenerateResult, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+        LanguageModelResponse, LanguageModelStreamFinish, LanguageModelStreamPart,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult, LanguageModelStreamStart,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall,
+        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
+        LanguageModelUsage, OutputTokenUsage,
     };
-    use crate::provider::SpecificationVersion;
+    use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -2295,6 +2296,57 @@ mod tests {
             },
             LanguageModelUsage::default(),
         )
+    }
+
+    fn simulate_streaming_stream(
+        result: LanguageModelGenerateResult,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let model = StaticLanguageModel;
+        let middleware = simulate_streaming_middleware();
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(move || Box::pin(ready(result))),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("simulate streaming wrap-stream exists");
+
+        poll_boxed(wrapped_stream)
+    }
+
+    fn upstream_test_usage() -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(5),
+                no_cache: Some(5),
+                cache_read: Some(0),
+                cache_write: Some(0),
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(10),
+                text: Some(10),
+                reasoning: Some(3),
+            },
+            raw: None,
+        }
+    }
+
+    fn finish_reason(unified: FinishReason, raw: Option<&str>) -> LanguageModelFinishReason {
+        LanguageModelFinishReason {
+            unified,
+            raw: raw.map(ToString::to_string),
+        }
+    }
+
+    fn provider_metadata(provider: &str, value: serde_json::Value) -> ProviderMetadata {
+        BTreeMap::from([(
+            provider.to_string(),
+            value
+                .as_object()
+                .expect("metadata must be an object")
+                .clone(),
+        )])
     }
 
     fn object_schema() -> crate::json::JsonSchema {
@@ -3885,6 +3937,324 @@ mod tests {
                 )),
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\nmore")),
                 LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_text_response() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "This is a test response",
+            ))],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_string() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "This is the reasoning process",
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "This is the reasoning process",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_array_of_text_objects()
+     {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let signature_metadata = provider_metadata("testProvider", json!({ "signature": "abc" }));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "First reasoning step",
+                )),
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "Second reasoning step",
+                )),
+                LanguageModelContent::Reasoning(
+                    LanguageModelReasoning::new("")
+                        .with_provider_metadata(signature_metadata.clone()),
+                ),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1",
+                    "First reasoning step",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("2")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "2",
+                    "Second reasoning step",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("3")
+                        .with_provider_metadata(signature_metadata)
+                ),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new("3", "")),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("3")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_array_of_mixed_objects()
+     {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let redacted_metadata = provider_metadata("testProvider", json!({ "isRedacted": true }));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "First reasoning step",
+                )),
+                LanguageModelContent::Reasoning(
+                    LanguageModelReasoning::new("data")
+                        .with_provider_metadata(redacted_metadata.clone()),
+                ),
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "First reasoning step",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("1").with_provider_metadata(redacted_metadata)
+                ),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1", "data",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "2",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_tool_calls() {
+        let finish_reason = finish_reason(FinishReason::ToolCalls, None);
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "tool-1",
+                    "calculator",
+                    r#"{"expression": "2+2"}"#,
+                )),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "tool-2",
+                    "weather",
+                    r#"{"location": "New York"}"#,
+                )),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "tool-1",
+                    "calculator",
+                    r#"{"expression": "2+2"}"#,
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "tool-2",
+                    "weather",
+                    r#"{"location": "New York"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_preserve_additional_metadata_in_the_response() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let metadata = provider_metadata("custom", json!({ "key": "value" }));
+        let result = simulate_streaming_stream(
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "This is a test response",
+                ))],
+                finish_reason.clone(),
+                upstream_test_usage(),
+            )
+            .with_provider_metadata(metadata.clone()),
+        );
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(upstream_test_usage(), finish_reason)
+                        .with_provider_metadata(metadata)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_handle_empty_text_response() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(""))],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_pass_through_warnings_from_the_model() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "This is a test response",
+                ))],
+                finish_reason.clone(),
+                upstream_test_usage(),
+            )
+            .with_warning(Warning::Other {
+                message: "Test warning".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "Test warning".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
             ]
         );
     }
