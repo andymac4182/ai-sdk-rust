@@ -752,17 +752,45 @@ pub fn is_github_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (5) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream `index.test.ts` cases are enumerated as
+    //! js-only-documented here because they exercise behavior that
+    //! is unrepresentable in the Rust port by construction:
     //!
-    //! - `should expose protected members and methods to subclasses`:
-    //!   TypeScript-class-`protected` access modifier check. Rust
-    //!   uses `pub(crate)` visibility + trait composition rather
-    //!   than class inheritance — the subclass-protected-leak test
-    //!   is unrepresentable by construction.
+    //! 1. `describe("subclass extensibility") > should expose
+    //!    protected members and methods to subclasses` — TypeScript
+    //!    `protected` access modifier check. Rust uses
+    //!    `pub(crate)` visibility + trait composition rather than
+    //!    class inheritance.
+    //!
+    //! 2. `describe("octokit getter") > should return the
+    //!    underlying Octokit instance in PAT mode` — asserts the
+    //!    getter returns an `Octokit` typed class instance. Rust
+    //!    has no `Octokit` equivalent — HTTP is held as an opaque
+    //!    `reqwest::Client` injected via `with_http_client(...)`;
+    //!    the "type identity" assertion is moot.
+    //!
+    //! 3. `describe("octokit getter") > should return the same
+    //!    instance across calls in single-tenant mode` —
+    //!    Octokit-instance referential equality. The Rust port's
+    //!    `Client` is held by value (`Clone`-ed when the adapter
+    //!    is cloned); per-call referential equality is moot since
+    //!    `Clone` produces shared underlying connection pools.
+    //!
+    //! 4. `describe("octokit getter") > should expose the same
+    //!    instance via the deprecated "client" alias` — alias-name
+    //!    backwards-compat. The Rust port never shipped the
+    //!    deprecated alias, so there is nothing to assert.
+    //!
+    //! 5. `describe("octokit getter") > should throw in
+    //!    multi-tenant mode when called outside a webhook` —
+    //!    runtime "no installation context" throw. The Rust port
+    //!    surfaces the equivalent via typed errors at the call
+    //!    sites that need the per-installation client (e.g. the
+    //!    webhook handler), rather than via a property getter,
+    //!    so the property-throw shape is unrepresentable.
     use super::*;
     use futures_executor::block_on;
 
