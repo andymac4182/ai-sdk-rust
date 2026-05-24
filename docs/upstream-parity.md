@@ -2649,6 +2649,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   `result.response`, `result.providerMetadata`, `result.toJsonResponse`,
   `options.headers`, and `options.providerOptions` cases one-to-one while
   preserving the Rust AI user-agent suffix behavior.
+- 2026-05-25: `generateObject` schema transformation parity added
+  `generate_object_zod_transform_counterpart_validates_and_transforms_object`
+  and
+  `generate_object_zod_preprocess_counterpart_uses_schema_before_validation_output`
+  in `src/generate_object.rs`, mapping the portable upstream Zod transform and
+  preprocess cases at Rust's schema validator boundary by proving provider
+  response-format JSON Schema remains the pre-transform schema while validated
+  output can be transformed before reaching `result.object`.
 - 2026-05-23: `generateObject` callback panic parity added
   `generate_object_callback_panics_do_not_break_generation` in
   `src/generate_object.rs`, mapping upstream
@@ -5129,7 +5137,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    `result.providerMetadata`, `result.toJsonResponse`, `options.headers`, and
    `options.providerOptions` cases now have named Rust counterparts, including
    `generate_object_result_to_json_response_returns_json_response` for the
-   default status, JSON content type, and compact JSON body. The upstream
+   default status, JSON content type, and compact JSON body. The upstream Zod
+   transform and preprocess cases now have Rust schema-validator counterparts
+   in `generate_object_zod_transform_counterpart_validates_and_transforms_object`
+   and
+   `generate_object_zod_preprocess_counterpart_uses_schema_before_validation_output`,
+   proving pre-transform JSON Schema is sent to the model while transformed
+   validator output reaches `result.object`. The upstream
    `generateObject` direct warnings and warning logger spy cases now have
    named Rust counterparts in `generate_object_result_returns_warnings`,
    `generate_object_calls_log_warnings_with_the_correct_warnings` and

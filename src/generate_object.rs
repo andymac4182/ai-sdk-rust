@@ -2735,6 +2735,72 @@ mod tests {
     }
 
     #[test]
+    fn generate_object_zod_transform_counterpart_validates_and_transforms_object() {
+        let result = content_object_result();
+        let model = StaticObjectModel::new(result);
+        let schema = json_schema(content_json_schema()).with_validator(|value| {
+            let Some(content) = value.get("content").and_then(JsonValue::as_str) else {
+                return ValidationResult::failure("content must be a string");
+            };
+
+            ValidationResult::success(json!({ "content": content.len() }))
+        });
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(schema),
+        ))
+        .expect("transformed object is generated");
+
+        assert_eq!(output.object, json!({ "content": 13 }));
+        let seen_options = model.seen_options();
+        assert_eq!(seen_options.len(), 1);
+        assert_eq!(
+            seen_options[0].response_format,
+            Some(LanguageModelResponseFormat::json().with_schema(content_json_schema()))
+        );
+    }
+
+    #[test]
+    fn generate_object_zod_preprocess_counterpart_uses_schema_before_validation_output() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                r#"{ "content": 123 }"#,
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+        let schema = json_schema(content_json_schema()).with_validator(|value| {
+            let Some(content) = value.get("content") else {
+                return ValidationResult::failure("content is required");
+            };
+            let content = match content {
+                JsonValue::Number(number) => number.to_string(),
+                JsonValue::String(text) => text.clone(),
+                _ => return ValidationResult::failure("content must be a string or number"),
+            };
+
+            ValidationResult::success(json!({ "content": content }))
+        });
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(schema),
+        ))
+        .expect("preprocessed object is generated");
+
+        assert_eq!(output.object, json!({ "content": "123" }));
+        let seen_options = model.seen_options();
+        assert_eq!(seen_options.len(), 1);
+        assert_eq!(
+            seen_options[0].response_format,
+            Some(LanguageModelResponseFormat::json().with_schema(content_json_schema()))
+        );
+    }
+
+    #[test]
     fn generate_object_lifecycle_events_use_upstream_json_shapes() {
         let start = GenerateObjectStartEvent {
             call_id: "aiobj_call".to_string(),
