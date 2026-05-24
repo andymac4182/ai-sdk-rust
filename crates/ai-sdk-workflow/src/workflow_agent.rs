@@ -1271,6 +1271,7 @@ fn provider_executed_tool_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -1288,7 +1289,8 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        DoStreamStepOutput, ScriptedStreamTextStepExecutor, WorkflowPrepareStepResult,
+        DoStreamStepOptions, DoStreamStepOutput, ScriptedStreamTextStepCall,
+        ScriptedStreamTextStepExecutor, SerializableToolSet, WorkflowPrepareStepResult,
         do_stream_step_from_parts,
     };
 
@@ -1382,6 +1384,48 @@ mod tests {
 
     fn stop_step() -> DoStreamStepOutput {
         output_from_parts([finish(FinishReason::Stop)], 1)
+    }
+
+    #[derive(Debug)]
+    struct RecordingStreamTextStepExecutor {
+        steps: VecDeque<DoStreamStepOutput>,
+        calls: Arc<Mutex<Vec<ScriptedStreamTextStepCall>>>,
+    }
+
+    impl RecordingStreamTextStepExecutor {
+        fn new(
+            steps: impl IntoIterator<Item = DoStreamStepOutput>,
+        ) -> (Self, Arc<Mutex<Vec<ScriptedStreamTextStepCall>>>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    steps: steps.into_iter().collect(),
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl WorkflowStreamTextStepExecutor for RecordingStreamTextStepExecutor {
+        fn do_stream_step(
+            &mut self,
+            prompt: &[LanguageModelMessage],
+            tools: &SerializableToolSet,
+            options: &DoStreamStepOptions,
+        ) -> Result<DoStreamStepOutput, WorkflowStreamTextError> {
+            self.calls
+                .lock()
+                .expect("calls lock succeeds")
+                .push(ScriptedStreamTextStepCall {
+                    prompt: prompt.to_vec(),
+                    tools: tools.clone(),
+                    options: options.clone(),
+                });
+            self.steps
+                .pop_front()
+                .ok_or(WorkflowStreamTextError::MissingScriptedStep)
+        }
     }
 
     fn executable_test_tool() -> Tool {
@@ -2663,6 +2707,133 @@ mod tests {
             tool_result.output,
             LanguageModelToolResultOutput::error_text("Invalid input for tool testTool")
         );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_generation_settings_from_constructor_to_stream_text_iterator()
+     {
+        let generation_settings = WorkflowGenerationSettings {
+            temperature: Some(0.7),
+            max_output_tokens: Some(1000),
+            top_p: Some(0.9),
+            seed: Some(42),
+            ..WorkflowGenerationSettings::default()
+        };
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_generation_settings(generation_settings.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .generation_settings,
+            generation_settings
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_allow_stream_options_to_override_constructor_generation_settings()
+     {
+        let constructor_settings = WorkflowGenerationSettings {
+            temperature: Some(0.7),
+            ..WorkflowGenerationSettings::default()
+        };
+        let stream_settings = WorkflowGenerationSettings {
+            temperature: Some(0.3),
+            max_output_tokens: Some(500),
+            ..WorkflowGenerationSettings::default()
+        };
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_generation_settings(constructor_settings),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_generation_settings(stream_settings.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .generation_settings,
+            stream_settings
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator() {
+        let tool_choice = json!("required");
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tool_choice(tool_choice.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .tool_choice,
+            Some(tool_choice)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice() {
+        let agent =
+            WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool_choice(json!("auto")));
+        let stream_tool_choice = json!("none");
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_tool_choice(stream_tool_choice.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .tool_choice,
+            Some(stream_tool_choice)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified() {
+        let tools = [
+            Tool::new("tool1", object_schema()),
+            Tool::new("tool2", object_schema()),
+            Tool::new("tool3", object_schema()),
+        ];
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tools(tools));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_active_tools(["tool1".to_string(), "tool3".to_string()]),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls[0].tools.len(), 2);
+        assert!(calls[0].tools.contains_key("tool1"));
+        assert!(calls[0].tools.contains_key("tool3"));
+        assert!(!calls[0].tools.contains_key("tool2"));
     }
 
     #[test]
