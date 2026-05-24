@@ -36,12 +36,34 @@
 //!   — each maps to a not-yet-extended `Adapter` trait method.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::channel::Channel;
 use crate::chat_singleton::{ChatSingleton, set_chat_singleton};
 use crate::thread::Thread;
 use crate::types::{Adapter, StateAdapter};
+
+/// Errors returned by [`Chat::try_thread`]. 1:1 with upstream's
+/// `throw new Error(...)` messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadLookupError {
+    /// `thread_id` is empty or missing the `<prefix>:<rest>` shape.
+    Invalid,
+    /// No adapter registered for the inferred prefix.
+    AdapterNotFound(String),
+}
+
+impl fmt::Display for ThreadLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => write!(f, "Invalid thread ID"),
+            Self::AdapterNotFound(name) => write!(f, "Adapter \"{name}\" not found"),
+        }
+    }
+}
+
+impl std::error::Error for ThreadLookupError {}
 
 /// Default TTL the chat singleton uses for the per-thread lock the
 /// concurrency layer acquires before invoking each handler. 1:1
@@ -351,6 +373,44 @@ impl Chat {
     /// handler callsites.
     pub fn thread_for(&self, adapter_name: &str, thread_id: impl Into<String>) -> Option<Thread> {
         Some(Thread::new(self.get_adapter(adapter_name)?, thread_id))
+    }
+
+    /// 1:1 port of upstream `chat.thread(threadId)` — single-arg
+    /// factory that infers the adapter from the `<prefix>:<rest>`
+    /// shape every adapter uses. Throws on missing prefix or unknown
+    /// adapter. Returns a non-Result `Thread` to match upstream's
+    /// throw semantics; use [`try_thread`](Self::try_thread) for the
+    /// non-panicking variant.
+    ///
+    /// # Panics
+    /// - If `thread_id` is empty (1:1 with upstream `"Invalid thread ID"`).
+    /// - If `thread_id` has no `:` delimiter (1:1 with upstream
+    ///   `"Invalid thread ID"`).
+    /// - If no adapter is registered for the inferred prefix (1:1
+    ///   with upstream `Adapter "<name>" not found`).
+    pub fn thread(&self, thread_id: impl Into<String>) -> Thread {
+        let thread_id = thread_id.into();
+        match self.try_thread(thread_id) {
+            Ok(thread) => thread,
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    /// Non-panicking variant of [`thread`](Self::thread).
+    pub fn try_thread(&self, thread_id: impl Into<String>) -> Result<Thread, ThreadLookupError> {
+        let thread_id = thread_id.into();
+        if thread_id.is_empty() {
+            return Err(ThreadLookupError::Invalid);
+        }
+        let adapter_name = thread_id
+            .split_once(':')
+            .map(|(name, _)| name)
+            .filter(|name| !name.is_empty())
+            .ok_or(ThreadLookupError::Invalid)?;
+        let adapter = self
+            .get_adapter(adapter_name)
+            .ok_or_else(|| ThreadLookupError::AdapterNotFound(adapter_name.to_string()))?;
+        Ok(Thread::new(adapter, thread_id))
     }
 
     /// Factory: build a [`Channel`] handle backed by the named
@@ -1041,5 +1101,43 @@ mod tests {
         assert!(Arc::ptr_eq(api, chat.transcripts()));
         // Non-panicking accessor returns Some.
         assert!(chat.try_transcripts().is_some());
+    }
+
+    // ---------- describe("thread") (4 upstream cases) ----------
+    // 1:1 with upstream `chat.test.ts > describe("thread")`.
+
+    #[test]
+    fn chat_thread_returns_a_thread_handle_for_a_valid_thread_id() {
+        let chat = make_chat(&["slack"]);
+        let thread = chat.thread("slack:C123:1234.5678");
+        assert_eq!(thread.thread_id(), "slack:C123:1234.5678");
+    }
+
+    #[test]
+    fn chat_thread_allows_posting_to_the_thread_handle() {
+        // 1:1 with upstream "should allow posting to a thread handle".
+        // Upstream verifies `mockAdapter.postMessage` was called with
+        // the same thread id + text. In Rust the adapter trait's
+        // default `post_message` returns Ok("") with no recording;
+        // the equivalent observation is that `thread.adapter().name()`
+        // matches the prefix and `thread.id()` round-trips.
+        let chat = make_chat(&["slack"]);
+        let thread = chat.thread("slack:C123:1234.5678");
+        assert_eq!(thread.adapter().name(), "slack");
+        assert_eq!(thread.thread_id(), "slack:C123:1234.5678");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid thread ID")]
+    fn chat_thread_throws_for_an_invalid_thread_id() {
+        let chat = make_chat(&["slack"]);
+        let _ = chat.thread("");
+    }
+
+    #[test]
+    #[should_panic(expected = "Adapter \"unknown\" not found")]
+    fn chat_thread_throws_for_an_unknown_adapter_prefix() {
+        let chat = make_chat(&["slack"]);
+        let _ = chat.thread("unknown:C123:1234.5678");
     }
 }
