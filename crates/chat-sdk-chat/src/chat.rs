@@ -445,6 +445,61 @@ impl Chat {
         }
     }
 
+    /// 1:1 port (early-exit subset) of upstream's
+    /// `Chat.handleIncomingMessage(adapter, threadId, message)`.
+    /// This slice ships only the two upstream early-exit paths:
+    ///
+    /// 1. **Self-skip**: if `message.author.is_me`, return early
+    ///    without recording state or dispatching handlers.
+    /// 2. **Dedup**: if the same `(adapter, message.id)` pair has
+    ///    already been processed within [`DEDUPE_TTL_MS`], return
+    ///    early.
+    ///
+    /// The full upstream method also threads through lock
+    /// acquisition, per-thread-history persistence, and the
+    /// concurrency strategy dispatcher — those land in follow-up
+    /// slices alongside the event-handler trait surface
+    /// (`on_new_mention`, `on_subscribed_message`, etc.).
+    ///
+    /// Returns `Ok(true)` when the message was newly dispatched
+    /// (passed both early-exit gates), `Ok(false)` when an
+    /// early-exit applied. Returns `Err` only when the state
+    /// adapter's `set_if_not_exists` itself errors — *not* for
+    /// downstream dispatcher errors (those land in follow-ups).
+    pub async fn handle_incoming_message(
+        &self,
+        adapter: &dyn Adapter,
+        _thread_id: &str,
+        message: &crate::message::Message,
+    ) -> crate::types::StateResult<bool> {
+        // 1:1 with upstream "Skip messages from self (bot's own
+        // messages)" — `if (message.author.isMe) return`.
+        if message.author.is_me {
+            return Ok(false);
+        }
+
+        // 1:1 with upstream "Deduplicate messages atomically" —
+        // `dedupe:<adapter>:<message.id>` key with `DEDUPE_TTL_MS`
+        // TTL via setIfNotExists.
+        let dedupe_key = format!("dedupe:{}:{}", adapter.name(), message.id);
+        let is_first = self
+            .state
+            .set_if_not_exists(
+                &dedupe_key,
+                serde_json::Value::Bool(true),
+                Some(DEDUPE_TTL_MS),
+            )
+            .await?;
+        if !is_first {
+            return Ok(false);
+        }
+
+        // Full dispatcher (lock + concurrency + handler dispatch)
+        // is deferred. Returning `Ok(true)` signals the message
+        // *would* have been dispatched in the upstream code.
+        Ok(true)
+    }
+
     /// 1:1 port of upstream `Chat.openDM(user)`. Infers the adapter
     /// from `user_id` (Slack `U.../W...`, GChat `users/...`, Teams
     /// `29:...`, Linear UUID v4, or numeric for Discord/Telegram/
@@ -1485,5 +1540,138 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "slack:DU123456:");
         assert_eq!(calls[0].1, "Hello via DM!");
+    }
+
+    // ---------- describe("Chat") > handleIncomingMessage early-exit ----------
+    // Slice 347 ports the 2 portable early-exit upstream cases:
+    // "should skip messages from self" + "should skip duplicate
+    // messages with the same id" (the latter is in
+    // `describe("message deduplication")`). The full
+    // handler-dispatch cases are deferred until the chat-sdk-chat
+    // event-handler trait surface lands (on_new_mention etc.).
+
+    use crate::message::Message;
+    use crate::types::{Author, BotStatus, MessageMetadata};
+
+    fn dispatched_message(id: &str, is_me: bool) -> Message {
+        use crate::markdown::root;
+        Message::new(
+            id,
+            "slack:C123:1234.5678",
+            "hello",
+            root(vec![]),
+            serde_json::json!({}),
+            Author {
+                user_id: "U_AUTHOR".to_string(),
+                user_name: "author".to_string(),
+                full_name: "Author".to_string(),
+                is_bot: BotStatus::Known(false),
+                is_me,
+            },
+            MessageMetadata {
+                date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+                edited: false,
+                edited_at: None,
+            },
+            Vec::new(),
+        )
+    }
+
+    /// State adapter backed by an in-process HashMap so the
+    /// dedupe `set_if_not_exists` round-trips. Uses the
+    /// default trait `set_if_not_exists` impl (which is
+    /// `get` + `set` — sufficient for dedup semantics in tests).
+    #[derive(Debug, Default)]
+    struct InMemoryState {
+        cache: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for InMemoryState {
+        async fn get(&self, key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(self.cache.lock().unwrap().get(key).cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            self.cache.lock().unwrap().insert(key.to_string(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> StateResult<()> {
+            self.cache.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn chat_with_in_memory_state() -> (Chat, Arc<dyn Adapter>) {
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        (chat, adapter)
+    }
+
+    #[test]
+    fn chat_handle_incoming_message_should_skip_messages_from_self() {
+        let (chat, adapter) = chat_with_in_memory_state();
+        let msg = dispatched_message("msg-1", true);
+        let dispatched =
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+                .unwrap();
+        // is_me=true → early-exit, returns false (not dispatched).
+        assert!(!dispatched);
+    }
+
+    #[test]
+    fn chat_handle_incoming_message_should_skip_duplicate_messages_with_the_same_id() {
+        let (chat, adapter) = chat_with_in_memory_state();
+        let msg = dispatched_message("msg-1", false);
+        // First call: passes both gates, returns true.
+        let first =
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+                .unwrap();
+        assert!(first);
+        // Second call (same id): dedupe gate trips, returns false.
+        let second =
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+                .unwrap();
+        assert!(!second);
+    }
+
+    #[test]
+    fn chat_handle_incoming_message_dispatches_new_messages() {
+        // Additive: verifies the happy path returns true so the
+        // early-exit semantics don't accidentally short-circuit
+        // every message.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let msg = dispatched_message("new-msg", false);
+        let dispatched =
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+                .unwrap();
+        assert!(dispatched);
     }
 }
