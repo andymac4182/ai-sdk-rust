@@ -2559,6 +2559,15 @@ mod tests {
             }
         }
 
+        fn with_send_results(
+            responses: impl IntoIterator<Item = Result<Vec<UiMessageChunk>, ChatTransportError>>,
+        ) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                captured_sends: Mutex::new(Vec::new()),
+            }
+        }
+
         fn with_error(error: ChatTransportError) -> Self {
             Self {
                 responses: Mutex::new(VecDeque::from([Err(error)])),
@@ -3116,6 +3125,63 @@ mod tests {
     }
 
     #[test]
+    fn chat_should_submit_message_when_a_tool_error_result_is_added() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-0",
+                    "test-tool",
+                    json!({ "testArg": "test-value" }),
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![UiMessageChunk::finish()],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_error("tool-call-0", "test-error")
+            .expect("tool error is added");
+        chat.submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect("assistant message submits after tool error");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        let follow_up = &captured_sends[1];
+        assert_eq!(follow_up.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(follow_up.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&follow_up.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-error",
+                            "input": { "testArg": "test-value" },
+                            "errorText": "test-error"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+    }
+
+    #[test]
     fn chat_should_add_dynamic_tool_output_to_the_latest_assistant_message() {
         let transport = RecordingChatTransport::new([
             UiMessageChunk::start_with_message_id("assistant-1"),
@@ -3141,6 +3207,176 @@ mod tests {
         chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
             .expect("dynamic tool output is added");
 
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_dynamic_tool_output_is_added() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "test-tool".to_string(),
+                    input: json!({ "testArg": "test-value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "test-delta"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish_with_reason(FinishReason::Stop),
+            ],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
+            .expect("dynamic tool output is added");
+        chat.submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect("assistant message submits after dynamic tool output");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&captured_sends[1].messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        },
+                        { "type": "step-start" },
+                        { "type": "text", "text": "test-delta", "state": "done" }
+                    ]
+                }
+            ])
+        );
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            event.message.as_ref().map(|message| message.parts.len()),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn chat_should_keep_tool_output_state_when_follow_up_send_fails() {
+        let transport = RecordingChatTransport::with_send_results([
+            Ok(vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "test-tool".to_string(),
+                    input: json!({ "testArg": "test-value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ]),
+            Err(ChatTransportError::ResponseStatus {
+                status: 500,
+                body: "Internal Server Error".to_string(),
+            }),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
+            .expect("dynamic tool output is added");
+
+        let error = chat
+            .submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect_err("follow-up transport failure is surfaced");
+
+        assert_eq!(
+            error.to_string(),
+            "chat transport returned status 500: Internal Server Error"
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(
+            chat.error(),
+            Some("chat transport returned status 500: Internal Server Error")
+        );
         assert_eq!(
             serde_json::to_value(chat.messages()).expect("history serializes"),
             json!([
