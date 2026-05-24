@@ -491,9 +491,13 @@ impl Adapter for DiscordAdapter {
         Ok(())
     }
 
-    /// Add a reaction via PUT `/channels/<channel_id>/messages/
+    /// Add a reaction via PUT `/channels/<target>/messages/
     /// <message_id>/reactions/<url-encoded-emoji>/@me`. 1:1 with
-    /// upstream's `adapter.addReaction`. The emoji is URL-encoded
+    /// upstream's `adapter.addReaction`. `target` is the sub-thread
+    /// id when the thread id encodes one
+    /// (`discord:<guild>:<channel>:<sub-thread>`), otherwise the
+    /// channel id — matches upstream's `targetChannelId =
+    /// discordThreadId || channelId`. The emoji is URL-encoded
     /// (Discord accepts either raw glyphs or `<name:id>` for
     /// custom emoji).
     async fn add_reaction(
@@ -504,17 +508,13 @@ impl Adapter for DiscordAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<()> {
         use chat_sdk_chat::types::AdapterError;
 
-        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
-            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
-        })?;
-
-        let emoji_encoded = url_encode_emoji(emoji);
-        let url = format!(
-            "{}/{}/reactions/{}/@me",
-            self.channel_messages_url(&decoded.channel_id),
-            message_id,
-            emoji_encoded
-        );
+        let url = self
+            .reaction_url(thread_id, message_id, emoji)
+            .ok_or_else(|| {
+                AdapterError::InvalidPayload(format!(
+                    "thread_id {thread_id:?} is not Discord-encoded"
+                ))
+            })?;
 
         let response = self
             .http
@@ -1223,6 +1223,57 @@ mod tests {
         });
         let url = adapter
             .reaction_url("discord:guild1:channel456:thread789", "msg001", "fire")
+            .unwrap();
+        assert!(
+            url.contains("/channels/thread789/messages/msg001/reactions/"),
+            "URL was {url}"
+        );
+    }
+
+    // ---------- describe("addReaction") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("addReaction")`.
+    // Both `add_reaction` and `remove_reaction` route through the
+    // same `reaction_url` helper, so the URL-shape tests below
+    // cover the addReaction describe block's PUT path too —
+    // these tests assert the same target-channel routing as
+    // slice-330's remove_reaction tests.
+
+    #[test]
+    fn discord_add_reaction_url_uses_channel_id_for_top_level_thread() {
+        // 1:1 with upstream "adds a reaction to a message" — channel
+        // id is the URL target when no sub-thread is encoded.
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .reaction_url("discord:guild1:channel456", "msg001", "thumbs_up")
+            .unwrap();
+        assert!(
+            url.contains("/channels/channel456/messages/msg001/reactions/"),
+            "URL was {url}"
+        );
+        assert!(url.ends_with("/@me"), "URL was {url}");
+    }
+
+    #[test]
+    fn discord_add_reaction_url_routes_through_sub_thread_when_encoded() {
+        // 1:1 with upstream "adds a reaction in a thread" — sub-thread
+        // id is the URL target when encoded.
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .reaction_url("discord:guild1:channel456:thread789", "msg001", "heart")
             .unwrap();
         assert!(
             url.contains("/channels/thread789/messages/msg001/reactions/"),
