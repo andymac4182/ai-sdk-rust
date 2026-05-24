@@ -1312,6 +1312,41 @@ mod tests {
         );
     }
 
+    // ---------- describe("posts, edits, deletes, and sends typing events") ----------
+    // 1:1 with upstream `index.test.ts` URL-shape assertions.
+    // Upstream's single combined `it` exercises 5 endpoints (sendMessage,
+    // editMessageText, deleteMessage, sendChatAction, setMessageReaction)
+    // via the mockFetch spy. The Rust port asserts the URL shape via
+    // the `method_url` helper for each (the body-shape assertions stay
+    // covered by the existing per-method tests).
+
+    #[test]
+    fn adapter_method_url_produces_telegram_endpoints_for_all_runtime_methods() {
+        let adapter = TelegramAdapter::new(
+            TelegramAdapterOptions::new("BOTTOK").with_base_url("https://example.test"),
+        );
+        assert_eq!(
+            adapter.method_url("sendMessage"),
+            "https://example.test/botBOTTOK/sendMessage"
+        );
+        assert_eq!(
+            adapter.method_url("editMessageText"),
+            "https://example.test/botBOTTOK/editMessageText"
+        );
+        assert_eq!(
+            adapter.method_url("deleteMessage"),
+            "https://example.test/botBOTTOK/deleteMessage"
+        );
+        assert_eq!(
+            adapter.method_url("sendChatAction"),
+            "https://example.test/botBOTTOK/sendChatAction"
+        );
+        assert_eq!(
+            adapter.method_url("setMessageReaction"),
+            "https://example.test/botBOTTOK/setMessageReaction"
+        );
+    }
+
     #[test]
     fn adapter_token_and_base_url_accessors() {
         let adapter = TelegramAdapter::new(
