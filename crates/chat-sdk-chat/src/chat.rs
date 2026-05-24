@@ -121,7 +121,41 @@ pub fn is_numeric_user_id(user_id: &str) -> bool {
 pub struct Chat {
     adapters: Arc<HashMap<String, Arc<dyn Adapter>>>,
     state: Arc<dyn StateAdapter>,
+    /// Optional transcripts API. `Some` iff [`ChatOptions::transcripts`]
+    /// was set at construction with a matching `identity` resolver.
+    transcripts: Option<Arc<crate::transcripts::TranscriptsApiImpl>>,
 }
+
+/// Identity resolver. 1:1 (in shape) with upstream `identity?:
+/// (message: Message) => Promise<string>`. Adopters that don't need
+/// transcripts can leave [`ChatOptions::identity`] as `None`.
+#[async_trait::async_trait]
+pub trait IdentityResolver: Send + Sync + std::fmt::Debug {
+    async fn user_key_for(&self, message: &crate::message::Message) -> Option<String>;
+}
+
+/// Errors that [`Chat::try_new`] can return at construction. 1:1
+/// with upstream's two `throw` paths in the Chat constructor.
+#[derive(Debug)]
+pub enum ChatBuildError {
+    /// `transcripts` was supplied but `identity` was not. Mirrors
+    /// upstream's `throw new Error("Chat: ChatConfig.identity is
+    /// required when transcripts is configured")`.
+    TranscriptsRequiresIdentity,
+}
+
+impl std::fmt::Display for ChatBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TranscriptsRequiresIdentity => write!(
+                f,
+                "Chat: ChatConfig.identity is required when transcripts is configured"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ChatBuildError {}
 
 impl std::fmt::Debug for Chat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -132,16 +166,36 @@ impl std::fmt::Debug for Chat {
     }
 }
 
-/// Options for [`Chat::new`]. 1:1 port of upstream
-/// `interface ChatOptions { state; adapters? }`.
+/// Options for [`Chat::new`] / [`Chat::try_new`]. 1:1 port of
+/// upstream `interface ChatOptions { state; adapters?;
+/// transcripts?; identity? }`.
 #[derive(Clone)]
 pub struct ChatOptions {
     /// State backend. Required (matches upstream's required `state`).
     pub state: Arc<dyn StateAdapter>,
-    /// Initial adapter registrations (name -> adapter). Optional;
-    /// adapters can also be added later via
-    /// [`Chat::register_adapter`].
+    /// Initial adapter registrations (name -> adapter).
     pub adapters: Vec<Arc<dyn Adapter>>,
+    /// Optional transcripts configuration. When `Some`, [`Self::identity`]
+    /// must also be `Some` — [`Chat::try_new`] returns
+    /// [`ChatBuildError::TranscriptsRequiresIdentity`] otherwise
+    /// (matches upstream's construction-time throw).
+    pub transcripts: Option<crate::types::TranscriptsConfig>,
+    /// Optional identity resolver used to populate `message.userKey`
+    /// before handlers run. Required if [`Self::transcripts`] is set.
+    pub identity: Option<Arc<dyn IdentityResolver>>,
+}
+
+impl Default for ChatOptions {
+    fn default() -> Self {
+        // Default ChatOptions is not usable on its own — it requires
+        // a state. Callers must always populate `state`.
+        Self {
+            state: Arc::new(NullStateAdapter),
+            adapters: Vec::new(),
+            transcripts: None,
+            identity: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for ChatOptions {
@@ -156,25 +210,99 @@ impl std::fmt::Debug for ChatOptions {
                     .map(|a| a.name().to_string())
                     .collect::<Vec<_>>(),
             )
+            .field("transcripts_configured", &self.transcripts.is_some())
+            .field("identity_configured", &self.identity.is_some())
             .finish()
     }
 }
 
+/// Default unusable state adapter for [`ChatOptions::default`]. Every
+/// method returns an empty/no-op result. Callers must override
+/// [`ChatOptions::state`] before passing to [`Chat::try_new`].
+#[derive(Debug)]
+struct NullStateAdapter;
+
+#[async_trait::async_trait]
+impl StateAdapter for NullStateAdapter {
+    async fn get(&self, _key: &str) -> crate::types::StateResult<Option<serde_json::Value>> {
+        Ok(None)
+    }
+    async fn set(
+        &self,
+        _key: &str,
+        _value: serde_json::Value,
+        _ttl_ms: Option<u64>,
+    ) -> crate::types::StateResult<()> {
+        Ok(())
+    }
+    async fn delete(&self, _key: &str) -> crate::types::StateResult<()> {
+        Ok(())
+    }
+    async fn append_to_list(
+        &self,
+        _key: &str,
+        _value: serde_json::Value,
+        _max_length: Option<usize>,
+        _ttl_ms: Option<u64>,
+    ) -> crate::types::StateResult<()> {
+        Ok(())
+    }
+    async fn get_list(
+        &self,
+        _key: &str,
+        _limit: Option<usize>,
+    ) -> crate::types::StateResult<Vec<serde_json::Value>> {
+        Ok(Vec::new())
+    }
+}
+
 impl Chat {
-    /// 1:1 port of upstream `new Chat({ state, adapters? })`.
-    /// Adapters are keyed by their `Adapter::name()` return value;
-    /// duplicates from the supplied list silently overwrite earlier
-    /// entries (last-write-wins), matching upstream's
-    /// `adapters.forEach(a => map.set(a.name, a))`.
+    /// 1:1 port of upstream `new Chat({ state, adapters? })`. Panics
+    /// if `options.transcripts` is set without `options.identity`
+    /// (matches upstream's construction-time throw); use
+    /// [`Chat::try_new`] when callers need a non-panicking fallback.
     pub fn new(options: ChatOptions) -> Self {
-        let mut map: HashMap<String, Arc<dyn Adapter>> = HashMap::new();
-        for adapter in options.adapters {
-            map.insert(adapter.name().to_string(), adapter);
+        Self::try_new(options).expect("Chat::new: invalid ChatOptions")
+    }
+
+    /// Non-panicking variant of [`Chat::new`]. Returns
+    /// [`ChatBuildError`] for any construction-time validation
+    /// failure (currently: transcripts-without-identity).
+    pub fn try_new(options: ChatOptions) -> Result<Self, ChatBuildError> {
+        if options.transcripts.is_some() && options.identity.is_none() {
+            return Err(ChatBuildError::TranscriptsRequiresIdentity);
         }
-        Self {
+        let mut map: HashMap<String, Arc<dyn Adapter>> = HashMap::new();
+        for adapter in &options.adapters {
+            map.insert(adapter.name().to_string(), adapter.clone());
+        }
+        let transcripts = options.transcripts.map(|cfg| {
+            Arc::new(crate::transcripts::TranscriptsApiImpl::new(
+                options.state.clone(),
+                cfg,
+            ))
+        });
+        Ok(Self {
             adapters: Arc::new(map),
             state: options.state,
-        }
+            transcripts,
+        })
+    }
+
+    /// 1:1 port of upstream `chat.transcripts` getter. Panics when
+    /// transcripts were not configured at construction (matches
+    /// upstream's `throw new Error("chat.transcripts is not
+    /// configured")`).
+    pub fn transcripts(&self) -> &Arc<crate::transcripts::TranscriptsApiImpl> {
+        self.transcripts
+            .as_ref()
+            .expect("chat.transcripts is not configured")
+    }
+
+    /// Non-panicking accessor for [`Self::transcripts`]. Returns
+    /// `None` when transcripts weren't configured.
+    pub fn try_transcripts(&self) -> Option<&Arc<crate::transcripts::TranscriptsApiImpl>> {
+        self.transcripts.as_ref()
     }
 
     /// Register a new adapter by name. 1:1 port of upstream
@@ -374,7 +502,11 @@ mod tests {
                 }) as Arc<dyn Adapter>
             })
             .collect();
-        Chat::new(ChatOptions { state, adapters })
+        Chat::new(ChatOptions {
+            state,
+            adapters,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -678,6 +810,7 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             adapters,
             state: state.clone(),
+            ..Default::default()
         });
         (chat, adapter_handles, state)
     }
@@ -716,6 +849,7 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             adapters: vec![Arc::new(BareAdapter) as Arc<dyn Adapter>],
             state: state.clone(),
+            ..Default::default()
         });
         block_on(chat.shutdown());
         assert_eq!(state.disconnect_calls.load(AtomicOrdering::SeqCst), 1);
@@ -814,9 +948,98 @@ mod tests {
         let chat = Chat::new(ChatOptions {
             adapters: vec![adapter.clone() as Arc<dyn Adapter>],
             state: state.clone(),
+            ..Default::default()
         });
         block_on(chat.initialize());
         assert_eq!(adapter.initialize_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(state.connect_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    // ---------- transcripts-wiring (5 upstream cases) ----------
+    // 1:1 with upstream `transcripts-wiring.test.ts > describe(
+    // "Chat — Transcripts API wiring")`. Covers the construction-
+    // time validation + `chat.transcripts` getter. Dispatch-hook
+    // tests (populate-userKey-from-resolver) depend on the
+    // handleIncomingMessage path and are deferred.
+
+    use crate::types::TranscriptsConfig;
+
+    #[derive(Debug)]
+    struct StubIdentity;
+
+    #[async_trait::async_trait]
+    impl IdentityResolver for StubIdentity {
+        async fn user_key_for(&self, _msg: &crate::message::Message) -> Option<String> {
+            Some("u1".to_string())
+        }
+    }
+
+    fn dummy_state() -> Arc<dyn StateAdapter> {
+        Arc::new(NullStateAdapter) as Arc<dyn StateAdapter>
+    }
+
+    #[test]
+    fn transcripts_wiring_throws_at_construction_when_transcripts_set_without_identity() {
+        let err = Chat::try_new(ChatOptions {
+            state: dummy_state(),
+            adapters: Vec::new(),
+            transcripts: Some(TranscriptsConfig::default()),
+            identity: None,
+        })
+        .expect_err("expected construction-time failure");
+        assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
+    }
+
+    #[test]
+    fn transcripts_wiring_does_not_throw_when_neither_transcripts_nor_identity_is_set() {
+        let result = Chat::try_new(ChatOptions {
+            state: dummy_state(),
+            adapters: Vec::new(),
+            transcripts: None,
+            identity: None,
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn transcripts_wiring_does_not_throw_when_identity_is_set_without_transcripts() {
+        let result = Chat::try_new(ChatOptions {
+            state: dummy_state(),
+            adapters: Vec::new(),
+            transcripts: None,
+            identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "chat.transcripts is not configured")]
+    fn transcripts_wiring_chat_transcripts_getter_panics_when_transcripts_was_not_configured() {
+        let chat = Chat::try_new(ChatOptions {
+            state: dummy_state(),
+            adapters: Vec::new(),
+            transcripts: None,
+            identity: None,
+        })
+        .unwrap();
+        // Panics — matches upstream's `throw new Error(...)` getter.
+        let _ = chat.transcripts();
+    }
+
+    #[test]
+    fn transcripts_wiring_chat_transcripts_returns_the_api_instance_when_configured() {
+        let chat = Chat::try_new(ChatOptions {
+            state: dummy_state(),
+            adapters: Vec::new(),
+            transcripts: Some(TranscriptsConfig::default()),
+            identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
+        })
+        .unwrap();
+        // Returns a real TranscriptsApiImpl handle.
+        let api = chat.transcripts();
+        // Same handle on repeat calls (Arc-shared).
+        assert!(Arc::ptr_eq(api, chat.transcripts()));
+        // Non-panicking accessor returns Some.
+        assert!(chat.try_transcripts().is_some());
     }
 }
