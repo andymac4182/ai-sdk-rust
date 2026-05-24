@@ -457,6 +457,17 @@ impl<T: ChatTransport> Chat<T> {
         )])
     }
 
+    pub fn add_tool_error(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        error_text: impl Into<String>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::tool_output_error(
+            tool_call_id,
+            error_text,
+        )])
+    }
+
     fn generate_message_id(&mut self) -> String {
         self.next_message_index += 1;
         format!("msg-{}", self.next_message_index)
@@ -2868,6 +2879,53 @@ mod tests {
                             "state": "output-available",
                             "input": { "testArg": "test-value" },
                             "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_add_tool_error_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "tool-call-0",
+                "test-tool",
+                json!({ "testArg": "test-value" }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        chat.add_tool_error("tool-call-0", "test-error")
+            .expect("tool error is added");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-error",
+                            "input": { "testArg": "test-value" },
+                            "errorText": "test-error"
                         }
                     ]
                 }

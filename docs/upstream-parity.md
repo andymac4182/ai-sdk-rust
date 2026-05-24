@@ -2291,10 +2291,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   exposing abort status, reason, and the finish payload's `isAbort` flag while
   preserving the partial assistant state.
 - 2026-05-25: `packages/ai` `Chat.addToolOutput` state parity added
-  `chat_should_add_tool_output_to_the_latest_assistant_message`, covering the
-  portable upstream `ui/chat.test.ts` tool-output submission UI state by
-  mutating the matching latest assistant tool part to `output-available` while
-  preserving its input and tool-call metadata.
+  `chat_should_add_tool_output_to_the_latest_assistant_message` and
+  `chat_should_add_tool_error_to_the_latest_assistant_message`, covering the
+  portable upstream `ui/chat.test.ts` tool-output and tool-error submission UI
+  state by mutating the matching latest assistant tool part to
+  `output-available` or `output-error` while preserving its input and tool-call
+  metadata.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
