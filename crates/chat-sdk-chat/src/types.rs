@@ -938,6 +938,16 @@ pub struct ScheduledMessage {
     pub raw: serde_json::Value,
 }
 
+/// Result of opening a modal via [`Adapter::open_modal`]. 1:1 with
+/// upstream `{ viewId: string }` return shape. Adapters that don't
+/// expose a stable view id can return an empty string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenModalResult {
+    /// Platform-specific view id (e.g. Slack `V01ABC`).
+    #[serde(rename = "viewId")]
+    pub view_id: String,
+}
+
 /// Result of posting an ephemeral message. 1:1 port of upstream
 /// `interface EphemeralMessage`. Ephemeral messages are visible only to a
 /// specific user and typically cannot be edited or deleted (platform-dependent).
@@ -1560,6 +1570,29 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         _post_at_unix_ms: u64,
     ) -> AdapterResult<ScheduledMessage> {
         Err(AdapterError::Unsupported("schedule_message"))
+    }
+
+    /// Optional native modal-open dispatch. 1:1 with upstream
+    /// optional `openModal?(triggerId, modal, contextId):
+    /// Promise<{ viewId: string } | undefined>`. Opens a modal
+    /// view in response to an interaction-trigger (button click,
+    /// slash command, etc.). The `context_id` is a dispatcher-
+    /// generated UUID that the adapter persists on the modal so
+    /// the eventual `viewSubmission` event can look up the
+    /// originating thread/channel context.
+    ///
+    /// Default returns `Err(Unsupported("open_modal"))` so the
+    /// [`crate::chat::Chat`] orchestration layer can detect the
+    /// missing-method case and surface upstream's
+    /// `"<adapter> does not support modals"` warning + return
+    /// `None` to the caller.
+    async fn open_modal(
+        &self,
+        _trigger_id: &str,
+        _modal: &crate::modals::ModalElement,
+        _context_id: &str,
+    ) -> AdapterResult<OpenModalResult> {
+        Err(AdapterError::Unsupported("open_modal"))
     }
 
     /// Optional cancellation hook for previously-scheduled messages.
@@ -3414,5 +3447,92 @@ mod tests {
         };
         let extended = block_on(state.extend_lock(&dummy, 1000)).unwrap();
         assert!(!extended);
+    }
+
+    // ---------- Adapter::open_modal — slice 428 ----------
+    //
+    // Phase A of the deferred-adapter-method 3-slice cadence for
+    // the upstream openModal flow. Verifies the trait method
+    // default returns Err(Unsupported("open_modal")) and a custom
+    // override returns the typed OpenModalResult.
+
+    #[derive(Debug, Default)]
+    struct BareAdapterForModal;
+
+    #[async_trait::async_trait]
+    impl Adapter for BareAdapterForModal {
+        fn name(&self) -> &str {
+            "bare"
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ModalAdapter {
+        calls: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for ModalAdapter {
+        fn name(&self) -> &str {
+            "modal"
+        }
+        async fn open_modal(
+            &self,
+            trigger_id: &str,
+            modal: &crate::modals::ModalElement,
+            context_id: &str,
+        ) -> AdapterResult<OpenModalResult> {
+            self.calls.lock().unwrap().push((
+                trigger_id.to_string(),
+                modal.callback_id.clone(),
+                context_id.to_string(),
+            ));
+            Ok(OpenModalResult {
+                view_id: "V_FROM_ADAPTER".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn adapter_default_open_modal_returns_unsupported_error() {
+        let adapter = BareAdapterForModal;
+        let modal = crate::modals::modal(crate::modals::ModalOptions {
+            callback_id: "test_modal".to_string(),
+            title: "Test".to_string(),
+            children: Some(Vec::new()),
+            ..Default::default()
+        });
+        let err = block_on(adapter.open_modal("trigger-1", &modal, "ctx-1"))
+            .expect_err("expected Unsupported");
+        assert!(matches!(err, AdapterError::Unsupported("open_modal")));
+    }
+
+    #[test]
+    fn adapter_open_modal_override_returns_typed_result() {
+        let adapter = ModalAdapter::default();
+        let modal = crate::modals::modal(crate::modals::ModalOptions {
+            callback_id: "my_modal".to_string(),
+            title: "Title".to_string(),
+            children: Some(Vec::new()),
+            ..Default::default()
+        });
+        let result = block_on(adapter.open_modal("trigger-1", &modal, "ctx-uuid")).unwrap();
+        assert_eq!(result.view_id, "V_FROM_ADAPTER");
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "trigger-1");
+        assert_eq!(calls[0].1, "my_modal");
+        assert_eq!(calls[0].2, "ctx-uuid");
+    }
+
+    #[test]
+    fn open_modal_result_round_trips_through_serde_with_camelcase_view_id() {
+        let value = OpenModalResult {
+            view_id: "V01ABC".to_string(),
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert_eq!(json, r#"{"viewId":"V01ABC"}"#);
+        let back: OpenModalResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.view_id, "V01ABC");
     }
 }
