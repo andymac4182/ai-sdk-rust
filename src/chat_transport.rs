@@ -7,7 +7,7 @@ use crate::generate_text::{GenerateTextTool, ToolModelOutputErrorMode, create_to
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    LanguageModel, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
+    FinishReason, LanguageModel, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
     LanguageModelAssistantMessage, LanguageModelCustomPart, LanguageModelFileData,
     LanguageModelFilePart, LanguageModelMessage, LanguageModelPrompt,
     LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelStreamPart,
@@ -302,6 +302,17 @@ impl ChatMessageInput {
     }
 }
 
+/// Finish payload recorded by the Rust equivalent of upstream `Chat.onFinish`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatFinishEvent {
+    pub finish_reason: Option<FinishReason>,
+    pub is_abort: bool,
+    pub is_disconnect: bool,
+    pub is_error: bool,
+    pub message: Option<UiMessage>,
+    pub messages: Vec<UiMessage>,
+}
+
 /// Portable Rust state manager for upstream `Chat` submit-message flows.
 pub struct Chat<T: ChatTransport> {
     id: String,
@@ -311,6 +322,7 @@ pub struct Chat<T: ChatTransport> {
     error: Option<String>,
     is_aborted: bool,
     abort_reason: Option<JsonValue>,
+    last_finish_event: Option<ChatFinishEvent>,
     next_message_index: usize,
 }
 
@@ -324,6 +336,7 @@ impl<T: ChatTransport> Chat<T> {
             error: None,
             is_aborted: false,
             abort_reason: None,
+            last_finish_event: None,
             next_message_index: 0,
         }
     }
@@ -352,6 +365,10 @@ impl<T: ChatTransport> Chat<T> {
 
     pub fn abort_reason(&self) -> Option<&JsonValue> {
         self.abort_reason.as_ref()
+    }
+
+    pub fn last_finish_event(&self) -> Option<&ChatFinishEvent> {
+        self.last_finish_event.as_ref()
     }
 
     pub fn messages(&self) -> &[UiMessage] {
@@ -391,6 +408,7 @@ impl<T: ChatTransport> Chat<T> {
         self.error = None;
         self.is_aborted = false;
         self.abort_reason = None;
+        self.last_finish_event = None;
 
         let send_options =
             ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, self.id.clone())
@@ -405,6 +423,7 @@ impl<T: ChatTransport> Chat<T> {
                 self.status = ChatStatus::Error;
                 let message = error.to_string();
                 self.error = Some(message);
+                self.last_finish_event = None;
                 Err(error.into())
             }
         }
@@ -428,6 +447,7 @@ impl<T: ChatTransport> Chat<T> {
             self.error = Some(error_text.clone());
             self.is_aborted = false;
             self.abort_reason = None;
+            self.last_finish_event = None;
             return Err(ChatError::Stream(error_text));
         }
 
@@ -435,14 +455,27 @@ impl<T: ChatTransport> Chat<T> {
         let states = process_ui_message_stream(&mut state, chunks, false)
             .map_err(|error| ChatError::Stream(error.to_string()))?;
 
-        if !state.message.id.is_empty()
+        let has_assistant_message = !state.message.id.is_empty()
             || !state.message.parts.is_empty()
-            || state.message.metadata.is_some()
-        {
-            self.messages.push(state.message);
+            || state.message.metadata.is_some();
+        let assistant_message = if has_assistant_message {
+            Some(state.message.clone())
+        } else {
+            None
+        };
+        if let Some(message) = &assistant_message {
+            self.messages.push(message.clone());
         }
         self.is_aborted = state.aborted;
         self.abort_reason = state.abort_reason;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: state.finish_reason,
+            is_abort: self.is_aborted,
+            is_disconnect: false,
+            is_error: false,
+            message: assistant_message,
+            messages: self.messages.clone(),
+        });
         self.status = ChatStatus::Ready;
         Ok(states)
     }
@@ -2436,6 +2469,62 @@ mod tests {
         assert_eq!(
             states.last().and_then(|message| message.parts.last()),
             Some(&json!({ "type": "text", "text": "Hello.", "state": "done" }))
+        );
+    }
+
+    #[test]
+    fn chat_should_call_on_finish_with_message_and_messages() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, Some(FinishReason::Stop));
+        assert!(!event.is_abort);
+        assert!(!event.is_disconnect);
+        assert!(!event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello, world.", "state": "done" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello, world.", "state": "done" }
+                    ]
+                }
+            ])
         );
     }
 
