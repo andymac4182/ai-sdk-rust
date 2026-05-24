@@ -385,6 +385,28 @@ pub enum UiMessageChunk {
         provider_metadata: Option<ProviderMetadata>,
     },
 
+    /// Data UI part chunk.
+    ///
+    /// Upstream represents this as a dynamic `type: "data-*"` chunk. The Rust
+    /// variant stores the dynamic type separately and emits the upstream part
+    /// shape while processing the stream.
+    Data {
+        /// Full upstream data part type, e.g. `data-weather`.
+        data_type: String,
+
+        /// Optional data part identifier used for replacement updates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+
+        /// Data payload.
+        data: JsonValue,
+
+        /// Transient data parts are delivered to callbacks but not persisted in
+        /// the final UI message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transient: Option<bool>,
+    },
+
     /// Error chunk sent to UI-message stream consumers.
     Error {
         /// Error text visible to the client.
@@ -1545,6 +1567,36 @@ impl UiMessageChunk {
         }
     }
 
+    /// Creates a data UI-message chunk.
+    pub fn data(data_type: impl Into<String>, data: impl Into<JsonValue>) -> Self {
+        Self::Data {
+            data_type: data_type.into(),
+            id: None,
+            data: data.into(),
+            transient: None,
+        }
+    }
+
+    /// Sets the id for a data UI-message chunk.
+    pub fn with_data_id(mut self, id: impl Into<String>) -> Self {
+        if let Self::Data { id: data_id, .. } = &mut self {
+            *data_id = Some(id.into());
+        }
+        self
+    }
+
+    /// Marks a data UI-message chunk as transient or persistent.
+    pub fn with_transient(mut self, transient: bool) -> Self {
+        if let Self::Data {
+            transient: is_transient,
+            ..
+        } = &mut self
+        {
+            *is_transient = Some(transient);
+        }
+        self
+    }
+
     /// Creates an error UI-message chunk.
     pub fn error(error_text: impl Into<String>) -> Self {
         Self::Error {
@@ -1657,6 +1709,7 @@ pub struct StreamingUiMessageState {
     active_text_parts: BTreeMap<String, usize>,
     active_reasoning_parts: BTreeMap<String, usize>,
     active_tool_input_parts: BTreeSet<String>,
+    data_part_indices: BTreeMap<String, usize>,
 }
 
 impl StreamingUiMessageState {
@@ -1675,6 +1728,7 @@ impl StreamingUiMessageState {
             active_text_parts: BTreeMap::new(),
             active_reasoning_parts: BTreeMap::new(),
             active_tool_input_parts: BTreeSet::new(),
+            data_part_indices: BTreeMap::new(),
         }
     }
 }
@@ -2124,6 +2178,39 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                     serde_json::to_value(&chunk)
                         .expect("ui-message stream chunk serializes to a JSON part"),
                 );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            } => {
+                if transient.unwrap_or(false) {
+                    continue;
+                }
+
+                let mut part = JsonObject::new();
+                part.insert("type".to_string(), JsonValue::String(data_type));
+                if let Some(id) = id.clone() {
+                    part.insert("id".to_string(), JsonValue::String(id));
+                }
+                part.insert("data".to_string(), data);
+
+                if let Some(id) = id {
+                    if let Some(index) = state.data_part_indices.get(&id).copied() {
+                        if let Some(existing_part) = state.message.parts.get_mut(index) {
+                            *existing_part = JsonValue::Object(part);
+                        }
+                    } else {
+                        let index = state.message.parts.len();
+                        state.data_part_indices.insert(id, index);
+                        state.message.parts.push(JsonValue::Object(part));
+                    }
+                } else {
+                    state.message.parts.push(JsonValue::Object(part));
+                }
+
                 updates.push(state.message.clone());
             }
             UiMessageChunk::Error { error_text } => {
@@ -4464,6 +4551,101 @@ mod tests {
                 "keep": true,
                 "finish": true
             }))
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_appends_data_parts() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything")),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "data-test",
+                        "data": "example-data-can-be-anything"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_skips_transient_data_parts() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything"))
+                    .with_transient(true),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 0);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [{ "type": "step-start" }]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_replaces_data_parts_with_matching_id() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything"))
+                    .with_data_id("data-part-id"),
+                UiMessageChunk::data("data-test", json!("or-something-else"))
+                    .with_data_id("data-part-id"),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "data-test",
+                        "id": "data-part-id",
+                        "data": "or-something-else"
+                    }
+                ]
+            })
         );
     }
 
