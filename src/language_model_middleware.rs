@@ -2071,6 +2071,26 @@ mod tests {
         value.as_object().expect("value is a JSON object").clone()
     }
 
+    fn transform_default_settings(
+        settings: LanguageModelDefaultSettings,
+        params: LanguageModelCallOptions,
+    ) -> LanguageModelCallOptions {
+        let middleware = default_settings_middleware(settings);
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Generate,
+                params,
+                &StaticLanguageModel,
+            ))
+            .expect("default settings transform exists");
+
+        poll_ready(transformed)
+    }
+
+    fn provider_options(value: serde_json::Value) -> crate::provider::ProviderOptions {
+        serde_json::from_value(value).expect("provider options deserialize")
+    }
+
     fn transform_tool_examples(
         middleware: &AddToolInputExamplesMiddleware,
         tools: Option<Vec<LanguageModelTool>>,
@@ -2269,6 +2289,262 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_settings() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_temperature(0.7),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_give_precedence_to_user_provided_settings() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_temperature(0.7),
+            LanguageModelCallOptions::new(Vec::new()).with_temperature(0.5),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.5));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_merge_provider_metadata_with_default_settings() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new()
+                .with_temperature(0.7)
+                .with_provider_options(provider_options(json!({
+                    "anthropic": {
+                        "cacheControl": { "type": "ephemeral" }
+                    }
+                }))),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.7));
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_merge_complex_provider_metadata_objects() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_provider_options(provider_options(json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" },
+                    "feature": { "enabled": true }
+                },
+                "openai": {
+                    "logit_bias": { "50256": -100 }
+                }
+            }))),
+            LanguageModelCallOptions::new(Vec::new()).with_provider_options(provider_options(
+                json!({
+                    "anthropic": {
+                        "feature": { "enabled": false },
+                        "otherSetting": "value"
+                    }
+                }),
+            )),
+        );
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" },
+                    "feature": { "enabled": false },
+                    "otherSetting": "value"
+                },
+                "openai": {
+                    "logit_bias": { "50256": -100 }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_keep_zero_temperature_when_default_is_not_set() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new(),
+            LanguageModelCallOptions::new(Vec::new()).with_temperature(0.0),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_max_output_tokens() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_max_output_tokens(100),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.max_output_tokens, Some(100));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_prioritize_param_max_output_tokens() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_max_output_tokens(100),
+            LanguageModelCallOptions::new(Vec::new()).with_max_output_tokens(50),
+        );
+
+        assert_eq!(transformed.max_output_tokens, Some(50));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_stop_sequences() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_stop_sequence("stop"),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.stop_sequences, Some(vec!["stop".to_string()]));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_prioritize_param_stop_sequences() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_stop_sequence("stop"),
+            LanguageModelCallOptions::new(Vec::new()).with_stop_sequence("end"),
+        );
+
+        assert_eq!(transformed.stop_sequences, Some(vec!["end".to_string()]));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_top_p() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_top_p(0.9),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_prioritize_param_top_p() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_top_p(0.9),
+            LanguageModelCallOptions::new(Vec::new()).with_top_p(0.5),
+        );
+
+        assert_eq!(transformed.top_p, Some(0.5));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_merge_headers() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new()
+                .with_header("X-Custom-Header", "test")
+                .with_header("X-Another-Header", "test2"),
+            LanguageModelCallOptions::new(Vec::new()).with_header("X-Custom-Header", "test2"),
+        );
+
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([
+                ("X-Custom-Header".to_string(), "test2".to_string()),
+                ("X-Another-Header".to_string(), "test2".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_default_headers() {
+        let mut settings = LanguageModelDefaultSettings::new();
+        settings.headers = Some(BTreeMap::new());
+        let transformed = transform_default_settings(
+            settings,
+            LanguageModelCallOptions::new(Vec::new()).with_header("X-Param-Header", "param"),
+        );
+
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([(
+                "X-Param-Header".to_string(),
+                "param".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_param_headers() {
+        let mut params = LanguageModelCallOptions::new(Vec::new());
+        params.headers = Some(BTreeMap::new());
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_header("X-Default-Header", "default"),
+            params,
+        );
+
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([(
+                "X-Default-Header".to_string(),
+                "default".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_both_headers_being_undefined() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new(),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.headers, None);
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_default_provider_options() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_provider_options(provider_options(json!({}))),
+            LanguageModelCallOptions::new(Vec::new()).with_provider_options(provider_options(
+                json!({ "openai": { "user": "param-user" } }),
+            )),
+        );
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({ "openai": { "user": "param-user" } })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_param_provider_options() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_provider_options(provider_options(
+                json!({ "anthropic": { "user": "default-user" } }),
+            )),
+            LanguageModelCallOptions::new(Vec::new())
+                .with_provider_options(provider_options(json!({}))),
+        );
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({ "anthropic": { "user": "default-user" } })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_both_provider_options_being_undefined() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new(),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.provider_options, None);
     }
 
     #[test]

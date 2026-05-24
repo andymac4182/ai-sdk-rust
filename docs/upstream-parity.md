@@ -437,7 +437,7 @@ inventory.
 | File upload: `uploadFile` | verified | `src/upload_file.rs` | `upload_file_*` tests | Provider implementations remain unported. |
 | Skill upload: `uploadSkill` | verified | `src/upload_skill.rs` | `upload_skill_*` tests | Provider implementations remain unported. |
 | Provider registry | verified | `src/registry.rs` | `create_provider_registry_*` tests | Gateway-specific registry helpers remain unported. |
-| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_*`; `default_settings_middleware_*`; `add_tool_input_examples_middleware_*`; `extract_json_middleware_*`; `extract_reasoning_middleware_*`; `simulate_streaming_middleware_*` tests | Mirrors upstream v4 model-level hooks plus default settings, tool input example description transforms, extract-JSON transforms, extract-reasoning transforms, and simulated streaming over Rust `Vec<LanguageModelStreamPart>` streams. |
+| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_*`; `default_settings_middleware_*`; `add_tool_input_examples_middleware_*`; `extract_json_middleware_*`; `extract_reasoning_middleware_*`; `simulate_streaming_middleware_*` tests | Mirrors upstream v4 model-level hooks plus default settings, tool input example description transforms, extract-JSON transforms, extract-reasoning transforms, and simulated streaming over Rust `Vec<LanguageModelStreamPart>` streams. The default-settings tests now split the portable upstream cases for default application, user precedence, provider-options merging, zero-valued temperature, max output tokens, stop sequences, topP, headers, and empty/absent provider options; the JavaScript-only explicit `temperature: null as any` case is represented by Rust's typed `Option<f64>` boundary rather than a runtime null value. |
 | Embedding model middleware: wrap/default settings | verified | `src/embedding_model_middleware.rs` | `wrap_embedding_model_*`; `default_embedding_settings_middleware_*` tests | Mirrors upstream v4 hooks. |
 | Image model middleware: wrap | verified | `src/image_model_middleware.rs` | `image_model_middleware_exposes_upstream_v4_hooks`; wrap tests | Additional upstream AI middleware remains unported. |
 | Provider wrapping middleware | verified | `src/provider_middleware.rs` | `wrap_provider_wraps_all_language_model_lookups`; `wrap_provider_with_image_middleware_wraps_all_image_model_lookups`; passthrough and optional-interface tests | Mirrors upstream `middleware/wrap-provider.ts` for provider-v4 Rust providers: wraps every language lookup, optionally wraps image lookups, forwards embedding and optional provider extensions. Provider-v2/v3 conversion remains tracked separately. |
@@ -1399,6 +1399,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   lists, empty tool arrays, and absent tools. The existing default removal,
   custom prefix/formatter, and `remove: false` tests remain the counterpart
   coverage for the upstream option cases.
+- 2026-05-24: `packages/ai` `defaultSettingsMiddleware` one-to-one case
+  mapping expanded with named Rust counterparts for default application, user
+  precedence, provider-options merge, complex/nested provider-options merge,
+  zero temperature preservation, max-output-token, stop-sequence, topP,
+  header merge, empty header, and empty/absent provider-options cases. The
+  upstream untyped `temperature: null as any` case is JavaScript-runtime-only
+  at Rust's typed `Option<f64>` boundary and remains documented instead of
+  modeled as a valid Rust call option.
 - 2026-05-23: `packages/ai` `streamText` UI-message response helper
   parity added named Rust counterparts
   `stream_text_result_to_ui_message_stream_masks_error_messages_by_default`,
