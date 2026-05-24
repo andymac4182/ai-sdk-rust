@@ -644,10 +644,48 @@ pub fn truncate_content(content: &str) -> String {
     format!("{head}...")
 }
 
+/// Map a Discord unicode emoji glyph (or already-named token) to a
+/// standard `EmojiValue` via [`chat_sdk_chat::emoji::get_emoji`].
+/// 1:1 with upstream's `normalizeDiscordEmoji(emojiName)` instance
+/// method.
+///
+/// Recognized unicode glyphs map to their standard short names
+/// (`👍 → "thumbs_up"`, `🔥 → "fire"`, etc.); unknown inputs pass
+/// through to `get_emoji` with the input string verbatim (matching
+/// upstream's `unicodeToName[emojiName] || emojiName` fallback).
+pub fn normalize_discord_emoji(emoji_name: &str) -> std::sync::Arc<chat_sdk_chat::types::EmojiValue> {
+    // 1:1 with upstream's inline `unicodeToName` Record<string, string>.
+    let normalized = match emoji_name {
+        "👍" => "thumbs_up",
+        "👎" => "thumbs_down",
+        "❤️" => "heart",
+        "❤" => "heart",
+        "🔥" => "fire",
+        "🚀" => "rocket",
+        "🙌" => "raised_hands",
+        "✅" => "check",
+        "❌" => "x",
+        "👋" => "wave",
+        "🤔" => "thinking",
+        "😊" => "smile",
+        "😂" => "laugh",
+        "🎉" => "party",
+        "⭐" => "star",
+        "✨" => "sparkles",
+        "👀" => "eyes",
+        "💯" => "100",
+        other => other,
+    };
+    chat_sdk_chat::emoji::get_emoji(normalized)
+}
+
 /// Percent-encode an emoji glyph (or `<name:id>` custom emoji
 /// token) for inclusion in a Discord reaction URL path. 1:1 with
-/// upstream's `encodeURIComponent(emoji)`.
-fn url_encode_emoji(emoji: &str) -> String {
+/// upstream's `encodeURIComponent(emoji)`. Exposed at module scope
+/// (rather than as a private adapter method like upstream) so the
+/// upstream `describe("encodeEmoji")` cases can be exercised
+/// without going through HTTP-call dispatch.
+pub fn url_encode_emoji(emoji: &str) -> String {
     let mut out = String::with_capacity(emoji.len() * 3);
     for byte in emoji.as_bytes() {
         let b = *byte;
@@ -1006,6 +1044,77 @@ mod tests {
         assert_eq!(url_encode_emoji("smile"), "smile");
         // Custom emoji <name:id> includes characters that need encoding
         assert_eq!(url_encode_emoji("<custom:123>"), "%3Ccustom%3A123%3E");
+    }
+
+    // ---------- describe("normalizeDiscordEmoji") (7 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("normalizeDiscordEmoji")`.
+    // Upstream's tests only assert the result is "defined" (truthy);
+    // the Rust port asserts that `get_emoji` returned an Arc with a
+    // non-empty `name()` after the unicode-to-name mapping.
+
+    #[test]
+    fn discord_normalize_discord_emoji_normalizes_unicode_thumbs_up() {
+        let result = normalize_discord_emoji("\u{1F44D}");
+        assert_eq!(result.name,"thumbs_up");
+    }
+
+    #[test]
+    fn discord_normalize_discord_emoji_normalizes_unicode_heart() {
+        let result = normalize_discord_emoji("\u{2764}\u{FE0F}");
+        assert_eq!(result.name,"heart");
+    }
+
+    #[test]
+    fn discord_normalize_discord_emoji_normalizes_heart_without_variation_selector() {
+        let result = normalize_discord_emoji("\u{2764}");
+        assert_eq!(result.name,"heart");
+    }
+
+    #[test]
+    fn discord_normalize_discord_emoji_normalizes_unicode_fire() {
+        let result = normalize_discord_emoji("\u{1F525}");
+        assert_eq!(result.name,"fire");
+    }
+
+    #[test]
+    fn discord_normalize_discord_emoji_passes_through_unknown_emoji_names() {
+        // 1:1 with upstream's fallback to `emojiName` when not in
+        // the unicode-to-name map. The Rust `get_emoji` registers a
+        // fresh EmojiValue with the input name.
+        let result = normalize_discord_emoji("custom_emoji");
+        assert_eq!(result.name,"custom_emoji");
+    }
+
+    #[test]
+    fn discord_normalize_discord_emoji_normalizes_unicode_rocket() {
+        let result = normalize_discord_emoji("\u{1F680}");
+        assert_eq!(result.name,"rocket");
+    }
+
+    #[test]
+    fn discord_normalize_discord_emoji_normalizes_eyes() {
+        let result = normalize_discord_emoji("\u{1F440}");
+        assert_eq!(result.name,"eyes");
+    }
+
+    // ---------- describe("encodeEmoji") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("encodeEmoji")`.
+    // Upstream only asserts `typeof result === "string"` and that
+    // it's non-empty. The Rust port has the existing
+    // `url_encode_emoji_percent_encodes_unicode_glyphs` test that
+    // covers the percent-encoding shape with stricter assertions;
+    // the 2 1:1 mappings below match upstream's loose assertions.
+
+    #[test]
+    fn discord_encode_emoji_url_encodes_emoji_for_api_paths() {
+        let result = url_encode_emoji("thumbs_up");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn discord_encode_emoji_handles_string_emoji_input() {
+        let result = url_encode_emoji("fire");
+        assert!(!result.is_empty());
     }
 
     #[test]
