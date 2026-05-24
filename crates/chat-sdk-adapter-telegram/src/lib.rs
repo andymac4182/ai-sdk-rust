@@ -54,12 +54,21 @@ pub const TELEGRAM_SECRET_TOKEN_HEADER: &str = "x-telegram-bot-api-secret-token"
 /// `TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS = 30`.
 pub const TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS: u64 = 30;
 
+/// 1:1 with upstream's default `userName ?? "bot"` constant.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`TelegramAdapter::new`]. 1:1 with upstream
 /// `interface TelegramAdapterOptions`.
 #[derive(Debug, Clone)]
 pub struct TelegramAdapterOptions {
     /// Telegram bot token (`<bot-id>:<secret>` from BotFather).
     pub token: String,
+    /// Optional secret token Telegram sends in the
+    /// `x-telegram-bot-api-secret-token` webhook header for
+    /// verification. 1:1 with upstream `secretToken?: string`.
+    pub secret_token: Option<String>,
+    /// Optional display name (defaults to [`DEFAULT_USER_NAME`]).
+    pub user_name: Option<String>,
     /// Optional Bot API base URL override. Defaults to
     /// [`DEFAULT_BASE_URL`]. Used by tests + custom Telegram-API
     /// proxies.
@@ -72,6 +81,8 @@ impl TelegramAdapterOptions {
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
+            secret_token: None,
+            user_name: None,
             base_url: None,
         }
     }
@@ -85,6 +96,11 @@ impl TelegramAdapterOptions {
     /// Effective base URL with default applied.
     pub fn effective_base_url(&self) -> &str {
         self.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL)
+    }
+
+    /// Effective `userName` with default applied.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -125,6 +141,16 @@ impl TelegramAdapter {
     /// Effective base URL.
     pub fn base_url(&self) -> &str {
         self.options.effective_base_url()
+    }
+
+    /// 1:1 with upstream `readonly secretToken?: string`.
+    pub fn secret_token(&self) -> Option<&str> {
+        self.options.secret_token.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly userName: string` (with default).
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
     }
 
     /// Build the absolute URL for a Telegram Bot API method. 1:1
@@ -1133,5 +1159,33 @@ mod tests {
         );
         assert_eq!(adapter.token(), "test-token");
         assert_eq!(adapter.base_url(), "https://example.test");
+    }
+
+    // ---------- createTelegramAdapter create-instance (2 cases) ----------
+    // 1:1 with portable subset of upstream `index.test.ts >
+    // describe("createTelegramAdapter")`. Env-var-driven cases
+    // (`throws when bot token is missing` / `uses env vars when
+    // config is omitted` / the 7 `constructor env var resolution`
+    // cases) need an env-var-resolution factory; documented as
+    // deferred.
+
+    #[test]
+    fn telegram_adapter_creates_an_instance() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("token-from-env"));
+        assert_eq!(adapter.name(), "telegram");
+        // Default userName = "bot".
+        assert_eq!(adapter.user_name(), "bot");
+        // secret_token defaults to None.
+        assert!(adapter.secret_token().is_none());
+    }
+
+    #[test]
+    fn telegram_adapter_uses_provided_secret_token_and_user_name() {
+        let mut opts = TelegramAdapterOptions::new("token");
+        opts.secret_token = Some("env-secret".to_string());
+        opts.user_name = Some("env_bot_name".to_string());
+        let adapter = TelegramAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "env_bot_name");
+        assert_eq!(adapter.secret_token(), Some("env-secret"));
     }
 }
