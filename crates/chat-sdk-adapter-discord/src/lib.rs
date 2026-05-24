@@ -785,7 +785,7 @@ pub fn is_discord_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (2) ----------
+    //! ---------- upstream js-only-documented cases (3) ----------
     //!
     //! Per the slice-380 type-system-impossible pattern, the
     //! following upstream cases are enumerated as js-only-documented
@@ -808,6 +808,15 @@ mod tests {
     //!    discord.js-specific. DM support in the Rust gateway is
     //!    surfaced via channel-type dispatch in the event handler,
     //!    not via a partials-enum opt-in.
+    //!
+    //! 3. `index.test.ts > describe("constructor env var
+    //!    resolution") > should default logger when not provided`
+    //!    — asserts the constructor falls back to a default
+    //!    `Logger` instance when none is supplied. Rust adapters
+    //!    do not take a `Logger` as a first-class adapter
+    //!    dependency (logging is plumbed via the `log` crate's
+    //!    static dispatch elsewhere); the constructor-default-
+    //!    logger fallback shape is moot.
     use super::*;
     use futures_executor::block_on;
 

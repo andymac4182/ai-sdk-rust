@@ -902,7 +902,7 @@ pub fn parse_slack_post_ephemeral_response(
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (6) ----------
+    //! ---------- upstream js-only-documented cases (7) ----------
     //!
     //! Per the slice-380 type-system-impossible pattern, the
     //! following upstream `index.test.ts` cases are enumerated as
@@ -954,6 +954,15 @@ mod tests {
     //!    adapter.client")` re-asserts the same alias semantics
     //!    as case 4 (deprecated property alias check); accounted
     //!    for under case 4.
+    //!
+    //! 7. `describe("constructor env var resolution") > should
+    //!    default logger when not provided` — asserts the
+    //!    constructor falls back to a default `Logger` instance
+    //!    when none is supplied. Rust adapters do not take a
+    //!    `Logger` as a first-class adapter dependency (logging
+    //!    is plumbed via the `log` crate's static dispatch
+    //!    elsewhere); the constructor-default-logger fallback
+    //!    shape is moot.
     use super::*;
     use futures_executor::block_on;
 
