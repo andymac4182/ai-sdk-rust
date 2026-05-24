@@ -1417,6 +1417,22 @@ focused tests for each portable behavior before changing rows to `verified`.
   and redacted-reasoning ordering is preserved, assistant file provider
   references and filenames pass through unchanged, and reasoning-file base64
   plus byte data preserve the upstream provider-facing tagged file data shape.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` assistant
+  tool/file continuation parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` assistant tool-call,
+  tool-result, provider-executed tool, and assistant file cases:
+  `convert_to_language_model_message_assistant_tool_call_should_pass_through_provider_options`,
+  `convert_to_language_model_message_assistant_tool_call_should_include_provider_executed_flag`,
+  `convert_to_language_model_message_assistant_tool_result_should_include_provider_options`,
+  `convert_to_language_model_message_assistant_provider_executed_tool_calls_and_results_should_include_provider_executed_flag`,
+  `convert_to_language_model_message_assistant_file_parts_should_convert_file_data_correctly`,
+  `convert_to_language_model_message_assistant_file_parts_should_preserve_filename_when_present`,
+  and
+  `convert_to_language_model_message_assistant_file_parts_should_handle_provider_options`.
+  Rust proves provider options remain on tool-call, tool-result, and file
+  parts, provider-executed tool-call flags are preserved alongside paired tool
+  results, and assistant file base64 data, filenames, and provider options
+  keep the upstream provider-facing shape.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
