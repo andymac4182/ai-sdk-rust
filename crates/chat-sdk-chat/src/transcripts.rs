@@ -865,6 +865,19 @@ mod tests {
     }
 
     // ---------- additional append/count describe block cases (3 upstream) ----------
+    //
+    // The following 2 upstream cases are 1:1 via the type system
+    // (per the slice-380 brief tightening) and have no matching
+    // Rust test:
+    //
+    // - `append > no-ops when Message has no userKey`: the Rust
+    //   `AppendTranscriptInput` struct has `user_key: String` as a
+    //   required (non-Option) field; an Input without a user key
+    //   cannot be constructed.
+    // - `append > requires options.userKey when appending an
+    //   AppendInput`: same as above — the type signature
+    //   enforces the userKey requirement at compile time, so the
+    //   missing-userKey case is unreachable.
 
     #[test]
     fn transcripts_api_append_assistant_message_with_explicit_user_key() {
@@ -905,6 +918,29 @@ mod tests {
             },
         );
         assert_eq!(api.retention_ms(), Some(7 * 24 * 60 * 60 * 1000));
+        block_on(api.append(sample_input("u1"))).unwrap();
+        // Append succeeds with the retention configured.
+        assert_eq!(block_on(api.count("u1")).unwrap(), 1);
+    }
+
+    #[test]
+    fn transcripts_api_append_passes_numeric_retention_through_unchanged() {
+        // 1:1 with upstream `it("passes numeric retention through
+        // unchanged")` — `TranscriptsConfig.retention` accepts a
+        // numeric ms value via `RetentionPolicy::Millis(u64)`; the
+        // Rust impl passes it through to `append_to_list` as
+        // `ttl_ms` unchanged.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                retention: Some(crate::types::RetentionPolicy::Millis(60_000)),
+                max_per_user: Some(50),
+                ..Default::default()
+            },
+        );
+        assert_eq!(api.retention_ms(), Some(60_000));
+        assert_eq!(api.max_per_user(), 50);
         block_on(api.append(sample_input("u1"))).unwrap();
         // Append succeeds with the retention configured.
         assert_eq!(block_on(api.count("u1")).unwrap(), 1);
