@@ -550,6 +550,87 @@ fn decode_composite_message_id(
     }
 }
 
+/// 1:1 with upstream `interface TelegramAdapterConfig` — all
+/// fields optional so the factory can fall back to environment
+/// variables. Used by [`try_create_telegram_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct TelegramCreateOptions {
+    /// Bot token. Falls back to `TELEGRAM_BOT_TOKEN`.
+    pub bot_token: Option<String>,
+    /// Webhook secret token. Falls back to `TELEGRAM_WEBHOOK_SECRET_TOKEN`.
+    pub secret_token: Option<String>,
+    /// Display name override. Falls back to `TELEGRAM_BOT_USERNAME`.
+    pub user_name: Option<String>,
+    /// Bot API URL override. Takes precedence over `api_base_url`
+    /// (1:1 with upstream `apiUrl ?? apiBaseUrl`).
+    pub api_url: Option<String>,
+    /// Bot API base URL fallback. Falls back to `TELEGRAM_API_BASE_URL`.
+    pub api_base_url: Option<String>,
+}
+
+/// Errors returned by [`try_create_telegram_adapter`]. 1:1 with
+/// upstream `throw new ValidationError("telegram", "...")`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramCreateError {
+    /// `botToken` missing and `TELEGRAM_BOT_TOKEN` not set (or empty).
+    BotTokenRequired,
+}
+
+impl std::fmt::Display for TelegramCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BotTokenRequired => write!(
+                f,
+                "botToken is required. Set TELEGRAM_BOT_TOKEN or provide it in config."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TelegramCreateError {}
+
+/// 1:1 with upstream `createTelegramAdapter(config)` /
+/// `new TelegramAdapter(config)` env-var-resolution path. The `env`
+/// reader is a closure (avoids `unsafe std::env::set_var` and
+/// process-global racing across parallel tests).
+///
+/// Resolution rules (1:1 with upstream):
+/// - `bot_token` ← `opts.bot_token` ?? non-empty
+///   `env("TELEGRAM_BOT_TOKEN")` (empty string treated as missing,
+///   matching upstream `process.env.TELEGRAM_BOT_TOKEN = ""` → throw)
+/// - `secret_token` ← `opts.secret_token` ??
+///   `env("TELEGRAM_WEBHOOK_SECRET_TOKEN")`
+/// - `user_name` ← `opts.user_name` ??
+///   `env("TELEGRAM_BOT_USERNAME")` ?? [`DEFAULT_USER_NAME`]
+/// - `base_url` ← `opts.api_url` ?? `opts.api_base_url` ??
+///   `env("TELEGRAM_API_BASE_URL")` ?? [`DEFAULT_BASE_URL`]
+pub fn try_create_telegram_adapter(
+    opts: TelegramCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<TelegramAdapter, TelegramCreateError> {
+    let bot_token = opts
+        .bot_token
+        .or_else(|| env("TELEGRAM_BOT_TOKEN"))
+        .filter(|s| !s.is_empty())
+        .ok_or(TelegramCreateError::BotTokenRequired)?;
+
+    let secret_token = opts
+        .secret_token
+        .or_else(|| env("TELEGRAM_WEBHOOK_SECRET_TOKEN"));
+    let user_name = opts.user_name.or_else(|| env("TELEGRAM_BOT_USERNAME"));
+    let base_url = opts
+        .api_url
+        .or(opts.api_base_url)
+        .or_else(|| env("TELEGRAM_API_BASE_URL"));
+
+    Ok(TelegramAdapter::new(TelegramAdapterOptions {
+        token: bot_token,
+        secret_token,
+        user_name,
+        base_url,
+    }))
+}
+
 /// Encode a Telegram thread id. 1:1 with upstream's inline format:
 /// `telegram:<chat_id>` or `telegram:<chat_id>:<thread_id>` when
 /// the optional Telegram `message_thread_id` is present.
@@ -1187,5 +1268,167 @@ mod tests {
         let adapter = TelegramAdapter::new(opts);
         assert_eq!(adapter.user_name(), "env_bot_name");
         assert_eq!(adapter.secret_token(), Some("env-secret"));
+    }
+
+    // ---------- createTelegramAdapter env-var resolution (11 cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("createTelegramAdapter")`
+    // (2 cases) + `describe("constructor env var resolution")` (9
+    // cases). Env reader is an injected closure to avoid Rust 2024
+    // `unsafe set_var` + parallel-test races.
+
+    fn empty_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn create_telegram_adapter_throws_when_bot_token_is_missing() {
+        // Upstream: `process.env.TELEGRAM_BOT_TOKEN = ""` then
+        // `createTelegramAdapter({})` throws ValidationError.
+        // The factory treats empty string as missing.
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some(String::new()),
+            _ => None,
+        };
+        let err = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect_err("empty bot token rejected");
+        assert_eq!(err, TelegramCreateError::BotTokenRequired);
+    }
+
+    #[test]
+    fn create_telegram_adapter_uses_env_vars_when_config_is_omitted() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("token-from-env".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect("env-only construction");
+        assert_eq!(adapter.name(), "telegram");
+        assert_eq!(adapter.token(), "token-from-env");
+    }
+
+    #[test]
+    fn ctor_env_throws_when_bot_token_missing_and_env_not_set() {
+        let err = try_create_telegram_adapter(TelegramCreateOptions::default(), empty_env)
+            .expect_err("missing token");
+        assert_eq!(err, TelegramCreateError::BotTokenRequired);
+        assert!(err.to_string().contains("botToken is required"));
+    }
+
+    #[test]
+    fn ctor_env_resolves_bot_token_from_telegram_bot_token_env_var() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect("env token");
+        assert_eq!(adapter.token(), "env-bot-token");
+    }
+
+    #[test]
+    fn ctor_env_resolves_secret_token_from_telegram_webhook_secret_token_env_var() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            "TELEGRAM_WEBHOOK_SECRET_TOKEN" => Some("env-secret".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect("env secret token");
+        assert_eq!(adapter.secret_token(), Some("env-secret"));
+    }
+
+    #[test]
+    fn ctor_env_resolves_user_name_from_telegram_bot_username_env_var() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            "TELEGRAM_BOT_USERNAME" => Some("env_bot_name".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect("env user name");
+        assert_eq!(adapter.user_name(), "env_bot_name");
+    }
+
+    #[test]
+    fn ctor_env_resolves_api_base_url_from_telegram_api_base_url_env_var() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            "TELEGRAM_API_BASE_URL" => Some("https://custom-api.example.com".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect("env api base url");
+        assert_eq!(adapter.base_url(), "https://custom-api.example.com");
+    }
+
+    #[test]
+    fn ctor_env_accepts_api_url_config_and_prefers_it_over_api_base_url() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(
+            TelegramCreateOptions {
+                bot_token: Some("token".to_string()),
+                api_url: Some("https://apiurl.example.com".to_string()),
+                api_base_url: Some("https://apibaseurl.example.com".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("api url config wins");
+        assert_eq!(adapter.base_url(), "https://apiurl.example.com");
+    }
+
+    #[test]
+    fn ctor_env_falls_back_to_api_base_url_when_api_url_is_not_set() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(
+            TelegramCreateOptions {
+                bot_token: Some("token".to_string()),
+                api_base_url: Some("https://apibaseurl.example.com".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("api base url fallback");
+        assert_eq!(adapter.base_url(), "https://apibaseurl.example.com");
+    }
+
+    #[test]
+    fn ctor_env_defaults_logger_when_not_provided() {
+        // Upstream asserts adapter is constructed when no logger
+        // is supplied. Logger isn't yet a first-class adapter
+        // dependency in this port; equivalent is env-only success.
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
+            .expect("env-only construction");
+        assert_eq!(adapter.name(), "telegram");
+    }
+
+    #[test]
+    fn ctor_env_prefers_config_values_over_env_vars() {
+        let env = |key: &str| match key {
+            "TELEGRAM_BOT_TOKEN" => Some("env-token".to_string()),
+            "TELEGRAM_BOT_USERNAME" => Some("env-name".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_telegram_adapter(
+            TelegramCreateOptions {
+                bot_token: Some("config-token".to_string()),
+                user_name: Some("config-name".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config wins");
+        assert_eq!(adapter.token(), "config-token");
+        assert_eq!(adapter.user_name(), "config-name");
     }
 }
