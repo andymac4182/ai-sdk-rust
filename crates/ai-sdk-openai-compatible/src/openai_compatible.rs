@@ -1267,6 +1267,7 @@ impl OpenAICompatibleCompletionLanguageModel {
         .await
         {
             Ok(response) => openai_compatible_completion_stream_result_from_response(
+                &self.config.settings.name,
                 response.value,
                 response.response_headers,
                 request_body_for_response,
@@ -3540,6 +3541,7 @@ async fn openai_compatible_provider_metadata(
 }
 
 fn openai_compatible_completion_stream_result_from_response(
+    provider_name: &str,
     events: Vec<ParseJsonResult<JsonValue>>,
     response_headers: Option<Headers>,
     request_body: JsonValue,
@@ -3556,6 +3558,7 @@ fn openai_compatible_completion_stream_result_from_response(
     let mut usage = None::<JsonValue>;
     let mut is_first_chunk = true;
     let mut is_active_text = false;
+    let mut logprobs = None::<JsonValue>;
 
     for event in events {
         match event {
@@ -3606,6 +3609,12 @@ fn openai_compatible_completion_stream_result_from_response(
                     finish_reason = openai_compatible_finish_reason(Some(raw_finish_reason));
                 }
 
+                if let Some(choice_logprobs) =
+                    choice.get("logprobs").filter(|value| !value.is_null())
+                {
+                    logprobs = Some(choice_logprobs.clone());
+                }
+
                 if let Some(text) = choice.get("text").and_then(JsonValue::as_str) {
                     stream.push(LanguageModelStreamPart::TextDelta(
                         LanguageModelTextDelta::new("0", text),
@@ -3631,12 +3640,19 @@ fn openai_compatible_completion_stream_result_from_response(
         )));
     }
 
-    stream.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(
-            openai_compatible_completion_usage(usage.as_ref()),
-            finish_reason,
-        ),
-    ));
+    let mut finish = LanguageModelStreamFinish::new(
+        openai_compatible_completion_usage(usage.as_ref()),
+        finish_reason,
+    );
+    if let Some(logprobs) = logprobs {
+        let mut provider_metadata = JsonObject::new();
+        provider_metadata.insert("logprobs".to_string(), logprobs);
+        finish = finish.with_provider_metadata(ProviderMetadata::from([(
+            provider_name.to_string(),
+            provider_metadata,
+        )]));
+    }
+    stream.push(LanguageModelStreamPart::Finish(finish));
 
     let mut result = LanguageModelStreamResult::new(stream)
         .with_request(LanguageModelRequest::new().with_body(request_body));

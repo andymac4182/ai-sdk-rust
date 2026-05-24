@@ -2130,8 +2130,8 @@ mod tests {
     use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFilePart, LanguageModelMessage, LanguageModelTextPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelStreamPart,
+        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -3204,6 +3204,348 @@ mod tests {
 
         let _result = poll_ready(
             provider.completion("gpt-3.5-turbo-instruct").do_generate(
+                openai_completion_call_options()
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request(&captured_requests).headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("openai-organization").map(String::as_str),
+            Some("test-organization")
+        );
+        assert_eq!(
+            headers.get("openai-project").map(String::as_str),
+            Some("test-project")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn openai_completion_stream_should_stream_text_deltas() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            sse_body([
+                json!({
+                    "id": "cmpl-96c64EdfhOw8pjFFgVpLuT8k2MtdT",
+                    "object": "text_completion",
+                    "created": 1711363440,
+                    "model": "gpt-3.5-turbo-instruct",
+                    "choices": [
+                        {
+                            "text": "Hello",
+                            "index": 0,
+                            "logprobs": openai_completion_logprobs(),
+                            "finish_reason": null
+                        }
+                    ]
+                }),
+                json!({
+                    "id": "cmpl-96c64EdfhOw8pjFFgVpLuT8k2MtdT",
+                    "object": "text_completion",
+                    "created": 1711363440,
+                    "model": "gpt-3.5-turbo-instruct",
+                    "choices": [
+                        {
+                            "text": ", ",
+                            "index": 0,
+                            "logprobs": openai_completion_logprobs(),
+                            "finish_reason": null
+                        }
+                    ]
+                }),
+                json!({
+                    "id": "cmpl-96c64EdfhOw8pjFFgVpLuT8k2MtdT",
+                    "object": "text_completion",
+                    "created": 1711363440,
+                    "model": "gpt-3.5-turbo-instruct",
+                    "choices": [
+                        {
+                            "text": "World!",
+                            "index": 0,
+                            "logprobs": openai_completion_logprobs(),
+                            "finish_reason": null
+                        }
+                    ]
+                }),
+                json!({
+                    "id": "cmpl-96c3yLQE1TtZCd6n6OILVmzev8M8H",
+                    "object": "text_completion",
+                    "created": 1711363310,
+                    "model": "gpt-3.5-turbo-instruct",
+                    "choices": [
+                        {
+                            "text": "",
+                            "index": 0,
+                            "logprobs": openai_completion_logprobs(),
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }),
+                json!({
+                    "id": "cmpl-96c3yLQE1TtZCd6n6OILVmzev8M8H",
+                    "object": "text_completion",
+                    "created": 1711363310,
+                    "model": "gpt-3.5-turbo-instruct",
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 362,
+                        "total_tokens": 372
+                    },
+                    "choices": []
+                }),
+            ]),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_stream(openai_completion_call_options()),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::ResponseMetadata(metadata))
+                if metadata.id.as_deref() == Some("cmpl-96c64EdfhOw8pjFFgVpLuT8k2MtdT")
+                    && metadata.model_id.as_deref() == Some("gpt-3.5-turbo-instruct")
+                    && metadata.timestamp
+                        == Some(time::OffsetDateTime::from_unix_timestamp(1711363440).unwrap())
+        ));
+        assert!(matches!(
+            result.stream.get(2),
+            Some(LanguageModelStreamPart::TextStart(start)) if start.id == "0"
+        ));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Hello", ", ", "World!", ""]
+        );
+        assert!(matches!(
+            result
+                .stream
+                .iter()
+                .rev()
+                .find(|part| matches!(part, LanguageModelStreamPart::TextEnd(_))),
+            Some(LanguageModelStreamPart::TextEnd(end)) if end.id == "0"
+        ));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Stop
+                    && finish.finish_reason.raw.as_deref() == Some("stop")
+                    && finish.usage.input_tokens.total == Some(10)
+                    && finish.usage.input_tokens.no_cache == Some(10)
+                    && finish.usage.output_tokens.total == Some(362)
+                    && finish.usage.output_tokens.text == Some(362)
+                    && finish
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("logprobs"))
+                        == Some(&openai_completion_logprobs())
+        ));
+    }
+
+    #[test]
+    fn openai_completion_stream_should_handle_error_stream_parts() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            "data: {\"error\":{\"message\":\"The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error.\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\ndata: [DONE]\n\n",
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_stream(openai_completion_call_options()),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::Error(error))
+                if error.error
+                    == json!({
+                        "message": "The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error.",
+                        "type": "server_error",
+                        "param": null,
+                        "code": null
+                    })
+        ));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+                    && finish.finish_reason.raw.is_none()
+                    && finish.usage == Default::default()
+        ));
+    }
+
+    #[test]
+    fn openai_completion_stream_should_handle_unparsable_stream_parts() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            "data: {unparsable}\n\ndata: [DONE]\n\n",
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_stream(openai_completion_call_options()),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::Error(error))
+                if error
+                    .error
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|message| message.contains("JSON parsing failed"))
+        ));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+                    && finish.finish_reason.raw.is_none()
+                    && finish.usage == Default::default()
+        ));
+    }
+
+    #[test]
+    fn openai_completion_stream_should_send_request_body() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_empty_stream_body(),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_stream(openai_completion_call_options()),
+        );
+
+        assert_eq!(
+            result.request.and_then(|request| request.body),
+            Some(json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_completion_prompt_text(),
+                "stop": ["\nuser:"],
+                "stream": true
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_completion_stream_should_expose_the_raw_response_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_empty_stream_body(),
+            Headers::from([
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_stream(openai_completion_call_options()),
+        );
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_completion_stream_should_pass_the_model_and_the_prompt() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_empty_stream_body(),
+            Headers::new(),
+        );
+
+        let _result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_stream(openai_completion_call_options()),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_completion_prompt_text(),
+                "stop": ["\nuser:"],
+                "stream": true
+            })
+        );
+    }
+
+    #[test]
+    fn openai_completion_stream_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_stream_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_empty_stream_body(),
+            Headers::new(),
+        )
+        .with_organization("test-organization")
+        .with_project("test-project")
+        .with_header("Custom-Provider-Header", "provider-header-value");
+
+        let _result = poll_ready(
+            provider.completion("gpt-3.5-turbo-instruct").do_stream(
                 openai_completion_call_options()
                     .with_header("Custom-Request-Header", "request-header-value"),
             ),
@@ -5259,6 +5601,33 @@ mod tests {
             .with_transport(transport)
     }
 
+    fn openai_completion_stream_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: impl Into<String>,
+        response_headers: Headers,
+    ) -> OpenAIProvider {
+        let response_body = response_body.into();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.clone(),
+                )
+                .with_headers(response_headers.clone()))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_transport(transport)
+    }
+
     fn openai_completion_call_options() -> LanguageModelCallOptions {
         LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
             LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
@@ -5324,6 +5693,37 @@ mod tests {
         )
     }
 
+    fn openai_completion_empty_stream_body() -> String {
+        sse_body([
+            json!({
+                "id": "cmpl-96c3yLQE1TtZCd6n6OILVmzev8M8H",
+                "object": "text_completion",
+                "created": 1711363310,
+                "model": "gpt-3.5-turbo-instruct",
+                "choices": [
+                    {
+                        "text": "",
+                        "index": 0,
+                        "logprobs": null,
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+            json!({
+                "id": "cmpl-96c3yLQE1TtZCd6n6OILVmzev8M8H",
+                "object": "text_completion",
+                "created": 1711363310,
+                "model": "gpt-3.5-turbo-instruct",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 0,
+                    "total_tokens": 10
+                },
+                "choices": []
+            }),
+        ])
+    }
+
     fn openai_completion_logprobs() -> JsonValue {
         json!({
             "tokens": [" ever", " after", ".\n\n", "The", " end", "."],
@@ -5344,6 +5744,14 @@ mod tests {
                 { ".": -0.10247037 }
             ]
         })
+    }
+
+    fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
+        events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect()
     }
 
     fn openai_embedding_test_provider(
