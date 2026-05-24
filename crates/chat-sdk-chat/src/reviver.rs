@@ -88,6 +88,51 @@ pub fn revive_value(value: Value) -> Revived {
     }
 }
 
+/// Recursively walk a JSON value and revive any nested
+/// `chat:Message` envelope in-place. 1:1 with upstream's
+/// `JSON.parse(text, reviver)` semantics — the reviver callback is
+/// invoked on every key/value pair in the tree, so a `chat:Message`
+/// nested inside `{data: {messages: [...]}}` gets promoted just
+/// like a top-level one.
+///
+/// Returns the rewritten `Value` with `chat:Message` envelopes
+/// replaced by `serde_json::to_value(Message::from_serialized(...))`
+/// (the canonical typed shape). Currently only recognizes
+/// `chat:Message`; `chat:Thread` / `chat:Channel` pass through
+/// until their reviver branches land.
+pub fn revive_walk(value: Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(revive_walk).collect())
+        }
+        Value::Object(map) => {
+            let mut walked = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                walked.insert(k, revive_walk(v));
+            }
+            let walked = Value::Object(walked);
+            // After child walking, check if this object is a
+            // recognized envelope. Upstream's `JSON.parse(reviver)`
+            // visits children before parents, matching this order.
+            if walked
+                .as_object()
+                .and_then(|o| o.get("_type"))
+                .and_then(Value::as_str)
+                == Some("chat:Message")
+            {
+                if let Ok(serialized) =
+                    serde_json::from_value::<SerializedMessage>(walked.clone())
+                {
+                    let revived = Message::from_serialized(serialized);
+                    return serde_json::to_value(revived.to_serialized()).unwrap_or(walked);
+                }
+            }
+            walked
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Additive coverage. Upstream's `reviver.test.ts` does not exist;
@@ -232,5 +277,69 @@ mod tests {
         assert!(revive_str("not-json").is_err());
         assert!(revive_str("").is_err());
         assert!(revive_str("{").is_err());
+    }
+
+    // ---------- describe("chat.reviver()") (3 of 5 portable cases) ----------
+    // 1:1 with upstream `serialization.test.ts > describe("chat.reviver()")`.
+    // The 2 deferred cases (revive chat:Thread / revive both Thread+Message)
+    // need the Thread reviver branch which is gated on the cross-
+    // package Adapter lookup (`chat.getAdapter(adapterName)`) inside
+    // a singleton-resolved `chat.reviver()` factory.
+
+    #[test]
+    fn revive_walk_should_revive_chat_message_objects() {
+        // 1:1 with upstream "should revive chat:Message objects"
+        // (top-level envelope).
+        let value = sample_message_payload();
+        let walked = revive_walk(value);
+        // The walked value preserves the chat:Message wire shape
+        // (still has _type / id / text fields) — upstream returns
+        // a typed `Message` instance; the Rust port re-serializes
+        // through to_serialized so the observable wire shape is
+        // identical.
+        assert_eq!(
+            walked.get("_type").and_then(Value::as_str),
+            Some("chat:Message")
+        );
+        assert_eq!(walked.get("id").and_then(Value::as_str), Some("m1"));
+    }
+
+    #[test]
+    fn revive_walk_should_leave_non_chat_objects_unchanged() {
+        // 1:1 with upstream "should leave non-chat objects unchanged".
+        let value = json!({
+            "id": "user-1",
+            "name": "test",
+            "nested": { "key": "value" }
+        });
+        let walked = revive_walk(value.clone());
+        assert_eq!(walked, value);
+    }
+
+    #[test]
+    fn revive_walk_should_work_with_nested_structures() {
+        // 1:1 with upstream "should work with nested structures" —
+        // a chat:Message envelope nested inside `{data: {messages:
+        // [...]}}` gets promoted just like a top-level one (matches
+        // upstream's `JSON.parse(text, reviver)` recursive visit
+        // semantics).
+        let message_json = sample_message_payload();
+        let payload = json!({
+            "data": {
+                "messages": [message_json]
+            }
+        });
+        let walked = revive_walk(payload);
+        let nested_msg = &walked["data"]["messages"][0];
+        // Nested message went through the reviver and preserves the
+        // wire shape.
+        assert_eq!(
+            nested_msg.get("_type").and_then(Value::as_str),
+            Some("chat:Message")
+        );
+        assert_eq!(
+            nested_msg["metadata"]["dateSent"].as_str(),
+            Some("2024-01-01T00:00:00.000Z")
+        );
     }
 }
