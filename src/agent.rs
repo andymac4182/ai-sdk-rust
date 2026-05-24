@@ -2137,6 +2137,105 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_stream_rejects_invalid_call_options_schema_before_model_call() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_call_options_schema(legal_topic_options_schema()),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("hi").with_options(json!({ "topic": "evil" }));
+
+        let error = poll_ready(agent.stream(options)).expect_err("options are invalid");
+
+        assert!(
+            error
+                .message()
+                .contains("Type validation failed for options"),
+            "{}",
+            error.message()
+        );
+        assert!(model.stream_calls().is_empty());
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_passes_valid_call_options_schema() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("reply"));
+        let recorded_options = Rc::new(RefCell::new(None::<JsonValue>));
+        let recorded_options_for_prepare_call = Rc::clone(&recorded_options);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_call_options_schema(legal_topic_options_schema())
+                .with_prepare_call(move |prepared| {
+                    *recorded_options_for_prepare_call.borrow_mut() = prepared.call_options.clone();
+                    prepared
+                }),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("hi").with_options(json!({ "topic": "legal" }));
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            recorded_options.borrow().as_ref(),
+            Some(&json!({ "topic": "legal" }))
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_prepare_call_receives_merged_runtime_and_tools_context() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let prepared_contexts = Rc::new(RefCell::new(Vec::<JsonValue>::new()));
+        let prepared_contexts_for_callback = Rc::clone(&prepared_contexts);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_runtime_context(JsonObject::from_iter([
+                    ("tenant".to_string(), json!("default")),
+                    ("region".to_string(), json!("au")),
+                ]))
+                .with_tools_context(JsonObject::from_iter([
+                    ("weather".to_string(), json!({ "apiKey": "default-key" })),
+                    ("search".to_string(), json!({ "endpoint": "default" })),
+                ]))
+                .with_prepare_call(move |prepared| {
+                    prepared_contexts_for_callback.borrow_mut().push(json!({
+                        "runtimeContext": prepared.runtime_context,
+                        "toolsContext": prepared.tools_context,
+                    }));
+                    prepared
+                }),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("hi")
+                .with_runtime_context(JsonObject::from_iter([(
+                    "tenant".to_string(),
+                    json!("call"),
+                )]))
+                .with_tools_context(JsonObject::from_iter([(
+                    "weather".to_string(),
+                    json!({ "apiKey": "call-key" }),
+                )]));
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            prepared_contexts.borrow().as_slice(),
+            [json!({
+                "runtimeContext": {
+                    "tenant": "call",
+                    "region": "au"
+                },
+                "toolsContext": {
+                    "weather": { "apiKey": "call-key" },
+                    "search": { "endpoint": "default" }
+                }
+            })]
+        );
+    }
+
+    #[test]
     fn tool_loop_agent_generate_passes_sandbox_to_prepare_call() {
         let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
         let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
