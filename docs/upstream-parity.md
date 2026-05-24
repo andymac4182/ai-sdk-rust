@@ -2311,7 +2311,9 @@ focused tests for each portable behavior before changing rows to `verified`.
   assistant tool part to `output-available` or `output-error` while preserving
   its input and tool-call metadata.
 - 2026-05-25: `packages/ai` `Chat.addToolOutput` follow-up submission parity
-  added `chat_should_submit_message_when_a_tool_output_is_added`, covering the
+  added `chat_should_submit_message_when_a_tool_output_is_added` and
+  `chat_add_tool_output_should_forward_options_to_make_request_when_auto_sending`,
+  covering the
   portable upstream `ui/chat.test.ts` second `submit-message` call after a
   tool output is appended to the latest assistant message. The Rust state
   manager now resubmits the full message list with the assistant message id and

@@ -3360,8 +3360,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chat_should_submit_message_when_a_tool_output_is_added() {
+    fn assert_chat_tool_output_forwards_follow_up_options() {
         let transport = RecordingChatTransport::with_responses([
             vec![
                 UiMessageChunk::start_with_message_id("assistant-1"),
@@ -3440,6 +3439,16 @@ mod tests {
             event.message.as_ref().map(|message| message.id.as_str()),
             Some("assistant-1")
         );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_output_is_added() {
+        assert_chat_tool_output_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_add_tool_output_should_forward_options_to_make_request_when_auto_sending() {
+        assert_chat_tool_output_forwards_follow_up_options();
     }
 
     #[test]
