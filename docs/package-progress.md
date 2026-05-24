@@ -35,7 +35,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `ai` | 98% | In progress | core package | Core surface is broad; model resolution plus abort, callback, serial job, token metric, response-message, portable... |
 | `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
 | `@ai-sdk/provider-utils` | 82% | In progress | provider support library | Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod... |
-| `@ai-sdk/openai` | 86% | In progress | provider package | OpenAI/Open Responses foundations, provider base URL precedence, language-model capability matrix, hosted... |
+| `@ai-sdk/openai` | 87% | In progress | provider package | OpenAI/Open Responses foundations, provider base URL precedence, language-model capability matrix, hosted... |
 | `@ai-sdk/open-responses` | 88% | In progress | provider package | Most fixture, tool, prompt, request, metadata, and stream slices are mapped; remaining... |
 | `@ai-sdk/assemblyai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |

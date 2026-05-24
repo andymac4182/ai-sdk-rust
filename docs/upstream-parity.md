@@ -2693,6 +2693,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   upstream `openai-chat-language-model.test.ts` reasoning-model, search-preview,
   forced-reasoning, and service-tier request pruning/warning cases for the
   non-Responses OpenAI chat facade.
+- 2026-05-24: OpenAI chat system-message mode parity added
+  `openai_chat_should_default_system_message_mode_to_developer_when_forcing_reasoning`,
+  `openai_chat_should_use_developer_messages_for_o1`,
+  `openai_chat_should_allow_overriding_system_message_mode_via_provider_options`,
+  `openai_chat_should_use_default_system_message_mode_when_not_overridden`, and
+  `openai_chat_should_remove_system_messages_when_requested`, mapping upstream
+  `convert-to-openai-chat-messages.test.ts` and `openai-chat-language-model.test.ts`
+  system/developer/remove message-mode behavior for the non-Responses OpenAI
+  chat facade while preserving generic OpenAI-compatible system-message output.
 - 2026-05-20: OpenAI Responses hosted tool include parity added
   `open_responses_provider_adds_hosted_tool_include_options` now covers
   upstream automatic `include` additions for hosted web-search action sources

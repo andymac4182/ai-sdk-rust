@@ -1900,6 +1900,7 @@ fn openai_compatible_chat_request_body(
         text_verbosity,
         strict_json_schema,
         force_reasoning: _,
+        system_message_mode: _,
         additional_body_options,
     } = provider_options.clone();
 
@@ -1991,7 +1992,10 @@ fn openai_compatible_chat_request_body(
 
     body.insert(
         "messages".to_string(),
-        JsonValue::Array(openai_compatible_messages(&prompt)?),
+        JsonValue::Array(openai_compatible_messages_with_system_mode(
+            &prompt,
+            openai_compatible_chat_system_message_mode(model_id, provider, &provider_options),
+        )?),
     );
 
     let (tools, tool_choice) =
@@ -2608,6 +2612,7 @@ struct OpenAICompatibleChatProviderOptions {
     text_verbosity: Option<String>,
     strict_json_schema: Option<bool>,
     force_reasoning: Option<bool>,
+    system_message_mode: Option<String>,
     additional_body_options: JsonObject,
 }
 
@@ -2697,6 +2702,11 @@ fn merge_openai_compatible_chat_known_options(
 
     if let Some(force_reasoning) = options.get("forceReasoning").and_then(JsonValue::as_bool) {
         resolved.force_reasoning = Some(force_reasoning);
+    }
+
+    if let Some(system_message_mode) = options.get("systemMessageMode").and_then(JsonValue::as_str)
+    {
+        resolved.system_message_mode = Some(system_message_mode.to_string());
     }
 }
 
@@ -2887,6 +2897,40 @@ fn apply_openai_chat_model_request_rules(
     }
 }
 
+fn openai_compatible_chat_system_message_mode(
+    model_id: &str,
+    provider: &str,
+    provider_options: &OpenAICompatibleChatProviderOptions,
+) -> OpenAICompatibleSystemMessageMode {
+    if openai_compatible_provider_options_name(provider) != "openai" {
+        return OpenAICompatibleSystemMessageMode::System;
+    }
+
+    match provider_options.system_message_mode.as_deref() {
+        Some("developer") => OpenAICompatibleSystemMessageMode::Developer,
+        Some("remove") => OpenAICompatibleSystemMessageMode::Remove,
+        Some("system") => OpenAICompatibleSystemMessageMode::System,
+        _ => {
+            let capabilities = openai_compatible_openai_chat_capabilities(model_id);
+            let is_reasoning_model = provider_options
+                .force_reasoning
+                .unwrap_or(capabilities.is_reasoning_model);
+            if is_reasoning_model {
+                OpenAICompatibleSystemMessageMode::Developer
+            } else {
+                OpenAICompatibleSystemMessageMode::System
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenAICompatibleSystemMessageMode {
+    System,
+    Developer,
+    Remove,
+}
+
 fn openai_compatible_reasoning_effort(
     reasoning: Option<&LanguageModelReasoningEffort>,
 ) -> Option<String> {
@@ -3043,14 +3087,32 @@ fn openai_compatible_json_instruction_options(
     }
 }
 
+#[cfg(test)]
 fn openai_compatible_messages(prompt: &[LanguageModelMessage]) -> Result<Vec<JsonValue>, String> {
+    openai_compatible_messages_with_system_mode(prompt, OpenAICompatibleSystemMessageMode::System)
+}
+
+fn openai_compatible_messages_with_system_mode(
+    prompt: &[LanguageModelMessage],
+    system_message_mode: OpenAICompatibleSystemMessageMode,
+) -> Result<Vec<JsonValue>, String> {
     let mut messages = Vec::new();
 
     for message in prompt {
         match message {
             LanguageModelMessage::System(message) => {
+                if system_message_mode == OpenAICompatibleSystemMessageMode::Remove {
+                    continue;
+                }
                 let mut object = JsonObject::new();
-                object.insert("role".to_string(), JsonValue::String("system".to_string()));
+                object.insert(
+                    "role".to_string(),
+                    JsonValue::String(match system_message_mode {
+                        OpenAICompatibleSystemMessageMode::System => "system".to_string(),
+                        OpenAICompatibleSystemMessageMode::Developer => "developer".to_string(),
+                        OpenAICompatibleSystemMessageMode::Remove => unreachable!(),
+                    }),
+                );
                 object.insert(
                     "content".to_string(),
                     JsonValue::String(message.content.clone()),

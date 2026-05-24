@@ -2156,8 +2156,8 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelReasoningEffort,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -2903,6 +2903,158 @@ mod tests {
                 ),
             }]
         );
+    }
+
+    #[test]
+    fn openai_chat_should_default_system_message_mode_to_developer_when_forcing_reasoning() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "forceReasoning": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let (body, warnings) = openai_chat_captured_body_and_warnings_with_prompt_options(
+            "stealth-reasoning-model",
+            openai_chat_system_and_user_prompt(),
+            |options| options.with_provider_options(provider_options),
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "stealth-reasoning-model",
+                "messages": [
+                    {
+                        "role": "developer",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_use_developer_messages_for_o1() {
+        let (body, warnings) = openai_chat_captured_body_and_warnings_with_prompt_options(
+            "o1",
+            openai_chat_system_and_user_prompt(),
+            |options| options,
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "o1",
+                "messages": [
+                    {
+                        "role": "developer",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_allow_overriding_system_message_mode_via_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "systemMessageMode": "developer"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let (body, warnings) = openai_chat_captured_body_and_warnings_with_prompt_options(
+            "gpt-4o",
+            openai_chat_system_and_user_prompt(),
+            |options| options.with_provider_options(provider_options),
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "developer",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_use_default_system_message_mode_when_not_overridden() {
+        let (body, warnings) = openai_chat_captured_body_and_warnings_with_prompt_options(
+            "gpt-4o",
+            openai_chat_system_and_user_prompt(),
+            |options| options,
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_remove_system_messages_when_requested() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "systemMessageMode": "remove"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let (body, warnings) = openai_chat_captured_body_and_warnings_with_prompt_options(
+            "gpt-4o",
+            openai_chat_system_and_user_prompt(),
+            |options| options.with_provider_options(provider_options),
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -6178,18 +6330,43 @@ mod tests {
         model_id: &str,
         configure: impl FnOnce(LanguageModelCallOptions) -> LanguageModelCallOptions,
     ) -> (JsonValue, Vec<Warning>) {
+        openai_chat_captured_body_and_warnings_with_prompt_options(
+            model_id,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )],
+            ))],
+            configure,
+        )
+    }
+
+    fn openai_chat_captured_body_and_warnings_with_prompt_options(
+        model_id: &str,
+        prompt: Vec<LanguageModelMessage>,
+        configure: impl FnOnce(LanguageModelCallOptions) -> LanguageModelCallOptions,
+    ) -> (JsonValue, Vec<Warning>) {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let provider = openai_chat_test_provider(Arc::clone(&captured_requests));
 
-        let result = poll_ready(provider.chat(model_id).do_generate(configure(
-            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                    LanguageModelTextPart::new("Hello"),
-                )]),
-            )]),
-        )));
+        let result = poll_ready(
+            provider
+                .chat(model_id)
+                .do_generate(configure(LanguageModelCallOptions::new(prompt))),
+        );
 
         (captured_json_body(&captured_requests), result.warnings)
+    }
+
+    fn openai_chat_system_and_user_prompt() -> Vec<LanguageModelMessage> {
+        vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                "You are a helpful assistant.",
+            )),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ]
     }
 
     fn openai_chat_test_provider(
