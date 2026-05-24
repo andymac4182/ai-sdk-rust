@@ -109,6 +109,22 @@ mod tests {
 
     // ---------- extract_card ----------
 
+    // ---------- extract_card ----------
+    //
+    // 1:1 with upstream `adapter-utils.test.ts > describe("extractCard")`.
+    // The following 4 upstream cases are 1:1 via the type system
+    // (per the slice-380 brief tightening) and have no matching
+    // Rust test:
+    //
+    // - `returns null for null input` / `returns null for undefined
+    //   input`: the Rust signature takes `&AdapterPostableMessage`
+    //   (non-null), so the cases are unreachable.
+    // - `returns null for object without card or type` / `returns
+    //   null for non-card type object`: the Rust input is a typed
+    //   enum (`AdapterPostableMessage`) with only the recognized
+    //   postable variants; the unstructured-object case is not
+    //   constructible.
+
     #[test]
     fn extract_card_returns_card_element_passed_directly() {
         let card = sample_card("Test Card");
@@ -327,6 +343,16 @@ mod tests {
     }
 
     // ---------- extract_postable_attachments ----------
+    //
+    // 1:1 with upstream `adapter-utils.test.ts >
+    // describe("extractPostableAttachments")`. The following 2
+    // upstream cases are 1:1 via the type system (per the slice-380
+    // brief tightening) and have no matching Rust test:
+    //
+    // - `returns empty array for null input` / `returns empty array
+    //   for undefined input`: the Rust signature takes
+    //   `&AdapterPostableMessage` (non-null), so the cases are
+    //   unreachable.
 
     #[test]
     fn extract_postable_attachments_returns_attachments_from_postable_raw() {
