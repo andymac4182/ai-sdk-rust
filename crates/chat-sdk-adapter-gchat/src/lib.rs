@@ -43,6 +43,9 @@ pub const SUBSCRIPTION_CACHE_TTL_MS: u64 = 25 * 60 * 60 * 1000;
 /// `SPACE_SUB_KEY_PREFIX = "gchat:space-sub:"`.
 pub const SPACE_SUB_KEY_PREFIX: &str = "gchat:space-sub:";
 
+/// 1:1 with upstream `userName ?? "bot"` adapter-default.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`GchatAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct GchatAdapterOptions {
@@ -55,6 +58,23 @@ pub struct GchatAdapterOptions {
     pub subject_email: String,
     /// Optional API base URL override.
     pub api_base: Option<String>,
+    /// Display name override. 1:1 with upstream
+    /// `config.userName ?? "bot"`. Defaults to [`DEFAULT_USER_NAME`].
+    pub user_name: Option<String>,
+    /// Optional Pub/Sub topic for receiving Chat events. 1:1 with
+    /// upstream `pubsubTopic` (carry-through; the Rust port's runtime
+    /// surface for Pub/Sub is a separate workstream).
+    pub pubsub_topic: Option<String>,
+    /// Optional user to impersonate via domain-wide delegation. 1:1
+    /// with upstream `impersonateUser` (an alternate spelling of
+    /// `subjectEmail` used by some configurations).
+    pub impersonate_user: Option<String>,
+    /// Use Application Default Credentials instead of an explicit
+    /// service-account JSON. 1:1 with upstream
+    /// `useApplicationDefaultCredentials`. When `true`, the factory
+    /// stores `service_account_json` as the empty string and the
+    /// runtime token-mint will eventually consult `gcloud`/metadata.
+    pub use_application_default_credentials: bool,
 }
 
 impl GchatAdapterOptions {
@@ -65,6 +85,10 @@ impl GchatAdapterOptions {
             service_account_json: service_account_json.into(),
             subject_email: subject_email.into(),
             api_base: None,
+            user_name: None,
+            pubsub_topic: None,
+            impersonate_user: None,
+            use_application_default_credentials: false,
         }
     }
 
@@ -77,6 +101,11 @@ impl GchatAdapterOptions {
     /// Effective API base URL with default applied.
     pub fn effective_api_base(&self) -> &str {
         self.api_base.as_deref().unwrap_or(DEFAULT_API_BASE)
+    }
+
+    /// Effective `userName` with default applied.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -144,6 +173,27 @@ impl GchatAdapter {
     /// Read the currently-configured bearer token, if any.
     pub fn bearer_token(&self) -> Option<&str> {
         self.bearer_token.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly userName: string` (with default).
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
+    }
+
+    /// 1:1 with upstream `readonly pubsubTopic?: string`.
+    pub fn pubsub_topic(&self) -> Option<&str> {
+        self.options.pubsub_topic.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly impersonateUser?: string`.
+    pub fn impersonate_user(&self) -> Option<&str> {
+        self.options.impersonate_user.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly useApplicationDefaultCredentials:
+    /// boolean`.
+    pub fn use_application_default_credentials(&self) -> bool {
+        self.options.use_application_default_credentials
     }
 
     /// Build the Google Chat `messages.create` URL. 1:1 with
@@ -389,6 +439,112 @@ impl Adapter for GchatAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<()> {
         Ok(())
     }
+}
+
+/// 1:1 with upstream `interface GoogleChatAdapterConfig` — all
+/// fields optional so the factory can fall back to environment
+/// variables. Used by [`try_create_gchat_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct GchatCreateOptions {
+    /// Service-account JSON. Falls back to `GOOGLE_CHAT_CREDENTIALS`.
+    pub credentials: Option<String>,
+    /// Use Application Default Credentials. Falls back to
+    /// `GOOGLE_CHAT_USE_ADC == "true"`.
+    pub use_application_default_credentials: Option<bool>,
+    /// Subject email (domain-wide-delegation impersonation). Falls
+    /// back to `GOOGLE_CHAT_IMPERSONATE_USER`.
+    pub subject_email: Option<String>,
+    /// Display name override. (Upstream factory does not resolve
+    /// this from env; defaults to [`DEFAULT_USER_NAME`].)
+    pub user_name: Option<String>,
+    /// Pub/Sub topic. Falls back to `GOOGLE_CHAT_PUBSUB_TOPIC`.
+    pub pubsub_topic: Option<String>,
+    /// API base URL override. Falls back to `GOOGLE_CHAT_API_URL`.
+    pub api_url: Option<String>,
+}
+
+/// Errors returned by [`try_create_gchat_adapter`]. 1:1 with
+/// upstream `throw new ValidationError("gchat", "Authentication is
+/// required")`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GchatCreateError {
+    /// Neither `credentials` nor `use_application_default_credentials`
+    /// resolved from config or environment.
+    AuthenticationRequired,
+}
+
+impl std::fmt::Display for GchatCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthenticationRequired => write!(
+                f,
+                "Authentication is required. Set GOOGLE_CHAT_CREDENTIALS, GOOGLE_CHAT_USE_ADC, or provide credentials in config."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GchatCreateError {}
+
+/// 1:1 with upstream `createGoogleChatAdapter(config)` /
+/// `new GoogleChatAdapter(config)` env-var-resolution path. The
+/// `env` reader is a closure (avoids `unsafe std::env::set_var`
+/// and parallel-test races).
+///
+/// Resolution rules (1:1 with upstream):
+/// - **Auth** ← config.credentials > config.use_application_default_credentials >
+///   `env("GOOGLE_CHAT_CREDENTIALS")` >
+///   `env("GOOGLE_CHAT_USE_ADC") == "true"` > error.
+///   Config credentials short-circuit env auth ("don't mix modes").
+/// - `subject_email` ← `opts` ?? `env("GOOGLE_CHAT_IMPERSONATE_USER")`
+///   ?? `""` (subject is optional; ADC mode often omits it).
+/// - `user_name` ← `opts.user_name` ?? [`DEFAULT_USER_NAME`] (no
+///   env fallback at the factory in upstream).
+/// - `pubsub_topic` ← `opts` ?? `env("GOOGLE_CHAT_PUBSUB_TOPIC")`.
+/// - `api_url` ← `opts` ?? `env("GOOGLE_CHAT_API_URL")`.
+pub fn try_create_gchat_adapter(
+    opts: GchatCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<GchatAdapter, GchatCreateError> {
+    let has_config_auth =
+        opts.credentials.is_some() || opts.use_application_default_credentials.is_some();
+
+    let (service_account_json, use_adc) = if has_config_auth {
+        if let Some(creds) = opts.credentials {
+            (creds, false)
+        } else if matches!(opts.use_application_default_credentials, Some(true)) {
+            (String::new(), true)
+        } else {
+            return Err(GchatCreateError::AuthenticationRequired);
+        }
+    } else if let Some(creds) = env("GOOGLE_CHAT_CREDENTIALS") {
+        (creds, false)
+    } else if env("GOOGLE_CHAT_USE_ADC").as_deref() == Some("true") {
+        (String::new(), true)
+    } else {
+        return Err(GchatCreateError::AuthenticationRequired);
+    };
+
+    let subject_email = opts
+        .subject_email
+        .or_else(|| env("GOOGLE_CHAT_IMPERSONATE_USER"))
+        .unwrap_or_default();
+    let pubsub_topic = opts.pubsub_topic.or_else(|| env("GOOGLE_CHAT_PUBSUB_TOPIC"));
+    let api_url = opts.api_url.or_else(|| env("GOOGLE_CHAT_API_URL"));
+
+    Ok(GchatAdapter::new(GchatAdapterOptions {
+        service_account_json,
+        subject_email: subject_email.clone(),
+        api_base: api_url,
+        user_name: opts.user_name,
+        pubsub_topic,
+        impersonate_user: if subject_email.is_empty() {
+            None
+        } else {
+            Some(subject_email)
+        },
+        use_application_default_credentials: use_adc,
+    }))
 }
 
 /// Encode a Google Chat thread id. 1:1 with upstream's inline format:
@@ -708,5 +864,170 @@ mod tests {
         );
         let adapter = GchatAdapter::new(opts);
         assert_eq!(adapter.name(), "gchat");
+    }
+
+    // ---------- constructor / initialization (portable subset, 4 cases) +
+    //            constructor env var resolution (8 cases) ----------
+    // 1:1 with upstream `describe("constructor / initialization")` +
+    // `describe("constructor env var resolution")`. The 2
+    // `initialize`-restore-botUserId cases are deferred — they need
+    // the chat-sdk-chat StateAdapter wiring + `GchatAdapter::initialize`
+    // implementation. The "should default logger when not provided"
+    // case is js-only here (logger isn't a first-class adapter
+    // dependency in this port). The 2 `apiUrl` cases are part of the
+    // env-var-resolution block.
+
+    const TEST_CREDS: &str = "{\"type\":\"service_account\"}";
+
+    fn empty_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn ctor_init_should_use_provided_user_name() {
+        let adapter = try_create_gchat_adapter(
+            GchatCreateOptions {
+                credentials: Some(TEST_CREDS.to_string()),
+                user_name: Some("mybot".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("config credentials");
+        assert_eq!(adapter.user_name(), "mybot");
+    }
+
+    #[test]
+    fn ctor_init_should_default_user_name_to_bot() {
+        let adapter = try_create_gchat_adapter(
+            GchatCreateOptions {
+                credentials: Some(TEST_CREDS.to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("default user name");
+        assert_eq!(adapter.user_name(), "bot");
+    }
+
+    #[test]
+    fn ctor_init_should_throw_when_no_auth_is_configured() {
+        let err = try_create_gchat_adapter(GchatCreateOptions::default(), empty_env)
+            .expect_err("no auth");
+        assert_eq!(err, GchatCreateError::AuthenticationRequired);
+        assert!(err.to_string().contains("Authentication is required"));
+    }
+
+    #[test]
+    fn ctor_init_should_accept_adc_config() {
+        let adapter = try_create_gchat_adapter(
+            GchatCreateOptions {
+                use_application_default_credentials: Some(true),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("ADC config");
+        assert_eq!(adapter.name(), "gchat");
+        assert!(adapter.use_application_default_credentials());
+    }
+
+    #[test]
+    fn ctor_env_throws_when_no_auth_configured_and_no_env_vars_set() {
+        let err = try_create_gchat_adapter(GchatCreateOptions::default(), empty_env)
+            .expect_err("no auth anywhere");
+        assert_eq!(err, GchatCreateError::AuthenticationRequired);
+    }
+
+    #[test]
+    fn ctor_env_resolves_credentials_from_google_chat_credentials_env_var() {
+        let env = |key: &str| match key {
+            "GOOGLE_CHAT_CREDENTIALS" => Some(TEST_CREDS.to_string()),
+            _ => None,
+        };
+        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
+            .expect("env credentials");
+        assert_eq!(adapter.service_account_json(), TEST_CREDS);
+        assert!(!adapter.use_application_default_credentials());
+    }
+
+    #[test]
+    fn ctor_env_resolves_adc_from_google_chat_use_adc_env_var() {
+        let env = |key: &str| match key {
+            "GOOGLE_CHAT_USE_ADC" => Some("true".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
+            .expect("env ADC");
+        assert!(adapter.use_application_default_credentials());
+    }
+
+    #[test]
+    fn ctor_env_resolves_pubsub_topic_from_google_chat_pubsub_topic_env_var() {
+        let env = |key: &str| match key {
+            "GOOGLE_CHAT_CREDENTIALS" => Some(TEST_CREDS.to_string()),
+            "GOOGLE_CHAT_PUBSUB_TOPIC" => Some("projects/test/topics/test".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
+            .expect("env pubsub topic");
+        assert_eq!(adapter.pubsub_topic(), Some("projects/test/topics/test"));
+    }
+
+    #[test]
+    fn ctor_env_resolves_impersonate_user_from_google_chat_impersonate_user_env_var() {
+        let env = |key: &str| match key {
+            "GOOGLE_CHAT_CREDENTIALS" => Some(TEST_CREDS.to_string()),
+            "GOOGLE_CHAT_IMPERSONATE_USER" => Some("user@example.com".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
+            .expect("env impersonate user");
+        assert_eq!(adapter.impersonate_user(), Some("user@example.com"));
+        assert_eq!(adapter.subject_email(), "user@example.com");
+    }
+
+    #[test]
+    fn ctor_env_prefers_config_credentials_over_env_vars() {
+        let env = |key: &str| match key {
+            "GOOGLE_CHAT_USE_ADC" => Some("true".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_gchat_adapter(
+            GchatCreateOptions {
+                credentials: Some(TEST_CREDS.to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config credentials override env ADC");
+        assert_eq!(adapter.service_account_json(), TEST_CREDS);
+        assert!(!adapter.use_application_default_credentials());
+    }
+
+    #[test]
+    fn ctor_env_resolves_api_url_from_google_chat_api_url_env_var() {
+        let env = |key: &str| match key {
+            "GOOGLE_CHAT_CREDENTIALS" => Some(TEST_CREDS.to_string()),
+            "GOOGLE_CHAT_API_URL" => Some("https://custom-chat.googleapis.com".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
+            .expect("env api url");
+        assert_eq!(adapter.api_base(), "https://custom-chat.googleapis.com");
+    }
+
+    #[test]
+    fn ctor_env_accepts_api_url_config() {
+        let adapter = try_create_gchat_adapter(
+            GchatCreateOptions {
+                credentials: Some(TEST_CREDS.to_string()),
+                api_url: Some("https://custom-chat.googleapis.com".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect("api url config");
+        assert_eq!(adapter.api_base(), "https://custom-chat.googleapis.com");
     }
 }
