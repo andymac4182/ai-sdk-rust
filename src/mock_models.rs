@@ -1039,7 +1039,8 @@ mod tests {
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions,
         LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
         LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamStart,
-        LanguageModelSupportedUrls, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage, OutputTokenUsage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{
@@ -1116,6 +1117,32 @@ mod tests {
     }
 
     #[test]
+    fn mock_language_model_v4_returns_array_backed_generate_results_from_the_first_entry() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([text_result("first"), text_result("second")]);
+
+        let first = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        let second = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(extract_text(&first), "first");
+        assert_eq!(extract_text(&second), "second");
+        assert_eq!(model.generate_calls().len(), 2);
+    }
+
+    #[test]
+    fn mock_language_model_v4_returns_array_backed_stream_results_from_the_first_entry() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_result("first"), stream_result("second")]);
+
+        let first = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+        let second = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(collect_stream_text(&first), "first");
+        assert_eq!(collect_stream_text(&second), "second");
+        assert_eq!(model.stream_calls().len(), 2);
+    }
+
+    #[test]
     fn mock_embedding_model_records_calls_and_capabilities() {
         let model = MockEmbeddingModel::new()
             .with_max_embeddings_per_call(3)
@@ -1132,6 +1159,23 @@ mod tests {
         assert!(poll_ready(model.supports_parallel_calls()));
         assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
         assert_eq!(model.embed_calls()[0].values, vec!["alpha"]);
+    }
+
+    #[test]
+    fn mock_embedding_model_v4_returns_array_backed_embed_results_from_the_first_entry() {
+        let model = MockEmbeddingModel::new().with_embed_results([
+            EmbeddingModelResult::new(vec![vec![1.0]]),
+            EmbeddingModelResult::new(vec![vec![2.0]]),
+        ]);
+
+        let first =
+            poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec!["first".to_string()])));
+        let second =
+            poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec!["second".to_string()])));
+
+        assert_eq!(first.embeddings, vec![vec![1.0]]);
+        assert_eq!(second.embeddings, vec![vec![2.0]]);
+        assert_eq!(model.embed_calls().len(), 2);
     }
 
     #[test]
@@ -1281,11 +1325,32 @@ mod tests {
         )
     }
 
+    fn stream_result(text: &str) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new(text)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(text, text)),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(text)),
+        ])
+    }
+
     fn extract_text(result: &LanguageModelGenerateResult) -> &str {
         match &result.content[0] {
             LanguageModelContent::Text(text) => &text.text,
             _ => panic!("expected text result"),
         }
+    }
+
+    fn collect_stream_text(
+        result: &LanguageModelStreamResult<Vec<LanguageModelStreamPart>>,
+    ) -> String {
+        result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
