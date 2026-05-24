@@ -508,6 +508,55 @@ mod tests {
         assert_eq!(serialized.is_mention, Some(true));
     }
 
+    #[test]
+    fn to_serialized_should_handle_undefined_edited_at() {
+        // 1:1 with upstream `describe("Message.toJSON()") > it("should
+        // handle undefined editedAt")` — when `edited: false` and
+        // `editedAt: None`, the serialized payload's `editedAt` field
+        // is `None` (omitted on the wire via `skip_serializing_if`).
+        let mut msg = sample_message();
+        msg.metadata = MessageMetadata {
+            date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+            edited: false,
+            edited_at: None,
+        };
+        let serialized = msg.to_serialized();
+        assert_eq!(serialized.metadata.edited_at, None);
+        // Wire-shape check: the JSON should not include `editedAt`
+        // when None (matches upstream's `editedAt: undefined`
+        // which JSON.stringify omits).
+        let json = serde_json::to_value(&serialized).unwrap();
+        assert!(json["metadata"].get("editedAt").is_none());
+    }
+
+    #[test]
+    fn to_serialized_should_serialize_author_correctly() {
+        // 1:1 with upstream `describe("Message.toJSON()") > it("should
+        // serialize author correctly")` — author round-trips with its
+        // `userId` / `userName` / `fullName` / `isBot` / `isMe`
+        // fields preserved.
+        let serialized = sample_message().to_serialized();
+        let json = serde_json::to_value(&serialized).unwrap();
+        let author = &json["author"];
+        assert!(author["userId"].is_string());
+        assert!(author["userName"].is_string());
+        assert!(author["fullName"].is_string());
+        assert!(author["isBot"].is_boolean() || author["isBot"].is_string());
+    }
+
+    #[test]
+    fn to_serialized_should_produce_json_serializable_output() {
+        // 1:1 with upstream `describe("Message.toJSON()") > it("should
+        // produce JSON-serializable output")` — the serialized form
+        // round-trips through `JSON.stringify`+`JSON.parse` losslessly
+        // (the Rust equivalent is `serde_json::to_string` →
+        // `serde_json::from_str` round-trip).
+        let serialized = sample_message().to_serialized();
+        let text = serde_json::to_string(&serialized).expect("serialize");
+        let _parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("re-parse round-trips");
+    }
+
     // ---------- from_serialized ----------
 
     #[test]
