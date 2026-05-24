@@ -484,6 +484,42 @@ impl<T: ChatTransport> Chat<T> {
         )])
     }
 
+    pub fn submit_latest_assistant_message(
+        &mut self,
+        request: ChatRequestOptions,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let assistant_index = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == UiMessageRole::Assistant)
+            .ok_or_else(|| ChatError::Stream("No assistant message exists.".to_string()))?;
+        let message_id = self.messages[assistant_index].id.clone();
+
+        self.status = ChatStatus::Submitted;
+        self.error = None;
+        self.is_aborted = false;
+        self.abort_reason = None;
+        self.last_finish_event = None;
+
+        let send_options =
+            ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, self.id.clone())
+                .with_message_id(message_id)
+                .with_messages(self.messages.clone())
+                .with_request(request);
+
+        self.status = ChatStatus::Streaming;
+        match self.transport.send_messages(send_options) {
+            Ok(chunks) => self.apply_response_chunks_to_existing_assistant(assistant_index, chunks),
+            Err(error) => {
+                self.status = ChatStatus::Error;
+                let message = error.to_string();
+                self.error = Some(message);
+                self.last_finish_event = None;
+                Err(error.into())
+            }
+        }
+    }
+
     fn generate_message_id(&mut self) -> String {
         self.next_message_index += 1;
         format!("msg-{}", self.next_message_index)
@@ -505,6 +541,46 @@ impl<T: ChatTransport> Chat<T> {
             .map_err(|error| ChatError::Stream(error.to_string()))?;
         self.messages[assistant_index] = state.message;
         Ok(())
+    }
+
+    fn apply_response_chunks_to_existing_assistant(
+        &mut self,
+        assistant_index: usize,
+        chunks: Vec<UiMessageChunk>,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let has_error_chunk = chunks.iter().find_map(|chunk| match chunk {
+            UiMessageChunk::Error { error_text } => Some(error_text.clone()),
+            _ => None,
+        });
+        if let Some(error_text) = has_error_chunk {
+            self.status = ChatStatus::Error;
+            self.error = Some(error_text.clone());
+            self.is_aborted = false;
+            self.abort_reason = None;
+            self.last_finish_event = None;
+            return Err(ChatError::Stream(error_text));
+        }
+
+        let last_message = self.messages[assistant_index].clone();
+        let mut state = StreamingUiMessageState::new(last_message.id.clone(), Some(last_message));
+        let states = process_ui_message_stream(&mut state, chunks, false).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        let assistant_message = state.message.clone();
+        self.messages[assistant_index] = assistant_message.clone();
+        self.status = ChatStatus::Ready;
+        self.is_aborted = state.aborted;
+        self.abort_reason = state.abort_reason;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: state.finish_reason,
+            is_abort: self.is_aborted,
+            is_disconnect: false,
+            is_error: false,
+            message: Some(assistant_message),
+            messages: self.messages.clone(),
+        });
+        Ok(states)
     }
 
     fn apply_response_chunks(
@@ -2365,6 +2441,7 @@ fn default_send_messages_body(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -2463,34 +2540,46 @@ mod tests {
 
     #[derive(Debug)]
     struct RecordingChatTransport {
-        response: Vec<UiMessageChunk>,
-        error: Option<ChatTransportError>,
-        captured_send: Mutex<Option<ChatTransportSendOptions>>,
+        responses: Mutex<VecDeque<Result<Vec<UiMessageChunk>, ChatTransportError>>>,
+        captured_sends: Mutex<Vec<ChatTransportSendOptions>>,
     }
 
     impl RecordingChatTransport {
         fn new(response: impl IntoIterator<Item = UiMessageChunk>) -> Self {
             Self {
-                response: response.into_iter().collect(),
-                error: None,
-                captured_send: Mutex::new(None),
+                responses: Mutex::new(VecDeque::from([Ok(response.into_iter().collect())])),
+                captured_sends: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_responses(responses: impl IntoIterator<Item = Vec<UiMessageChunk>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(Ok).collect()),
+                captured_sends: Mutex::new(Vec::new()),
             }
         }
 
         fn with_error(error: ChatTransportError) -> Self {
             Self {
-                response: Vec::new(),
-                error: Some(error),
-                captured_send: Mutex::new(None),
+                responses: Mutex::new(VecDeque::from([Err(error)])),
+                captured_sends: Mutex::new(Vec::new()),
             }
         }
 
         fn captured_send(&self) -> ChatTransportSendOptions {
-            self.captured_send
+            self.captured_sends
+                .lock()
+                .expect("captured send mutex is not poisoned")
+                .last()
+                .cloned()
+                .expect("send was captured")
+        }
+
+        fn captured_sends(&self) -> Vec<ChatTransportSendOptions> {
+            self.captured_sends
                 .lock()
                 .expect("captured send mutex is not poisoned")
                 .clone()
-                .expect("send was captured")
         }
     }
 
@@ -2499,14 +2588,15 @@ mod tests {
             &self,
             options: ChatTransportSendOptions,
         ) -> Result<Vec<UiMessageChunk>, ChatTransportError> {
-            *self
-                .captured_send
+            self.captured_sends
                 .lock()
-                .expect("captured send mutex is not poisoned") = Some(options);
-            if let Some(error) = &self.error {
-                return Err(error.clone());
-            }
-            Ok(self.response.clone())
+                .expect("captured send mutex is not poisoned")
+                .push(options);
+            self.responses
+                .lock()
+                .expect("responses mutex is not poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Ok(Vec::new()))
         }
 
         fn reconnect_to_stream(
@@ -2899,6 +2989,82 @@ mod tests {
                     ]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_output_is_added() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-0",
+                    "test-tool",
+                    json!({ "testArg": "test-value" }),
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![UiMessageChunk::finish()],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_output("tool-call-0", json!("test-output"))
+            .expect("tool output is added");
+        chat.submit_latest_assistant_message(
+            ChatRequestOptions::new().with_body_property("session", json!("s1")),
+        )
+        .expect("assistant message submits after tool output");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        let follow_up = &captured_sends[1];
+        assert_eq!(follow_up.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(follow_up.chat_id, "chat-1");
+        assert_eq!(follow_up.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            follow_up.request.body,
+            Some(JsonObject::from_iter([(
+                "session".to_string(),
+                json!("s1")
+            )]))
+        );
+        assert_eq!(
+            serde_json::to_value(&follow_up.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            serde_json::to_value(&follow_up.messages).expect("messages serialize")
+        );
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(
+            event.message.as_ref().map(|message| message.id.as_str()),
+            Some("assistant-1")
         );
     }
 

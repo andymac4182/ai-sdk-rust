@@ -2298,6 +2298,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   and dynamic-tool output submission UI state by mutating the matching latest
   assistant tool part to `output-available` or `output-error` while preserving
   its input and tool-call metadata.
+- 2026-05-25: `packages/ai` `Chat.addToolOutput` follow-up submission parity
+  added `chat_should_submit_message_when_a_tool_output_is_added`, covering the
+  portable upstream `ui/chat.test.ts` second `submit-message` call after a
+  tool output is appended to the latest assistant message. The Rust state
+  manager now resubmits the full message list with the assistant message id and
+  folds the follow-up response back into that same assistant message.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
