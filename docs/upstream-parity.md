@@ -2786,6 +2786,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   so the equivalent proof is that each high-level API invokes the model trait
   method for URL file prompts and the generation still resolves to the expected
   text or object.
+- 2026-05-25: `packages/ai` `streamText` prepare-step URL-file model-switch
+  parity added
+  `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
+  matching upstream's `prepareStep with model switch and image URLs` case by
+  proving URL-file support is queried on the step-selected model, not the
+  original model, and that the switched model receives the provider call with
+  the URL file prompt.
 - 2026-05-21: `streamObject` warnings and callback parity added
   `stream_object_warnings_resolve_empty_when_no_warnings_are_present`,
   `stream_object_warnings_resolve_model_warnings`,
@@ -5044,6 +5051,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving approved and denied provider-executed approval responses are sent to
    the model exactly once without replaying the assistant approval-request
    part, and that provider-executed tool results/text are surfaced afterward.
+   The upstream `streamText` prepare-step model switch with image URLs case now
+   has the named Rust counterpart
+   `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
+   proving URL-file support checks are performed against the model selected by
+   `prepareStep` rather than the original model before the provider stream
+   call.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,

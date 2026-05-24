@@ -6339,6 +6339,79 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_prepare_step_model_switch_uses_step_model_supported_urls() {
+        let primary = MockLanguageModel::new()
+            .with_model_id("with-image-url-support")
+            .with_supported_urls(BTreeMap::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "should not run",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let secondary = MockLanguageModel::new()
+            .with_provider("without-image-url-support")
+            .with_model_id("without-image-url-support")
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "response from without-image-url-support",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let secondary_model = &secondary;
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "Describe this image",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&primary, prompt).with_prepare_step(
+                move |_options| async move { PrepareStepResult::new().with_model(secondary_model) },
+            ),
+        ));
+
+        assert_eq!(result.text, "response from without-image-url-support");
+        assert_eq!(primary.supported_urls_calls(), 0);
+        assert_eq!(secondary.supported_urls_calls(), 1);
+        assert_eq!(primary.stream_calls().len(), 0);
+        let secondary_calls = secondary.stream_calls();
+        assert_eq!(secondary_calls.len(), 1);
+        assert!(matches!(
+            &secondary_calls[0].prompt[0],
+            LanguageModelMessage::User(message)
+                if message.content.len() == 2
+                    && matches!(
+                        &message.content[1],
+                        LanguageModelUserContentPart::File(file)
+                            if file.media_type == "image/jpeg"
+                                && matches!(file.data, FileData::Url { .. })
+                    )
+        ));
+    }
+
+    #[test]
     fn stream_text_tool_result_url_file_calls_model_supported_urls() {
         let model = MockLanguageModel::new()
             .with_model_id("mock-model-id")
