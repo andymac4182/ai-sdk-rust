@@ -977,6 +977,19 @@ focused tests for each portable behavior before changing rows to `verified`.
   reader-cancellation and rejected async callback logging cases remain
   JavaScript Web-stream/Promise-runtime boundaries for the current
   materialized synchronous Rust API.
+- 2026-05-24: `packages/ai` `createUIMessageStreamResponse`
+  `consumeSseStream` parity added `UiMessageSseConsumer` and named Rust
+  counterparts for upstream `create-ui-message-stream-response.test.ts`
+  consumer cases:
+  `create_ui_message_stream_response_calls_consume_sse_stream_with_teed_stream`,
+  `create_ui_message_stream_response_does_not_block_response_for_consume_sse_stream`,
+  `create_ui_message_stream_response_handles_synchronous_consume_sse_stream`,
+  and
+  `create_ui_message_stream_response_handles_consume_sse_stream_errors_gracefully`.
+  Rust represents upstream's teed `ReadableStream<string>` as a cloned
+  materialized encoded SSE body; consumer errors are ignored so the returned
+  response body remains readable. Exact asynchronous Web-stream scheduling is
+  JavaScript-runtime-specific for the current Rust helper.
 - 2026-05-23: `packages/ai` `streamText` automatic tool approval stream
   parity added the named Rust counterpart
   `stream_text_automatic_tool_approval_response_streams_before_tool_result`

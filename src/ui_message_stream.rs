@@ -2757,8 +2757,43 @@ impl UiMessageStreamResponseInit {
     }
 }
 
+/// Consumer callback used to observe encoded UI-message SSE chunks.
+pub type UiMessageSseConsumerFunction =
+    dyn Fn(Vec<Vec<u8>>) -> Result<(), String> + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `consumeSseStream`.
+#[derive(Clone)]
+pub struct UiMessageSseConsumer {
+    callback: Arc<UiMessageSseConsumerFunction>,
+}
+
+impl UiMessageSseConsumer {
+    /// Creates an encoded SSE stream consumer.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(Vec<Vec<u8>>) -> Result<(), String> + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Runs the consumer with a cloned encoded SSE body.
+    pub fn consume(&self, body: Vec<Vec<u8>>) -> Result<(), String> {
+        (self.callback)(body)
+    }
+}
+
+impl fmt::Debug for UiMessageSseConsumer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UiMessageSseConsumer")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options shared by UI-message stream response helpers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct UiMessageStreamResponseOptions {
     /// UI-message chunks to encode as server-sent events.
     pub stream: Vec<UiMessageChunk>,
@@ -2771,6 +2806,9 @@ pub struct UiMessageStreamResponseOptions {
 
     /// Optional response headers.
     pub headers: Option<Headers>,
+
+    /// Optional observer for a cloned encoded SSE body.
+    pub consume_sse_stream: Option<UiMessageSseConsumer>,
 }
 
 impl UiMessageStreamResponseOptions {
@@ -2792,6 +2830,7 @@ impl UiMessageStreamResponseOptions {
             status: init.status,
             status_text: init.status_text,
             headers: init.headers,
+            consume_sse_stream: None,
         }
     }
 
@@ -2818,6 +2857,21 @@ impl UiMessageStreamResponseOptions {
         self.headers
             .get_or_insert_with(Headers::new)
             .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets a consumer callback that receives a cloned encoded SSE body.
+    pub fn with_consume_sse_stream<F>(mut self, consume_sse_stream: F) -> Self
+    where
+        F: Fn(Vec<Vec<u8>>) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.consume_sse_stream = Some(UiMessageSseConsumer::new(consume_sse_stream));
+        self
+    }
+
+    /// Sets a pre-built encoded SSE stream consumer.
+    pub fn with_sse_consumer(mut self, consume_sse_stream: UiMessageSseConsumer) -> Self {
+        self.consume_sse_stream = Some(consume_sse_stream);
         self
     }
 }
@@ -2859,13 +2913,20 @@ pub fn create_ui_message_stream_response(
         status,
         status_text,
         headers,
+        consume_sse_stream,
     } = options;
+
+    let body = encode_ui_message_sse_stream(stream);
+
+    if let Some(consume_sse_stream) = consume_sse_stream {
+        let _ = consume_sse_stream.consume(body.clone());
+    }
 
     UiMessageStreamResponse {
         status: status.unwrap_or(200),
         status_text,
         headers: prepare_ui_message_stream_headers(headers),
-        body: encode_ui_message_sse_stream(stream),
+        body,
     }
 }
 
@@ -2905,6 +2966,7 @@ where
         status,
         status_text,
         headers,
+        consume_sse_stream: _,
     } = options;
 
     let status = status.unwrap_or(200);
@@ -3050,6 +3112,117 @@ mod tests {
             response.decoded_body().expect("body chunks decode"),
             vec![
                 r#"data: {"type":"error","errorText":"Custom error message"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_calls_consume_sse_stream_with_teed_stream() {
+        let consumed_body = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let consumed_body_for_callback = Arc::clone(&consumed_body);
+
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([
+                UiMessageChunk::text_delta("1", "test-data-1"),
+                UiMessageChunk::text_delta("1", "test-data-2"),
+            ])
+            .with_consume_sse_stream(move |body| {
+                *consumed_body_for_callback
+                    .lock()
+                    .expect("consumed body lock") = body;
+                Ok(())
+            }),
+        );
+
+        let response_body = response.decoded_body().expect("response body decodes");
+        assert_eq!(
+            response_body,
+            vec![
+                r#"data: {"type":"text-delta","id":"1","delta":"test-data-1"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"text-delta","id":"1","delta":"test-data-2"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
+        );
+
+        let consumed = consumed_body.lock().expect("consumed body lock").clone();
+        let consumed = consumed
+            .into_iter()
+            .map(String::from_utf8)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("consumed body decodes");
+        assert_eq!(consumed, response_body);
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_does_not_block_response_for_consume_sse_stream() {
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([UiMessageChunk::text_delta("1", "test-data")])
+                .with_consume_sse_stream(|body| {
+                    assert_eq!(body.len(), 2);
+                    Ok(())
+                }),
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            vec![
+                r#"data: {"type":"text-delta","id":"1","delta":"test-data"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_handles_synchronous_consume_sse_stream() {
+        let consumed_body = Arc::new(Mutex::new(Vec::<String>::new()));
+        let consumed_body_for_callback = Arc::clone(&consumed_body);
+
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([UiMessageChunk::text_delta("1", "sync-test")])
+                .with_consume_sse_stream(move |body| {
+                    *consumed_body_for_callback
+                        .lock()
+                        .expect("consumed body lock") = body
+                        .into_iter()
+                        .map(String::from_utf8)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                }),
+        );
+
+        let response_body = response.decoded_body().expect("response body decodes");
+        assert_eq!(
+            consumed_body.lock().expect("consumed body lock").as_slice(),
+            response_body.as_slice()
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_handles_consume_sse_stream_errors_gracefully() {
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([UiMessageChunk::text_delta("1", "error-test")])
+                .with_consume_sse_stream(|_| Err("consumeSseStream error".to_string())),
+        );
+
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            vec![
+                r#"data: {"type":"text-delta","id":"1","delta":"error-test"}
 
 "#
                 .to_string(),
