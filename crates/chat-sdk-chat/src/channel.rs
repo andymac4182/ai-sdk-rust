@@ -27,7 +27,16 @@
 use std::sync::Arc;
 
 use crate::postable_object::{PostableDispatchError, post_postable_object};
-use crate::types::{Adapter, AdapterResult};
+use crate::types::{Adapter, AdapterResult, StateAdapter, StateResult};
+
+/// 1:1 with upstream's private
+/// `const CHANNEL_STATE_KEY_PREFIX = "channel-state:"`.
+pub const CHANNEL_STATE_KEY_PREFIX: &str = "channel-state:";
+
+/// 1:1 with upstream `export const CHANNEL_STATE_TTL_MS = 30 * 24
+/// * 60 * 60 * 1000` (30 days in milliseconds). Channel state and
+/// thread state share the same TTL upstream.
+pub const CHANNEL_STATE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Cross-platform channel handle. 1:1 port (in progress) of upstream
 /// `class Channel`.
@@ -40,6 +49,8 @@ use crate::types::{Adapter, AdapterResult};
 pub struct Channel {
     adapter: Arc<dyn Adapter>,
     channel_id: String,
+    is_dm: bool,
+    state_adapter: Option<Arc<dyn StateAdapter>>,
 }
 
 impl std::fmt::Debug for Channel {
@@ -53,11 +64,63 @@ impl std::fmt::Debug for Channel {
 
 impl Channel {
     /// 1:1 port of upstream `new Channel({ adapter, channelId })`.
+    /// `is_dm` defaults to `false`, matching upstream's `isDM ??
+    /// false` fallback. No state adapter bound — call
+    /// [`Channel::with_state_adapter`] or use
+    /// [`Channel::with_options`] to configure both.
     pub fn new(adapter: Arc<dyn Adapter>, channel_id: impl Into<String>) -> Self {
         Self {
             adapter,
             channel_id: channel_id.into(),
+            is_dm: false,
+            state_adapter: None,
         }
+    }
+
+    /// 1:1 port of upstream `new ChannelImpl({ adapter, id,
+    /// stateAdapter })` with `isDM` defaulted to `false`. Use this
+    /// constructor when callers want [`Channel::state`] /
+    /// [`Channel::set_state`] without the (not yet ported) chat-
+    /// singleton fallback.
+    pub fn with_state_adapter(
+        adapter: Arc<dyn Adapter>,
+        channel_id: impl Into<String>,
+        state_adapter: Arc<dyn StateAdapter>,
+    ) -> Self {
+        Self {
+            adapter,
+            channel_id: channel_id.into(),
+            is_dm: false,
+            state_adapter: Some(state_adapter),
+        }
+    }
+
+    /// 1:1 port of upstream `new ChannelImpl({ adapter, id,
+    /// stateAdapter, isDM })`. The most general constructor.
+    pub fn with_options(
+        adapter: Arc<dyn Adapter>,
+        channel_id: impl Into<String>,
+        state_adapter: Option<Arc<dyn StateAdapter>>,
+        is_dm: bool,
+    ) -> Self {
+        Self {
+            adapter,
+            channel_id: channel_id.into(),
+            is_dm,
+            state_adapter,
+        }
+    }
+
+    /// 1:1 with upstream `readonly isDM: boolean`. Returns the
+    /// `isDM` flag set at construction (defaults to `false`).
+    pub fn is_dm(&self) -> bool {
+        self.is_dm
+    }
+
+    /// Borrow the bound state adapter, if any. Returns `None` when
+    /// [`Channel::new`] was used.
+    pub fn state_adapter(&self) -> Option<&Arc<dyn StateAdapter>> {
+        self.state_adapter.as_ref()
     }
 
     /// Channel-id accessor. 1:1 with upstream `get channelId(): string`.
@@ -94,6 +157,63 @@ impl Channel {
         envelope: &serde_json::Value,
     ) -> Result<String, PostableDispatchError> {
         post_postable_object(self.adapter.as_ref(), &self.channel_id, envelope).await
+    }
+
+    fn state_key(&self) -> String {
+        format!("{CHANNEL_STATE_KEY_PREFIX}{}", self.channel_id)
+    }
+
+    /// 1:1 port of upstream `Channel.state` getter. Reads stored
+    /// state via the bound [`StateAdapter`]. Returns `Ok(None)`
+    /// when the key is unset, expired, or when the Channel was
+    /// built without a state adapter (matches upstream's `null`
+    /// resolution).
+    pub async fn state(&self) -> StateResult<Option<serde_json::Value>> {
+        let Some(state) = self.state_adapter.as_ref() else {
+            return Ok(None);
+        };
+        state.get(&self.state_key()).await
+    }
+
+    /// 1:1 port of upstream `Channel.setState(newState, options?)`.
+    /// Shallow-merges `new_state` with the existing value under the
+    /// channel-state key. State persists for
+    /// [`CHANNEL_STATE_TTL_MS`] ms. No-op when the Channel has no
+    /// state adapter bound.
+    pub async fn set_state(&self, new_state: serde_json::Value) -> StateResult<()> {
+        self.set_state_with_options(new_state, false).await
+    }
+
+    /// 1:1 port of upstream `Channel.setState(newState, { replace:
+    /// true })`. Overwrites any existing state under the key.
+    pub async fn set_state_replace(&self, new_state: serde_json::Value) -> StateResult<()> {
+        self.set_state_with_options(new_state, true).await
+    }
+
+    async fn set_state_with_options(
+        &self,
+        new_state: serde_json::Value,
+        replace: bool,
+    ) -> StateResult<()> {
+        let Some(state) = self.state_adapter.as_ref() else {
+            return Ok(());
+        };
+        let key = self.state_key();
+        if replace {
+            return state.set(&key, new_state, Some(CHANNEL_STATE_TTL_MS)).await;
+        }
+        let merged = match state.get(&key).await? {
+            Some(serde_json::Value::Object(mut existing)) => {
+                if let serde_json::Value::Object(incoming) = new_state {
+                    for (k, v) in incoming {
+                        existing.insert(k, v);
+                    }
+                }
+                serde_json::Value::Object(existing)
+            }
+            _ => new_state,
+        };
+        state.set(&key, merged, Some(CHANNEL_STATE_TTL_MS)).await
     }
 }
 
@@ -211,6 +331,130 @@ mod tests {
         block_on(cloned.post("b")).unwrap();
         let calls = adapter.post_message.lock().unwrap();
         assert_eq!(calls.len(), 2);
+    }
+
+    // ---------- basic properties (2 upstream cases) ----------
+
+    #[test]
+    fn channel_basic_properties_should_have_correct_id_and_adapter() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter, "C123");
+        assert_eq!(channel.channel_id(), "C123");
+        assert_eq!(channel.adapter_name(), "recording");
+        // Default: isDM is false (upstream `isDM ?? false`).
+        assert!(!channel.is_dm());
+    }
+
+    #[test]
+    fn channel_basic_properties_should_set_is_dm_when_configured() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::with_options(adapter, "U123", None, true);
+        assert!(channel.is_dm());
+    }
+
+    // ---------- state management (5 upstream cases) ----------
+
+    use crate::types::StateAdapter;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Debug, Default)]
+    struct MockState {
+        cache: StdMutex<HashMap<String, serde_json::Value>>,
+        set_calls: StdMutex<Vec<(String, serde_json::Value, Option<u64>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for MockState {
+        async fn get(&self, key: &str) -> crate::types::StateResult<Option<serde_json::Value>> {
+            Ok(self.cache.lock().unwrap().get(key).cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            ttl_ms: Option<u64>,
+        ) -> crate::types::StateResult<()> {
+            self.set_calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), value.clone(), ttl_ms));
+            self.cache.lock().unwrap().insert(key.to_string(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> crate::types::StateResult<()> {
+            self.cache.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> crate::types::StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> crate::types::StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn channel_with_state() -> (Channel, Arc<MockState>) {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let channel = Channel::with_state_adapter(
+            adapter,
+            "C123",
+            state.clone() as Arc<dyn StateAdapter>,
+        );
+        (channel, state)
+    }
+
+    #[test]
+    fn channel_state_should_return_none_when_no_state_has_been_set() {
+        let (channel, _state) = channel_with_state();
+        let value = block_on(channel.state()).unwrap();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn channel_state_should_set_and_retrieve_state() {
+        let (channel, _state) = channel_with_state();
+        block_on(channel.set_state(serde_json::json!({ "topic": "hello" }))).unwrap();
+        let value = block_on(channel.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "topic": "hello" })));
+    }
+
+    #[test]
+    fn channel_state_should_merge_state_by_default() {
+        let (channel, _state) = channel_with_state();
+        block_on(channel.set_state(serde_json::json!({ "topic": "x" }))).unwrap();
+        block_on(channel.set_state(serde_json::json!({ "members": 5 }))).unwrap();
+        let value = block_on(channel.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "topic": "x", "members": 5 })));
+    }
+
+    #[test]
+    fn channel_state_should_replace_state_when_option_is_set() {
+        let (channel, _state) = channel_with_state();
+        block_on(channel.set_state(serde_json::json!({ "topic": "x", "members": 5 }))).unwrap();
+        block_on(channel.set_state_replace(serde_json::json!({ "members": 10 }))).unwrap();
+        let value = block_on(channel.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "members": 10 })));
+    }
+
+    #[test]
+    fn channel_state_should_use_channel_state_key_prefix() {
+        let (channel, state) = channel_with_state();
+        block_on(channel.set_state(serde_json::json!({ "topic": "x" }))).unwrap();
+        let last = state.set_calls.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last.0, "channel-state:C123");
+        assert_eq!(last.2, Some(CHANNEL_STATE_TTL_MS));
     }
 
     #[test]
