@@ -736,6 +736,25 @@ pub fn encode_dm_thread_id(channel_id: &str) -> String {
     encode_thread_id(DM_GUILD, channel_id)
 }
 
+/// Encode a Discord thread id with an optional sub-thread segment.
+/// 1:1 with upstream `adapter.encodeThreadId({guildId, channelId,
+/// threadId})` — when `thread_id` is provided, produces the 4-part
+/// `discord:<guild_id>:<channel_id>:<thread_id>` shape used for
+/// posting into sub-threads under a parent channel; otherwise
+/// falls back to the 3-part `encode_thread_id` form.
+pub fn encode_thread_id_with_sub_thread(
+    guild_id: &str,
+    channel_id: &str,
+    thread_id: Option<&str>,
+) -> String {
+    match thread_id {
+        Some(t) if !t.is_empty() => {
+            format!("{THREAD_ID_PREFIX}{guild_id}:{channel_id}:{t}")
+        }
+        _ => encode_thread_id(guild_id, channel_id),
+    }
+}
+
 /// Components of a decoded Discord thread id. 1:1 with upstream
 /// `interface DiscordThreadId { guildId; channelId; threadId? }`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -844,9 +863,36 @@ mod tests {
         );
     }
 
+    // ---------- describe("encodeThreadId") (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("encodeThreadId")`.
+    // Previously only case 1 (`encode_thread_id_builds_the_upstream_format`)
+    // and case 3 (`encode_dm_thread_id_uses_the_at_me_guild`) were
+    // mapped; case 2 ("encodes with thread ID") was unmapped because
+    // Rust's `encode_thread_id` only takes 2 args. Slice 460 adds the
+    // upstream-compatible `encode_thread_id_with_sub_thread` helper
+    // for the 4-part `discord:guild:channel:sub_thread` shape.
+
     #[test]
-    fn encode_thread_id_builds_the_upstream_format() {
+    fn encode_thread_id_encodes_guild_and_channel_correctly() {
+        // 1:1 with upstream `encodeThreadId > encodes guild and
+        // channel correctly`.
         assert_eq!(encode_thread_id("123", "456"), "discord:123:456");
+    }
+
+    #[test]
+    fn encode_thread_id_encodes_with_thread_id() {
+        // 1:1 with upstream `encodeThreadId > encodes with thread ID`
+        // — `{guildId: "guild123", channelId: "channel456", threadId:
+        // "thread789"}` -> `discord:guild123:channel456:thread789`.
+        assert_eq!(
+            encode_thread_id_with_sub_thread("guild123", "channel456", Some("thread789")),
+            "discord:guild123:channel456:thread789"
+        );
+        // None sub-thread falls back to the 3-part form.
+        assert_eq!(
+            encode_thread_id_with_sub_thread("guild123", "channel456", None),
+            "discord:guild123:channel456"
+        );
     }
 
     #[test]
