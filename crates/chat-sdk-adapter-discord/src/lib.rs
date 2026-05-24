@@ -138,10 +138,16 @@ impl DiscordAdapter {
         self.options.effective_api_base()
     }
 
-    /// Build the channel-messages URL. 1:1 with upstream's inline
-    /// `<api_base>/channels/<channel_id>/messages` template.
-    fn channel_messages_url(&self, channel_id: &str) -> String {
-        format!("{}/channels/{channel_id}/messages", self.api_base())
+    /// Build the create-message URL (post target). 1:1 with
+    /// upstream's inline `<api_base>/channels/<target>/messages`.
+    /// `target` is the sub-thread id when the thread id encodes
+    /// one, otherwise the channel id — matches upstream's
+    /// `targetChannelId = discordThreadId || channelId`. Returns
+    /// `None` when `thread_id` isn't Discord-encoded.
+    pub fn post_message_url(&self, thread_id: &str) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        let target = decoded.thread_id.as_deref().unwrap_or(&decoded.channel_id);
+        Some(format!("{}/channels/{}/messages", self.api_base(), target))
     }
 
     /// Build the per-message URL (edit/delete target). 1:1 with
@@ -366,10 +372,10 @@ impl Adapter for DiscordAdapter {
         ADAPTER_NAME
     }
 
-    /// Post a text message to a Discord channel. 1:1 with upstream's
-    /// `adapter.postMessage`:
+    /// Post a text message to a Discord channel (or sub-thread). 1:1
+    /// with upstream's `adapter.postMessage`:
     ///
-    /// - Decodes `discord:<guild_id>:<channel_id>` (guild is opaque
+    /// - Decodes `discord:<guild_id>:<channel_id>[:sub-thread]` (guild is opaque
     ///   here; Discord routes by channel_id alone).
     /// - POSTs JSON `{content: text}` to
     ///   `<api_base>/channels/<channel_id>/messages`.
@@ -386,11 +392,9 @@ impl Adapter for DiscordAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<String> {
         use chat_sdk_chat::types::AdapterError;
 
-        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+        let url = self.post_message_url(thread_id).ok_or_else(|| {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
         })?;
-
-        let url = self.channel_messages_url(&decoded.channel_id);
         let body = serde_json::json!({ "content": truncate_content(text) });
 
         let response = self
@@ -982,18 +986,6 @@ mod tests {
     }
 
     #[test]
-    fn adapter_channel_messages_url_builds_the_upstream_endpoint() {
-        let adapter = DiscordAdapter::new(
-            DiscordAdapterOptions::new("b", "a")
-                .with_api_base("https://discord.example.test/api/v10"),
-        );
-        assert_eq!(
-            adapter.channel_messages_url("456"),
-            "https://discord.example.test/api/v10/channels/456/messages"
-        );
-    }
-
-    #[test]
     fn adapter_credential_accessors() {
         let adapter = DiscordAdapter::new(
             DiscordAdapterOptions::new("bot-tok", "app-id").with_api_base("https://example.test"),
@@ -1254,6 +1246,63 @@ mod tests {
             url.contains("/channels/thread789/messages/msg001/reactions/"),
             "URL was {url}"
         );
+    }
+
+    // ---------- describe("postMessage") (2 of 3 upstream cases; jsx-payload case deferred) ----------
+    // 1:1 with upstream `index.test.ts > describe("postMessage")`.
+    // The 3rd case (cards/JSX payload) needs the cards renderer
+    // wired into post_message and is deferred.
+
+    #[test]
+    fn discord_post_message_url_uses_channel_id_for_top_level_thread() {
+        // 1:1 with upstream "posts a plain text message".
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter.post_message_url("discord:guild1:channel456").unwrap();
+        assert_eq!(
+            url,
+            "https://discord.test/api/v10/channels/channel456/messages"
+        );
+    }
+
+    #[test]
+    fn discord_post_message_url_routes_through_sub_thread_when_encoded() {
+        // 1:1 with upstream "posts to thread channel when threadId
+        // is present".
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .post_message_url("discord:guild1:channel456:thread789")
+            .unwrap();
+        assert_eq!(
+            url,
+            "https://discord.test/api/v10/channels/thread789/messages"
+        );
+    }
+
+    #[test]
+    fn discord_post_message_url_returns_none_for_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        assert!(adapter.post_message_url("slack:C123:1.0").is_none());
     }
 
     // ---------- describe("editMessage") truncation (1 of 3 upstream cases) ----------
