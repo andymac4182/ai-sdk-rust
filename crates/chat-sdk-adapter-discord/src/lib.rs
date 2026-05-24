@@ -47,6 +47,9 @@ pub struct DiscordAdapterOptions {
     pub public_key: Option<String>,
     /// Optional display name (defaults to [`DEFAULT_USER_NAME`]).
     pub user_name: Option<String>,
+    /// 1:1 with upstream `mentionRoleIds: string[]`. Role ids the
+    /// adapter should mention by default.
+    pub mention_role_ids: Vec<String>,
 }
 
 impl DiscordAdapterOptions {
@@ -59,6 +62,7 @@ impl DiscordAdapterOptions {
             api_base: None,
             public_key: None,
             user_name: None,
+            mention_role_ids: Vec::new(),
         }
     }
 
@@ -164,6 +168,126 @@ impl DiscordAdapter {
     pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         crate::markdown::DiscordFormatConverter::new().from_ast(ast)
     }
+
+    /// 1:1 with upstream `protected readonly mentionRoleIds:
+    /// string[]`. Reading from this list is upstream-visible behavior
+    /// via the gateway "mention" handlers; this accessor exposes it
+    /// for parity tests.
+    pub fn mention_role_ids(&self) -> &[String] {
+        &self.options.mention_role_ids
+    }
+}
+
+/// 1:1 with upstream `interface DiscordAdapterConfig` — all fields
+/// optional so the constructor can fall back to environment
+/// variables. Used by [`try_create_discord_adapter`].
+#[derive(Debug, Clone, Default)]
+pub struct DiscordCreateOptions {
+    /// Discord bot token. Falls back to `DISCORD_BOT_TOKEN`.
+    pub bot_token: Option<String>,
+    /// Discord application id. Falls back to `DISCORD_APPLICATION_ID`.
+    pub application_id: Option<String>,
+    /// Hex-encoded ed25519 public key. Falls back to
+    /// `DISCORD_PUBLIC_KEY`.
+    pub public_key: Option<String>,
+    /// API base URL. Falls back to `DISCORD_API_URL`, then
+    /// [`DEFAULT_API_BASE`].
+    pub api_url: Option<String>,
+    /// Mention role ids. Falls back to a comma-separated
+    /// `DISCORD_MENTION_ROLE_IDS`.
+    pub mention_role_ids: Option<Vec<String>>,
+    /// Display name. Falls back to [`DEFAULT_USER_NAME`].
+    pub user_name: Option<String>,
+}
+
+/// Errors returned by [`try_create_discord_adapter`] when a required
+/// field is missing from both the explicit options and the environment.
+/// 1:1 with upstream `throw new ValidationError("discord", "... is
+/// required")` cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscordCreateError {
+    /// `botToken` missing and `DISCORD_BOT_TOKEN` not set.
+    BotTokenRequired,
+    /// `publicKey` missing and `DISCORD_PUBLIC_KEY` not set.
+    PublicKeyRequired,
+    /// `applicationId` missing and `DISCORD_APPLICATION_ID` not set.
+    ApplicationIdRequired,
+}
+
+impl std::fmt::Display for DiscordCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BotTokenRequired => write!(
+                f,
+                "botToken is required. Set DISCORD_BOT_TOKEN or provide it in config."
+            ),
+            Self::PublicKeyRequired => write!(
+                f,
+                "publicKey is required. Set DISCORD_PUBLIC_KEY or provide it in config."
+            ),
+            Self::ApplicationIdRequired => write!(
+                f,
+                "applicationId is required. Set DISCORD_APPLICATION_ID or provide it in config."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiscordCreateError {}
+
+/// 1:1 with upstream `new DiscordAdapter(config)` env-var resolution
+/// path. Prefer explicit options; otherwise fall through to the
+/// supplied `env` reader. The `env` parameter is a closure rather
+/// than `std::env::var` directly so tests don't have to mutate
+/// process-global state (which is `unsafe` in Rust 2024 edition).
+///
+/// Resolution rules (1:1 with upstream):
+/// - `bot_token` ← `opts.bot_token` ?? `env("DISCORD_BOT_TOKEN")`
+/// - `public_key` ← `opts.public_key` ?? `env("DISCORD_PUBLIC_KEY")`
+/// - `application_id` ← `opts.application_id` ??
+///   `env("DISCORD_APPLICATION_ID")`
+/// - `api_base` ← `opts.api_url` ?? `env("DISCORD_API_URL")` ??
+///   [`DEFAULT_API_BASE`]
+/// - `mention_role_ids` ← `opts.mention_role_ids` ?? comma-split
+///   `env("DISCORD_MENTION_ROLE_IDS")` ?? `[]`
+/// - `user_name` ← `opts.user_name` ?? [`DEFAULT_USER_NAME`]
+pub fn try_create_discord_adapter(
+    opts: DiscordCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<DiscordAdapter, DiscordCreateError> {
+    let bot_token = opts
+        .bot_token
+        .or_else(|| env("DISCORD_BOT_TOKEN"))
+        .ok_or(DiscordCreateError::BotTokenRequired)?;
+    let public_key = opts
+        .public_key
+        .or_else(|| env("DISCORD_PUBLIC_KEY"))
+        .ok_or(DiscordCreateError::PublicKeyRequired)?;
+    let application_id = opts
+        .application_id
+        .or_else(|| env("DISCORD_APPLICATION_ID"))
+        .ok_or(DiscordCreateError::ApplicationIdRequired)?;
+
+    let api_base = opts.api_url.or_else(|| env("DISCORD_API_URL"));
+    let mention_role_ids = opts.mention_role_ids.unwrap_or_else(|| {
+        env("DISCORD_MENTION_ROLE_IDS")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+
+    Ok(DiscordAdapter::new(DiscordAdapterOptions {
+        bot_token,
+        application_id,
+        api_base,
+        public_key: Some(public_key),
+        user_name: opts.user_name,
+        mention_role_ids,
+    }))
 }
 
 /// Discord interaction response types. 1:1 with upstream
@@ -788,6 +912,7 @@ mod tests {
             api_base: None,
             public_key: Some("ed25519-public-key-hex".to_string()),
             user_name: None,
+            mention_role_ids: Vec::new(),
         };
         let adapter = DiscordAdapter::new(opts);
         assert_eq!(adapter.name(), "discord");
@@ -801,6 +926,7 @@ mod tests {
             api_base: None,
             public_key: Some("ed25519-public-key-hex".to_string()),
             user_name: None,
+            mention_role_ids: Vec::new(),
         };
         let adapter = DiscordAdapter::new(opts);
         assert_eq!(adapter.user_name(), "bot");
@@ -814,8 +940,170 @@ mod tests {
             api_base: None,
             public_key: Some("ed25519-public-key-hex".to_string()),
             user_name: Some("custombot".to_string()),
+            mention_role_ids: Vec::new(),
         };
         let adapter = DiscordAdapter::new(opts);
         assert_eq!(adapter.user_name(), "custombot");
+    }
+
+    // ---------- constructor env var resolution describe block (9 cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("constructor env var
+    // resolution")`. Uses an injected `env` closure instead of mutating
+    // `std::env` (which is `unsafe` in Rust 2024 edition and racy
+    // between parallel tests).
+
+    fn empty_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn ctor_env_throws_when_bot_token_is_missing() {
+        let err = try_create_discord_adapter(DiscordCreateOptions::default(), empty_env)
+            .expect_err("missing bot token must fail");
+        assert_eq!(err, DiscordCreateError::BotTokenRequired);
+        assert!(err.to_string().contains("botToken is required"));
+    }
+
+    #[test]
+    fn ctor_env_throws_when_public_key_is_missing() {
+        let err = try_create_discord_adapter(
+            DiscordCreateOptions {
+                bot_token: Some("test".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("missing public key must fail");
+        assert_eq!(err, DiscordCreateError::PublicKeyRequired);
+        assert!(err.to_string().contains("publicKey is required"));
+    }
+
+    #[test]
+    fn ctor_env_throws_when_application_id_is_missing() {
+        let err = try_create_discord_adapter(
+            DiscordCreateOptions {
+                bot_token: Some("test".to_string()),
+                public_key: Some("ed25519-public-key-hex".to_string()),
+                ..Default::default()
+            },
+            empty_env,
+        )
+        .expect_err("missing application id must fail");
+        assert_eq!(err, DiscordCreateError::ApplicationIdRequired);
+        assert!(err.to_string().contains("applicationId is required"));
+    }
+
+    #[test]
+    fn ctor_env_resolves_all_fields_from_env_vars() {
+        let env = |key: &str| match key {
+            "DISCORD_BOT_TOKEN" => Some("env-token".to_string()),
+            "DISCORD_PUBLIC_KEY" => Some("ed25519-public-key-hex".to_string()),
+            "DISCORD_APPLICATION_ID" => Some("env-app-id".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_discord_adapter(DiscordCreateOptions::default(), env)
+            .expect("all env vars set");
+        assert_eq!(adapter.name(), "discord");
+        assert_eq!(adapter.bot_token(), "env-token");
+        assert_eq!(adapter.application_id(), "env-app-id");
+        assert_eq!(adapter.user_name(), "bot");
+    }
+
+    #[test]
+    fn ctor_env_resolves_mention_role_ids_from_env_var() {
+        let env = |key: &str| match key {
+            "DISCORD_BOT_TOKEN" => Some("env-token".to_string()),
+            "DISCORD_PUBLIC_KEY" => Some("ed25519-public-key-hex".to_string()),
+            "DISCORD_APPLICATION_ID" => Some("env-app-id".to_string()),
+            "DISCORD_MENTION_ROLE_IDS" => Some("role1, role2, role3".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_discord_adapter(DiscordCreateOptions::default(), env)
+            .expect("all env vars set");
+        assert_eq!(adapter.mention_role_ids(), &["role1", "role2", "role3"]);
+    }
+
+    #[test]
+    fn ctor_env_defaults_logger_when_not_provided() {
+        // Upstream asserts the adapter is constructed when no logger
+        // is supplied. In this port the logger is not yet a
+        // first-class adapter dependency, so the equivalent is that
+        // env-only construction succeeds.
+        let env = |key: &str| match key {
+            "DISCORD_BOT_TOKEN" => Some("env-token".to_string()),
+            "DISCORD_PUBLIC_KEY" => Some("ed25519-public-key-hex".to_string()),
+            "DISCORD_APPLICATION_ID" => Some("env-app-id".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_discord_adapter(DiscordCreateOptions::default(), env)
+            .expect("env-only construction works");
+        assert_eq!(adapter.name(), "discord");
+    }
+
+    #[test]
+    fn ctor_env_prefers_config_values_over_env_vars() {
+        let env = |key: &str| match key {
+            "DISCORD_BOT_TOKEN" => Some("env-token".to_string()),
+            "DISCORD_PUBLIC_KEY" => Some("env-public-key".to_string()),
+            "DISCORD_APPLICATION_ID" => Some("env-app-id".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_discord_adapter(
+            DiscordCreateOptions {
+                bot_token: Some("config-token".to_string()),
+                public_key: Some("ed25519-public-key-hex".to_string()),
+                application_id: Some("config-app-id".to_string()),
+                user_name: Some("mybot".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config overrides env");
+        assert_eq!(adapter.bot_token(), "config-token");
+        assert_eq!(adapter.application_id(), "config-app-id");
+        assert_eq!(adapter.user_name(), "mybot");
+    }
+
+    #[test]
+    fn ctor_env_resolves_api_url_from_discord_api_url_env_var() {
+        let env = |key: &str| match key {
+            "DISCORD_BOT_TOKEN" => Some("env-token".to_string()),
+            "DISCORD_PUBLIC_KEY" => Some("ed25519-public-key-hex".to_string()),
+            "DISCORD_APPLICATION_ID" => Some("env-app-id".to_string()),
+            "DISCORD_API_URL" => Some("https://custom-discord.example.com/api/v10".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_discord_adapter(DiscordCreateOptions::default(), env)
+            .expect("env api url resolves");
+        assert_eq!(
+            adapter.api_base(),
+            "https://custom-discord.example.com/api/v10"
+        );
+    }
+
+    #[test]
+    fn ctor_env_prefers_api_url_config_over_discord_api_url_env_var() {
+        let env = |key: &str| match key {
+            "DISCORD_BOT_TOKEN" => Some("env-token".to_string()),
+            "DISCORD_PUBLIC_KEY" => Some("ed25519-public-key-hex".to_string()),
+            "DISCORD_APPLICATION_ID" => Some("env-app-id".to_string()),
+            "DISCORD_API_URL" => Some("https://env-url.example.com/api/v10".to_string()),
+            _ => None,
+        };
+        let adapter = try_create_discord_adapter(
+            DiscordCreateOptions {
+                bot_token: Some("config-token".to_string()),
+                public_key: Some("ed25519-public-key-hex".to_string()),
+                application_id: Some("config-app-id".to_string()),
+                api_url: Some("https://config-url.example.com/api/v10".to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("config api url wins");
+        assert_eq!(
+            adapter.api_base(),
+            "https://config-url.example.com/api/v10"
+        );
     }
 }
