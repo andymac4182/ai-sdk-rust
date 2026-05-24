@@ -1191,6 +1191,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_text_handles_multiple_provider_executed_tool_approval_requests`,
   proving multiple provider-executed tool calls keep their matching approval
   requests and stream ordering.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` missing approval tool
+  call parity added
+  `stream_text_emits_error_when_tool_call_missing_for_provider_approval_request`,
+  proving provider-emitted approval requests for unknown tool calls become
+  error stream parts instead of invalid approval-request parts.
 - 2026-05-25: `packages/ai` `streamLanguageModelCall` unknown-tool repair
   parity added
   `stream_text_repairs_unknown_streamed_tool_name_before_execution`, proving

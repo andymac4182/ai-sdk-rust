@@ -19,10 +19,10 @@ use crate::generate_text::{
     GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
     LanguageModelCallEndEvent, LanguageModelCallStartEvent, PrepareStep, PrepareStepOptions,
     PrepareStepResult, StepToolApprovalResponse, StopCondition, ToolApprovalConfiguration,
-    ToolApprovalResponseOutput, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
-    ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
-    filter_active_language_model_tools, generate_text_call_id,
-    generate_text_tool_result_from_language_model_tool_result,
+    ToolApprovalResponseOutput, ToolCallNotFoundForApprovalError, ToolCallRepair,
+    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
+    apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
+    generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
     invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
     invoke_tool_input_start_callback, is_stop_condition_met, mark_runtime_dynamic_tool_calls,
     mark_tool_call_metadata, mark_tool_call_titles, mark_tool_result_metadata,
@@ -3377,7 +3377,7 @@ where
     let mut sources = Vec::new();
     let mut files = Vec::new();
     let mut reasoning_files = Vec::new();
-    let mut tool_calls = Vec::new();
+    let mut tool_calls = Vec::<GenerateTextToolCall>::new();
     let mut tool_results = Vec::new();
     let mut custom_parts = Vec::new();
     let mut errors = Vec::new();
@@ -3566,11 +3566,26 @@ where
                         parts.push(TextStreamPart::ToolInputEnd(part));
                     }
                     LanguageModelStreamPart::ToolApprovalRequest(part) => {
-                        provider_content
-                            .push(LanguageModelContent::ToolApprovalRequest(part.clone()));
-                        parts.push(TextStreamPart::ToolApprovalRequest(
-                            TextStreamToolApprovalRequestPart::from_language_model_tool_approval_request(part),
-                        ));
+                        if tool_calls
+                            .iter()
+                            .any(|tool_call| tool_call.tool_call_id == part.tool_call_id)
+                        {
+                            provider_content
+                                .push(LanguageModelContent::ToolApprovalRequest(part.clone()));
+                            parts.push(TextStreamPart::ToolApprovalRequest(
+                                TextStreamToolApprovalRequestPart::from_language_model_tool_approval_request(part),
+                            ));
+                        } else {
+                            let error = ToolCallNotFoundForApprovalError::new(
+                                &part.tool_call_id,
+                                &part.approval_id,
+                            );
+                            let error_value = JsonValue::String(error.to_string());
+                            errors.push(error_value.clone());
+                            parts.push(TextStreamPart::Error(LanguageModelErrorStreamPart::new(
+                                error_value,
+                            )));
+                        }
                     }
                     LanguageModelStreamPart::ToolCall(part) => {
                         let tool_call = GenerateTextToolCall::from_language_model_tool_call(&part);
@@ -11383,6 +11398,53 @@ mod tests {
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.finish_reason, FinishReason::ToolCalls);
         assert_eq!(result.tool_calls[0].tool_name, "weather");
+    }
+
+    #[test]
+    fn stream_text_emits_error_when_tool_call_missing_for_provider_approval_request() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("mcp-approval-1", "non-existent-call"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: None,
+                    },
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Approve MCP tool")],
+        )));
+
+        assert!(result.tool_calls.is_empty());
+        assert!(
+            result
+                .parts
+                .iter()
+                .all(|part| !matches!(part, TextStreamPart::ToolApprovalRequest(_)))
+        );
+        let error = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::Error(part) => Some(part.error.clone()),
+                _ => None,
+            })
+            .expect("missing approval tool call emits an error part");
+        assert_eq!(
+            error,
+            json!(
+                "Tool call \"non-existent-call\" not found for approval request \"mcp-approval-1\"."
+            )
+        );
+        assert_eq!(result.errors, vec![error]);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.raw_finish_reason, None);
     }
 
     #[test]
