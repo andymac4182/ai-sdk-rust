@@ -220,6 +220,20 @@ impl Adapter for TelegramAdapter {
         self.is_dm(thread_id)
     }
 
+    /// 1:1 with upstream `adapter.openDM(userId)`. Delegates to the
+    /// inherent [`TelegramAdapter::open_dm`] which parses the user
+    /// id as a numeric Telegram chat id and encodes it. Returns
+    /// `Err(InvalidPayload)` when the user id isn't numeric (matches
+    /// upstream's `parseInt(userId)` failure surface).
+    async fn open_dm(&self, user_id: &str) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+        self.open_dm(user_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!(
+                "Telegram open_dm expects a numeric user id, got {user_id:?}"
+            ))
+        })
+    }
+
     /// Post a plain-text message via Telegram's `sendMessage` Bot
     /// API method. 1:1 with upstream's `adapter.postMessage`:
     ///

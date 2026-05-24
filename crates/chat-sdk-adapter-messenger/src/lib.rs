@@ -238,6 +238,14 @@ impl Adapter for MessengerAdapter {
         Some(self.is_dm(thread_id))
     }
 
+    /// 1:1 with upstream `adapter.openDM(userId)`. Delegates to the
+    /// inherent [`MessengerAdapter::open_dm`] which encodes the
+    /// recipient id as `messenger:<user_id>` (no HTTP call —
+    /// Messenger addresses conversations by recipient id directly).
+    async fn open_dm(&self, user_id: &str) -> chat_sdk_chat::types::AdapterResult<String> {
+        Ok(self.open_dm(user_id))
+    }
+
     /// Post a text message via the Messenger Send API. 1:1 with
     /// upstream's `adapter.postMessage`:
     ///
