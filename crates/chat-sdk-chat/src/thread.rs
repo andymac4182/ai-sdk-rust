@@ -1255,6 +1255,61 @@ mod tests {
     }
 
     #[test]
+    fn thread_serialization_should_reconstruct_dm_thread() {
+        // 1:1 with upstream `describe("ThreadImpl.fromJSON()") >
+        // it("should reconstruct DM thread")` — `isDM: true` is
+        // preserved when reading a serialized DM thread back.
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "slack:DU456:",
+            "channelId": "DU456",
+            "isDM": true,
+            "adapterName": "slack",
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::from_json(&json, adapter);
+        assert!(thread.is_dm());
+        assert_eq!(thread.thread_id(), "slack:DU456:");
+    }
+
+    #[test]
+    fn thread_serialization_should_round_trip_correctly() {
+        // 1:1 with upstream `describe("ThreadImpl.fromJSON()") >
+        // it("should round-trip correctly")` — toJSON+fromJSON
+        // preserves id / channelId / isDM / adapter.name.
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let original = Thread::with_state_adapter(
+            adapter.clone(),
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_is_dm(true);
+        let json = original.to_json();
+        let restored = Thread::from_json(&json, adapter);
+        assert_eq!(restored.thread_id(), original.thread_id());
+        assert_eq!(restored.channel_id(), original.channel_id());
+        assert_eq!(restored.is_dm(), original.is_dm());
+        assert_eq!(restored.adapter_name(), original.adapter_name());
+    }
+
+    #[test]
+    fn thread_serialization_should_produce_json_serializable_output() {
+        // 1:1 with upstream `describe("ThreadImpl.toJSON()") >
+        // it("should produce JSON-serializable output")` — the
+        // serialized form round-trips through `JSON.stringify` +
+        // `JSON.parse` losslessly (Rust equivalent:
+        // `serde_json::to_string` → `serde_json::from_str`).
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678").with_channel_id("C123");
+        let json = thread.to_json();
+        let text = serde_json::to_string(&json).expect("serialize");
+        let _parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("re-parse round-trips");
+    }
+
+    #[test]
     fn thread_serialization_should_serialize_dm_thread_correctly() {
         // 1:1 with upstream `describe("ThreadImpl.toJSON()") >
         // it("should serialize DM thread correctly")` — `isDM: true`
