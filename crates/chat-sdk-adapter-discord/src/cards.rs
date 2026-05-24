@@ -490,7 +490,6 @@ mod tests {
 
     // ---------- cardToFallbackText (7 upstream cases) ----------
 
-    #[test]
     // ---------- cardToDiscordPayload (7 of 31 portable cases) ----------
     // 1:1 with upstream `cards.test.ts > describe("cardToDiscordPayload")`.
     // Covers the 7 cases that don't require the deferred Action-Row
