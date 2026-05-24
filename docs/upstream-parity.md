@@ -1036,6 +1036,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `tool_loop_agent_generate_passes_prepare_step_to_generate_text` and
   `tool_loop_agent_stream_per_call_prepare_step_overrides_default_prepare_step`,
   covering default prepare-step pass-through and per-call override semantics.
+  The upstream `runtimeContext` and `toolsContext` `prepareStep` type-surface
+  cases now also have the named Rust counterpart
+  `tool_loop_agent_prepare_step_receives_merged_runtime_and_tools_context`,
+  proving default/per-call context merging is visible to `prepare_step` and
+  finish callbacks.
 - 2026-05-24: `packages/ai` `InferAgentUIMessage` type-level parity added
   named Rust counterparts for upstream `infer-agent-ui-message.test-d.ts`:
   `infer_agent_ui_message_should_not_contain_arbitrary_static_tools_when_no_tools_are_provided`

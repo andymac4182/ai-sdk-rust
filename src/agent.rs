@@ -2233,6 +2233,80 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_prepare_step_receives_merged_runtime_and_tools_context() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("prepared"));
+        let seen_prepare_contexts = Rc::new(RefCell::new(Vec::<JsonValue>::new()));
+        let seen_prepare_contexts_for_callback = Rc::clone(&seen_prepare_contexts);
+        let seen_finish_contexts = Rc::new(RefCell::new(Vec::<JsonValue>::new()));
+        let seen_finish_contexts_for_callback = Rc::clone(&seen_finish_contexts);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_runtime_context(JsonObject::from_iter([
+                    ("tenant".to_string(), json!("default")),
+                    ("region".to_string(), json!("au")),
+                ]))
+                .with_tools_context(JsonObject::from_iter([
+                    ("weather".to_string(), json!({ "apiKey": "default-key" })),
+                    ("search".to_string(), json!({ "endpoint": "default" })),
+                ]))
+                .with_prepare_step(move |options| {
+                    seen_prepare_contexts_for_callback.borrow_mut().push(json!({
+                        "runtimeContext": options.runtime_context,
+                        "toolsContext": options.tools_context,
+                    }));
+                    async move { PrepareStepResult::new() }
+                })
+                .with_on_finish(move |event| {
+                    seen_finish_contexts_for_callback.borrow_mut().push(json!({
+                        "runtimeContext": event.runtime_context,
+                        "toolsContext": event.tools_context,
+                    }));
+                    ready(())
+                }),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Original prompt")
+                .with_runtime_context(JsonObject::from_iter([(
+                    "tenant".to_string(),
+                    json!("call"),
+                )]))
+                .with_tools_context(JsonObject::from_iter([(
+                    "weather".to_string(),
+                    json!({ "apiKey": "call-key" }),
+                )]));
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "prepared");
+        assert_eq!(
+            seen_prepare_contexts.borrow().as_slice(),
+            [json!({
+                "runtimeContext": {
+                    "tenant": "call",
+                    "region": "au"
+                },
+                "toolsContext": {
+                    "weather": { "apiKey": "call-key" },
+                    "search": { "endpoint": "default" }
+                }
+            })]
+        );
+        assert_eq!(
+            seen_finish_contexts.borrow().as_slice(),
+            [json!({
+                "runtimeContext": {
+                    "tenant": "call",
+                    "region": "au"
+                },
+                "toolsContext": {
+                    "weather": { "apiKey": "call-key" },
+                    "search": { "endpoint": "default" }
+                }
+            })]
+        );
+    }
+
+    #[test]
     fn tool_loop_agent_stream_passes_sandbox_to_prepare_call() {
         let model = MockLanguageModel::new().with_stream_result(stream_text_result("reply"));
         let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
