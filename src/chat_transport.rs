@@ -2296,6 +2296,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingChatTransport {
         response: Vec<UiMessageChunk>,
+        error: Option<ChatTransportError>,
         captured_send: Mutex<Option<ChatTransportSendOptions>>,
     }
 
@@ -2303,6 +2304,15 @@ mod tests {
         fn new(response: impl IntoIterator<Item = UiMessageChunk>) -> Self {
             Self {
                 response: response.into_iter().collect(),
+                error: None,
+                captured_send: Mutex::new(None),
+            }
+        }
+
+        fn with_error(error: ChatTransportError) -> Self {
+            Self {
+                response: Vec::new(),
+                error: Some(error),
                 captured_send: Mutex::new(None),
             }
         }
@@ -2325,6 +2335,9 @@ mod tests {
                 .captured_send
                 .lock()
                 .expect("captured send mutex is not poisoned") = Some(options);
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
             Ok(self.response.clone())
         }
 
@@ -2453,6 +2466,39 @@ mod tests {
 
         assert_eq!(chat.error(), None);
         assert_eq!(chat.status(), ChatStatus::Ready);
+    }
+
+    #[test]
+    fn chat_should_set_error_status_when_transport_send_fails() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::ResponseStatus {
+            status: 500,
+            body: "Internal Server Error".to_string(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        let error = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("transport failure is surfaced");
+
+        assert_eq!(
+            error.to_string(),
+            "chat transport returned status 500: Internal Server Error"
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(
+            chat.error(),
+            Some("chat transport returned status 500: Internal Server Error")
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
     }
 
     #[test]

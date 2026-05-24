@@ -2259,6 +2259,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   `chat_should_handle_error_parts`, covering the portable upstream
   `ui/chat.test.ts` error chunk flow where streamed `error` chunks set chat
   status to `error` and expose the error text.
+- 2026-05-25: `packages/ai` `Chat` transport-error parity added
+  `chat_should_set_error_status_when_transport_send_fails`, covering upstream
+  chat UI error-state behavior when the request/transport fails before a
+  response stream can be folded.
 - 2026-05-25: `packages/ai` `Chat.clearError` parity added
   `chat_should_clear_the_error_and_set_the_status_to_ready`, covering the
   portable upstream `ui/chat.test.ts` clear-error flow after a streamed error.
