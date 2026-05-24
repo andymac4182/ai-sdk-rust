@@ -187,6 +187,23 @@ impl Message {
             .unwrap_or_else(|| fallback.to_string())
     }
 
+    /// 1:1 port of upstream `Message[WORKFLOW_SERIALIZE](msg)` —
+    /// the static method exposed under the
+    /// `WORKFLOW_SERIALIZE` symbol so workflow runtimes can
+    /// serialize a `Message` without knowing the concrete class.
+    /// Equivalent to `msg.to_serialized()`; ported as an associated
+    /// function for parity with upstream's static-method shape.
+    pub fn workflow_serialize(msg: &Self) -> SerializedMessage {
+        msg.to_serialized()
+    }
+
+    /// 1:1 port of upstream `Message[WORKFLOW_DESERIALIZE](serialized)`.
+    /// Reconstructs a `Message` from its `SerializedMessage`
+    /// form via [`Self::from_serialized`].
+    pub fn workflow_deserialize(serialized: SerializedMessage) -> Self {
+        Self::from_serialized(serialized)
+    }
+
     /// Convert to a wire-shape [`SerializedMessage`] with inline
     /// attachment payloads stripped. 1:1 with upstream
     /// `Message.toJSON()`'s `data` / `fetchData` strip behavior. Use
@@ -581,6 +598,35 @@ mod tests {
         assert_eq!(restored.metadata.date_sent, msg.metadata.date_sent);
         assert_eq!(restored.attachments[0].url, msg.attachments[0].url);
         assert_eq!(restored.links[0].url, "https://example.com");
+    }
+
+    // ---------- describe("WORKFLOW_SERIALIZE / WORKFLOW_DESERIALIZE") (2 cases) ----------
+    // 1:1 with upstream `message.test.ts > describe("WORKFLOW_SERIALIZE
+    // / WORKFLOW_DESERIALIZE")`.
+
+    #[test]
+    fn workflow_serialize_should_serialize_via_static_method() {
+        let msg = sample_message();
+        let serialized = Message::workflow_serialize(&msg);
+        assert_eq!(
+            serde_json::to_value(&serialized.kind).unwrap(),
+            json!("chat:Message")
+        );
+        assert_eq!(serialized.id, "msg-1");
+    }
+
+    #[test]
+    fn workflow_deserialize_should_deserialize_via_static_method() {
+        let msg = sample_message();
+        let serialized = Message::workflow_serialize(&msg);
+        let restored = Message::workflow_deserialize(serialized);
+        assert_eq!(restored.id, msg.id);
+        // Upstream asserts metadata.dateSent is a Date instance.
+        // Rust port stores it as ISO String — assert the same string
+        // is preserved (the Rust shape doesn't convert to a typed
+        // date; that's a Date<->String boundary that lives in
+        // wire-shape layer).
+        assert_eq!(restored.metadata.date_sent, msg.metadata.date_sent);
     }
 
     // ---------- buffer-strip (upstream toJSON data/fetchData strip) ----------
