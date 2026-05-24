@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::image_model::ImageModel;
+use crate::image_model_middleware::ImageModelMiddleware;
 use crate::language_model::LanguageModel;
 use crate::language_model_middleware::LanguageModelMiddleware;
 use crate::provider::{
@@ -7,7 +9,10 @@ use crate::provider::{
     ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
     ProviderWithVideoModel,
 };
-use crate::provider_middleware::{WrappedProvider, wrap_provider};
+use crate::provider_middleware::{
+    WrappedProvider, WrappedProviderWithImageModelMiddleware, wrap_provider,
+    wrap_provider_with_image_model_middleware,
+};
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -303,6 +308,33 @@ where
     )
 }
 
+/// Creates a provider registry that wraps every image model lookup with middleware.
+///
+/// This mirrors upstream `createProviderRegistry(..., { imageModelMiddleware })`
+/// while keeping the Rust return type explicit.
+pub fn create_provider_registry_with_image_model_middleware<I, K, P, IW>(
+    providers: I,
+    image_model_middleware: IW,
+    options: ProviderRegistryOptions,
+) -> ProviderRegistry<WrappedProviderWithImageModelMiddleware<P, IW>>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+    P: Provider,
+    P::ImageModel: ImageModel + Sync,
+    IW: ImageModelMiddleware<P::ImageModel> + Clone + Sync,
+{
+    ProviderRegistry::with_options(
+        providers.into_iter().map(|(id, provider)| {
+            (
+                id,
+                wrap_provider_with_image_model_middleware(provider, image_model_middleware.clone()),
+            )
+        }),
+        options,
+    )
+}
+
 /// Splits a registry model id into its provider id and provider-specific model id.
 pub fn split_registry_model_id<'a>(
     id: &'a str,
@@ -433,6 +465,7 @@ fn no_such_provider_default_message(provider_id: &str, available_providers: &[St
 mod tests {
     use super::{
         NoSuchProviderError, ProviderRegistryOptions, create_provider_registry,
+        create_provider_registry_with_image_model_middleware,
         create_provider_registry_with_language_model_middleware,
         create_provider_registry_with_options, split_registry_model_id,
     };
@@ -442,6 +475,7 @@ mod tests {
     use crate::image_model::{
         ImageModel, ImageModelCallOptions, ImageModelResponse, ImageModelResult,
     };
+    use crate::image_model_middleware::{ImageModelMiddleware, ImageModelMiddlewareModelOptions};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamPart,
@@ -923,6 +957,34 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct PrefixImageModelIdMiddleware;
+
+    impl ImageModelMiddleware<StaticImageModel> for PrefixImageModelIdMiddleware {
+        type OverrideMaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            StaticImageModel: 'a;
+        type TransformParamsFuture<'a>
+            = Ready<ImageModelCallOptions>
+        where
+            Self: 'a,
+            StaticImageModel: 'a;
+        type WrapGenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a,
+            StaticImageModel: 'a;
+
+        fn override_model_id(
+            &self,
+            options: ImageModelMiddlewareModelOptions<'_, StaticImageModel>,
+        ) -> Option<String> {
+            Some(format!("override-{}", options.model.model_id()))
+        }
+    }
+
     #[test]
     fn registry_options_default_to_upstream_separator() {
         assert_eq!(ProviderRegistryOptions::new().separator(), ":");
@@ -1117,6 +1179,41 @@ mod tests {
             registry
                 .language_model("provider2:model-3")
                 .expect("second provider model resolves")
+                .model_id(),
+            "override-model-3"
+        );
+    }
+
+    #[test]
+    fn create_provider_registry_should_wrap_all_image_models_accessed_through_the_provider_registry()
+     {
+        let registry = create_provider_registry_with_image_model_middleware(
+            [
+                ("provider1", StaticProvider { id: "provider1" }),
+                ("provider2", StaticProvider { id: "provider2" }),
+            ],
+            PrefixImageModelIdMiddleware,
+            ProviderRegistryOptions::new(),
+        );
+
+        assert_eq!(
+            registry
+                .image_model("provider1:model-1")
+                .expect("first provider image model resolves")
+                .model_id(),
+            "override-model-1"
+        );
+        assert_eq!(
+            registry
+                .image_model("provider1:model-2")
+                .expect("second image model resolves")
+                .model_id(),
+            "override-model-2"
+        );
+        assert_eq!(
+            registry
+                .image_model("provider2:model-3")
+                .expect("second provider image model resolves")
                 .model_id(),
             "override-model-3"
         );

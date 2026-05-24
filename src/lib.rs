@@ -331,8 +331,8 @@ pub use provider::{
     UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_middleware::{
-    WrappedProvider, WrappedProviderWithImageMiddleware, wrap_provider,
-    wrap_provider_with_image_middleware,
+    WrappedProvider, WrappedProviderWithImageMiddleware, WrappedProviderWithImageModelMiddleware,
+    wrap_provider, wrap_provider_with_image_middleware, wrap_provider_with_image_model_middleware,
 };
 pub use provider_utils::{
     Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
@@ -386,8 +386,9 @@ pub use provider_utils::{
 };
 pub use registry::{
     NoSuchProviderError, ProviderRegistry, ProviderRegistryError, ProviderRegistryOptions,
-    create_provider_registry, create_provider_registry_with_language_model_middleware,
-    create_provider_registry_with_options, split_registry_model_id,
+    create_provider_registry, create_provider_registry_with_image_model_middleware,
+    create_provider_registry_with_language_model_middleware, create_provider_registry_with_options,
+    split_registry_model_id,
 };
 pub use rerank::{
     RerankDocument, RerankDocuments, RerankEndEvent, RerankOnEnd, RerankOnEndCallback,
