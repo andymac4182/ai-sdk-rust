@@ -391,7 +391,7 @@ impl Adapter for DiscordAdapter {
         })?;
 
         let url = self.channel_messages_url(&decoded.channel_id);
-        let body = serde_json::json!({ "content": text });
+        let body = serde_json::json!({ "content": truncate_content(text) });
 
         let response = self
             .http
@@ -436,7 +436,7 @@ impl Adapter for DiscordAdapter {
         let url = self.message_url(thread_id, message_id).ok_or_else(|| {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
         })?;
-        let body = serde_json::json!({ "content": text });
+        let body = serde_json::json!({ "content": truncate_content(text) });
 
         let response = self
             .http
@@ -619,6 +619,25 @@ impl Adapter for DiscordAdapter {
         }
         Ok(())
     }
+}
+
+/// Truncate `content` to [`DISCORD_MAX_CONTENT_LENGTH`] with a
+/// `"..."` tail when over the limit. 1:1 with upstream's private
+/// `truncateContent(content)` helper — returns the input
+/// unchanged when within limit, otherwise slices to
+/// `limit - 3` and appends three dots so the final length is
+/// exactly the limit. Operates on chars, not bytes, to handle
+/// multibyte Unicode safely.
+pub fn truncate_content(content: &str) -> String {
+    let char_count = content.chars().count();
+    if char_count <= DISCORD_MAX_CONTENT_LENGTH {
+        return content.to_string();
+    }
+    let head: String = content
+        .chars()
+        .take(DISCORD_MAX_CONTENT_LENGTH - 3)
+        .collect();
+    format!("{head}...")
 }
 
 /// Percent-encode an emoji glyph (or `<name:id>` custom emoji
@@ -1235,6 +1254,39 @@ mod tests {
             url.contains("/channels/thread789/messages/msg001/reactions/"),
             "URL was {url}"
         );
+    }
+
+    // ---------- describe("editMessage") truncation (1 of 3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("editMessage")`.
+    // The 2 routing cases (channel-id / sub-thread) are already
+    // covered by the `discord_delete_message_url_*` tests below
+    // since `edit_message` and `delete_message` share the
+    // `message_url` helper. The truncation case is exercised
+    // directly via the pure `truncate_content` helper.
+
+    #[test]
+    fn discord_edit_message_truncates_content_exceeding_2000_characters() {
+        let long = "b".repeat(2500);
+        let truncated = truncate_content(&long);
+        assert!(truncated.chars().count() <= DISCORD_MAX_CONTENT_LENGTH);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn discord_truncate_content_returns_input_unchanged_when_under_limit() {
+        let short = "hello";
+        assert_eq!(truncate_content(short), short);
+    }
+
+    #[test]
+    fn discord_truncate_content_handles_multibyte_chars_safely() {
+        // 1000 4-byte chars + 500 multibyte = 1500 chars, under
+        // limit. 2500 emoji chars would exceed; verify char-count
+        // boundary not byte-count.
+        let unicode = "🦀".repeat(2500);
+        let truncated = truncate_content(&unicode);
+        assert!(truncated.chars().count() <= DISCORD_MAX_CONTENT_LENGTH);
+        assert!(truncated.ends_with("..."));
     }
 
     // ---------- describe("deleteMessage") (2 upstream cases) ----------
