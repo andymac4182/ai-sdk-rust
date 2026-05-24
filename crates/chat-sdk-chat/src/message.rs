@@ -587,6 +587,67 @@ mod tests {
     }
 
     #[test]
+    fn from_serialized_should_restore_message_from_json() {
+        // 1:1 with upstream `describe("Message.fromJSON()") > it("should
+        // restore message from JSON")` — round-trips id / text / author
+        // through the wire format.
+        let serialized = SerializedMessage {
+            kind: MessageKind::Message,
+            id: "msg-1".to_string(),
+            thread_id: "slack:C123:1234.5678".to_string(),
+            text: "Hello world".to_string(),
+            formatted: root(vec![]),
+            raw: json!({ "some": "data" }),
+            author: sample_author(),
+            metadata: MessageMetadata {
+                date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+                edited: false,
+                edited_at: None,
+            },
+            attachments: vec![],
+            is_mention: None,
+            links: None,
+        };
+        let msg = Message::from_serialized(serialized);
+        assert_eq!(msg.id, "msg-1");
+        assert_eq!(msg.text, "Hello world");
+        assert_eq!(msg.author.user_name, "testuser");
+    }
+
+    #[test]
+    fn from_serialized_should_preserve_iso_strings_for_dates() {
+        // 1:1 with upstream `describe("Message.fromJSON()") > it("should
+        // convert ISO strings back to Date objects")`. The TS port
+        // converts the string to a `Date` instance; the Rust port
+        // keeps the ISO string verbatim (no Date type) — the
+        // observable contract is identical: the value round-trips
+        // unchanged.
+        let serialized = SerializedMessage {
+            kind: MessageKind::Message,
+            id: "msg-1".to_string(),
+            thread_id: "slack:C123:1234.5678".to_string(),
+            text: "Test".to_string(),
+            formatted: root(vec![]),
+            raw: json!({}),
+            author: sample_author(),
+            metadata: MessageMetadata {
+                date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+                edited: true,
+                edited_at: Some("2024-01-15T11:00:00.000Z".to_string()),
+            },
+            attachments: vec![],
+            is_mention: None,
+            links: None,
+        };
+        let msg = Message::from_serialized(serialized);
+        assert_eq!(msg.metadata.date_sent, "2024-01-15T10:30:00.000Z");
+        assert_eq!(
+            msg.metadata.edited_at.as_deref(),
+            Some("2024-01-15T11:00:00.000Z")
+        );
+    }
+
+    #[test]
     fn from_serialized_handles_missing_edited_at() {
         let serialized = SerializedMessage {
             kind: MessageKind::Message,
