@@ -144,6 +144,23 @@ impl DiscordAdapter {
         format!("{}/channels/{channel_id}/messages", self.api_base())
     }
 
+    /// Build the per-message URL (edit/delete target). 1:1 with
+    /// upstream's inline `<api_base>/channels/<target>/messages/
+    /// <message_id>`. `target` is the sub-thread id when the thread
+    /// id encodes one, otherwise the channel id — matches upstream's
+    /// `targetChannelId = discordThreadId || channelId`. Returns
+    /// `None` when `thread_id` isn't Discord-encoded.
+    pub fn message_url(&self, thread_id: &str, message_id: &str) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        let target = decoded.thread_id.as_deref().unwrap_or(&decoded.channel_id);
+        Some(format!(
+            "{}/channels/{}/messages/{}",
+            self.api_base(),
+            target,
+            message_id
+        ))
+    }
+
     /// Build the typing-indicator URL for a thread. 1:1 with
     /// upstream's inline `<api_base>/channels/<target>/typing`.
     /// `target` is the sub-thread id when the thread id encodes one,
@@ -404,7 +421,8 @@ impl Adapter for DiscordAdapter {
     }
 
     /// Edit a Discord message via PATCH
-    /// `/channels/<channel_id>/messages/<message_id>`. 1:1 with
+    /// `/channels/<target>/messages/<message_id>` (target =
+    /// sub-thread id when encoded, else channel id). 1:1 with
     /// upstream's text-only path (cards/components deferred).
     /// Returns the (unchanged) message id.
     async fn edit_message(
@@ -415,15 +433,9 @@ impl Adapter for DiscordAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<String> {
         use chat_sdk_chat::types::AdapterError;
 
-        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+        let url = self.message_url(thread_id, message_id).ok_or_else(|| {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
         })?;
-
-        let url = format!(
-            "{}/{}",
-            self.channel_messages_url(&decoded.channel_id),
-            message_id
-        );
         let body = serde_json::json!({ "content": text });
 
         let response = self
@@ -454,7 +466,8 @@ impl Adapter for DiscordAdapter {
     }
 
     /// Delete a Discord message via DELETE
-    /// `/channels/<channel_id>/messages/<message_id>`. 1:1 with
+    /// `/channels/<target>/messages/<message_id>` (target =
+    /// sub-thread id when encoded, else channel id). 1:1 with
     /// upstream's `adapter.deleteMessage`.
     async fn delete_message(
         &self,
@@ -463,15 +476,9 @@ impl Adapter for DiscordAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<()> {
         use chat_sdk_chat::types::AdapterError;
 
-        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+        let url = self.message_url(thread_id, message_id).ok_or_else(|| {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
         })?;
-
-        let url = format!(
-            "{}/{}",
-            self.channel_messages_url(&decoded.channel_id),
-            message_id
-        );
 
         let response = self
             .http
@@ -1228,6 +1235,60 @@ mod tests {
             url.contains("/channels/thread789/messages/msg001/reactions/"),
             "URL was {url}"
         );
+    }
+
+    // ---------- describe("deleteMessage") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("deleteMessage")`.
+
+    #[test]
+    fn discord_delete_message_url_uses_channel_id_for_top_level_thread() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .message_url("discord:guild1:channel456", "msg001")
+            .unwrap();
+        assert_eq!(
+            url,
+            "https://discord.test/api/v10/channels/channel456/messages/msg001"
+        );
+    }
+
+    #[test]
+    fn discord_delete_message_url_routes_through_sub_thread_when_encoded() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .message_url("discord:guild1:channel456:thread789", "msg002")
+            .unwrap();
+        assert_eq!(
+            url,
+            "https://discord.test/api/v10/channels/thread789/messages/msg002"
+        );
+    }
+
+    #[test]
+    fn discord_message_url_returns_none_for_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        assert!(adapter.message_url("slack:C123:1.0", "msg").is_none());
     }
 
     // ---------- describe("addReaction") (2 upstream cases) ----------
