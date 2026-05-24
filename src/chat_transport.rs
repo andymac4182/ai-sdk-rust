@@ -6,14 +6,14 @@ use crate::generate_text::{GenerateTextTool, ToolModelOutputErrorMode, create_to
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    LanguageModel, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
-    LanguageModelCustomPart, LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage,
-    LanguageModelPrompt, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
-    LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-    LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-    LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
-    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
-    LanguageModelUserMessage,
+    LanguageModel, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
+    LanguageModelAssistantMessage, LanguageModelCustomPart, LanguageModelFileData,
+    LanguageModelFilePart, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelStreamPart,
+    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
+    LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolContentPart,
+    LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+    LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::prompt::Prompt;
 use crate::provider::ProviderOptions;
@@ -90,7 +90,7 @@ impl ChatRequestOptions {
 }
 
 /// Options passed to [`ChatTransport::send_messages`].
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatTransportSendOptions {
     pub trigger: ChatTransportTrigger,
@@ -104,6 +104,9 @@ pub struct ChatTransportSendOptions {
 
     #[serde(default)]
     pub request: ChatRequestOptions,
+
+    #[serde(skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl ChatTransportSendOptions {
@@ -114,6 +117,7 @@ impl ChatTransportSendOptions {
             message_id: None,
             messages: Vec::new(),
             request: ChatRequestOptions::default(),
+            abort_signal: None,
         }
     }
 
@@ -130,6 +134,26 @@ impl ChatTransportSendOptions {
     pub fn with_request(mut self, request: ChatRequestOptions) -> Self {
         self.request = request;
         self
+    }
+
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+}
+
+impl PartialEq for ChatTransportSendOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.trigger == other.trigger
+            && self.chat_id == other.chat_id
+            && self.message_id == other.message_id
+            && self.messages == other.messages
+            && self.request == other.request
+            && match (&self.abort_signal, &other.abort_signal) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.is_same_signal(right),
+                _ => false,
+            }
     }
 }
 
@@ -275,8 +299,11 @@ impl<'transport, 'agent, M: LanguageModel + ?Sized> DirectChatTransport<'transpo
     {
         let model_messages = convert_ui_messages_to_model_messages(&options.messages)?;
         let prompt = Prompt::from_messages(model_messages).with_allow_system_in_messages(true);
-        let call_options =
+        let mut call_options =
             ToolLoopAgentCallOptions::new(prompt).with_model_settings(self.model_settings.clone());
+        if let Some(abort_signal) = options.abort_signal {
+            call_options = call_options.with_abort_signal(abort_signal);
+        }
         let result = self
             .agent
             .stream(call_options)
@@ -1889,10 +1916,11 @@ mod tests {
     use super::*;
     use crate::agent::{ToolLoopAgent, ToolLoopAgentSettings};
     use crate::language_model::{
-        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelReasoningDelta,
-        LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelStreamFinish,
-        LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelTextDelta,
-        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelAbortController, LanguageModelFinishReason,
+        LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+        LanguageModelStreamFinish, LanguageModelStreamResult, LanguageModelStreamStart,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage,
+        OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use serde_json::json;
@@ -2292,6 +2320,32 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(text_deltas, vec!["Hello", ", ", "world!"]);
+    }
+
+    #[test]
+    fn direct_chat_transport_passes_abort_signal_to_agent() {
+        let model = MockLanguageModel::new().with_stream_result(text_stream_result(["test"]));
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::new(&agent);
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+
+        poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")])
+                    .with_abort_signal(abort_signal.clone()),
+            ),
+        )
+        .expect("direct transport streams");
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        let captured_signal = calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("abort signal is forwarded");
+        assert!(captured_signal.is_same_signal(&abort_signal));
     }
 
     #[test]

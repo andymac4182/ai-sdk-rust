@@ -2357,14 +2357,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   provider metadata.
 - 2026-05-19: Direct chat transport parity added
   `direct_chat_transport_streams_text_response_from_agent`,
+  `direct_chat_transport_passes_abort_signal_to_agent`,
   `direct_chat_transport_passes_prepared_agent_options`,
   `direct_chat_transport_applies_ui_message_stream_options`,
   `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`,
   `direct_chat_transport_rejects_invalid_ui_message_part_shape`, and
   `direct_chat_transport_reconnect_returns_none` in `src/chat_transport.rs`,
   covering upstream `DirectChatTransport`'s portable in-process agent bridge,
-  UI-message text conversion, Rust agent option forwarding, UI-message stream
-  options, validation errors, and reconnect-null behavior.
+  UI-message text conversion, native Rust abort-signal forwarding to the agent
+  and model call, Rust agent option forwarding, UI-message stream options,
+  validation errors, and reconnect-null behavior.
 - 2026-05-19: Assistant tool-history UI-to-model conversion parity added
   `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`,
   `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`,
@@ -4074,14 +4076,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    cases now have named Rust counterparts under `openai_image_should_*`.
 5. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
-   expanding to unrelated providers. Continue choosing from `packages/ai`,
-   `packages/provider`, `packages/provider-utils`, `packages/open-responses`,
-   `packages/gateway`, Vercel AI Gateway routes, MCP,
-   OTel, Workflow, telemetry, UI transport, chat state management, and
-   test-server support until those rows are verified or intentionally
-   documented as non-portable. The OpenAI-compatible package row is now
-   verified against all current upstream package tests; do not spend another
-   first-phase slice there unless upstream changes or a regression appears.
+   expanding to unrelated providers. Within that first-phase set, finish open
+   packages in this order unless upstream drift or a regression forces a
+   narrower repair first: `packages/ai` to 100%, then
+   `packages/provider-utils`, then `packages/provider`, then the remaining
+   first-phase rows (`packages/open-responses`, `packages/gateway`, Vercel AI
+   Gateway routes, MCP, OTel, Workflow, telemetry, UI transport, chat state
+   management, and test-server support). The OpenAI-compatible package row is
+   now verified against all current upstream package tests; do not spend
+   another first-phase slice there unless upstream changes or a regression
+   appears.
 6. Continue `packages/mcp` inside `crates/ai-sdk-mcp` only where live protected
    service validation is possible with suitable credentials, or where upstream
    adds new portable MCP surfaces. HTTP transport bearer-token injection and
