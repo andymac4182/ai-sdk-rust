@@ -558,6 +558,25 @@ pub fn is_messenger_thread_id(thread_id: &str) -> bool {
     thread_id.starts_with(THREAD_ID_PREFIX)
 }
 
+/// Normalize a raw Messenger user id (or already-prefixed thread id)
+/// to the prefixed form. 1:1 with upstream's implicit normalization
+/// in `adapter.postMessage(threadId, …)` which accepts both the bare
+/// PSID (e.g. `"USER_123"`) and the prefixed form
+/// (`"messenger:USER_123"`).
+///
+/// - Input already starts with `messenger:` → returned unchanged.
+/// - Input is the bare PSID → returned as `messenger:<input>`.
+///
+/// Used by callers that accept user-supplied thread ids and want to
+/// be permissive about the prefix.
+pub fn normalize_thread_id(thread_id: &str) -> String {
+    if thread_id.starts_with(THREAD_ID_PREFIX) {
+        thread_id.to_string()
+    } else {
+        format!("{THREAD_ID_PREFIX}{thread_id}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +643,29 @@ mod tests {
     fn rejects_empty_thread_id() {
         // Upstream: decodeThreadId("") throws.
         assert!(decode_thread_id("").is_none());
+    }
+
+    #[test]
+    fn normalize_thread_id_passes_through_prefixed_input() {
+        // Already-prefixed thread ids are returned unchanged. Mirrors
+        // upstream's `adapter.postMessage("messenger:USER_123", _)`
+        // path which doesn't double-prepend.
+        assert_eq!(
+            normalize_thread_id("messenger:USER_123"),
+            "messenger:USER_123"
+        );
+    }
+
+    #[test]
+    fn normalize_thread_id_resolves_raw_user_id_without_prefix() {
+        // 1:1 with upstream `index.test.ts > describe("thread ID
+        // encoding") > it("resolves raw thread ID without messenger:
+        // prefix")` — upstream accepts the bare PSID
+        // (`"USER_123"`) and treats it as the prefixed thread id.
+        // The Rust port exposes the normalization at the helper
+        // boundary so callers (HTTP dispatcher path) can route
+        // accordingly.
+        assert_eq!(normalize_thread_id("USER_123"), "messenger:USER_123");
     }
 
     // ---------- additive Rust-side coverage ----------
