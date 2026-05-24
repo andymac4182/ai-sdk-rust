@@ -23,6 +23,17 @@ pub const THREAD_ID_PREFIX: &str = "teams:";
 /// Default Bot Framework / Teams API base URL.
 pub const DEFAULT_API_BASE: &str = "https://smba.trafficmanager.net";
 
+/// TTL the adapter caches per-conversation metadata (serviceUrl,
+/// tenantId, etc.) under. 1:1 with upstream's private
+/// `CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000` (30 days).
+pub const CACHE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Maximum time the adapter waits for a handler to call
+/// `chat.openModal()` after Teams sends an `invoke` activity
+/// requesting a task module. 1:1 with upstream's private
+/// `DEFAULT_DIALOG_OPEN_TIMEOUT_MS = 5000` (5 s).
+pub const DEFAULT_DIALOG_OPEN_TIMEOUT_MS: u64 = 5000;
+
 /// Options for [`TeamsAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct TeamsAdapterOptions {
@@ -426,6 +437,15 @@ mod tests {
     }
 
     // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    #[test]
+    fn teams_cache_and_dialog_timeout_consts_match_upstream() {
+        // 1:1 with upstream's private `CACHE_TTL_MS = 30 * 24 * 60 *
+        // 60 * 1000` and `DEFAULT_DIALOG_OPEN_TIMEOUT_MS = 5000`.
+        assert_eq!(CACHE_TTL_MS, 30 * 24 * 60 * 60 * 1000);
+        assert_eq!(DEFAULT_DIALOG_OPEN_TIMEOUT_MS, 5000);
+    }
+
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {
         use chat_sdk_chat::markdown::{Node, paragraph, root, text};
