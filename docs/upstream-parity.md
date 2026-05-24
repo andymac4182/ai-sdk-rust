@@ -952,6 +952,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   proves the equivalent typed boundary by exposing no configured static tools
   for a no-tool `ToolLoopAgent`, keeping dynamic/data UI parts representable,
   and preserving caller-provided UI message metadata through serialization.
+- 2026-05-24: `packages/ai` `ui/chat.test-d.ts` inventory documented all 8
+  `onToolCall` generic inference cases as TypeScript compiler-only. These
+  cases assert conditional mapped types over `ToolSet | UITools`, Zod-driven
+  `tool()` generic inference, literal tool-name unions, and output-schema
+  independence in `ChatInit<UIMessage<...>>`. Rust has no TypeScript
+  conditional type, `never`/`undefined`, `expectTypeOf`, or Zod inference
+  layer to port at runtime. The portable runtime behavior behind the same
+  surface remains tracked by UI-message stream `onToolCall` execution,
+  tool-part validation, and DirectChatTransport/convert-to-model-message tests;
+  a future Rust-native chat state facade should add its own typed callback
+  tests if that API is introduced.
 - 2026-05-24: `packages/ai` `handleUIMessageStreamFinish` parity added
   named Rust counterparts for the portable upstream
   `handle-ui-message-stream-finish.test.ts` pass-through, injected message id,
@@ -4136,6 +4147,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    standalone providers.
    Standalone provider slices are blocked while any of these rows are not yet
    verified or explicitly documented as intentionally non-portable.
+   Within this gate, use the current hard package order: finish `packages/ai`
+   to 100% first, then `@ai-sdk/provider-utils`, then `@ai-sdk/provider`, then
+   continue the remaining first-phase rows in the most effective order. Do not
+   start a provider-utils slice while portable `packages/ai` inventory remains
+   open, and do not start a provider slice while portable provider-utils
+   inventory remains open.
 2. Treat the original upstream TypeScript tests as the non-negotiable floor for
    every slice. Each future iteration must start from the exact original
    package test list and ensure EVERY portable `it`/`test` case, table row,
