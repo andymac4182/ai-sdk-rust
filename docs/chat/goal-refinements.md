@@ -4537,3 +4537,117 @@ handler-trait sequence. chat-sdk-chat 821 → 852 tests (+31).
   prior turn). Still deferred.
 - **PostableMessage input enum** (option 3 from the prior turn).
   Still deferred.
+
+## Slices 422..426 refinement cycle (handler-trait sequence Phase G-J + dedupe TTL)
+
+5-slice cycle covering slices 422..426. Continues the handler-trait
+architectural sequence from cycle 412..420 (Phase A-F: mention /
+subscribed / direct_message / new_message / reaction / action) with
+Phases G-J (slash_command / options_load / detectMention walker /
+dedupe TTL).
+
+**Slices summary**
+
+- 422: **Phase G** — Chat::on_slash_command + on_slash_command_filtered
+  + Chat::process_slash_command + normalize_slash_command helper.
+  6 portable + 1 additive.
+- 423: **Phase H** — Chat::on_options_load + on_options_load_filtered
+  + Chat::process_options_load REQUEST/RESPONSE dispatcher (returns
+  Option<serde_json::Value>; specific-first then catch-all fallback;
+  continues past handler errors). 5 portable + 1 additive.
+- 424: refresh chat basis line + regenerate package-progress.md
+  (doc-only sync of the 415-423 progress).
+- 425: detectMention walker + Adapter::user_name() / bot_user_id()
+  optional accessors + ChatOptions.user_name fallback + dispatcher
+  applies `is_mention = prior || detect_mention(...)`. 3 portable
+  + 7 additive.
+- 426: ChatOptions.dedupe_ttl_ms override + 3 message-deduplication
+  TTL cases (default TTL, custom TTL, atomic set_if_not_exists)
+  via RecordingState test mock. 3 portable.
+
+Total: 17 portable + 9 additive upstream cases mapped across this
+cycle. chat-sdk-chat 852 → 878 tests (+26).
+
+Combined with cycle 412..420 (23 portable + 14 additive across
+slices 415..420), the handler-trait sequence has now mapped
+**40 portable + 23 additive upstream cases** across the full
+chat.test.ts handler surface (slices 415..426). The remaining
+~70 chat.test.ts cases gate on: openModal (Adapter::open_modal
+trait method + ModalContext storage), callbackUrl POSTs
+(HttpPoster threading), and the concurrency dispatcher
+(lock/queue/debounce/burst/concurrent strategies + persistThreadHistory).
+
+**Lessons**
+
+1. **Optional trait accessors are the right abstraction for
+   adapter-provided metadata.** Slice 425's `Adapter::user_name()`
+   / `Adapter::bot_user_id()` returns `Option<&str>` with a
+   `None` default. Adapters that fetch the bot identity at
+   `initialize()` override; ones that don't get the no-op default
+   and never break. Avoids the "every adapter must implement this
+   even if it has nothing to return" tax.
+
+2. **Recording test mocks are the cleanest way to assert
+   call signatures.** Slice 426's `RecordingState` records every
+   `set_if_not_exists` call (key + TTL) so tests can assert the
+   dispatcher's atomic + TTL-correct invocation without needing
+   the real state-backend round-trip. The pattern carries from
+   slice 419's `CancelingAdapter` (records cancel calls) and
+   slice 420's `OpenDmAdapter` (records open_dm / post_message)
+   — same shape, different domain.
+
+3. **Request/response dispatchers are a distinct shape from
+   fire-and-forget.** Slice 423's `process_options_load` returns
+   `Option<serde_json::Value>` rather than firing all matching
+   handlers concurrently. It walks specific handlers first, then
+   catch-all, returning the first successful non-Null result.
+   The "continues past handler errors" semantics map to a
+   `match handler(event).await { Ok(...) => return; Err(_) =>
+   continue; }` loop. Distinct enough from the fire-and-forget
+   dispatchers (process_reaction / process_action / process_slash_command)
+   that the storage type (`OptionsLoadFuture` returning `Result`
+   instead of `()`) needs its own type alias.
+
+4. **`||` semantics matter for the dispatcher hook.** Slice 425
+   wired detect_mention into the dispatcher as
+   `message.is_mention = prior || detect_mention(...)`. Just
+   computing-and-setting (without the `||`) would overwrite a
+   gateway-derived `Some(true)` with a walker-computed `false`,
+   breaking the "gateway pre-sets mention via the source platform's
+   native signal" use case. Tests must cover both directions:
+   prior=None gets overwritten with computed; prior=Some(true)
+   survives even when computed=false.
+
+5. **ChatOptions field churn requires test-site sync.** Slices
+   425 + 426 each added a new ChatOptions field
+   (`user_name`, `dedupe_ttl_ms`). The 5 existing test sites
+   that directly literal-construct `ChatOptions { state: ...,
+   adapters: ..., transcripts: ..., identity: ... }` (without
+   `..Default::default()`) needed to be updated each time. Lesson:
+   prefer `..Default::default()` in tests that don't exercise
+   the full struct, even when it adds a single field today —
+   it future-proofs against the next field addition.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- (no brief edits — the multi-slice architectural sequence pattern
+  from slice 411 still applies. The dispatcher-hook lesson would
+  fit there but wouldn't change the recipe.)
+
+**Open refinements deferred**
+
+- **openModal handler + Adapter::open_modal trait method** —
+  unlocks the 6 chat.test.ts openModal cases + the
+  remaining slash-command openModal case.
+- **callbackUrl POSTs in handler dispatch** — wires the existing
+  HttpPoster trait into the action / modal-submit handlers
+  for the 8+ callback URL cases.
+- **Lock + concurrency dispatcher** — onLockConflict + the 4
+  concurrency strategies (queue / debounce / burst / concurrent).
+  ~70+ cases. Largest remaining single area.
+- **persistThreadHistory flag-gated storage** — 6 cases.
+- **adapter post_message wire-up assertion in handler-trait tests**
+  — for the 2 deferred "should allow posting from <reaction|
+  action> thread" cases. RecordingAdapter pattern is in scope
+  but a Phase-K-style coordinated update.
