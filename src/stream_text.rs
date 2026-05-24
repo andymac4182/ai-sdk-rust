@@ -10573,6 +10573,81 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_generates_consistent_call_id_for_language_model_callbacks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let start_call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let end_call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let end_response_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let start_call_ids_for_callback = Arc::clone(&start_call_ids);
+        let end_call_ids_for_callback = Arc::clone(&end_call_ids);
+        let end_response_ids_for_callback = Arc::clone(&end_response_ids);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test prompt")])
+                .with_experimental_on_language_model_call_start(move |event| {
+                    let start_call_ids = Arc::clone(&start_call_ids_for_callback);
+                    async move {
+                        assert_eq!(event.provider, "mock-provider");
+                        assert_eq!(event.model_id, "mock-model-id");
+                        assert_eq!(event.messages.len(), 1);
+                        start_call_ids
+                            .lock()
+                            .expect("start call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let end_call_ids = Arc::clone(&end_call_ids_for_callback);
+                    let end_response_ids = Arc::clone(&end_response_ids_for_callback);
+                    async move {
+                        assert_eq!(event.provider, "mock-provider");
+                        assert_eq!(event.model_id, "mock-model-id");
+                        assert_eq!(event.finish_reason, FinishReason::Stop);
+                        assert_eq!(event.usage, usage());
+                        assert!(event.content.is_empty());
+                        end_call_ids
+                            .lock()
+                            .expect("end call ids lock")
+                            .push(event.call_id);
+                        end_response_ids
+                            .lock()
+                            .expect("end response ids lock")
+                            .push(event.response_id);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.steps.len(), 1);
+        let step = &result.steps[0];
+        let start_call_ids = start_call_ids.lock().expect("start call ids lock");
+        let end_call_ids = end_call_ids.lock().expect("end call ids lock");
+        assert_eq!(start_call_ids.len(), 1);
+        assert_eq!(end_call_ids.len(), 1);
+        assert!(start_call_ids[0].starts_with("call-"));
+        assert_eq!(start_call_ids[0].len(), "call-".len() + 24);
+        assert_eq!(end_call_ids[0], start_call_ids[0]);
+
+        assert_eq!(end_call_ids.as_slice(), [start_call_ids[0].clone()]);
+        assert_eq!(
+            end_response_ids
+                .lock()
+                .expect("end response ids lock")
+                .as_slice(),
+            [step
+                .response
+                .id
+                .clone()
+                .expect("stream_text generated a response id")]
+        );
+    }
+
+    #[test]
     fn stream_text_invokes_finish_callback_with_completed_records() {
         let provider_metadata = ProviderMetadata::from([(
             "mock".to_string(),

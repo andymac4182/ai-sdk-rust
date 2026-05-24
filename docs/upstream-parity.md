@@ -1728,6 +1728,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream case where refined tool input must reach the emitted
   tool-call part, local tool-result part, language-model-call-end callback, and
   tool-execution-start callback.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` generated call-id
+  callback parity added the named Rust counterpart
+  `stream_text_generates_consistent_call_id_for_language_model_callbacks`,
+  proving a generated streaming language-model call id is reused across
+  start/end callbacks while fallback response identity is still generated.
 - 2026-05-23: `packages/ai` `streamText` `result.fullStream`
   tool-call parity added the named Rust counterpart
   `stream_text_result_full_stream_sends_tool_calls` for the upstream snapshot
