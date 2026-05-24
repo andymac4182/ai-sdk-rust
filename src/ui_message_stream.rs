@@ -3464,6 +3464,30 @@ mod tests {
     }
 
     #[test]
+    fn pipe_ui_message_stream_to_response_should_handle_errors_in_the_stream() {
+        let mut response = MockUiMessageStreamResponse::default();
+
+        pipe_ui_message_stream_to_response(
+            &mut response,
+            UiMessageStreamResponseOptions::new([UiMessageChunk::error("Custom error message")])
+                .with_status(200),
+        )
+        .expect("mock response writes");
+
+        assert_eq!(response.status, Some(200));
+        assert_eq!(
+            response.decoded_chunks(),
+            vec![
+                r#"data: {"type":"error","errorText":"Custom error message"}
+
+"#,
+                "data: [DONE]\n\n"
+            ]
+        );
+        assert!(response.ended);
+    }
+
+    #[test]
     fn transform_text_to_ui_message_stream_emits_upstream_sequence() {
         let chunks = transform_text_to_ui_message_stream(["Hello", " ", "World"]);
 
@@ -3476,6 +3500,24 @@ mod tests {
                 { "type": "text-delta", "id": "text-1", "delta": "Hello" },
                 { "type": "text-delta", "id": "text-1", "delta": " " },
                 { "type": "text-delta", "id": "text-1", "delta": "World" },
+                { "type": "text-end", "id": "text-1" },
+                { "type": "finish-step" },
+                { "type": "finish" }
+            ])
+        );
+    }
+
+    #[test]
+    fn transform_text_to_ui_message_stream_should_handle_single_chunk_streams() {
+        let chunks = transform_text_to_ui_message_stream(["Complete message"]);
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "text-1" },
+                { "type": "text-delta", "id": "text-1", "delta": "Complete message" },
                 { "type": "text-end", "id": "text-1" },
                 { "type": "finish-step" },
                 { "type": "finish" }

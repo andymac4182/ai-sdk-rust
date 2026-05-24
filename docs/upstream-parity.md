@@ -1001,6 +1001,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   `ReadableStream` scheduling cases such as delayed merged streams and writes
   after close remain JavaScript-runtime-specific until a live stream
   abstraction is introduced.
+- 2026-05-24: `packages/ai` UI-message text/response edge parity added named
+  Rust counterparts for the remaining portable upstream
+  `transform-text-to-ui-message-stream.test.ts` single-chunk case and
+  `pipe-ui-message-stream-to-response.test.ts` error-stream case:
+  `transform_text_to_ui_message_stream_should_handle_single_chunk_streams` and
+  `pipe_ui_message_stream_to_response_should_handle_errors_in_the_stream`.
+  Together with the existing multi-chunk, empty-stream, header, and encoded SSE
+  tests, the portable upstream transform and pipe test files are now mapped in
+  Rust; Node `ServerResponse` and Web `ReadableStream` details remain covered
+  through the crate's response-writer and collected-stream boundaries.
 - 2026-05-23: `packages/ai` `streamText` automatic tool approval stream
   parity added the named Rust counterpart
   `stream_text_automatic_tool_approval_response_streams_before_tool_result`
