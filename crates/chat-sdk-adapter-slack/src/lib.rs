@@ -266,6 +266,19 @@ impl Adapter for SlackAdapter {
         ADAPTER_NAME
     }
 
+    /// 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`.
+    /// Delegates to the inherent
+    /// [`SlackAdapter::channel_id_from_thread_id`].
+    fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        self.channel_id_from_thread_id(thread_id)
+    }
+
+    /// 1:1 with upstream `adapter.isDM(threadId)`. Delegates to the
+    /// inherent [`SlackAdapter::is_dm`].
+    fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        self.is_dm(thread_id)
+    }
+
     /// Post a text message via Slack's `chat.postMessage` Web API.
     /// 1:1 with upstream's `adapter.postMessage`:
     ///

@@ -210,6 +210,19 @@ impl Adapter for WhatsappAdapter {
         ADAPTER_NAME
     }
 
+    /// 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`.
+    /// WhatsApp has no separate channel id (every thread is a 1:1
+    /// conversation) — returns the thread id unchanged.
+    fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        Some(self.channel_id_from_thread_id(thread_id))
+    }
+
+    /// 1:1 with upstream `adapter.isDM(threadId)`. WhatsApp is always
+    /// a DM (no group chats in the Cloud API surface here).
+    fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        Some(self.is_dm(thread_id))
+    }
+
     /// Post a text message via the WhatsApp Cloud API. 1:1 with
     /// upstream's `adapter.postMessage`:
     ///

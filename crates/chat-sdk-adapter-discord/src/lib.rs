@@ -372,6 +372,21 @@ impl Adapter for DiscordAdapter {
         ADAPTER_NAME
     }
 
+    /// 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`.
+    /// Delegates to the inherent
+    /// [`DiscordAdapter::channel_id_from_thread_id`] (which returns
+    /// `String` unconditionally — wraps in `Some(_)` to match the
+    /// `Option<String>` trait shape).
+    fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        Some(self.channel_id_from_thread_id(thread_id))
+    }
+
+    /// 1:1 with upstream `adapter.isDM(threadId)`. Delegates to the
+    /// inherent [`DiscordAdapter::is_dm`].
+    fn is_dm(&self, thread_id: &str) -> Option<bool> {
+        self.is_dm(thread_id)
+    }
+
     /// Post a text message to a Discord channel (or sub-thread). 1:1
     /// with upstream's `adapter.postMessage`:
     ///
