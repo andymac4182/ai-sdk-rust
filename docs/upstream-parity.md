@@ -1402,6 +1402,21 @@ focused tests for each portable behavior before changing rows to `verified`.
   `convert_to_language_model_message_assistant_should_include_empty_text_parts_when_there_are_provider_options`.
   Rust now removes empty user text and empty assistant text without provider
   options while preserving empty assistant text that carries provider options.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` assistant
+  custom/reasoning/file parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` assistant custom,
+  reasoning, assistant file provider-reference, and reasoning-file cases:
+  `convert_to_language_model_message_assistant_should_include_custom_parts`,
+  `convert_to_language_model_message_assistant_reasoning_should_pass_through_provider_options`,
+  `convert_to_language_model_message_assistant_reasoning_should_support_a_mix_of_reasoning_redacted_reasoning_and_text_parts`,
+  `convert_to_language_model_message_assistant_should_pass_through_provider_reference_for_file_parts_without_conversion`,
+  `convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_base64_data`,
+  and
+  `convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_uint8_array_data`.
+  Rust proves provider options stay on custom and reasoning parts, reasoning
+  and redacted-reasoning ordering is preserved, assistant file provider
+  references and filenames pass through unchanged, and reasoning-file base64
+  plus byte data preserve the upstream provider-facing tagged file data shape.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

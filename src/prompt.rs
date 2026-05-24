@@ -1211,8 +1211,9 @@ mod tests {
     use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::json::JsonValue;
     use crate::language_model::{
-        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelFilePart,
-        LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCustomPart,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelPrompt,
+        LanguageModelReasoningEffort, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
         LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelUserContentPart,
@@ -2220,6 +2221,245 @@ mod tests {
                         "toolCallId": "toolCallId",
                         "toolName": "toolName",
                         "input": {}
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_include_custom_parts() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "cmp_123"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Custom(
+                LanguageModelCustomPart::new("test-provider.compaction")
+                    .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "custom",
+                        "kind": "test-provider.compaction",
+                        "providerOptions": {
+                            "openai": {
+                                "itemId": "cmp_123"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_reasoning_should_pass_through_provider_options()
+    {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Reasoning(
+                LanguageModelReasoningPart::new("hello, world!")
+                    .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning",
+                        "text": "hello, world!",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_reasoning_should_support_a_mix_of_reasoning_redacted_reasoning_and_text_parts()
+     {
+        let redacted_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "redacted": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                "I'm thinking",
+            )),
+            LanguageModelAssistantContentPart::Reasoning(
+                LanguageModelReasoningPart::new("redacted-reasoning-data")
+                    .with_provider_options(redacted_options),
+            ),
+            LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                "more thinking",
+            )),
+            LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("hello, world!")),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning",
+                        "text": "I'm thinking"
+                    },
+                    {
+                        "type": "reasoning",
+                        "text": "redacted-reasoning-data",
+                        "providerOptions": {
+                            "test-provider": {
+                                "redacted": true
+                            }
+                        }
+                    },
+                    {
+                        "type": "reasoning",
+                        "text": "more thinking"
+                    },
+                    {
+                        "type": "text",
+                        "text": "hello, world!"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_pass_through_provider_reference_for_file_parts_without_conversion()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Reference {
+                        reference: provider_reference(&[
+                            ("anthropic", "file-xyz789"),
+                            ("openai", "file-abc123"),
+                        ]),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("doc.pdf"),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "file",
+                        "filename": "doc.pdf",
+                        "data": {
+                            "type": "reference",
+                            "reference": {
+                                "anthropic": "file-xyz789",
+                                "openai": "file-abc123"
+                            }
+                        },
+                        "mediaType": "application/pdf"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_base64_data()
+     {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ReasoningFile(
+                LanguageModelReasoningFilePart::new(
+                    LanguageModelFileData::Data {
+                        data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                    },
+                    "image/png",
+                )
+                .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning-file",
+                        "data": {
+                            "type": "data",
+                            "data": "iVBORw0KGgo="
+                        },
+                        "mediaType": "image/png",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_uint8_array_data()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ReasoningFile(LanguageModelReasoningFilePart::new(
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Bytes(vec![137, 80, 78, 71, 13, 10, 26, 10]),
+                },
+                "image/png",
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning-file",
+                        "data": {
+                            "type": "data",
+                            "data": [137, 80, 78, 71, 13, 10, 26, 10]
+                        },
+                        "mediaType": "image/png"
                     }
                 ]
             })
