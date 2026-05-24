@@ -459,7 +459,11 @@ impl Chat {
             .open_dm(user_id)
             .await
             .map_err(|err| OpenDmError::AdapterError(format!("{err:?}")))?;
-        Ok(Thread::new(adapter, thread_id))
+        // 1:1 with upstream's `createThread` — derive is_dm from
+        // `adapter.is_dm(thread_id) ?? false`. open_dm targets a
+        // DM by definition, but the adapter is the source of truth.
+        let is_dm = adapter.is_dm(&thread_id).unwrap_or(false);
+        Ok(Thread::new(adapter, thread_id).with_is_dm(is_dm))
     }
 
     /// 1:1 port of upstream `Chat.getUser(user)`. Infers the adapter
@@ -670,6 +674,11 @@ mod tests {
                 .unwrap()
                 .push((thread_id.to_string(), text.to_string()));
             Ok("msg-id".to_string())
+        }
+        fn is_dm(&self, thread_id: &str) -> Option<bool> {
+            // Slack-style DM thread ids start with `<adapter>:D` —
+            // matches the open_dm output above.
+            Some(thread_id.starts_with(&format!("{}:D", self.name)))
         }
     }
 
@@ -1439,6 +1448,21 @@ mod tests {
         let (chat, _adapter) = chat_with_get_user_adapter(GetUserAdapter::new("slack", None));
         let user = futures_executor::block_on(chat.get_user("U999999")).unwrap();
         assert!(user.is_none());
+    }
+
+    // ---------- describe("isDM") (1 of 3 upstream cases) ----------
+    // 1:1 with upstream `chat.test.ts > describe("isDM")`. The 2
+    // deferred cases need `handleIncomingMessage` + the chat event
+    // dispatcher to wire `adapter.is_dm(thread_id)` into the
+    // delivered thread handle.
+
+    #[test]
+    fn chat_is_dm_should_return_true_for_dm_threads() {
+        let (chat, _adapter) = chat_with_open_dm_adapter("slack");
+        let thread = futures_executor::block_on(chat.open_dm("U123456")).unwrap();
+        // OpenDmAdapter.is_dm returns true for thread ids prefixed
+        // with "<adapter>:D", which matches the open_dm output.
+        assert!(thread.is_dm());
     }
 
     #[test]

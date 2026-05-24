@@ -1391,6 +1391,16 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Optional DM-thread detection. 1:1 with upstream optional
+    /// `isDM?(threadId): boolean`. Returns `None` when the adapter
+    /// doesn't model channel/DM separation (e.g. Messenger/WhatsApp
+    /// where every thread is a DM, or platforms that always return
+    /// the same answer — those override and return
+    /// `Some(<constant>)`).
+    fn is_dm(&self, _thread_id: &str) -> Option<bool> {
+        None
+    }
+
     /// Optional adapter-supplied channel descriptor lookup. 1:1 with
     /// upstream optional `fetchChannelInfo?(channelId): Promise<ChannelInfo>`.
     /// Default returns `Err(Unsupported("fetch_channel_info"))` —
