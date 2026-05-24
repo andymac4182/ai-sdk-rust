@@ -446,6 +446,62 @@ fn normalize_slash_command(cmd: &str) -> String {
     }
 }
 
+/// 1:1 with upstream `OptionsLoadEvent` — invoked by the platform
+/// when a dynamic select-menu needs its options populated. The
+/// handler returns a list of option entries (or option groups)
+/// that the platform renders inline.
+#[derive(Clone, Debug)]
+pub struct OptionsLoadEvent {
+    /// Block-kit / cards action id of the select-menu (e.g.
+    /// `"person_select"`).
+    pub action_id: String,
+    /// Typed-ahead query string entered by the user.
+    pub query: String,
+    /// Author of the typeahead query.
+    pub user: crate::types::Author,
+    /// Platform-specific raw event payload.
+    pub raw: serde_json::Value,
+}
+
+/// 1:1 with upstream `OptionsLoadHandler` — returns the option
+/// entries the platform should render in the select-menu. The
+/// return type is `serde_json::Value` to accommodate both flat
+/// option lists and grouped option lists (upstream's
+/// `OptionGroup<TValue> | OptionItem<TValue>` union) without
+/// requiring callers to commit to a single shape.
+///
+/// Returning `Ok(serde_json::Value::Null)` is interpreted as "no
+/// options" — the dispatcher proceeds to the next handler. Returning
+/// `Err` logs the error and the dispatcher also proceeds.
+pub type OptionsLoadHandler = Arc<
+    dyn Fn(OptionsLoadEvent) -> OptionsLoadFuture + Send + Sync + 'static,
+>;
+
+/// Boxed future returned by an [`OptionsLoadHandler`]. Carries the
+/// `Result<serde_json::Value, Box<dyn Error>>` instead of `()` so
+/// handler errors are recoverable (upstream's "should continue after
+/// handler errors" behavior).
+pub type OptionsLoadFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    serde_json::Value,
+                    Box<dyn std::error::Error + Send + Sync>,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Stored filter+handler pair for [`Chat::on_options_load`] /
+/// [`Chat::on_options_load_filtered`].
+struct OptionsLoadRegistration {
+    /// `None` means "catch-all" (runs only when no specific
+    /// handler succeeded). Otherwise matches when the event's
+    /// `action_id` equals any string in the vec.
+    filters: Option<Vec<String>>,
+    handler: OptionsLoadHandler,
+}
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -459,6 +515,7 @@ struct ChatHandlers {
     reaction: Arc<std::sync::Mutex<Vec<ReactionRegistration>>>,
     action: Arc<std::sync::Mutex<Vec<ActionRegistration>>>,
     slash_command: Arc<std::sync::Mutex<Vec<SlashCommandRegistration>>>,
+    options_load: Arc<std::sync::Mutex<Vec<OptionsLoadRegistration>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -942,6 +999,97 @@ impl Chat {
             };
             handler(slash).await;
         }
+    }
+
+    /// 1:1 port of upstream `chat.onOptionsLoad(handler)`
+    /// catch-all overload. Catch-all handlers fire only when no
+    /// specific (action-id-filtered) handler succeeded for the
+    /// matching event.
+    pub fn on_options_load<F>(&self, handler: F)
+    where
+        F: Fn(OptionsLoadEvent) -> OptionsLoadFuture + Send + Sync + 'static,
+    {
+        self.handlers
+            .options_load
+            .lock()
+            .unwrap()
+            .push(OptionsLoadRegistration {
+                filters: None,
+                handler: Arc::new(handler),
+            });
+    }
+
+    /// 1:1 port of upstream `chat.onOptionsLoad(actionId, handler)`
+    /// (also covers the `onOptionsLoad(actionIds[], handler)`
+    /// overload via the IntoIterator signature). Specific handlers
+    /// run before catch-all handlers; the first specific handler
+    /// to return successfully provides the options list.
+    pub fn on_options_load_filtered<F, I, S>(&self, action_ids: I, handler: F)
+    where
+        F: Fn(OptionsLoadEvent) -> OptionsLoadFuture + Send + Sync + 'static,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let filters: Vec<String> = action_ids.into_iter().map(Into::into).collect();
+        self.handlers
+            .options_load
+            .lock()
+            .unwrap()
+            .push(OptionsLoadRegistration {
+                filters: Some(filters),
+                handler: Arc::new(handler),
+            });
+    }
+
+    /// 1:1 port of upstream `chat.processOptionsLoad(event)`.
+    /// Dispatches the options-load event to specific handlers first
+    /// (in registration order); falls back to catch-all handlers
+    /// when no specific handler returns a non-empty result. Continues
+    /// past handler errors per upstream's "should continue after
+    /// handler errors" behavior. Returns the first non-empty,
+    /// non-erroring options payload, or `None` if no handler
+    /// succeeded.
+    pub async fn process_options_load(
+        &self,
+        _adapter: &dyn Adapter,
+        event: OptionsLoadEvent,
+    ) -> Option<serde_json::Value> {
+        let registrations: Vec<(Option<Vec<String>>, OptionsLoadHandler)> = self
+            .handlers
+            .options_load
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.filters.clone(), r.handler.clone()))
+            .collect();
+
+        // First pass: specific handlers (filters.is_some() and
+        // matches event.action_id).
+        for (filters, handler) in registrations.iter() {
+            let Some(filters) = filters else { continue };
+            if !filters.iter().any(|f| f.as_str() == event.action_id.as_str()) {
+                continue;
+            }
+            match handler(event.clone()).await {
+                Ok(serde_json::Value::Null) => continue,
+                Ok(value) => return Some(value),
+                Err(_) => continue, // logger error path deferred
+            }
+        }
+
+        // Second pass: catch-all handlers (filters.is_none()).
+        for (filters, handler) in registrations.iter() {
+            if filters.is_some() {
+                continue;
+            }
+            match handler(event.clone()).await {
+                Ok(serde_json::Value::Null) => continue,
+                Ok(value) => return Some(value),
+                Err(_) => continue,
+            }
+        }
+
+        None
     }
 
     pub async fn process_reaction(&self, adapter: &dyn Adapter, event: ReactionEventInput) {
@@ -4072,6 +4220,202 @@ mod tests {
         futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
         // handlers 1 and 2 fire; 3 ("/status") does not match
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    // ---------- describe("Options Load") — slice 423 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("Options Load")`.
+    // Phase H (slice 423). Unlike the other handler classes,
+    // process_options_load RETURNS the options payload (it's a
+    // request/response model, not fire-and-forget). Dispatch:
+    // specific handlers first, then catch-all on no-specific-match,
+    // continuing past errors per upstream.
+
+    fn make_options_event(action_id: &str, query: &str) -> OptionsLoadEvent {
+        OptionsLoadEvent {
+            action_id: action_id.to_string(),
+            query: query.to_string(),
+            user: Author {
+                user_id: "U123".to_string(),
+                user_name: "user".to_string(),
+                full_name: "Test User".to_string(),
+                is_bot: BotStatus::Known(false),
+                is_me: false,
+            },
+            raw: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn on_options_load_calls_handler_for_matching_action_id() {
+        // 1:1 with upstream "should call onOptionsLoad handler for
+        // a matching action ID". Specific handler returns the
+        // options payload; dispatcher relays it as the result.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_options_load_filtered(["person_select"], move |event| {
+            let o = o.clone();
+            let aid = event.action_id.clone();
+            let q = event.query.clone();
+            Box::pin(async move {
+                *o.lock().unwrap() = Some((aid, q));
+                Ok(serde_json::json!([
+                    {"label": "Maria Garcia", "value": "person_123"}
+                ]))
+            })
+        });
+        let event = make_options_event("person_select", "mar");
+        let result =
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        let obs = observed.lock().unwrap();
+        assert_eq!(
+            obs.as_ref().map(|(a, q)| (a.as_str(), q.as_str())),
+            Some(("person_select", "mar"))
+        );
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!([{"label": "Maria Garcia", "value": "person_123"}])
+        );
+    }
+
+    #[test]
+    fn on_options_load_prefers_specific_handlers_before_catch_all() {
+        // 1:1 with upstream "should prefer specific handlers before
+        // catch-all handlers". Both registered (catch-all FIRST in
+        // registration); specific runs, catch-all does NOT.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let catchall_calls = Arc::new(AtomicUsize::new(0));
+        let specific_calls = Arc::new(AtomicUsize::new(0));
+        let ca = catchall_calls.clone();
+        chat.on_options_load(move |_event| {
+            let ca = ca.clone();
+            Box::pin(async move {
+                ca.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(serde_json::json!([{"label": "Fallback", "value": "fallback"}]))
+            })
+        });
+        let sp = specific_calls.clone();
+        chat.on_options_load_filtered(["person_select"], move |_event| {
+            let sp = sp.clone();
+            Box::pin(async move {
+                sp.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(serde_json::json!([{"label": "Specific", "value": "specific"}]))
+            })
+        });
+        let event = make_options_event("person_select", "mar");
+        let result =
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        assert_eq!(specific_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(catchall_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!([{"label": "Specific", "value": "specific"}])
+        );
+    }
+
+    #[test]
+    fn on_options_load_falls_back_to_catch_all_when_no_specific_match() {
+        // 1:1 with upstream "should fall back to catch-all handlers
+        // when no specific handler matches". Only catch-all
+        // registered; event with unknown action_id fires it.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_options_load(move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(serde_json::json!([{"label": "Fallback", "value": "fallback"}]))
+            })
+        });
+        let event = make_options_event("unknown_select", "test");
+        let result =
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!([{"label": "Fallback", "value": "fallback"}])
+        );
+    }
+
+    #[test]
+    fn on_options_load_continues_after_handler_errors() {
+        // 1:1 with upstream "should continue after handler errors".
+        // First specific handler errors; second handler (catch-all
+        // in this test) provides the fallback result.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let failing_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let f = failing_calls.clone();
+        chat.on_options_load_filtered(["person_select"], move |_event| {
+            let f = f.clone();
+            Box::pin(async move {
+                f.fetch_add(1, AtomicOrdering::SeqCst);
+                Err::<serde_json::Value, _>(Box::new(std::io::Error::other("boom"))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+        });
+        let fb = fallback_calls.clone();
+        chat.on_options_load(move |_event| {
+            let fb = fb.clone();
+            Box::pin(async move {
+                fb.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(serde_json::json!([{"label": "Recovered", "value": "recovered"}]))
+            })
+        });
+        let event = make_options_event("person_select", "mar");
+        let result =
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        assert_eq!(failing_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!([{"label": "Recovered", "value": "recovered"}])
+        );
+    }
+
+    #[test]
+    fn on_options_load_supports_returning_option_groups() {
+        // 1:1 with upstream "should support returning option groups".
+        // Rust port uses serde_json::Value for the return type so
+        // both flat options and grouped options work without a
+        // distinct type union.
+        let (chat, adapter) = chat_with_in_memory_state();
+        chat.on_options_load_filtered(["user_select"], move |_event| {
+            Box::pin(async move {
+                Ok(serde_json::json!([
+                    {"label": "Recent", "options": [{"label": "Alice", "value": "u1"}]},
+                    {"label": "All", "options": [
+                        {"label": "Bob", "value": "u2"},
+                        {"label": "Carol", "value": "u3"}
+                    ]}
+                ]))
+            })
+        });
+        let event = make_options_event("user_select", "");
+        let result =
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event))
+                .unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["label"], "Recent");
+    }
+
+    #[test]
+    fn on_options_load_returns_none_when_no_handler_matches() {
+        // Additive: when no specific or catch-all handler matches /
+        // succeeds, process_options_load returns None.
+        let (chat, adapter) = chat_with_in_memory_state();
+        chat.on_options_load_filtered(["specific_only"], move |_event| {
+            Box::pin(async move {
+                Ok(serde_json::json!([{"label": "X", "value": "x"}]))
+            })
+        });
+        let event = make_options_event("unknown_select", "test");
+        let result =
+            futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
+        assert!(result.is_none());
     }
 
     #[test]
