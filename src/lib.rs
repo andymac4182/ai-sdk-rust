@@ -77,13 +77,14 @@ pub use cerebras::{
     create_cerebras,
 };
 pub use chat_transport::{
-    ChatRequestOptions, ChatTransport, ChatTransportError, ChatTransportReconnectOptions,
-    ChatTransportSendOptions, ChatTransportTrigger, DefaultChatTransport, DirectChatTransport,
-    DirectChatTransportOptions, HttpChatTransport, HttpChatTransportMethod,
-    HttpChatTransportOptions, HttpChatTransportRequest, PrepareReconnectToStreamRequestOptions,
-    PrepareSendMessagesRequestOptions, PreparedReconnectToStreamRequest,
-    PreparedSendMessagesRequest, RequestCredentials, TextStreamChatTransport,
-    convert_ui_messages_to_model_messages, convert_ui_messages_to_model_messages_with_tools,
+    Chat, ChatError, ChatMessageInput, ChatRequestOptions, ChatStatus, ChatTransport,
+    ChatTransportError, ChatTransportReconnectOptions, ChatTransportSendOptions,
+    ChatTransportTrigger, DefaultChatTransport, DirectChatTransport, DirectChatTransportOptions,
+    HttpChatTransport, HttpChatTransportMethod, HttpChatTransportOptions, HttpChatTransportRequest,
+    PrepareReconnectToStreamRequestOptions, PrepareSendMessagesRequestOptions,
+    PreparedReconnectToStreamRequest, PreparedSendMessagesRequest, RequestCredentials,
+    TextStreamChatTransport, convert_ui_messages_to_model_messages,
+    convert_ui_messages_to_model_messages_with_tools,
 };
 pub use completion_transport::{
     CompletionRequestOptions, CompletionStreamProtocol, CompletionTransport,

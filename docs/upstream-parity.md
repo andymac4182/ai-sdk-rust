@@ -2249,6 +2249,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   and `http_chat_transport_includes_headers_in_request_when_function_is_provided`,
   so Rust transport options can now resolve callback-produced request body and
   header maps like upstream `body: () => ...` and `headers: () => ...`.
+- 2026-05-25: `packages/ai` initial `Chat` state-manager parity added
+  `chat_should_include_the_metadata_of_text_message`, covering the portable
+  upstream `ui/chat.test.ts` metadata-preserving text-message flow: metadata is
+  retained in the submitted transport messages, request options are forwarded,
+  and the chat history keeps the user metadata while folding streamed assistant
+  chunks into state.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool

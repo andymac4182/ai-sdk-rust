@@ -21,7 +21,8 @@ use crate::provider::ProviderOptions;
 use crate::provider_utils::{ParseJsonResult, Tool, normalize_headers, parse_json_event_stream};
 use crate::stream_text::StreamTextUiMessageStreamOptions;
 use crate::ui_message_stream::{
-    UiMessage, UiMessageChunk, UiMessageRole, transform_text_to_ui_message_stream,
+    StreamingUiMessageState, UiMessage, UiMessageChunk, UiMessageRole, process_ui_message_stream,
+    transform_text_to_ui_message_stream,
 };
 
 /// Credentials mode used by upstream browser fetch transports.
@@ -218,6 +219,201 @@ pub trait ChatTransport {
         &self,
         options: ChatTransportReconnectOptions,
     ) -> Result<Option<Vec<UiMessageChunk>>, ChatTransportError>;
+}
+
+/// Status of a portable Rust [`Chat`] session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatStatus {
+    Ready,
+    Submitted,
+    Streaming,
+    Error,
+}
+
+/// Error returned by the portable Rust [`Chat`] state manager.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChatError {
+    Transport(ChatTransportError),
+    Stream(String),
+}
+
+impl fmt::Display for ChatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "{error}"),
+            Self::Stream(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ChatError {}
+
+impl From<ChatTransportError> for ChatError {
+    fn from(error: ChatTransportError) -> Self {
+        Self::Transport(error)
+    }
+}
+
+/// Text-message input accepted by [`Chat::send_message`].
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    pub text: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
+
+    #[serde(default)]
+    pub request: ChatRequestOptions,
+}
+
+impl ChatMessageInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            text: text.into(),
+            metadata: None,
+            request: ChatRequestOptions::default(),
+        }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: impl Into<JsonValue>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
+
+    pub fn with_request(mut self, request: ChatRequestOptions) -> Self {
+        self.request = request;
+        self
+    }
+}
+
+/// Portable Rust state manager for upstream `Chat` submit-message flows.
+pub struct Chat<T: ChatTransport> {
+    id: String,
+    transport: T,
+    messages: Vec<UiMessage>,
+    status: ChatStatus,
+    error: Option<String>,
+    next_message_index: usize,
+}
+
+impl<T: ChatTransport> Chat<T> {
+    pub fn new(id: impl Into<String>, transport: T) -> Self {
+        Self {
+            id: id.into(),
+            transport,
+            messages: Vec::new(),
+            status: ChatStatus::Ready,
+            error: None,
+            next_message_index: 0,
+        }
+    }
+
+    pub fn with_messages(mut self, messages: impl IntoIterator<Item = UiMessage>) -> Self {
+        self.messages = messages.into_iter().collect();
+        self.next_message_index = self.messages.len();
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn status(&self) -> ChatStatus {
+        self.status
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn messages(&self) -> &[UiMessage] {
+        &self.messages
+    }
+
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    pub fn send_message(&mut self, input: ChatMessageInput) -> Result<Vec<UiMessage>, ChatError> {
+        let message_id = input.id.unwrap_or_else(|| self.generate_message_id());
+        let mut user_message = UiMessage::new(message_id.clone(), UiMessageRole::User)
+            .with_part(json_text_part(input.text));
+        if let Some(metadata) = input.metadata {
+            user_message = user_message.with_metadata(metadata);
+        }
+
+        self.messages.push(user_message);
+        self.status = ChatStatus::Submitted;
+        self.error = None;
+
+        let send_options =
+            ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, self.id.clone())
+                .with_message_id(message_id)
+                .with_messages(self.messages.clone())
+                .with_request(input.request);
+
+        self.status = ChatStatus::Streaming;
+        match self.transport.send_messages(send_options) {
+            Ok(chunks) => self.apply_response_chunks(chunks),
+            Err(error) => {
+                self.status = ChatStatus::Error;
+                let message = error.to_string();
+                self.error = Some(message);
+                Err(error.into())
+            }
+        }
+    }
+
+    fn generate_message_id(&mut self) -> String {
+        self.next_message_index += 1;
+        format!("msg-{}", self.next_message_index)
+    }
+
+    fn apply_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let has_error_chunk = chunks.iter().find_map(|chunk| match chunk {
+            UiMessageChunk::Error { error_text } => Some(error_text.clone()),
+            _ => None,
+        });
+        if let Some(error_text) = has_error_chunk {
+            self.status = ChatStatus::Error;
+            self.error = Some(error_text.clone());
+            return Err(ChatError::Stream(error_text));
+        }
+
+        let mut state = StreamingUiMessageState::new("", None);
+        let states = process_ui_message_stream(&mut state, chunks, false)
+            .map_err(|error| ChatError::Stream(error.to_string()))?;
+
+        if !state.message.id.is_empty()
+            || !state.message.parts.is_empty()
+            || state.message.metadata.is_some()
+        {
+            self.messages.push(state.message);
+        }
+        self.status = ChatStatus::Ready;
+        Ok(states)
+    }
+}
+
+fn json_text_part(text: impl Into<String>) -> JsonValue {
+    let mut part = JsonObject::new();
+    part.insert("type".to_string(), JsonValue::String("text".to_string()));
+    part.insert("text".to_string(), JsonValue::String(text.into()));
+    JsonValue::Object(part)
 }
 
 /// Constructor options for the Rust equivalent of upstream `DirectChatTransport`.
@@ -1982,6 +2178,7 @@ fn default_send_messages_body(
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
     use super::*;
@@ -2073,6 +2270,121 @@ mod tests {
 
     fn user_text_message(id: &str, text: &str) -> UiMessage {
         UiMessage::new(id, UiMessageRole::User).with_part(json!({ "type": "text", "text": text }))
+    }
+
+    #[derive(Debug)]
+    struct RecordingChatTransport {
+        response: Vec<UiMessageChunk>,
+        captured_send: Mutex<Option<ChatTransportSendOptions>>,
+    }
+
+    impl RecordingChatTransport {
+        fn new(response: impl IntoIterator<Item = UiMessageChunk>) -> Self {
+            Self {
+                response: response.into_iter().collect(),
+                captured_send: Mutex::new(None),
+            }
+        }
+
+        fn captured_send(&self) -> ChatTransportSendOptions {
+            self.captured_send
+                .lock()
+                .expect("captured send mutex is not poisoned")
+                .clone()
+                .expect("send was captured")
+        }
+    }
+
+    impl ChatTransport for RecordingChatTransport {
+        fn send_messages(
+            &self,
+            options: ChatTransportSendOptions,
+        ) -> Result<Vec<UiMessageChunk>, ChatTransportError> {
+            *self
+                .captured_send
+                .lock()
+                .expect("captured send mutex is not poisoned") = Some(options);
+            Ok(self.response.clone())
+        }
+
+        fn reconnect_to_stream(
+            &self,
+            _options: ChatTransportReconnectOptions,
+        ) -> Result<Option<Vec<UiMessageChunk>>, ChatTransportError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn chat_should_include_the_metadata_of_text_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(
+                ChatMessageInput::text("Hello")
+                    .with_id("user-1")
+                    .with_metadata(json!({ "test": "metadata" }))
+                    .with_request(
+                        ChatRequestOptions::new().with_body_property("session", json!("s1")),
+                    ),
+            )
+            .expect("message sends");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(captured.chat_id, "chat-1");
+        assert_eq!(captured.message_id, Some("user-1".to_string()));
+        assert_eq!(
+            captured.request.body,
+            Some(JsonObject::from_iter([(
+                "session".to_string(),
+                json!("s1")
+            )]))
+        );
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "metadata": { "test": "metadata" },
+                    "parts": [{ "type": "text", "text": "Hello" }]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "metadata": { "test": "metadata" },
+                    "parts": [{ "type": "text", "text": "Hello" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello.", "state": "done" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            states.last().and_then(|message| message.parts.last()),
+            Some(&json!({ "type": "text", "text": "Hello.", "state": "done" }))
+        );
     }
 
     #[test]
