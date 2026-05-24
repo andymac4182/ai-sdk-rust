@@ -144,6 +144,17 @@ impl DiscordAdapter {
         format!("{}/channels/{channel_id}/messages", self.api_base())
     }
 
+    /// Build the typing-indicator URL for a thread. 1:1 with
+    /// upstream's inline `<api_base>/channels/<target>/typing`.
+    /// `target` is the sub-thread id when the thread id encodes one,
+    /// otherwise the channel id. Returns `None` when `thread_id`
+    /// isn't Discord-encoded.
+    pub fn typing_url(&self, thread_id: &str) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        let target = decoded.thread_id.as_deref().unwrap_or(&decoded.channel_id);
+        Some(format!("{}/channels/{}/typing", self.api_base(), target))
+    }
+
     /// Build the per-emoji reaction URL for a message. 1:1 with
     /// upstream's inline `<api_base>/channels/<target>/messages/
     /// <message_id>/reactions/<url-encoded-emoji>/@me`. `target` is
@@ -565,9 +576,13 @@ impl Adapter for DiscordAdapter {
     }
 
     /// Send a Discord typing indicator via POST
-    /// `/channels/<channel_id>/typing`. 1:1 with upstream's
+    /// `/channels/<target>/typing`. 1:1 with upstream's
     /// `adapter.startTyping` (status arg ignored — Discord has
     /// no per-action status text; upstream ignores it too).
+    /// `target` is the sub-thread id when the thread id encodes one
+    /// (`discord:<guild>:<channel>:<sub-thread>`), otherwise the
+    /// channel id — matches upstream's `targetChannelId =
+    /// discordThreadId || channelId` routing.
     async fn start_typing(
         &self,
         thread_id: &str,
@@ -575,11 +590,9 @@ impl Adapter for DiscordAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<()> {
         use chat_sdk_chat::types::AdapterError;
 
-        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+        let url = self.typing_url(thread_id).ok_or_else(|| {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Discord-encoded"))
         })?;
-
-        let url = format!("{}/channels/{}/typing", self.api_base(), decoded.channel_id);
 
         let response = self
             .http
@@ -1215,6 +1228,58 @@ mod tests {
             url.contains("/channels/thread789/messages/msg001/reactions/"),
             "URL was {url}"
         );
+    }
+
+    // ---------- describe("startTyping") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("startTyping")`.
+
+    #[test]
+    fn discord_typing_url_uses_channel_id_for_top_level_thread() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter.typing_url("discord:guild1:channel456").unwrap();
+        assert_eq!(
+            url,
+            "https://discord.test/api/v10/channels/channel456/typing"
+        );
+    }
+
+    #[test]
+    fn discord_typing_url_routes_through_sub_thread_when_encoded() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: Some("https://discord.test/api/v10".to_string()),
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        let url = adapter
+            .typing_url("discord:guild1:channel456:thread789")
+            .unwrap();
+        assert_eq!(
+            url,
+            "https://discord.test/api/v10/channels/thread789/typing"
+        );
+    }
+
+    #[test]
+    fn discord_typing_url_returns_none_for_non_discord_thread_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions {
+            bot_token: "test-token".to_string(),
+            application_id: "test-app-id".to_string(),
+            api_base: None,
+            public_key: None,
+            user_name: None,
+            mention_role_ids: Vec::new(),
+        });
+        assert!(adapter.typing_url("slack:C123:1.0").is_none());
     }
 
     #[test]
