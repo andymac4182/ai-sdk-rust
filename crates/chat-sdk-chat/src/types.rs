@@ -1401,6 +1401,15 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported("fetch_channel_info"))
     }
 
+    /// Optional Open-DM convenience. 1:1 with upstream optional
+    /// `openDM?(userId): Promise<string>` — returns the
+    /// platform-encoded thread id for the DM with `user_id`. Default
+    /// returns `Err(Unsupported("open_dm"))` so [`crate::chat::Chat::open_dm`]
+    /// can surface the upstream "Adapter does not support openDM" error.
+    async fn open_dm(&self, _user_id: &str) -> AdapterResult<String> {
+        Err(AdapterError::Unsupported("open_dm"))
+    }
+
     /// Optional channel-scoped post. 1:1 with upstream optional
     /// `postChannelMessage?(channelId, text): Promise<{id: string}>`.
     /// Some platforms distinguish channel-level posts (no parent

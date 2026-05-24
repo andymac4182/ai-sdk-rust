@@ -65,6 +65,31 @@ impl fmt::Display for ThreadLookupError {
 
 impl std::error::Error for ThreadLookupError {}
 
+/// Errors returned by [`Chat::open_dm`]. 1:1 with upstream's
+/// `throw new ChatError(...)` in `chat.openDM`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenDmError {
+    /// No adapter pattern matched the user id (Slack `U.../W...`,
+    /// GChat `users/...`, Teams `29:...`, Linear UUID, or numeric).
+    UnknownUserIdFormat(String),
+    /// The inferred adapter rejected `open_dm` (most often
+    /// `AdapterError::Unsupported("open_dm")`).
+    AdapterError(String),
+}
+
+impl fmt::Display for OpenDmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownUserIdFormat(id) => {
+                write!(f, "Cannot infer adapter from userId \"{id}\"")
+            }
+            Self::AdapterError(msg) => write!(f, "open_dm failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenDmError {}
+
 /// Default TTL the chat singleton uses for the per-thread lock the
 /// concurrency layer acquires before invoking each handler. 1:1
 /// with upstream's private `DEFAULT_LOCK_TTL_MS = 30_000` (30 s).
@@ -396,6 +421,71 @@ impl Chat {
         }
     }
 
+    /// 1:1 port of upstream `Chat.openDM(user)`. Infers the adapter
+    /// from `user_id` (Slack `U.../W...`, GChat `users/...`, Teams
+    /// `29:...`, Linear UUID v4, or numeric for Discord/Telegram/
+    /// GitHub depending on which adapters are registered), then
+    /// calls `adapter.open_dm(user_id)` and returns the resulting
+    /// `Thread` handle.
+    pub async fn open_dm(&self, user_id: &str) -> Result<Thread, OpenDmError> {
+        let adapter = self
+            .infer_adapter_for_user_id(user_id)
+            .ok_or_else(|| OpenDmError::UnknownUserIdFormat(user_id.to_string()))?;
+        let thread_id = adapter
+            .open_dm(user_id)
+            .await
+            .map_err(|err| OpenDmError::AdapterError(format!("{err:?}")))?;
+        Ok(Thread::new(adapter, thread_id))
+    }
+
+    /// Infer the adapter most likely to own this user id. 1:1 with
+    /// upstream's private `inferAdapterFromUserId` — Slack-prefix
+    /// (`U.../W...`) routes to slack, GChat-prefix (`users/...`) to
+    /// gchat, Teams-prefix (`29:`) to teams, UUID to linear,
+    /// numeric to discord/telegram/github (in registration-order
+    /// preference). Returns `None` when no adapter pattern matches.
+    pub fn infer_adapter_for_user_id(&self, user_id: &str) -> Option<Arc<dyn Adapter>> {
+        if user_id.starts_with("users/") {
+            if let Some(adapter) = self.get_adapter("gchat") {
+                return Some(adapter);
+            }
+        }
+        if user_id.starts_with("29:") {
+            if let Some(adapter) = self.get_adapter("teams") {
+                return Some(adapter);
+            }
+        }
+        if is_linear_uuid(user_id) {
+            if let Some(adapter) = self.get_adapter("linear") {
+                return Some(adapter);
+            }
+        }
+        if is_slack_user_id(user_id) {
+            if let Some(adapter) = self.get_adapter("slack") {
+                return Some(adapter);
+            }
+        }
+        if is_numeric_user_id(user_id) {
+            // Discord snowflakes are 17-19 digits; ambiguity with
+            // Telegram/GitHub is left to the caller — first match
+            // wins in registration-order (upstream raises an
+            // AMBIGUOUS_USER_ID error in the multi-candidate case;
+            // not modelled here yet).
+            if is_discord_snowflake(user_id) {
+                if let Some(adapter) = self.get_adapter("discord") {
+                    return Some(adapter);
+                }
+            }
+            if let Some(adapter) = self.get_adapter("telegram") {
+                return Some(adapter);
+            }
+            if let Some(adapter) = self.get_adapter("github") {
+                return Some(adapter);
+            }
+        }
+        None
+    }
+
     /// Non-panicking variant of [`thread`](Self::thread).
     pub fn try_thread(&self, thread_id: impl Into<String>) -> Result<Thread, ThreadLookupError> {
         let thread_id = thread_id.into();
@@ -509,6 +599,32 @@ mod tests {
     impl Adapter for NamedAdapter {
         fn name(&self) -> &str {
             &self.name
+        }
+    }
+
+    /// Adapter whose `open_dm` returns `"<name>:D<user_id>:"` and
+    /// `post_message` records calls — mirrors upstream
+    /// `createMockAdapter("slack")` for the openDM describe block.
+    #[derive(Debug, Default)]
+    struct OpenDmAdapter {
+        name: String,
+        post_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for OpenDmAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn open_dm(&self, user_id: &str) -> AdapterResult<String> {
+            Ok(format!("{}:D{user_id}:", self.name))
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            Ok("msg-id".to_string())
         }
     }
 
@@ -1139,5 +1255,55 @@ mod tests {
     fn chat_thread_throws_for_an_unknown_adapter_prefix() {
         let chat = make_chat(&["slack"]);
         let _ = chat.thread("unknown:C123:1234.5678");
+    }
+
+    // ---------- describe("openDM") (3 of 4 upstream cases; Author-object case deferred) ----------
+    // 1:1 with upstream `chat.test.ts > describe("openDM")`. The
+    // "should accept Author object and extract userId" case needs an
+    // `Into<UserId>` impl on `Author` — deferred until the Chat event
+    // loop ports.
+
+    fn chat_with_open_dm_adapter(adapter_name: &str) -> (Chat, Arc<OpenDmAdapter>) {
+        let adapter = Arc::new(OpenDmAdapter {
+            name: adapter_name.to_string(),
+            ..Default::default()
+        });
+        let state: Arc<dyn StateAdapter> = Arc::new(NullState);
+        let adapters: Vec<Arc<dyn Adapter>> = vec![adapter.clone() as Arc<dyn Adapter>];
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters,
+            ..Default::default()
+        });
+        (chat, adapter)
+    }
+
+    #[test]
+    fn chat_open_dm_should_infer_slack_adapter_from_u_prefixed_user_id() {
+        let (chat, adapter) = chat_with_open_dm_adapter("slack");
+        let thread = futures_executor::block_on(chat.open_dm("U123456")).unwrap();
+        assert_eq!(thread.thread_id(), "slack:DU123456:");
+        assert_eq!(thread.adapter().name(), "slack");
+        // post_message wasn't called — open_dm only opens, doesn't post.
+        assert!(adapter.post_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_open_dm_should_throw_error_for_unknown_user_id_format() {
+        let (chat, _adapter) = chat_with_open_dm_adapter("slack");
+        let err = futures_executor::block_on(chat.open_dm("invalid-user-id")).unwrap_err();
+        assert!(matches!(err, OpenDmError::UnknownUserIdFormat(ref id) if id == "invalid-user-id"));
+        assert!(err.to_string().contains("Cannot infer adapter from userId"));
+    }
+
+    #[test]
+    fn chat_open_dm_should_allow_posting_to_dm_thread() {
+        let (chat, adapter) = chat_with_open_dm_adapter("slack");
+        let thread = futures_executor::block_on(chat.open_dm("U123456")).unwrap();
+        futures_executor::block_on(thread.post("Hello via DM!")).unwrap();
+        let calls = adapter.post_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:DU123456:");
+        assert_eq!(calls[0].1, "Hello via DM!");
     }
 }
