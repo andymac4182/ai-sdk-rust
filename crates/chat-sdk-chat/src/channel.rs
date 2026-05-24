@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use crate::postable_object::{PostableDispatchError, post_postable_object};
-use crate::types::{Adapter, AdapterResult, StateAdapter, StateResult};
+use crate::types::{Adapter, AdapterError, AdapterResult, ChannelInfo, StateAdapter, StateResult};
 
 /// 1:1 with upstream's private
 /// `const CHANNEL_STATE_KEY_PREFIX = "channel-state:"`.
@@ -62,6 +62,11 @@ pub struct Channel {
     channel_id: String,
     is_dm: bool,
     state_adapter: Option<Arc<dyn StateAdapter>>,
+    /// 1:1 with upstream `name: string | null`. Lazily populated by
+    /// [`Channel::fetch_metadata`] from the adapter's
+    /// `fetch_channel_info` result. `Arc<Mutex>` to keep the handle
+    /// `Clone`.
+    name: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for Channel {
@@ -85,6 +90,7 @@ impl Channel {
             channel_id: channel_id.into(),
             is_dm: false,
             state_adapter: None,
+            name: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -103,6 +109,7 @@ impl Channel {
             channel_id: channel_id.into(),
             is_dm: false,
             state_adapter: Some(state_adapter),
+            name: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -119,6 +126,7 @@ impl Channel {
             channel_id: channel_id.into(),
             is_dm,
             state_adapter,
+            name: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -126,6 +134,39 @@ impl Channel {
     /// `isDM` flag set at construction (defaults to `false`).
     pub fn is_dm(&self) -> bool {
         self.is_dm
+    }
+
+    /// 1:1 with upstream `get name(): string | null`. Returns the
+    /// cached name populated by the last [`Self::fetch_metadata`]
+    /// call. `None` before the first fetch (matches upstream's
+    /// `null` initial value).
+    pub fn name(&self) -> Option<String> {
+        self.name.lock().unwrap().clone()
+    }
+
+    /// 1:1 port of upstream `async fetchMetadata(): Promise<ChannelInfo>`.
+    /// Calls the adapter's `fetch_channel_info(channel_id)`; on
+    /// `Unsupported` (1:1 with upstream's missing-method optional-
+    /// chaining), synthesizes a basic `ChannelInfo` with just the
+    /// `id`, `is_dm`, and empty metadata. Caches the resolved `name`
+    /// on the handle so [`Self::name`] reflects it.
+    pub async fn fetch_metadata(&self) -> AdapterResult<ChannelInfo> {
+        let info = match self.adapter.fetch_channel_info(&self.channel_id).await {
+            Ok(info) => info,
+            Err(AdapterError::Unsupported(_)) => ChannelInfo {
+                channel_visibility: None,
+                id: self.channel_id.clone(),
+                is_dm: Some(self.is_dm),
+                member_count: None,
+                metadata: serde_json::Map::new(),
+                name: None,
+            },
+            Err(err) => return Err(err),
+        };
+        if let Some(name) = info.name.as_ref() {
+            *self.name.lock().unwrap() = Some(name.clone());
+        }
+        Ok(info)
     }
 
     /// Borrow the bound state adapter, if any. Returns `None` when
@@ -520,6 +561,62 @@ mod tests {
         let adapter = RecordingAdapter::default();
         let channel_id = derive_channel_id(&adapter, "wa:PNID:E164");
         assert_eq!(channel_id, "wa:PNID:E164");
+    }
+
+    // ---------- describe("fetchMetadata") (2 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("fetchMetadata")`.
+
+    /// Adapter that returns a fixed `ChannelInfo` from
+    /// `fetch_channel_info` (1:1 with upstream's
+    /// `createMockAdapter().fetchChannelInfo` default mock that
+    /// returns `{ id, name: "#" + id }`).
+    #[derive(Debug)]
+    struct FetchInfoAdapter;
+    #[async_trait::async_trait]
+    impl Adapter for FetchInfoAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn fetch_channel_info(&self, channel_id: &str) -> AdapterResult<ChannelInfo> {
+            Ok(ChannelInfo {
+                channel_visibility: None,
+                id: channel_id.to_string(),
+                is_dm: Some(false),
+                member_count: None,
+                metadata: serde_json::Map::new(),
+                name: Some(format!("#{channel_id}")),
+            })
+        }
+    }
+
+    #[test]
+    fn channel_fetch_metadata_should_fetch_channel_info_and_set_name() {
+        let adapter: Arc<dyn Adapter> = Arc::new(FetchInfoAdapter);
+        let channel = Channel::new(adapter, "slack:C123");
+        // Before fetch: name is None.
+        assert!(channel.name().is_none());
+        let info = block_on(channel.fetch_metadata()).unwrap();
+        assert_eq!(info.id, "slack:C123");
+        assert_eq!(info.name.as_deref(), Some("#slack:C123"));
+        // After fetch: cached name reflects the fetched value.
+        assert_eq!(channel.name().as_deref(), Some("#slack:C123"));
+    }
+
+    #[test]
+    fn channel_fetch_metadata_returns_basic_info_when_adapter_has_no_fetch_channel_info() {
+        // 1:1 with upstream "should return basic info when adapter
+        // has no fetchChannelInfo". RecordingAdapter doesn't override
+        // `fetch_channel_info` so the default `Err(Unsupported)`
+        // triggers the synthesized fallback.
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::new(adapter, "slack:C123");
+        let info = block_on(channel.fetch_metadata()).unwrap();
+        assert_eq!(info.id, "slack:C123");
+        assert_eq!(info.is_dm, Some(false));
+        assert!(info.metadata.is_empty());
+        assert!(info.name.is_none());
+        // name accessor still None since no fetched name.
+        assert!(channel.name().is_none());
     }
 
     #[test]
