@@ -71,6 +71,14 @@ pub struct Thread {
     /// through `to_json` / `from_json` as the `channelVisibility`
     /// field.
     channel_visibility: crate::types::ChannelVisibility,
+    /// 1:1 with upstream `private _channelCache?: ChannelImpl`.
+    /// `Thread::channel()` constructs a `Channel` lazily on first
+    /// call and caches it here for subsequent calls (so the
+    /// upstream "should cache the channel instance" assertion
+    /// holds — repeated calls return the same `Arc<Channel>`).
+    /// Stored as `Arc<Mutex<Option<Arc<Channel>>>>` to keep
+    /// `Thread: Clone` while allowing interior mutation.
+    channel_cache: Arc<std::sync::Mutex<Option<Arc<crate::channel::Channel>>>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -98,6 +106,7 @@ impl Thread {
             current_message: None,
             is_dm: false,
             channel_visibility: crate::types::ChannelVisibility::Unknown,
+            channel_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -120,6 +129,7 @@ impl Thread {
             current_message: None,
             is_dm: false,
             channel_visibility: crate::types::ChannelVisibility::Unknown,
+            channel_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -186,6 +196,35 @@ impl Thread {
     /// 1:1 with upstream `get channelVisibility(): ChannelVisibility`.
     pub fn channel_visibility(&self) -> crate::types::ChannelVisibility {
         self.channel_visibility
+    }
+
+    /// 1:1 with upstream `get channel(): Channel`. Returns a
+    /// [`Channel`] handle for this thread's parent channel,
+    /// constructed lazily on first call and cached so subsequent
+    /// calls return the same `Arc<Channel>` (matches upstream's
+    /// "should cache the channel instance" assertion that
+    /// `thread.channel === thread.channel`).
+    ///
+    /// The Channel's id is derived via
+    /// [`crate::channel::derive_channel_id`] (which calls
+    /// `adapter.channel_id_from_thread_id`); `is_dm` and
+    /// `channel_visibility` are inherited from this thread.
+    pub fn channel(&self) -> Arc<crate::channel::Channel> {
+        let mut cache = self.channel_cache.lock().unwrap();
+        if let Some(ch) = cache.as_ref() {
+            return Arc::clone(ch);
+        }
+        let channel_id = crate::channel::derive_channel_id(self.adapter.as_ref(), &self.thread_id);
+        let channel = crate::channel::Channel::with_options(
+            Arc::clone(&self.adapter),
+            channel_id,
+            self.state_adapter.clone(),
+            self.is_dm,
+        )
+        .with_channel_visibility(self.channel_visibility);
+        let arc = Arc::new(channel);
+        *cache = Some(Arc::clone(&arc));
+        arc
     }
 
     /// 1:1 with upstream `get isDM(): boolean`. Returns the cached
@@ -1465,6 +1504,143 @@ mod tests {
 
     // ---------- describe("serialization") (4 upstream cases) ----------
     // 1:1 with upstream `thread.test.ts > describe("serialization")`.
+
+    // ---------- describe("thread.channel") (6 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("thread.channel")`.
+
+    #[test]
+    fn thread_channel_should_return_a_channel_for_the_threads_parent_channel() {
+        // 1:1 with upstream `thread.channel > should return a Channel
+        // for the thread's parent channel` — `thread.channel.id`
+        // returns the derived channel id ("slack:C123" from
+        // "slack:C123:1234.5678") via the adapter's
+        // channel_id_from_thread_id.
+        let adapter: Arc<dyn Adapter> = Arc::new(SlackishAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter.clone(),
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123");
+        let channel = thread.channel();
+        assert_eq!(channel.channel_id(), "slack:C123");
+        assert!(Arc::ptr_eq(channel.adapter(), &adapter));
+    }
+
+    #[test]
+    fn thread_channel_should_cache_the_channel_instance() {
+        // 1:1 with upstream `thread.channel > should cache the channel
+        // instance` — repeated `thread.channel` calls return the same
+        // instance (cached behind the `channel_cache` mutex).
+        let adapter: Arc<dyn Adapter> = Arc::new(SlackishAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123");
+        let ch1 = thread.channel();
+        let ch2 = thread.channel();
+        assert!(
+            Arc::ptr_eq(&ch1, &ch2),
+            "thread.channel() should return the cached Arc"
+        );
+    }
+
+    #[test]
+    fn thread_channel_should_inherit_is_dm_from_thread() {
+        // 1:1 with upstream `thread.channel > should inherit isDM from
+        // thread`.
+        let adapter: Arc<dyn Adapter> = Arc::new(SlackishAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:D123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("D123")
+        .with_is_dm(true);
+        assert!(thread.channel().is_dm());
+    }
+
+    #[test]
+    fn thread_channel_should_inherit_channel_visibility_from_thread() {
+        // 1:1 with upstream `thread.channel > should inherit
+        // channelVisibility from thread`.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(SlackishAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_channel_visibility(ChannelVisibility::External);
+        assert_eq!(
+            thread.channel().channel_visibility(),
+            ChannelVisibility::External
+        );
+    }
+
+    #[test]
+    fn thread_channel_should_default_channel_visibility_to_unknown() {
+        // 1:1 with upstream `thread.channel > should default
+        // channelVisibility to unknown`.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(SlackishAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123");
+        assert_eq!(
+            thread.channel().channel_visibility(),
+            ChannelVisibility::Unknown
+        );
+    }
+
+    #[test]
+    fn thread_channel_should_support_private_channel_visibility() {
+        // 1:1 with upstream `thread.channel > should support private
+        // channel visibility`.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(SlackishAdapter);
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:G123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("G123")
+        .with_channel_visibility(ChannelVisibility::Private);
+        assert_eq!(
+            thread.channel().channel_visibility(),
+            ChannelVisibility::Private
+        );
+    }
+
+    /// Test mock: adapter whose `channel_id_from_thread_id` derives
+    /// the `slack:<channel>` form from `slack:<channel>:<ts>` thread
+    /// ids (matching upstream's mock).
+    #[derive(Debug)]
+    struct SlackishAdapter;
+    #[async_trait::async_trait]
+    impl Adapter for SlackishAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+            let mut parts = thread_id.splitn(3, ':');
+            let prefix = parts.next()?;
+            let channel = parts.next()?;
+            Some(format!("{prefix}:{channel}"))
+        }
+    }
 
     #[test]
     fn thread_serialization_should_serialize_to_json() {

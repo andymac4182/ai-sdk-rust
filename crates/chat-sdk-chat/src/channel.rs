@@ -64,6 +64,12 @@ pub struct Channel {
     adapter: Arc<dyn Adapter>,
     channel_id: String,
     is_dm: bool,
+    /// 1:1 with upstream `channelVisibility: ChannelVisibility`.
+    /// Defaults to `Unknown` matching upstream's default; set via
+    /// [`Channel::with_channel_visibility`] when the constructor
+    /// or `thread.channel` getter has the visibility from the
+    /// thread's prior config.
+    channel_visibility: crate::types::ChannelVisibility,
     state_adapter: Option<Arc<dyn StateAdapter>>,
     /// 1:1 with upstream `name: string | null`. Lazily populated by
     /// [`Channel::fetch_metadata`] from the adapter's
@@ -94,6 +100,7 @@ impl Channel {
             is_dm: false,
             state_adapter: None,
             name: Arc::new(std::sync::Mutex::new(None)),
+            channel_visibility: crate::types::ChannelVisibility::Unknown,
         }
     }
 
@@ -113,6 +120,7 @@ impl Channel {
             is_dm: false,
             state_adapter: Some(state_adapter),
             name: Arc::new(std::sync::Mutex::new(None)),
+            channel_visibility: crate::types::ChannelVisibility::Unknown,
         }
     }
 
@@ -130,6 +138,7 @@ impl Channel {
             is_dm,
             state_adapter,
             name: Arc::new(std::sync::Mutex::new(None)),
+            channel_visibility: crate::types::ChannelVisibility::Unknown,
         }
     }
 
@@ -137,6 +146,22 @@ impl Channel {
     /// `isDM` flag set at construction (defaults to `false`).
     pub fn is_dm(&self) -> bool {
         self.is_dm
+    }
+
+    /// Builder: set the channel-visibility posture for this channel.
+    /// 1:1 with upstream `new ChannelImpl({ channelVisibility })`
+    /// constructor option. Defaults to `Unknown` when not set.
+    pub fn with_channel_visibility(
+        mut self,
+        channel_visibility: crate::types::ChannelVisibility,
+    ) -> Self {
+        self.channel_visibility = channel_visibility;
+        self
+    }
+
+    /// 1:1 with upstream `get channelVisibility(): ChannelVisibility`.
+    pub fn channel_visibility(&self) -> crate::types::ChannelVisibility {
+        self.channel_visibility
     }
 
     /// 1:1 with upstream `get name(): string | null`. Returns the
@@ -157,7 +182,8 @@ impl Channel {
             "_type": "chat:Channel",
             "id": self.channel_id,
             "adapterName": self.adapter.name(),
-            "channelVisibility": "unknown",
+            "channelVisibility": serde_json::to_value(self.channel_visibility)
+                .unwrap_or(serde_json::Value::String("unknown".to_string())),
             "isDM": self.is_dm,
         })
     }
@@ -176,7 +202,12 @@ impl Channel {
             .get("isDM")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let channel_visibility = json
+            .get("channelVisibility")
+            .and_then(|v| serde_json::from_value::<crate::types::ChannelVisibility>(v.clone()).ok())
+            .unwrap_or(crate::types::ChannelVisibility::Unknown);
         Self::with_options(adapter, channel_id, None, is_dm)
+            .with_channel_visibility(channel_visibility)
     }
 
     /// 1:1 port of upstream `async fetchMetadata(): Promise<ChannelInfo>`.
