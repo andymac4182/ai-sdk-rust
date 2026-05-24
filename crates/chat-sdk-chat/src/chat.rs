@@ -431,7 +431,8 @@ struct ReactionRegistration {
 
 /// 1:1 with upstream `ActionEvent` minus the `thread` and
 /// `openModal` fields. The dispatcher constructs the [`Thread`]
-/// from `thread_id`; `openModal` lands in a follow-up slice.
+/// from `thread_id` and the `open_modal` method from
+/// `trigger_id` + state.
 #[derive(Clone, Debug)]
 pub struct ActionEventInput {
     /// Block-kit / cards action id (e.g. `"approve"`).
@@ -444,16 +445,16 @@ pub struct ActionEventInput {
     pub message_id: String,
     /// Platform thread id containing the action surface.
     pub thread_id: String,
+    /// Optional trigger id (Slack-only; used to open modals via
+    /// [`ActionEvent::open_modal`]).
+    pub trigger_id: Option<String>,
     /// Platform-specific raw event payload.
     pub raw: serde_json::Value,
 }
 
 /// 1:1 with upstream `ActionEvent` — the input shape plus a
-/// dispatcher-constructed [`Thread`] handle for posting back. The
-/// upstream `openModal` callback is deferred until the
-/// `Adapter::open_modal` trait method lands behind a follow-up
-/// slice; for now adopters can call `chat.open_modal` directly via
-/// the existing modal pipeline.
+/// dispatcher-constructed [`Thread`] handle for posting back and a
+/// `state` handle that backs [`ActionEvent::open_modal`].
 #[derive(Clone, Debug)]
 pub struct ActionEvent {
     pub action_id: String,
@@ -461,8 +462,54 @@ pub struct ActionEvent {
     pub user: crate::types::Author,
     pub message_id: String,
     pub thread_id: String,
+    pub trigger_id: Option<String>,
     pub raw: serde_json::Value,
     pub thread: Thread,
+    /// State adapter used by [`Self::open_modal`] to persist the
+    /// modal-context payload keyed by the generated UUID. Set by
+    /// the dispatcher from the parent `Chat`'s state.
+    pub(crate) state: Arc<dyn StateAdapter>,
+}
+
+impl ActionEvent {
+    /// 1:1 with upstream `ActionEvent.openModal(modal)`. Mirrors
+    /// [`SlashCommandEvent::open_modal`] (slice 478) and
+    /// [`Chat::open_modal`] (slice 429) using the event-bound
+    /// adapter + trigger_id + state: generates a fresh UUID
+    /// context_id, persists a `modal-context:<context_id>`
+    /// envelope with the action's thread_id + adapter name +
+    /// callback_id, then calls `adapter.open_modal(trigger_id,
+    /// modal, context_id)`. Returns `Ok(None)` when `trigger_id`
+    /// is missing or when the adapter returns `Unsupported` for
+    /// `open_modal`.
+    pub async fn open_modal(
+        &self,
+        modal: &crate::modals::ModalElement,
+    ) -> Result<Option<crate::types::OpenModalResult>, crate::errors::ChatError> {
+        let Some(trigger_id) = self.trigger_id.as_deref() else {
+            return Ok(None);
+        };
+        let adapter = self.thread.adapter();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let context_value = serde_json::json!({
+            "thread": self.thread_id,
+            "adapterName": adapter.name(),
+            "callbackId": modal.callback_id,
+        });
+        let key = format!("{MODAL_CONTEXT_KEY_PREFIX}{context_id}");
+        let _ = self
+            .state
+            .set(&key, context_value, Some(MODAL_CONTEXT_TTL_MS))
+            .await;
+        match adapter.open_modal(trigger_id, modal, &context_id).await {
+            Ok(result) => Ok(Some(result)),
+            Err(crate::types::AdapterError::Unsupported(_)) => Ok(None),
+            Err(other) => Err(crate::errors::ChatError::new(
+                format!("{other}"),
+                "ADAPTER_ERROR",
+            )),
+        }
+    }
 }
 
 /// 1:1 with upstream `ActionHandler` — invoked per matching action
@@ -1259,8 +1306,10 @@ impl Chat {
                 user: event.user.clone(),
                 message_id: event.message_id.clone(),
                 thread_id: event.thread_id.clone(),
+                trigger_id: event.trigger_id.clone(),
                 raw: event.raw.clone(),
                 thread,
+                state: self.state.clone(),
             };
             handler(action).await;
         }
@@ -4645,6 +4694,7 @@ mod tests {
             },
             message_id: "msg-1".to_string(),
             thread_id: "slack:C123:1234.5678".to_string(),
+            trigger_id: Some("trigger-123".to_string()),
             raw: serde_json::json!({}),
         }
     }
@@ -4853,6 +4903,127 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "slack:C123:1234.5678");
         assert_eq!(calls[0].1, "Action received!");
+    }
+
+    /// Adapter that returns `Unsupported` for `open_modal` —
+    /// mirrors upstream's `adapterWithoutModals` fixture for the
+    /// ActionEvent::open_modal tests (slice 479).
+    #[derive(Debug)]
+    struct ActionNoModalAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for ActionNoModalAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn open_modal(
+            &self,
+            _trigger_id: &str,
+            _modal: &crate::modals::ModalElement,
+            _context_id: &str,
+        ) -> AdapterResult<crate::types::OpenModalResult> {
+            Err(AdapterError::Unsupported("open_modal"))
+        }
+    }
+
+    #[test]
+    fn on_action_event_open_modal_calls_adapter_open_modal_with_trigger_modal_context() {
+        // 1:1 with upstream `chat.test.ts > Actions > "should
+        // provide openModal method that calls adapter.openModal"`.
+        // ActionEvent::open_modal mirrors SlashCommandEvent::open_modal
+        // (slice 478): routes to Adapter::open_modal with the
+        // event's trigger_id + a freshly-generated UUID context_id;
+        // the modal-context envelope is persisted to state under
+        // `modal-context:<context_id>`.
+        let modal_adapter: Arc<RecordingModalAdapter> = Arc::new(RecordingModalAdapter::default());
+        let adapter: Arc<dyn Adapter> = modal_adapter.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state: state.clone(),
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let captured: Arc<Mutex<Option<crate::types::OpenModalResult>>> =
+            Arc::new(Mutex::new(None));
+        let c = captured.clone();
+        chat.on_action(move |event| {
+            let c = c.clone();
+            Box::pin(async move {
+                let result = event
+                    .open_modal(&make_modal("feedback_modal"))
+                    .await
+                    .unwrap();
+                *c.lock().unwrap() = result;
+            })
+        });
+        let event = make_action_event("open_form", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert!(captured.lock().unwrap().is_some());
+        let calls = modal_adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "trigger-123");
+        assert_eq!(calls[0].1, "feedback_modal");
+        assert!(!calls[0].2.is_empty());
+        let key = format!("{MODAL_CONTEXT_KEY_PREFIX}{}", calls[0].2);
+        let stored = futures_executor::block_on(state.get(&key)).unwrap();
+        assert!(stored.is_some());
+    }
+
+    #[test]
+    fn on_action_event_open_modal_returns_none_when_trigger_id_missing() {
+        // 1:1 with upstream `chat.test.ts > Actions > "should return
+        // undefined from openModal when triggerId is missing"`.
+        let modal_adapter: Arc<RecordingModalAdapter> = Arc::new(RecordingModalAdapter::default());
+        let adapter: Arc<dyn Adapter> = modal_adapter.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let captured: Arc<Mutex<Option<Option<crate::types::OpenModalResult>>>> =
+            Arc::new(Mutex::new(None));
+        let c = captured.clone();
+        chat.on_action(move |event| {
+            let c = c.clone();
+            Box::pin(async move {
+                let result = event.open_modal(&make_modal("test_modal")).await.unwrap();
+                *c.lock().unwrap() = Some(result);
+            })
+        });
+        let mut event = make_action_event("open_form", None, false);
+        event.trigger_id = None;
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(*captured.lock().unwrap(), Some(None));
+        assert!(modal_adapter.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn on_action_event_open_modal_returns_none_when_adapter_does_not_support_modals() {
+        // 1:1 with upstream `chat.test.ts > Actions > "should return
+        // undefined from openModal when adapter does not support
+        // modals"`. The adapter returns `Unsupported`; the event
+        // method maps to Ok(None) (upstream returns undefined).
+        let adapter: Arc<dyn Adapter> = Arc::new(ActionNoModalAdapter);
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let captured: Arc<Mutex<Option<Option<crate::types::OpenModalResult>>>> =
+            Arc::new(Mutex::new(None));
+        let c = captured.clone();
+        chat.on_action(move |event| {
+            let c = c.clone();
+            Box::pin(async move {
+                let result = event.open_modal(&make_modal("test_modal")).await.unwrap();
+                *c.lock().unwrap() = Some(result);
+            })
+        });
+        let event = make_action_event("open_form", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(*captured.lock().unwrap(), Some(None));
     }
 
     // ---------- describe("Slash Commands") — slice 422 ----------
