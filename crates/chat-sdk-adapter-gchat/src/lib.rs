@@ -308,6 +308,67 @@ impl Adapter for GchatAdapter {
         })
     }
 
+    /// Post an ephemeral Google Chat message via `spaces.messages.create`
+    /// with the `privateMessageViewer` field. 1:1 with the text-path
+    /// of upstream `adapter.postEphemeral` (the cardsV2 ephemeral
+    /// branch is deferred — needs `cardToGoogleCard` infra).
+    ///
+    /// Builds the request body via [`gchat_post_ephemeral_payload`]
+    /// (privateMessageViewer plus optional thread.name when the
+    /// thread id has a thread component), POSTs to
+    /// `messages_create_url`, and parses the response via
+    /// [`parse_gchat_post_ephemeral_response`] (preserves upstream's
+    /// `response.data.name || ""` empty-id fallback).
+    async fn post_ephemeral(
+        &self,
+        thread_id: &str,
+        user_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<chat_sdk_chat::types::EphemeralMessage> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GChat-encoded"))
+        })?;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload(
+                "GchatAdapter has no bearer_token configured".to_string(),
+            )
+        })?;
+
+        let url = self.messages_create_url(&decoded.space_id);
+        let body = gchat_post_ephemeral_payload(
+            &decoded.space_id,
+            &decoded.thread_id,
+            user_id,
+            text,
+        );
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Google Chat postEphemeral failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {msg}")));
+        }
+
+        Ok(parse_gchat_post_ephemeral_response(&json, thread_id))
+    }
+
     /// Edit a Google Chat message via `spaces.messages.update`.
     /// 1:1 with the text-only path of upstream `adapter.editMessage`
     /// (the cardsV2 branch is deferred): PATCH
@@ -545,6 +606,53 @@ pub fn try_create_gchat_adapter(
         },
         use_application_default_credentials: use_adc,
     }))
+}
+
+/// Build the request body posted to Google Chat's
+/// `spaces.messages.create` endpoint for an ephemeral message. 1:1
+/// with upstream's text-path postEphemeral payload assembly. Sets
+/// `privateMessageViewer.name = user_id` (Google's API field that
+/// makes the message visible only to that user). Omits the
+/// `thread.name` field entirely when `thread_id` is empty (top-level
+/// post), matching upstream's `thread: threadName ? { name: threadName } : undefined`.
+pub fn gchat_post_ephemeral_payload(
+    space_id: &str,
+    thread_id: &str,
+    user_id: &str,
+    text: &str,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::with_capacity(3);
+    map.insert(
+        "privateMessageViewer".to_string(),
+        serde_json::json!({ "name": user_id }),
+    );
+    map.insert("text".to_string(), serde_json::Value::from(text));
+    if !thread_id.is_empty() {
+        map.insert(
+            "thread".to_string(),
+            serde_json::json!({
+                "name": format!("spaces/{space_id}/threads/{thread_id}")
+            }),
+        );
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Parse a Google Chat `spaces.messages.create` ephemeral response
+/// JSON into an [`chat_sdk_chat::types::EphemeralMessage`]. 1:1 with
+/// upstream's response-mapping branch. Preserves the
+/// `response.data.name || ""` empty-id fallback (Google occasionally
+/// returns a successful create without `name`).
+pub fn parse_gchat_post_ephemeral_response(
+    json: &serde_json::Value,
+    thread_id: &str,
+) -> chat_sdk_chat::types::EphemeralMessage {
+    chat_sdk_chat::types::EphemeralMessage {
+        id: json["name"].as_str().unwrap_or("").to_string(),
+        thread_id: thread_id.to_string(),
+        used_fallback: false,
+        raw: json.clone(),
+    }
 }
 
 /// Encode a Google Chat thread id. 1:1 with upstream's inline format:
@@ -1029,5 +1137,107 @@ mod tests {
         )
         .expect("api url config");
         assert_eq!(adapter.api_base(), "https://custom-chat.googleapis.com");
+    }
+
+    // ---------- describe("postEphemeral") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("postEphemeral")`.
+    // Upstream stubs the `chatApi.spaces.messages.create` method via
+    // `vi.fn().mockResolvedValue(...)`; the Rust port covers the
+    // observable payload/response behavior via the pure
+    // [`gchat_post_ephemeral_payload`] + [`parse_gchat_post_ephemeral_response`]
+    // helpers that the runtime path also flows through.
+
+    #[test]
+    fn gchat_post_ephemeral_creates_ephemeral_text_message_with_private_message_viewer() {
+        // 1:1 with upstream "should create ephemeral text message with
+        // privateMessageViewer". Validates the payload sets
+        // privateMessageViewer.name + text + thread.name when the
+        // thread component is non-empty; the parsed response surfaces
+        // id from name and usedFallback=false.
+        // Inputs match the Rust port's decoded shape (raw IDs, not
+        // full `spaces/...` resource paths — upstream's `decodeThreadId`
+        // returns full paths, but the Rust port stores bare IDs and
+        // reassembles the resource path at the API boundary, matching
+        // the existing post_message helper convention).
+        let body = gchat_post_ephemeral_payload(
+            "ABC123",
+            "T1",
+            "users/TARGET",
+            "Only you can see this",
+        );
+        assert_eq!(
+            body["privateMessageViewer"],
+            serde_json::json!({ "name": "users/TARGET" })
+        );
+        assert_eq!(body["text"], "Only you can see this");
+        assert_eq!(
+            body["thread"],
+            serde_json::json!({ "name": "spaces/ABC123/threads/T1" })
+        );
+
+        let response =
+            serde_json::json!({ "name": "spaces/ABC123/messages/eph1" });
+        let parsed = parse_gchat_post_ephemeral_response(
+            &response,
+            "gchat:ABC123:T1",
+        );
+        assert_eq!(parsed.id, "spaces/ABC123/messages/eph1");
+        assert_eq!(parsed.thread_id, "gchat:ABC123:T1");
+        assert!(!parsed.used_fallback);
+    }
+
+    #[test]
+    fn gchat_post_ephemeral_omits_thread_for_top_level_post() {
+        // Rust-only edge case (also implicit in upstream's "no
+        // threadName" branch): when the thread component is empty,
+        // the payload omits the thread field entirely (matching
+        // upstream's `thread: threadName ? { name: threadName } : undefined`
+        // semantics that drops the key on undefined).
+        let body = gchat_post_ephemeral_payload("ABC123", "", "users/TARGET", "hi");
+        assert!(body.get("thread").is_none());
+        assert_eq!(
+            body["privateMessageViewer"],
+            serde_json::json!({ "name": "users/TARGET" })
+        );
+    }
+
+    #[test]
+    fn gchat_post_ephemeral_handles_missing_name_in_response() {
+        // Mirrors upstream's `response.data.name || ""` empty-id
+        // fallback (Google occasionally returns a successful create
+        // without `name`). The Rust parser surfaces this as an empty
+        // string rather than a typed error.
+        let response = serde_json::json!({});
+        let parsed = parse_gchat_post_ephemeral_response(&response, "gchat:ABC123:");
+        assert_eq!(parsed.id, "");
+        assert_eq!(parsed.thread_id, "gchat:ABC123:");
+        assert!(!parsed.used_fallback);
+    }
+
+    #[test]
+    fn gchat_post_ephemeral_rejects_non_gchat_thread_ids() {
+        // 1:1 with upstream "should throw on API error" but at the
+        // pre-dispatch layer: a non-gchat-prefixed thread id can
+        // never reach the API, surfacing as InvalidPayload.
+        // Reproduces the upstream behavior of rejecting at the
+        // adapter boundary.
+        let env = |_: &str| None;
+        let adapter = try_create_gchat_adapter(
+            GchatCreateOptions {
+                credentials: Some(TEST_CREDS.to_string()),
+                ..Default::default()
+            },
+            env,
+        )
+        .expect("ctor");
+        use chat_sdk_chat::types::AdapterError;
+        let err =
+            futures_executor::block_on(adapter.post_ephemeral("slack:C1:1.0", "users/1", "x"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GChat-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
     }
 }
