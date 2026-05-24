@@ -1856,7 +1856,7 @@ impl Chat {
         // short-circuits to `true` without round-tripping through
         // state (1:1 with upstream's `_isSubscribedContext` flag).
         let make_thread = |adapter: Arc<dyn Adapter>| -> Thread {
-            Thread::with_state_adapter(adapter, thread_id, self.state.clone())
+            Thread::with_state_adapter(adapter, thread_id, self.state.clone()).with_is_dm(is_dm)
         };
 
         if is_dm && !dm_handlers.is_empty() {
@@ -3009,6 +3009,92 @@ mod tests {
         // OpenDmAdapter.is_dm returns true for thread ids prefixed
         // with "<adapter>:D", which matches the open_dm output.
         assert!(thread.is_dm());
+    }
+
+    /// Recording adapter for the isDM dispatcher tests: tracks
+    /// `is_dm` calls and returns a configurable verdict.
+    #[derive(Debug)]
+    struct IsDmTrackingAdapter {
+        is_dm_verdict: bool,
+        is_dm_calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for IsDmTrackingAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        fn is_dm(&self, thread_id: &str) -> Option<bool> {
+            self.is_dm_calls.lock().unwrap().push(thread_id.to_string());
+            Some(self.is_dm_verdict)
+        }
+    }
+
+    #[test]
+    fn chat_is_dm_should_return_false_for_non_dm_threads() {
+        // 1:1 with upstream `chat.test.ts > describe("isDM") > "should
+        // return false for non-DM threads"`. The mention handler
+        // captures the dispatched thread; assertion: thread.is_dm()
+        // reflects adapter.is_dm(thread_id) (false here).
+        let tracker = Arc::new(IsDmTrackingAdapter {
+            is_dm_verdict: false,
+            is_dm_calls: Mutex::new(Vec::new()),
+        });
+        let adapter: Arc<dyn Adapter> = tracker.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let captured: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let c = captured.clone();
+        chat.on_new_mention(move |thread, _msg| {
+            let c = c.clone();
+            let is_dm = thread.is_dm();
+            Box::pin(async move {
+                *c.lock().unwrap() = Some(is_dm);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(*captured.lock().unwrap(), Some(false));
+    }
+
+    #[test]
+    fn chat_is_dm_should_use_adapter_is_dm_method_for_detection() {
+        // 1:1 with upstream `chat.test.ts > describe("isDM") > "should
+        // use adapter isDM method for detection"`. The dispatcher
+        // calls adapter.is_dm(thread_id) once per
+        // handle_incoming_message invocation.
+        let tracker = Arc::new(IsDmTrackingAdapter {
+            is_dm_verdict: false,
+            is_dm_calls: Mutex::new(Vec::new()),
+        });
+        let adapter: Arc<dyn Adapter> = tracker.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        chat.on_new_mention(move |_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        let calls = tracker.is_dm_calls.lock().unwrap();
+        assert!(calls.iter().any(|t| t == "slack:C123:1234.5678"));
     }
 
     #[test]
