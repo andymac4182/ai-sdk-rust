@@ -559,6 +559,18 @@ impl chat_sdk_chat::types::StateAdapter for MemoryStateAdapter {
     ) -> chat_sdk_chat::types::StateResult<bool> {
         MemoryStateAdapter::extend_lock(self, lock, ttl_ms).map_err(Into::into)
     }
+
+    async fn subscribe(&self, thread_id: &str) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::subscribe(self, thread_id).map_err(Into::into)
+    }
+
+    async fn unsubscribe(&self, thread_id: &str) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::unsubscribe(self, thread_id).map_err(Into::into)
+    }
+
+    async fn is_subscribed(&self, thread_id: &str) -> chat_sdk_chat::types::StateResult<bool> {
+        MemoryStateAdapter::is_subscribed(self, thread_id).map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

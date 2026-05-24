@@ -1371,6 +1371,15 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     async fn start_typing(&self, _thread_id: &str, _status: Option<&str>) -> AdapterResult<()> {
         Err(AdapterError::Unsupported("start_typing"))
     }
+
+    /// Optional hook called when a thread is subscribed via
+    /// [`crate::thread::Thread::subscribe`]. 1:1 with upstream
+    /// `onThreadSubscribe?(threadId): Promise<void>`. Default no-op
+    /// — adapters that need to react to subscription (e.g. join a
+    /// platform-side channel) override this method.
+    async fn on_thread_subscribe(&self, _thread_id: &str) -> AdapterResult<()> {
+        Ok(())
+    }
 }
 
 /// Errors returned by [`Adapter`] methods. Mirrors upstream's
@@ -1540,6 +1549,37 @@ pub trait StateAdapter: Send + Sync + std::fmt::Debug {
     /// `extendLock(lock, ttlMs): Promise<boolean>`. Returns `true` if
     /// the lock was extended, `false` if it had already expired or was
     /// stolen. Default returns `false`.
+    /// Subscribe to a thread. 1:1 with upstream
+    /// `subscribe(threadId): Promise<void>`. Default impl writes a
+    /// truthy marker under `subscribed:<thread_id>` via the existing
+    /// `set` call. Backends with a native set/registry (e.g.
+    /// state-memory's `HashSet`) override for better lookup cost.
+    async fn subscribe(&self, thread_id: &str) -> StateResult<()> {
+        self.set(
+            &format!("subscribed:{thread_id}"),
+            serde_json::Value::Bool(true),
+            None,
+        )
+        .await
+    }
+
+    /// Unsubscribe from a thread. 1:1 with upstream
+    /// `unsubscribe(threadId): Promise<void>`. Default impl deletes
+    /// the `subscribed:<thread_id>` key.
+    async fn unsubscribe(&self, thread_id: &str) -> StateResult<()> {
+        self.delete(&format!("subscribed:{thread_id}")).await
+    }
+
+    /// Is this thread currently subscribed? 1:1 with upstream
+    /// `isSubscribed(threadId): Promise<boolean>`. Default impl
+    /// inspects the `subscribed:<thread_id>` key for a truthy value.
+    async fn is_subscribed(&self, thread_id: &str) -> StateResult<bool> {
+        Ok(matches!(
+            self.get(&format!("subscribed:{thread_id}")).await?,
+            Some(serde_json::Value::Bool(true))
+        ))
+    }
+
     async fn extend_lock(&self, _lock: &Lock, _ttl_ms: u64) -> StateResult<bool> {
         Ok(false)
     }
