@@ -887,6 +887,18 @@ mod tests {
     }
 
     #[test]
+    fn is_dm_returns_false_for_threads_in_guilds() {
+        // 1:1 with upstream `describe("isDM") > it("returns false for
+        // threads in guilds")` — sub-thread under a guild channel is
+        // not a DM (only `@me` is).
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
+        assert_eq!(
+            adapter.is_dm("discord:guild123:channel456:thread789"),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn is_dm_returns_none_for_non_discord_ids() {
         let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
         assert_eq!(adapter.is_dm("slack:C1:1.0"), None);
