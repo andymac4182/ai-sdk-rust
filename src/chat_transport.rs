@@ -350,6 +350,13 @@ impl<T: ChatTransport> Chat<T> {
         &self.transport
     }
 
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        if self.status == ChatStatus::Error {
+            self.status = ChatStatus::Ready;
+        }
+    }
+
     pub fn send_message(&mut self, input: ChatMessageInput) -> Result<Vec<UiMessage>, ChatError> {
         let message_id = input
             .message_id
@@ -2426,6 +2433,26 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn chat_should_clear_the_error_and_set_the_status_to_ready() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start(),
+            UiMessageChunk::error("test-error"),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("error chunk fails chat send");
+
+        assert_eq!(chat.error(), Some("test-error"));
+        assert_eq!(chat.status(), ChatStatus::Error);
+
+        chat.clear_error();
+
+        assert_eq!(chat.error(), None);
+        assert_eq!(chat.status(), ChatStatus::Ready);
     }
 
     #[test]
