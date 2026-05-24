@@ -12590,6 +12590,98 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_streams_user_tool_approval_request_without_executing_tool() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({ "forecast": "sunny" }))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(execute_count.load(Ordering::SeqCst), 0);
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "weather");
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert!(result.tool_results.is_empty());
+
+        let tool_call_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolCall(call) if call.tool_call_id == "call-1"))
+            .expect("tool call is streamed");
+        let (approval_request_index, approval_request) = result
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| {
+                if let TextStreamPart::ToolApprovalRequest(request) = part
+                    && request.tool_call_id == "call-1"
+                {
+                    Some((index, request))
+                } else {
+                    None
+                }
+            })
+            .expect("user approval request is streamed");
+        assert!(tool_call_index < approval_request_index);
+        assert_eq!(approval_request.is_automatic, None);
+        assert!(
+            result
+                .parts
+                .iter()
+                .all(|part| !matches!(part, TextStreamPart::ToolApprovalResponse(_)))
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.contains(&json!({
+            "type": "tool-input-available",
+            "toolCallId": "call-1",
+            "toolName": "weather",
+            "input": { "city": "Brisbane" }
+        })));
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-request",
+            "approvalId": approval_request.approval_id.clone(),
+            "toolCallId": "call-1"
+        })));
+    }
+
+    #[test]
     fn stream_text_automatic_tool_approval_response_streams_before_tool_result() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![

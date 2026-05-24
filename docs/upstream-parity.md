@@ -4995,15 +4995,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    same-step provider errors close without another model call while later-step
    deferred provider errors continue once and resolve as provider-executed tool
    errors.
-   The upstream automatic approval and automatic denial tool-approval stream
-   cases now have Rust coverage in
-   `stream_text_automatic_tool_approval_response_streams_before_tool_result`
+   The upstream user-approval, automatic approval, and automatic denial
+   tool-approval stream cases now have Rust coverage in
+   `stream_text_streams_user_tool_approval_request_without_executing_tool`,
+   `stream_text_automatic_tool_approval_response_streams_before_tool_result`,
    and the hardened
    `stream_text_applies_denied_tool_approval_to_continuation_messages`,
-   proving `tool-approval-request` automatic metadata and
-   `tool-approval-response` chunks are emitted into both `fullStream` and
-   `toUIMessageStream` before approved local tool results or denied
-   continuation prompts.
+   proving `tool-approval-request` parts are emitted into both `fullStream`
+   and `toUIMessageStream`, user approval waits without local execution, and
+   automatic `tool-approval-response` chunks are emitted before approved local
+   tool results or denied continuation prompts.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
