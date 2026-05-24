@@ -66,6 +66,17 @@ pub fn get_chat_singleton() -> Arc<dyn ChatSingleton> {
     snapshot.expect("No Chat singleton registered. Call chat.registerSingleton() first.")
 }
 
+/// Get the active singleton if one has been registered, returning
+/// `None` instead of panicking. Useful at callers that want to
+/// degrade gracefully when no singleton is present (e.g. the
+/// standalone JSON reviver — slice 443).
+pub fn try_get_chat_singleton() -> Option<Arc<dyn ChatSingleton>> {
+    slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// Whether a singleton has been registered.
 /// Mirrors upstream `hasChatSingleton(): boolean`.
 pub fn has_chat_singleton() -> bool {
