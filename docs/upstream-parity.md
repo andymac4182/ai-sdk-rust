@@ -3984,6 +3984,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_object_type_counterpart_does_not_accept_timeout_option`. Rust proves
   this at the typed options boundary: neither API exposes a timeout field, and
   no timeout-derived abort signal is forwarded to the model call.
+- 2026-05-24: `generateObject` result type-level parity added a typed
+  `GenerateObjectResult<JsonValue>::object_as` accessor and named Rust
+  counterparts for the remaining portable upstream `generate-object.test-d.ts`
+  result assertions: `generate_object_type_counterpart_supports_enum_types`,
+  `generate_object_type_counterpart_supports_schema_types`,
+  `generate_object_type_counterpart_supports_no_schema_output_mode`, and
+  `generate_object_type_counterpart_supports_array_output_mode`.
 
 ## Next Unported Work Queue
 
@@ -4448,6 +4455,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    unsupported timeout-option assertions now have named Rust counterparts in
    `generate_object_type_counterpart_does_not_accept_timeout_option` and
    `stream_object_type_counterpart_does_not_accept_timeout_option`.
+   The remaining portable upstream `generate-object.test-d.ts` result-type
+   assertions now have typed Rust accessor counterparts for enum, schema,
+   no-schema, and array output in
+   `generate_object_type_counterpart_supports_enum_types`,
+   `generate_object_type_counterpart_supports_schema_types`,
+   `generate_object_type_counterpart_supports_no_schema_output_mode`, and
+   `generate_object_type_counterpart_supports_array_output_mode`.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
    array output. The upstream `callback ordering` call-id correlation case now

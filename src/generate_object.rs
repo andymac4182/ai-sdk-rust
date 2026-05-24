@@ -215,6 +215,16 @@ impl<T> GenerateObjectResult<T> {
     }
 }
 
+impl GenerateObjectResult<JsonValue> {
+    /// Deserializes the generated object into a caller-provided Rust type.
+    pub fn object_as<T>(&self) -> Result<T, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(self.object.clone())
+    }
+}
+
 /// Output strategy selected for a high-level `generate_object` call.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1560,6 +1570,7 @@ mod tests {
     use crate::VERSION;
     use crate::file_data::FileData;
     use crate::headers::Headers;
+    use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions,
         LanguageModelContent, LanguageModelFilePart, LanguageModelFinishReason,
@@ -1768,6 +1779,52 @@ mod tests {
         })
     }
 
+    fn number_json_schema() -> crate::json::JsonSchema {
+        serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "number": {
+                    "type": "number"
+                }
+            },
+            "required": ["number"],
+            "additionalProperties": false
+        }))
+        .expect("number schema is a JSON object")
+    }
+
+    fn number_schema() -> Schema {
+        json_schema(number_json_schema()).with_validator(|value| {
+            if value
+                .get("number")
+                .is_some_and(serde_json::Value::is_number)
+            {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("number must be a number")
+            }
+        })
+    }
+
+    fn number_value_json_schema() -> crate::json::JsonSchema {
+        serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "number"
+        }))
+        .expect("number value schema is a JSON object")
+    }
+
+    fn number_value_schema() -> Schema {
+        json_schema(number_value_json_schema()).with_validator(|value| {
+            if value.is_number() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("value must be a number")
+            }
+        })
+    }
+
     fn content_object_result() -> LanguageModelGenerateResult {
         LanguageModelGenerateResult::new(
             vec![LanguageModelContent::Text(LanguageModelText::new(
@@ -1779,6 +1836,11 @@ mod tests {
             },
             object_usage(),
         )
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct NumberObject {
+        number: u64,
     }
 
     #[test]
@@ -1966,6 +2028,95 @@ mod tests {
 
         assert_eq!(output.object, json!({ "answer": 42 }));
         assert!(model.seen_options()[0].abort_signal.is_none());
+    }
+
+    #[test]
+    fn generate_object_type_counterpart_supports_enum_types() {
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"result\":\"b\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ));
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_enum_values(["a", "b", "c"]),
+        ))
+        .expect("enum value is generated");
+        let object: String = output.object_as().expect("enum object is typed");
+
+        assert_eq!(object, "b");
+    }
+
+    #[test]
+    fn generate_object_type_counterpart_supports_schema_types() {
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"number\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ));
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(number_schema()),
+        ))
+        .expect("object is generated");
+        let object: NumberObject = output.object_as().expect("schema object is typed");
+
+        assert_eq!(object, NumberObject { number: 42 });
+    }
+
+    #[test]
+    fn generate_object_type_counterpart_supports_no_schema_output_mode() {
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"untyped\":[1,true,\"x\"]}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ));
+
+        let output = poll_ready(generate_object(GenerateObjectOptions::new(
+            &model,
+            prompt(),
+        )))
+        .expect("no-schema JSON is generated");
+        let object: JsonValue = output.object_as().expect("no-schema object is JSON");
+
+        assert_eq!(object, json!({ "untyped": [1, true, "x"] }));
+    }
+
+    #[test]
+    fn generate_object_type_counterpart_supports_array_output_mode() {
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"elements\":[1,2,3]}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ));
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_array_schema(number_value_schema()),
+        ))
+        .expect("array output is generated");
+        let object: Vec<u64> = output.object_as().expect("array object is typed");
+
+        assert_eq!(object, vec![1, 2, 3]);
     }
 
     #[test]
