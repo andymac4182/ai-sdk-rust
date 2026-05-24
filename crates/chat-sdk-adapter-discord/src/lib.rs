@@ -1003,10 +1003,24 @@ mod tests {
         );
     }
 
+    // ---------- describe("isDM") (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("isDM")`. Previously
+    // `is_dm_true_for_at_me_guild_only` bundled the upstream
+    // "returns true for DM channels (@me prefix)" and "returns false
+    // for guild channels" cases; per the slice-451 split-and-rename
+    // pattern they're now split into one Rust test per upstream case.
+
     #[test]
-    fn is_dm_true_for_at_me_guild_only() {
+    fn is_dm_returns_true_for_dm_channels_at_me_prefix() {
+        // 1:1 with upstream `isDM > returns true for DM channels (@me prefix)`.
         let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
         assert_eq!(adapter.is_dm("discord:@me:DM1"), Some(true));
+    }
+
+    #[test]
+    fn is_dm_returns_false_for_guild_channels() {
+        // 1:1 with upstream `isDM > returns false for guild channels`.
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
         assert_eq!(adapter.is_dm("discord:G1:C1"), Some(false));
     }
 
