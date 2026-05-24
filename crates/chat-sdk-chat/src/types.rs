@@ -1344,6 +1344,18 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Optional adapter-level lock scope. 1:1 with upstream
+    /// optional `lockScope?: "thread" | "channel"`. When `Some`,
+    /// overrides the per-Chat [`crate::chat::ChatOptions::lock_scope`]
+    /// for messages dispatched through this adapter. Default
+    /// returns `None` so adapters without an explicit scope fall
+    /// through to the chat-level config (which itself defaults to
+    /// thread scope). String value (not an enum) to keep the
+    /// trait method serializable; the dispatcher parses it.
+    fn lock_scope(&self) -> Option<&str> {
+        None
+    }
+
     /// Whether the adapter wants per-thread message history cached
     /// on every incoming-message dispatch. 1:1 with upstream
     /// optional `persistThreadHistory?: boolean` (defaults to

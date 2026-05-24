@@ -148,6 +148,54 @@ pub const MODAL_CONTEXT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// upstream's `modal-context:<contextId>` shape (slice 429).
 pub const MODAL_CONTEXT_KEY_PREFIX: &str = "modal-context:";
 
+/// 1:1 with upstream `LockScope` union (`"thread" | "channel" |
+/// async ({isDM}) => "thread" | "channel"`). Determines which key
+/// the dispatcher acquires the per-thread lock on:
+/// - `Thread` (default): use the full `thread_id`.
+/// - `Channel`: derive the channel id via
+///   [`crate::channel::derive_channel_id`].
+/// - `Resolver(fn)`: per-message async callback returning Thread or
+///   Channel.
+#[derive(Clone)]
+pub enum LockScope {
+    /// 1:1 with upstream `"thread"` literal.
+    Thread,
+    /// 1:1 with upstream `"channel"` literal.
+    Channel,
+    /// 1:1 with upstream `(ctx) => Promise<"thread" | "channel">`
+    /// callback. The closure receives the active adapter +
+    /// thread/channel ids + is_dm so adopters can route differently
+    /// per platform / per channel type.
+    Resolver(
+        Arc<
+            dyn Fn(crate::types::LockScopeContext) -> LockScopeFuture
+                + Send
+                + Sync
+                + 'static,
+        >,
+    ),
+}
+
+/// Boxed async future returned by a [`LockScope::Resolver`] callback.
+pub type LockScopeFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = LockScope> + Send>>;
+
+impl Default for LockScope {
+    fn default() -> Self {
+        Self::Thread
+    }
+}
+
+impl std::fmt::Debug for LockScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thread => f.write_str("LockScope::Thread"),
+            Self::Channel => f.write_str("LockScope::Channel"),
+            Self::Resolver(_) => f.write_str("LockScope::Resolver(<closure>)"),
+        }
+    }
+}
+
 /// Resolution returned by [`OnLockConflict::Callback`] when a lock
 /// conflict occurs. 1:1 with upstream string union `"drop" | "force"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,6 +661,11 @@ pub struct Chat {
     /// `ChatConfig.onLockConflict`. Defaults to
     /// [`OnLockConflict::Drop`] (slice 431).
     on_lock_conflict: OnLockConflict,
+    /// Per-instance lock-scope. 1:1 with upstream
+    /// `ChatConfig.lockScope`. Resolution order:
+    /// `adapter.lock_scope()` > `Chat.lock_scope` > Thread.
+    /// (slice 434).
+    lock_scope: LockScope,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -693,6 +746,11 @@ pub struct ChatOptions {
     /// `ChatConfig.onLockConflict`. Defaults to
     /// [`OnLockConflict::Drop`] when unset (slice 431).
     pub on_lock_conflict: OnLockConflict,
+    /// Per-instance lock-scope. 1:1 with upstream
+    /// `ChatConfig.lockScope`. Resolution at dispatch time:
+    /// `adapter.lock_scope()` first, then this field, then default
+    /// [`LockScope::Thread`]. (slice 434)
+    pub lock_scope: LockScope,
 }
 
 impl Default for ChatOptions {
@@ -709,6 +767,7 @@ impl Default for ChatOptions {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::default(),
+            lock_scope: LockScope::default(),
         }
     }
 }
@@ -811,6 +870,7 @@ impl Chat {
             // alias.
             thread_history: options.thread_history.or(options.message_history),
             on_lock_conflict: options.on_lock_conflict,
+            lock_scope: options.lock_scope,
         })
     }
 
@@ -1585,6 +1645,54 @@ impl Chat {
                 .await;
         }
 
+        // 1:1 with upstream `resolveLockScope` (slice 434). Resolution
+        // order: `adapter.lock_scope()` (string, parsed to LockScope)
+        // > `Chat.lock_scope` > [`LockScope::Thread`] default. When
+        // the resolved scope is `Channel`, the lock key is the
+        // channel id derived via [`crate::channel::derive_channel_id`]
+        // (which falls back to the thread id when the adapter doesn't
+        // implement `channel_id_from_thread_id`). When the resolved
+        // scope is `Resolver`, the closure is awaited with a
+        // [`crate::types::LockScopeContext`] holding the active
+        // adapter, channel id, is_dm flag, and thread id.
+        let adapter_arc_for_lock = self.adapters.get(adapter.name()).cloned();
+        let lock_scope = match adapter.lock_scope() {
+            Some("channel") => LockScope::Channel,
+            Some("thread") => LockScope::Thread,
+            _ => self.lock_scope.clone(),
+        };
+        let resolved_scope = match lock_scope {
+            LockScope::Resolver(resolver) => {
+                if let Some(adapter_arc) = adapter_arc_for_lock.as_ref() {
+                    let channel_id = crate::channel::derive_channel_id(
+                        &**adapter_arc,
+                        _thread_id,
+                    );
+                    let is_dm = adapter.is_dm(_thread_id).unwrap_or(false);
+                    let ctx = crate::types::LockScopeContext {
+                        adapter: adapter_arc.clone(),
+                        channel_id,
+                        is_dm,
+                        thread_id: _thread_id.to_string(),
+                    };
+                    resolver(ctx).await
+                } else {
+                    LockScope::Thread
+                }
+            }
+            other => other,
+        };
+        let lock_key: String = match resolved_scope {
+            LockScope::Channel => adapter_arc_for_lock
+                .as_ref()
+                .map(|a| crate::channel::derive_channel_id(&**a, _thread_id))
+                .unwrap_or_else(|| _thread_id.to_string()),
+            // Resolver is collapsed above; remaining Resolver here is
+            // unreachable (fallback already mapped to Thread). Treat
+            // as Thread for safety.
+            LockScope::Thread | LockScope::Resolver(_) => _thread_id.to_string(),
+        };
+
         // 1:1 with upstream `handleDrop` lock-acquire dance (slice
         // 431). Acquire a per-thread lock before dispatching
         // handlers; on conflict, consult `on_lock_conflict` policy:
@@ -1599,7 +1707,7 @@ impl Chat {
         // null).
         let lock_acquired = self
             .state
-            .acquire_lock(_thread_id, DEFAULT_LOCK_TTL_MS)
+            .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
             .await
             .unwrap_or(None);
         let lock = match lock_acquired {
@@ -1663,10 +1771,10 @@ impl Chat {
                     // dispatcher to return Err here).
                 }
                 OnLockConflict::Force => {
-                    let _ = self.state.force_release_lock(_thread_id).await;
+                    let _ = self.state.force_release_lock(&lock_key).await;
                     effective_lock = self
                         .state
-                        .acquire_lock(_thread_id, DEFAULT_LOCK_TTL_MS)
+                        .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
                         .await
                         .unwrap_or(None);
                 }
@@ -1674,17 +1782,17 @@ impl Chat {
                     let resolution = cb(_thread_id, message).await;
                     match resolution {
                         LockConflictResolution::Force => {
-                            let _ = self.state.force_release_lock(_thread_id).await;
+                            let _ = self.state.force_release_lock(&lock_key).await;
                             effective_lock = self
                                 .state
-                                .acquire_lock(_thread_id, DEFAULT_LOCK_TTL_MS)
+                                .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
                                 .await
                                 .unwrap_or(None);
                         }
                         LockConflictResolution::Drop => {
                             return Err(crate::types::StateAdapterError::Io(
                                 format!(
-                                    "Could not acquire lock on thread {_thread_id}. \
+                                    "Could not acquire lock on thread {lock_key}. \
                                      Another instance may be processing."
                                 )
                                 .into(),
@@ -2628,6 +2736,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2645,6 +2754,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         });
         assert!(result.is_ok());
     }
@@ -2661,6 +2771,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         });
         assert!(result.is_ok());
     }
@@ -2678,6 +2789,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -2696,6 +2808,7 @@ mod tests {
             thread_history: None,
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
+            lock_scope: LockScope::default(),
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -5956,6 +6069,182 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    // ---------- describe("lockScope") — slice 434 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("lockScope")`. The
+    // dispatcher resolves the lock key from (in priority):
+    // `adapter.lock_scope()` > `Chat.lock_scope` > `LockScope::Thread`.
+    // When `Channel`, the key is derived via
+    // `crate::channel::derive_channel_id` (first two `:`-segments
+    // for the well-known adapter prefixes; falls back to the full
+    // thread id otherwise). When the scope is a `Resolver` closure,
+    // the dispatcher awaits it with a `LockScopeContext` holding
+    // adapter / channel_id / is_dm / thread_id.
+    //
+    // Upstream ships 5 cases. The 5th ("should queue on
+    // channel-scoped lock key") depends on the concurrency=queue
+    // dispatcher (deferred — tracked under "concurrency strategies"
+    // in the parity ledger); the other 4 are 1:1 ported here.
+
+    /// Adapter that returns "channel" from `lock_scope` and splits
+    /// the thread id on `:` into channel id = `prefix:segment2`.
+    /// Mirrors upstream's `channelIdFromThreadId` for telegram /
+    /// slack mock adapters used in the lockScope describe block.
+    #[derive(Debug)]
+    struct LockScopeAdapter {
+        name: String,
+        scope: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for LockScopeAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn lock_scope(&self) -> Option<&str> {
+            self.scope.as_deref()
+        }
+        fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+            let mut parts = thread_id.splitn(3, ':');
+            let p1 = parts.next()?;
+            let p2 = parts.next()?;
+            Some(format!("{p1}:{p2}"))
+        }
+    }
+
+    #[test]
+    fn lock_scope_default_thread_uses_thread_id_as_lock_key() {
+        // 1:1 with upstream "should use threadId as lock key with
+        // default (thread) scope".
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "slack".to_string(),
+            scope: None,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["slack:C123:1234.5678"]
+        );
+    }
+
+    #[test]
+    fn lock_scope_channel_on_adapter_uses_channel_id_as_lock_key() {
+        // 1:1 with upstream "should use channelId as lock key with
+        // channel scope on adapter".
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "telegram".to_string(),
+            scope: Some("channel".to_string()),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-2", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "telegram:C123:topic456",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["telegram:C123"]
+        );
+    }
+
+    #[test]
+    fn lock_scope_channel_on_config_uses_channel_id_as_lock_key() {
+        // 1:1 with upstream "should use channelId as lock key with
+        // channel scope on config" — adapter has no override; the
+        // per-chat `LockScope::Channel` config takes effect.
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "slack".to_string(),
+            scope: None,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            lock_scope: LockScope::Channel,
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-3", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["slack:C123"]
+        );
+    }
+
+    #[test]
+    fn lock_scope_async_resolver_callback_resolves_channel_for_non_dm() {
+        // 1:1 with upstream "should support async lockScope resolver
+        // function". The resolver receives `LockScopeContext` and
+        // returns `LockScope::Channel` for non-DM threads. The
+        // dispatcher acquires on the channel-derived key.
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "telegram".to_string(),
+            scope: None,
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            lock_scope: LockScope::Resolver(Arc::new(|ctx| {
+                Box::pin(async move {
+                    if ctx.is_dm {
+                        LockScope::Thread
+                    } else {
+                        LockScope::Channel
+                    }
+                })
+            })),
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        let mut msg = dispatched_message("msg-ls-4", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "telegram:C123:topic456",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.acquire_calls.lock().unwrap().as_slice(),
+            ["telegram:C123"]
+        );
     }
 
     // ---------- describe("thread.isSubscribed()") — slice 432 ----------
