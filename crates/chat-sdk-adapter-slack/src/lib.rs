@@ -560,6 +560,67 @@ impl Adapter for SlackAdapter {
         Ok(())
     }
 
+    /// Remove an emoji reaction from a Slack message via
+    /// `reactions.remove`. 1:1 with upstream's
+    /// `adapter.removeReaction`. POSTs `{channel, timestamp:
+    /// message_id, name: emoji}` with bearer auth.
+    async fn remove_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("reactions.remove");
+        let body = serde_json::json!({
+            "channel": decoded.channel_id,
+            "timestamp": message_id,
+            "name": emoji,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+
+        // Slack treats `no_reaction` as a benign idempotent outcome —
+        // the reaction wasn't there to begin with. Match upstream's
+        // swallow behavior.
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            if error_code == "no_reaction" {
+                return Ok(());
+            }
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack reactions.remove: {error_code}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Set a Slack AI Assistant "Typing…" status via
     /// `assistant.threads.setStatus`. 1:1 with upstream's
     /// `adapter.startTyping`:
@@ -1016,6 +1077,33 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_rejects_non_slack_thread_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.remove_reaction("teams:CONV:MSG", "1234.5", "thumbsup"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_method_url_targets_reactions_remove() {
+        // Verifies the URL helper produces the right Slack API
+        // method for remove_reaction (the path tested upstream
+        // implicitly via the `reactions.remove` mock spy).
+        let adapter = SlackAdapter::new(
+            SlackAdapterOptions::new("xoxb", "s").with_api_base("https://slack.example.test/api"),
+        );
+        assert_eq!(
+            adapter.method_url("reactions.remove"),
+            "https://slack.example.test/api/reactions.remove"
+        );
     }
 
     #[test]
