@@ -265,6 +265,44 @@ impl TranscriptsApiImpl {
             .collect())
     }
 
+    /// 1:1 port of upstream `async list({ userKey, limit?, platforms?,
+    /// roles?, threadId? }): Promise<TranscriptEntry[]>` — the full
+    /// query shape with optional filters. Applies the upstream filter
+    /// chain in order: tombstones filtered first, then platform /
+    /// threadId / role filters, then truncated to `limit ??
+    /// DEFAULT_LIST_LIMIT` keeping the newest entries (chronological
+    /// order preserved).
+    pub async fn list_query(
+        &self,
+        query: &crate::types::ListQuery,
+    ) -> StateResult<Vec<TranscriptEntry>> {
+        let key = user_transcript_key(&query.user_key);
+        let raw = self.state.get_list(&key, None).await?;
+        let mut entries: Vec<TranscriptEntry> = raw
+            .into_iter()
+            .filter(|v| !is_tombstone(v))
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+
+        if let Some(platforms) = query.platforms.as_ref().filter(|p| !p.is_empty()) {
+            entries.retain(|e| platforms.iter().any(|p| p == &e.platform));
+        }
+        if let Some(thread_id) = query.thread_id.as_deref() {
+            entries.retain(|e| e.thread_id == thread_id);
+        }
+        if let Some(roles) = query.roles.as_ref().filter(|r| !r.is_empty()) {
+            entries.retain(|e| roles.contains(&e.role));
+        }
+
+        let limit = query.limit.map(|n| n as usize).unwrap_or(DEFAULT_LIST_LIMIT);
+        if entries.len() > limit {
+            // Keep the newest `limit`, preserving chronological order.
+            let drop_count = entries.len() - limit;
+            entries.drain(0..drop_count);
+        }
+        Ok(entries)
+    }
+
     /// 1:1 port of upstream `async delete(userKey): Promise<void>`.
     /// Writes a tombstone marker via [`StateAdapter::append_to_list`]
     /// with `max_length: Some(1)` so the list collapses to just the
@@ -613,5 +651,115 @@ mod tests {
         }
         let list = block_on(api.list("U1", None)).unwrap();
         assert_eq!(list.len(), DEFAULT_LIST_LIMIT);
+    }
+
+    // ---------- list_query filters (3 upstream cases) ----------
+    // 1:1 with upstream `list` describe block's filter cases.
+
+    fn input_for_thread(user: &str, platform: &str, thread_id: &str, role: TranscriptRole, text: &str) -> AppendTranscriptInput {
+        AppendTranscriptInput {
+            formatted: None,
+            platform: platform.to_string(),
+            platform_message_id: None,
+            role,
+            text: text.to_string(),
+            thread_id: thread_id.to_string(),
+            user_key: user.to_string(),
+        }
+    }
+
+    #[test]
+    fn transcripts_api_list_query_filters_by_platform() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+
+        block_on(api.append(input_for_thread("u1", "slack", "slack:C:T", TranscriptRole::User, "from slack")))
+            .unwrap();
+        block_on(api.append(input_for_thread(
+            "u1",
+            "discord",
+            "discord:C:T",
+            TranscriptRole::User,
+            "from discord",
+        )))
+        .unwrap();
+
+        let slack_only = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: Some(vec!["slack".to_string()]),
+            roles: None,
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(slack_only.len(), 1);
+        assert_eq!(slack_only[0].platform, "slack");
+    }
+
+    #[test]
+    fn transcripts_api_list_query_filters_by_thread_id() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+
+        block_on(api.append(input_for_thread("u1", "slack", "slack:C:A", TranscriptRole::User, "thread A")))
+            .unwrap();
+        block_on(api.append(input_for_thread("u1", "slack", "slack:C:B", TranscriptRole::User, "thread B")))
+            .unwrap();
+
+        let only_a = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: None,
+            thread_id: Some("slack:C:A".to_string()),
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].text, "thread A");
+    }
+
+    #[test]
+    fn transcripts_api_list_query_filters_by_role() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+
+        block_on(api.append(input_for_thread(
+            "u1",
+            "slack",
+            "slack:C:T",
+            TranscriptRole::User,
+            "user msg",
+        )))
+        .unwrap();
+        block_on(api.append(input_for_thread(
+            "u1",
+            "slack",
+            "slack:C:T",
+            TranscriptRole::Assistant,
+            "bot msg",
+        )))
+        .unwrap();
+
+        let user_only = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: Some(vec![TranscriptRole::User]),
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(user_only.len(), 1);
+        assert_eq!(user_only[0].role, TranscriptRole::User);
+
+        let assistant_only = block_on(api.list_query(&crate::types::ListQuery {
+            limit: None,
+            platforms: None,
+            roles: Some(vec![TranscriptRole::Assistant]),
+            thread_id: None,
+            user_key: "u1".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(assistant_only.len(), 1);
+        assert_eq!(assistant_only[0].role, TranscriptRole::Assistant);
     }
 }
