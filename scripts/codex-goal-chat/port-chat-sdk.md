@@ -767,6 +767,36 @@ landed this way.
 When 5+ consecutive slices follow this pattern, fold the lesson
 back into the brief here rather than re-deriving it.
 
+## Default-logger js-only-documented pattern (added slice 447)
+
+Several upstream adapters ship a `should default logger when not
+provided` test under `describe("constructor env var resolution")`
+or `describe("constructor / initialization")` that asserts the
+typed `Logger` parameter falls back to a library-default instance:
+
+  const adapter = new XAdapter({ /* required fields */ });
+  expect(adapter).toBeInstanceOf(XAdapter);
+  // implicitly: a default ConsoleLogger is installed under the hood
+
+The Rust adapter ports do not take `Logger` as a first-class
+constructor dependency. Logging is plumbed through the workspace's
+`log` crate via static dispatch — adopters configure a global
+subscriber (e.g. `env_logger`, `tracing_subscriber`) at the
+binary level rather than passing a Logger instance through every
+adapter. The typed-Logger-parameter-with-library-default shape is
+moot by construction.
+
+**Pattern: when an upstream adapter ships a `should default
+logger when not provided` case, enumerate it as
+js-only-documented in the adapter's test-mod header in a single
+sentence. No Rust test is needed — the static-dispatch logging
+model makes the case unrepresentable.**
+
+Slices 441 (gchat) + 442 (slack + discord + teams + telegram)
+landed this across 5 adapters. Other adapters (linear, github,
+messenger, whatsapp) don't ship the upstream case so don't need
+the enumeration.
+
 ## Consumer-class port pattern (added slice 121)
 
 After slices 117-120 landed StateAdapter + three consumer
