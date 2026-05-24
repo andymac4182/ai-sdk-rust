@@ -38,6 +38,17 @@ pub const CHANNEL_STATE_KEY_PREFIX: &str = "channel-state:";
 /// thread state share the same TTL upstream.
 pub const CHANNEL_STATE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
+/// 1:1 port of upstream `deriveChannelId(adapter, threadId): string`.
+/// Returns `adapter.channel_id_from_thread_id(thread_id)` when the
+/// adapter has overridden the trait method, falling back to
+/// `thread_id` otherwise (1:1 with upstream's
+/// `adapter.channelIdFromThreadId?.(threadId) ?? threadId`).
+pub fn derive_channel_id(adapter: &dyn Adapter, thread_id: &str) -> String {
+    adapter
+        .channel_id_from_thread_id(thread_id)
+        .unwrap_or_else(|| thread_id.to_string())
+}
+
 /// Cross-platform channel handle. 1:1 port (in progress) of upstream
 /// `class Channel`.
 ///
@@ -455,6 +466,60 @@ mod tests {
         let last = state.set_calls.lock().unwrap().last().unwrap().clone();
         assert_eq!(last.0, "channel-state:C123");
         assert_eq!(last.2, Some(CHANNEL_STATE_TTL_MS));
+    }
+
+    // ---------- describe("deriveChannelId") (2 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("deriveChannelId")`.
+
+    /// Adapter whose `name` and `channel_id_from_thread_id` override
+    /// match the upstream mock — strips any `:thread-suffix` from
+    /// `<prefix>:<channel>:<rest>` and returns `<prefix>:<channel>`.
+    #[derive(Debug)]
+    struct PlatformAdapter {
+        name: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl Adapter for PlatformAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+            // Collapse e.g. "slack:C123:1234.5678" -> "slack:C123"
+            // (matches the upstream mock's behavior of returning
+            // the prefix + first channel segment).
+            let mut parts = thread_id.splitn(3, ':');
+            let prefix = parts.next()?;
+            let channel = parts.next()?;
+            if prefix.is_empty() || channel.is_empty() {
+                return None;
+            }
+            Some(format!("{prefix}:{channel}"))
+        }
+    }
+
+    #[test]
+    fn derive_channel_id_uses_adapter_channel_id_from_thread_id_when_available() {
+        let adapter = PlatformAdapter { name: "slack" };
+        let channel_id = derive_channel_id(&adapter, "slack:C123:1234.5678");
+        assert_eq!(channel_id, "slack:C123");
+    }
+
+    #[test]
+    fn derive_channel_id_works_with_different_adapters() {
+        let adapter = PlatformAdapter { name: "gchat" };
+        let channel_id = derive_channel_id(&adapter, "gchat:spaces/ABC123:dGhyZWFk");
+        assert_eq!(channel_id, "gchat:spaces/ABC123");
+    }
+
+    #[test]
+    fn derive_channel_id_falls_back_to_thread_id_when_adapter_returns_none() {
+        // 1:1 with upstream `adapter.channelIdFromThreadId?.(threadId)
+        // ?? threadId` — adapters without the override (e.g.
+        // Messenger / WhatsApp where channel === thread) return the
+        // thread_id verbatim.
+        let adapter = RecordingAdapter::default();
+        let channel_id = derive_channel_id(&adapter, "wa:PNID:E164");
+        assert_eq!(channel_id, "wa:PNID:E164");
     }
 
     #[test]

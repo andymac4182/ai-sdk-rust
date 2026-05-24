@@ -1380,6 +1380,16 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     async fn on_thread_subscribe(&self, _thread_id: &str) -> AdapterResult<()> {
         Ok(())
     }
+
+    /// Derive the channel id this thread lives in. 1:1 with upstream
+    /// optional `channelIdFromThreadId?(threadId): string`. Default
+    /// returns `None` — [`crate::channel::derive_channel_id`] falls
+    /// back to `thread_id` when this is `None`. Adapters that have
+    /// a meaningful channel/thread separation (every adapter except
+    /// Messenger/WhatsApp) override this.
+    fn channel_id_from_thread_id(&self, _thread_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Errors returned by [`Adapter`] methods. Mirrors upstream's
