@@ -299,6 +299,35 @@ mod tests {
         }
     }
 
+    // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
+    //
+    // The following 8 upstream `index.test.ts` cases are js-only or
+    // type-system-impossible and have no matching Rust test:
+    //
+    // - `should export createRedisState function`: JS module-loader
+    //   check (`typeof createRedisState === "function"`). Rust's
+    //   module system makes the export visible at compile time.
+    // - `should accept an existing redis client`: upstream takes a
+    //   pre-configured node-redis client via `{client}`. Rust's
+    //   placeholder adapter doesn't model the node-redis client
+    //   surface; integration with `redis-rs` is deferred until the
+    //   workspace runtime decision lands.
+    // - `should wait for an injected open client to become ready`:
+    //   upstream EventEmitter-based wait-for-`ready` semantics; Rust
+    //   placeholder has no event-emitter wiring.
+    // - `should ignore transient errors while waiting for an injected
+    //   client to recover`: same EventEmitter-based path.
+    // - `should wait for an injected client to become ready again
+    //   after reconnecting`: same.
+    // - `should reject when an injected client ends before becoming
+    //   ready`: same.
+    // - 3 `describe.skip("integration tests")` cases — explicitly
+    //   skipped upstream too; would need a live Redis instance.
+    //
+    // The remaining 16 upstream cases are mapped (5 method-existence
+    // mapped to NotConnected smoke tests below + 8 NotConnected
+    // smoke tests + 3 generate_token additive tests).
+
     // ---------- upstream "should have X method" mappings (3 of 5) ----------
     // 1:1 with upstream `index.test.ts` cases:
     //
