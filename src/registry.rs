@@ -445,6 +445,34 @@ where
     }
 }
 
+impl<LM, EM, IM, FP> ProviderWithFiles for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithFiles<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type Files = FP::Files;
+
+    fn files(&self) -> Self::Files {
+        self.fallback_provider.files()
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithSkills for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithSkills<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type Skills = FP::Skills;
+
+    fn skills(&self) -> Self::Skills {
+        self.fallback_provider.skills()
+    }
+}
+
 impl<P, TM> Provider for CustomProviderWithTranscriptionModel<P, TM>
 where
     P: Provider,
@@ -1679,6 +1707,36 @@ mod tests {
 
         assert_eq!(ProviderWithFiles::files(&provider), files);
         assert_eq!(ProviderWithSkills::skills(&provider), skills);
+    }
+
+    #[test]
+    fn custom_provider_files_should_use_fallback_provider_files_if_files_is_not_configured_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            ProviderWithFiles::files(&provider),
+            StaticFiles {
+                provider: "fallback".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn custom_provider_skills_should_use_fallback_provider_skills_if_skills_is_not_configured_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            ProviderWithSkills::skills(&provider),
+            StaticSkills {
+                provider: "fallback".to_string(),
+            }
+        );
     }
 
     #[test]
