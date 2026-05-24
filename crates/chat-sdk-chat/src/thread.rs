@@ -359,21 +359,34 @@ impl Thread {
     /// upstream method dispatches to `adapter.scheduleMessage(threadId,
     /// text, postAt)` when the adapter implements it, and throws a
     /// `NotImplementedError("Scheduled messages are not supported by
-    /// this adapter", "scheduling")` otherwise. The Rust port currently
-    /// always returns the `NotImplementedError` variant because no
-    /// adapter ships a `schedule_message` trait method yet. Per the
-    /// slice-380 sentinel pattern, when an adapter adds native
-    /// scheduling support, this body will dispatch through a new
-    /// `Adapter::schedule_message` trait method (default `Err(NotImplemented)`).
+    /// this adapter", "scheduling")` otherwise.
+    ///
+    /// Per the slice-380 Unsupported-sentinel pattern, the dispatcher
+    /// matches `Err(AdapterError::Unsupported)` and re-surfaces it
+    /// as [`crate::errors::ChatError::NotImplemented`]. Other adapter
+    /// errors propagate verbatim via [`crate::errors::ChatError::Adapter`].
     pub async fn schedule(
         &self,
-        _text: &str,
-        _post_at_unix_ms: u64,
-    ) -> Result<(), crate::errors::ChatError> {
-        Err(crate::errors::ChatError::not_implemented_feature(
-            "Scheduled messages are not supported by this adapter",
-            "scheduling",
-        ))
+        text: &str,
+        post_at_unix_ms: u64,
+    ) -> Result<crate::types::ScheduledMessage, crate::errors::ChatError> {
+        match self
+            .adapter
+            .schedule_message(&self.thread_id, text, post_at_unix_ms)
+            .await
+        {
+            Ok(scheduled) => Ok(scheduled),
+            Err(crate::types::AdapterError::Unsupported(_)) => {
+                Err(crate::errors::ChatError::not_implemented_feature(
+                    "Scheduled messages are not supported by this adapter",
+                    "scheduling",
+                ))
+            }
+            Err(other) => Err(crate::errors::ChatError::new(
+                format!("{other}"),
+                "ADAPTER_ERROR",
+            )),
+        }
     }
 
     /// 1:1 port of upstream `Thread.createSentMessageFromMessage(msg)`.
@@ -1512,6 +1525,131 @@ mod tests {
             "got: {}",
             err.message()
         );
+    }
+
+    // ---------- describe("schedule()") (additional 5 of 24 upstream cases) ----------
+    // Slice 403 adds Adapter::schedule_message trait method + a
+    // SchedulingAdapter test mock. The basic-delegation + return-
+    // shape upstream cases are now mapped; the cancel(), JSX-Card
+    // conversion, AsyncIterable, and adapter-error-propagation cases
+    // remain deferred behind ScheduledMessage::cancel closure
+    // wiring and JSX-runtime / Stream / SentMessage infrastructure.
+
+    #[derive(Debug, Default)]
+    struct SchedulingAdapter {
+        schedule_calls: Mutex<Vec<(String, String, u64)>>,
+        scheduled_message_id: String,
+        channel_id: String,
+        post_at_unix_ms: u64,
+        raw: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for SchedulingAdapter {
+        fn name(&self) -> &str {
+            "scheduling"
+        }
+        async fn schedule_message(
+            &self,
+            thread_id: &str,
+            text: &str,
+            post_at_unix_ms: u64,
+        ) -> AdapterResult<crate::types::ScheduledMessage> {
+            self.schedule_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                text.to_string(),
+                post_at_unix_ms,
+            ));
+            Ok(crate::types::ScheduledMessage {
+                scheduled_message_id: self.scheduled_message_id.clone(),
+                channel_id: self.channel_id.clone(),
+                post_at_unix_ms: self.post_at_unix_ms,
+                raw: self.raw.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn thread_schedule_should_delegate_to_adapter_schedule_message_with_correct_threadid() {
+        // 1:1 with upstream "should delegate to adapter.scheduleMessage
+        // with correct threadId".
+        let adapter = Arc::new(SchedulingAdapter {
+            scheduled_message_id: "Q123".to_string(),
+            channel_id: "C123".to_string(),
+            post_at_unix_ms: FUTURE_UNIX_MS,
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        let calls = adapter.schedule_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123:1234.5678");
+        assert_eq!(calls[0].1, "Hello");
+        assert_eq!(calls[0].2, FUTURE_UNIX_MS);
+    }
+
+    #[test]
+    fn thread_schedule_should_return_scheduled_message_id_from_adapter() {
+        // 1:1 with upstream "should return scheduledMessageId from adapter".
+        let adapter = Arc::new(SchedulingAdapter {
+            scheduled_message_id: "Q999".to_string(),
+            channel_id: "C123".to_string(),
+            post_at_unix_ms: FUTURE_UNIX_MS,
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        assert_eq!(result.scheduled_message_id, "Q999");
+    }
+
+    #[test]
+    fn thread_schedule_should_return_channel_id_from_adapter() {
+        // 1:1 with upstream "should return channelId from adapter".
+        let adapter = Arc::new(SchedulingAdapter {
+            scheduled_message_id: "Q123".to_string(),
+            channel_id: "C456".to_string(),
+            post_at_unix_ms: FUTURE_UNIX_MS,
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        assert_eq!(result.channel_id, "C456");
+    }
+
+    #[test]
+    fn thread_schedule_should_return_post_at_from_adapter() {
+        // 1:1 with upstream "should return postAt from adapter".
+        const CUSTOM_UNIX_MS: u64 = 2_065_516_800_000; // 2035-06-15T12:00:00Z
+        let adapter = Arc::new(SchedulingAdapter {
+            scheduled_message_id: "Q123".to_string(),
+            channel_id: "C123".to_string(),
+            post_at_unix_ms: CUSTOM_UNIX_MS,
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        assert_eq!(result.post_at_unix_ms, CUSTOM_UNIX_MS);
+    }
+
+    #[test]
+    fn thread_schedule_should_return_raw_platform_response_from_adapter() {
+        // 1:1 with upstream "should return raw platform response from
+        // adapter".
+        let raw = serde_json::json!({
+            "ok": true,
+            "scheduled_message_id": "Q123",
+            "post_at": 123,
+        });
+        let adapter = Arc::new(SchedulingAdapter {
+            scheduled_message_id: "Q123".to_string(),
+            channel_id: "C123".to_string(),
+            post_at_unix_ms: FUTURE_UNIX_MS,
+            raw: raw.clone(),
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        assert_eq!(result.raw, raw);
     }
 
     // ---------- describe("postEphemeral") (5 upstream cases) ----------
