@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -1656,6 +1656,7 @@ pub struct StreamingUiMessageState {
 
     active_text_parts: BTreeMap<String, usize>,
     active_reasoning_parts: BTreeMap<String, usize>,
+    active_tool_input_parts: BTreeSet<String>,
 }
 
 impl StreamingUiMessageState {
@@ -1673,6 +1674,7 @@ impl StreamingUiMessageState {
             abort_reason: None,
             active_text_parts: BTreeMap::new(),
             active_reasoning_parts: BTreeMap::new(),
+            active_tool_input_parts: BTreeSet::new(),
         }
     }
 }
@@ -2076,12 +2078,40 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                 state.active_reasoning_parts.remove(&id);
                 updates.push(state.message.clone());
             }
+            ref chunk @ UiMessageChunk::ToolInputStart {
+                ref tool_call_id, ..
+            } => {
+                state.active_tool_input_parts.insert(tool_call_id.clone());
+                state.message.parts.push(
+                    serde_json::to_value(chunk)
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                );
+                updates.push(state.message.clone());
+            }
+            ref chunk @ UiMessageChunk::ToolInputDelta {
+                ref tool_call_id, ..
+            } => {
+                if !state.active_tool_input_parts.contains(tool_call_id) {
+                    return Err(UiMessageStreamProcessError::new(
+                        "tool-input-delta",
+                        tool_call_id.clone(),
+                        format!(
+                            "Received tool-input-delta for missing tool call with ID \"{tool_call_id}\". \
+Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chunks."
+                        ),
+                    ));
+                }
+
+                state.message.parts.push(
+                    serde_json::to_value(chunk)
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                );
+                updates.push(state.message.clone());
+            }
             chunk @ (UiMessageChunk::File { .. }
             | UiMessageChunk::ReasoningFile { .. }
             | UiMessageChunk::SourceUrl { .. }
             | UiMessageChunk::SourceDocument { .. }
-            | UiMessageChunk::ToolInputStart { .. }
-            | UiMessageChunk::ToolInputDelta { .. }
             | UiMessageChunk::ToolInputAvailable { .. }
             | UiMessageChunk::ToolInputError { .. }
             | UiMessageChunk::ToolOutputAvailable { .. }
@@ -2125,6 +2155,7 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
             UiMessageChunk::FinishStep => {
                 state.active_text_parts.clear();
                 state.active_reasoning_parts.clear();
+                state.active_tool_input_parts.clear();
             }
             UiMessageChunk::Finish {
                 finish_reason,
@@ -4453,6 +4484,86 @@ mod tests {
             error.message(),
             "Received text-delta for missing text part with ID \"missing-id\". \
 Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_reasoning_delta() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::reasoning_delta(
+                "reasoning-1",
+                "Thinking...",
+            )],
+            false,
+        )
+        .expect_err("missing reasoning start fails");
+
+        assert_eq!(error.chunk_type(), "reasoning-delta");
+        assert_eq!(error.chunk_id(), "reasoning-1");
+        assert_eq!(
+            error.message(),
+            "Received reasoning-delta for missing reasoning part with ID \"reasoning-1\". \
+Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_tool_input_delta() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::tool_input_delta("tool-1", "{\"key\":")],
+            false,
+        )
+        .expect_err("missing tool input start fails");
+
+        assert_eq!(error.chunk_type(), "tool-input-delta");
+        assert_eq!(error.chunk_id(), "tool-1");
+        assert_eq!(
+            error.message(),
+            "Received tool-input-delta for missing tool call with ID \"tool-1\". \
+Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_text_end() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error =
+            process_ui_message_stream(&mut state, [UiMessageChunk::text_end("text-1")], false)
+                .expect_err("missing text start fails");
+
+        assert_eq!(error.chunk_type(), "text-end");
+        assert_eq!(error.chunk_id(), "text-1");
+        assert_eq!(
+            error.message(),
+            "Received text-end for missing text part with ID \"text-1\". \
+Ensure a \"text-start\" chunk is sent before any \"text-end\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_reasoning_end() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::reasoning_end("reasoning-1")],
+            false,
+        )
+        .expect_err("missing reasoning start fails");
+
+        assert_eq!(error.chunk_type(), "reasoning-end");
+        assert_eq!(error.chunk_id(), "reasoning-1");
+        assert_eq!(
+            error.message(),
+            "Received reasoning-end for missing reasoning part with ID \"reasoning-1\". \
+Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
         );
     }
 
