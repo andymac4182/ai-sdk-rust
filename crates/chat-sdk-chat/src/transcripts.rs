@@ -817,6 +817,75 @@ mod tests {
         assert!(list.is_empty());
     }
 
+    // ---------- delete describe block additional cases (4 upstream) ----------
+
+    #[test]
+    fn transcripts_api_delete_hides_the_tombstone_from_list_and_count_after_deletion() {
+        // 1:1 with upstream `it("hides the tombstone from list/count
+        // after deletion")`. After delete, list/count both report
+        // empty (tombstone is silently filtered, not surfaced as a
+        // visible entry).
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.delete("u1")).unwrap();
+        assert_eq!(block_on(api.count("u1")).unwrap(), 0);
+        assert!(block_on(api.list("u1", None)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn transcripts_api_append_after_delete_behaves_as_if_list_were_freshly_empty() {
+        // 1:1 with upstream `it("appends after delete behave as if the
+        // list were freshly empty")`.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.delete("u1")).unwrap();
+        // Fresh append after delete starts a new history.
+        block_on(api.append(sample_input("u1"))).unwrap();
+        assert_eq!(block_on(api.count("u1")).unwrap(), 1);
+        let list = block_on(api.list("u1", None)).unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn transcripts_api_delete_called_twice_does_not_double_count() {
+        // 1:1 with upstream `it("does not double-count if delete is
+        // called twice")`. The Rust delete API returns `()`, so the
+        // "double-count" assertion lands on the post-delete state:
+        // count stays 0, no extra tombstones leak into list.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.delete("u1")).unwrap();
+        block_on(api.delete("u1")).unwrap();
+        assert_eq!(block_on(api.count("u1")).unwrap(), 0);
+        assert!(block_on(api.list("u1", None)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn transcripts_api_preserves_invariants_when_append_delete_append_are_interleaved() {
+        // 1:1 with upstream `it("preserves invariants when
+        // append/delete/append are interleaved without awaits")` —
+        // adapted to Rust's blocking-on-each-step shape (futures are
+        // not lazy; we still drive each in order).
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.delete("u1")).unwrap();
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.append(sample_input("u1"))).unwrap();
+        block_on(api.delete("u1")).unwrap();
+        block_on(api.append(sample_input("u1"))).unwrap();
+
+        // After the final delete + 1 append, count = 1.
+        assert_eq!(block_on(api.count("u1")).unwrap(), 1);
+        assert_eq!(block_on(api.list("u1", None)).unwrap().len(), 1);
+    }
+
     #[test]
     fn transcripts_api_list_returns_newest_n_when_limit_is_set_still_chronological() {
         // 1:1 with upstream `it("returns the newest N when limit is set,
