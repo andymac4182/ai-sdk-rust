@@ -3072,3 +3072,95 @@ module-aliasing test).
 - **Slack Block Kit** is no longer blocked (closed in slices
   268-271). Cross out from the prior refinement entry's "open"
   list at next cycle.
+
+---
+
+## Slices 272..280 refinement (renderer-pattern + chat-core unblock)
+
+**What was learned**
+
+- The renderer-port pattern (one slice per `describe` block,
+  ~8-12 mapped upstream cases per slice) generalises cleanly across
+  4 adapters now (Discord, Slack, Teams, GChat). Messenger added a
+  twist: it returns a discriminated `MessengerCardResult` (Text vs
+  Template) and within Template a Generic / Button union. The same
+  test-per-`describe` pacing held, but typed enums + matcher patterns
+  in tests are more verbose than `serde_json::Value` JSON-shape
+  matching. Worth it where the upstream type really is a discriminated
+  union (Messenger), `Value` elsewhere.
+- `Channel` + `Thread` per-state describe blocks port without
+  needing the upstream singleton-fallback path: just gate state
+  methods on a bound `Arc<dyn StateAdapter>`, return `Ok(None)` /
+  no-op when unbound. This unblocks 16 chat-sdk-chat cases without
+  touching the singleton resolver (slice 279 + 280).
+- `post_to_callback_url` ported via injected `HttpPoster` trait
+  (slice 278) instead of forcing a workspace HTTP-client choice.
+  The 3 upstream tests map cleanly to a `MockPoster` fixture inside
+  `#[cfg(test)]`. Pattern reusable for any other upstream code
+  that calls `globalThis.fetch` (Slack OAuth helpers, Teams Bot
+  Framework, etc. — when ported).
+- serde_json `json!({k: v, k2: v2})` doesn't preserve insertion
+  order — it uses BTreeMap (alphabetical). For byte-for-byte
+  parity with upstream's `JSON.stringify({...})` shape, either:
+  (a) assert on `contains()` of each key/value pair (slice 278's
+  approach), or (b) use `IndexMap`-backed value construction.
+  The `contains` approach is fine when the test asserts behaviour,
+  not wire shape.
+- Teams `cardToAdaptiveCard` ConvertResult bundling (body
+  elements + card-level actions) is reusable for any platform
+  with the same Body-vs-Actions split (Slack Block Kit `body` vs
+  `actions` already used a similar pattern). Pattern: introduce
+  a `ConvertResult { elements, actions }` struct early in the
+  renderer-port slice; bubble it up from `convert_child_to_X`
+  through `convert_section_to_X` to the entry point.
+
+**What is now true that wasn't before**
+
+- 5 adapters have `cards.test.ts` fully ported: Discord 38/38,
+  Slack 36/36, Teams 19/19, GChat 27/27, Messenger 44/44.
+- chat-sdk-chat `callback-url.test.ts` is fully ported (17/17)
+  via injected `HttpPoster`.
+- chat-sdk-chat `Thread::state` + `Channel::state` (Per-thread
+  + state-management describe blocks) total 13 upstream cases
+  ported.
+
+**Stale or misleading guidance**
+
+- The upstream-parity ledger row for chat-sdk-chat had "markdown
+  ports 33 of 122" early and "markdown 122/122 (1:1 COMPLETE)"
+  later — internal contradiction. The actual figure is the
+  second one. Future updates should drop the early reference
+  whenever the later figure supersedes it (audit at the start
+  of every refinement cycle).
+- The brief's per-package-progress percentage column lags behind
+  the actual coverage when a slice ports a describe block but
+  doesn't bump the rounded estimate. After 4 slices of renderer
+  ports the per-adapter % has been bumped by +2-4 each (not the
+  +10 the actual completion warrants). This is the right
+  behaviour for the goal-progress signal — Done is binary on the
+  ledger column, not on the rounded %, so the % is allowed to
+  lag the binary truth.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Slack Block Kit** (32 cases) — CLOSED in slice 271.
+- **Discord embeds** (24 cases) — CLOSED in slices 265-267.
+- **Teams Adaptive Cards** — CLOSED in slices 272-273.
+- **GChat Cards V2** — CLOSED in slices 274-275.
+- **Messenger templates** — CLOSED in slices 276-277.
+- **postToCallbackUrl HTTP** — CLOSED in slice 278.
+- **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** (~470) —
+  partial progress (slice 279/280 ported per-state describe
+  blocks: 16 cases). The full ChannelImpl/ThreadImpl messages
+  iterator + Streaming describe blocks need adapter-trait
+  extensions (`fetch_channel_messages`, `list_threads`, `stream`),
+  which is a multi-slice undertaking.
+- **State backend client wire-up** still blocked on workspace
+  runtime decision.
+- **All adapter `index.test.ts` integration suites** still
+  unblocked but most are large (~150-3000 LOC each) and need
+  per-adapter HTTP-mocking infrastructure decisions.
