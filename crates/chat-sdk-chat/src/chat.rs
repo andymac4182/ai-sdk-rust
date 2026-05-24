@@ -209,6 +209,10 @@ pub struct Chat {
     /// Optional transcripts API. `Some` iff [`ChatOptions::transcripts`]
     /// was set at construction with a matching `identity` resolver.
     transcripts: Option<Arc<crate::transcripts::TranscriptsApiImpl>>,
+    /// Optional identity resolver. 1:1 with upstream `identity?` —
+    /// invoked by `handle_incoming_message` to populate
+    /// `message.user_key` before handlers run (slice 387).
+    identity: Option<Arc<dyn IdentityResolver>>,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -371,6 +375,7 @@ impl Chat {
             adapters: Arc::new(map),
             state: options.state,
             transcripts,
+            identity: options.identity,
         })
     }
 
@@ -484,7 +489,7 @@ impl Chat {
         &self,
         adapter: &dyn Adapter,
         _thread_id: &str,
-        message: &crate::message::Message,
+        message: &mut crate::message::Message,
     ) -> crate::types::StateResult<bool> {
         // 1:1 with upstream "Skip messages from self (bot's own
         // messages)" — `if (message.author.isMe) return`.
@@ -506,6 +511,27 @@ impl Chat {
             .await?;
         if !is_first {
             return Ok(false);
+        }
+
+        // 1:1 with upstream `transcripts-wiring.test.ts >
+        // describe("dispatch hook")` — when an IdentityResolver is
+        // configured, invoke it to populate `message.user_key`
+        // before handlers run. Upstream behavior on resolver
+        // outcomes:
+        // - resolver returns a non-empty string → set userKey
+        // - resolver returns null / undefined / empty string →
+        //   leave userKey untouched (None)
+        // - resolver throws → log and proceed with userKey unset
+        //   (the Rust port treats `Err` from the resolver the same
+        //   way once the trait surface adopts `Result`; the
+        //   current `Option<String>` return shape encodes the
+        //   no-userKey decision via `None`)
+        if let Some(resolver) = self.identity.as_ref() {
+            if let Some(resolved) = resolver.user_key_for(message).await {
+                if !resolved.is_empty() {
+                    message.user_key = Some(resolved);
+                }
+            }
         }
 
         // Full dispatcher (lock + concurrency + handler dispatch)
@@ -1871,9 +1897,9 @@ mod tests {
     #[test]
     fn chat_handle_incoming_message_should_skip_messages_from_self() {
         let (chat, adapter) = chat_with_in_memory_state();
-        let msg = dispatched_message("msg-1", true);
+        let mut msg = dispatched_message("msg-1", true);
         let dispatched =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
                 .unwrap();
         // is_me=true → early-exit, returns false (not dispatched).
         assert!(!dispatched);
@@ -1882,15 +1908,15 @@ mod tests {
     #[test]
     fn chat_handle_incoming_message_should_skip_duplicate_messages_with_the_same_id() {
         let (chat, adapter) = chat_with_in_memory_state();
-        let msg = dispatched_message("msg-1", false);
+        let mut msg = dispatched_message("msg-1", false);
         // First call: passes both gates, returns true.
         let first =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
                 .unwrap();
         assert!(first);
         // Second call (same id): dedupe gate trips, returns false.
         let second =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
                 .unwrap();
         assert!(!second);
     }
@@ -1901,10 +1927,113 @@ mod tests {
         // early-exit semantics don't accidentally short-circuit
         // every message.
         let (chat, adapter) = chat_with_in_memory_state();
-        let msg = dispatched_message("new-msg", false);
+        let mut msg = dispatched_message("new-msg", false);
         let dispatched =
-            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &msg))
+            futures_executor::block_on(chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg))
                 .unwrap();
         assert!(dispatched);
+    }
+
+    // ---------- describe("dispatch hook") (4 of 6 portable cases) ----------
+    // 1:1 with upstream `transcripts-wiring.test.ts >
+    // describe("dispatch hook")`. The Rust `IdentityResolver` trait
+    // surface is async-only (sync resolver case is type-system-
+    // impossible). The "logs and proceeds when resolver throws"
+    // case needs the resolver to return `Result<Option<String>, _>`
+    // — currently `Option<String>` only, so it's deferred.
+
+    #[derive(Debug)]
+    struct FixedIdentityResolver {
+        result: Option<String>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl IdentityResolver for FixedIdentityResolver {
+        async fn user_key_for(
+            &self,
+            _message: &crate::message::Message,
+        ) -> Option<String> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    fn chat_with_identity(
+        identity: Arc<FixedIdentityResolver>,
+    ) -> (Chat, Arc<dyn Adapter>) {
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            identity: Some(identity as Arc<dyn IdentityResolver>),
+            ..Default::default()
+        });
+        (chat, adapter)
+    }
+
+    #[test]
+    fn chat_handle_incoming_should_populate_message_user_key_from_resolver_before_handlers_run() {
+        let resolver = Arc::new(FixedIdentityResolver {
+            result: Some("user@example.com".to_string()),
+            calls: AtomicUsize::new(0),
+        });
+        let (chat, adapter) = chat_with_identity(resolver.clone());
+        let mut msg = dispatched_message("msg-1", false);
+        let dispatched = futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
+        )
+        .unwrap();
+        assert!(dispatched);
+        assert_eq!(resolver.calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(msg.user_key.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn chat_handle_incoming_should_leave_user_key_unset_when_resolver_returns_none() {
+        let resolver = Arc::new(FixedIdentityResolver {
+            result: None,
+            calls: AtomicUsize::new(0),
+        });
+        let (chat, adapter) = chat_with_identity(resolver.clone());
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(resolver.calls.load(AtomicOrdering::SeqCst), 1);
+        assert!(msg.user_key.is_none());
+    }
+
+    #[test]
+    fn chat_handle_incoming_should_treat_resolver_returning_empty_string_as_no_user_key() {
+        let resolver = Arc::new(FixedIdentityResolver {
+            result: Some("".to_string()),
+            calls: AtomicUsize::new(0),
+        });
+        let (chat, adapter) = chat_with_identity(resolver.clone());
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(resolver.calls.load(AtomicOrdering::SeqCst), 1);
+        assert!(msg.user_key.is_none());
+    }
+
+    #[test]
+    fn chat_handle_incoming_should_not_call_the_resolver_when_no_identity_configured() {
+        let (chat, adapter) = chat_with_in_memory_state();
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "T1", &mut msg),
+        )
+        .unwrap();
+        // No identity configured → user_key stays None and no
+        // resolver invocation can happen (no resolver to invoke).
+        assert!(msg.user_key.is_none());
     }
 }
