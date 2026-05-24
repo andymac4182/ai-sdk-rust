@@ -391,7 +391,8 @@ pub use registry::{
     ProviderRegistryOptions, create_provider_registry,
     create_provider_registry_with_image_model_middleware,
     create_provider_registry_with_language_model_middleware, create_provider_registry_with_options,
-    custom_provider, split_registry_model_id,
+    custom_provider, experimental_create_provider_registry,
+    experimental_create_provider_registry_with_options, split_registry_model_id,
 };
 pub use rerank::{
     RerankDocument, RerankDocuments, RerankEndEvent, RerankOnEnd, RerankOnEndCallback,

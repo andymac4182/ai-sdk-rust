@@ -1032,6 +1032,27 @@ where
     ProviderRegistry::with_options(providers, options)
 }
 
+/// Deprecated alias for [`create_provider_registry`].
+pub fn experimental_create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+{
+    create_provider_registry(providers)
+}
+
+/// Deprecated alias for [`create_provider_registry_with_options`].
+pub fn experimental_create_provider_registry_with_options<I, K, P>(
+    providers: I,
+    options: ProviderRegistryOptions,
+) -> ProviderRegistry<P>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+{
+    create_provider_registry_with_options(providers, options)
+}
+
 /// Creates an empty custom provider with direct v4 model maps.
 pub fn custom_provider<LM, EM, IM>() -> CustomProvider<LM, EM, IM> {
     CustomProvider::new()
@@ -1229,7 +1250,9 @@ mod tests {
         NoSuchProviderError, ProviderRegistryOptions, create_provider_registry,
         create_provider_registry_with_image_model_middleware,
         create_provider_registry_with_language_model_middleware,
-        create_provider_registry_with_options, custom_provider, split_registry_model_id,
+        create_provider_registry_with_options, custom_provider,
+        experimental_create_provider_registry, experimental_create_provider_registry_with_options,
+        split_registry_model_id,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
     use crate::file_data::{FileDataContent, ProviderReference};
@@ -2367,6 +2390,38 @@ mod tests {
             .expect("language model resolves");
 
         assert_eq!(registry.options().separator(), "::");
+        assert_eq!(model.model_id(), "chat");
+    }
+
+    #[test]
+    fn experimental_create_provider_registry_is_a_deprecated_alias() {
+        let registry = experimental_create_provider_registry([(
+            "provider",
+            StaticProvider { id: "provider" },
+        )]);
+
+        let model = registry
+            .language_model("provider:chat")
+            .expect("language model resolves");
+
+        assert_eq!(registry.options().separator(), ":");
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "chat");
+    }
+
+    #[test]
+    fn experimental_create_provider_registry_with_options_is_a_deprecated_alias() {
+        let registry = experimental_create_provider_registry_with_options(
+            [("provider", StaticProvider { id: "provider" })],
+            ProviderRegistryOptions::new().with_separator(" > "),
+        );
+
+        let model = registry
+            .language_model("provider > chat")
+            .expect("language model resolves");
+
+        assert_eq!(registry.options().separator(), " > ");
+        assert_eq!(model.provider(), "provider");
         assert_eq!(model.model_id(), "chat");
     }
 
