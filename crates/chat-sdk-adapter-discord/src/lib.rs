@@ -1361,6 +1361,51 @@ mod tests {
         assert!(truncated.ends_with("..."));
     }
 
+    // ---------- describe("truncateContent") (5 upstream cases, +1 additive) ----------
+    // 1:1 with upstream `index.test.ts > describe("truncateContent")`.
+    // Cases 1 (under-limit) + 3 (exceeding-2000 with ellipsis) are
+    // already mapped above as
+    // `discord_truncate_content_returns_input_unchanged_when_under_limit`
+    // and `discord_edit_message_truncates_content_exceeding_2000_characters`.
+    // The 3 missing upstream cases (exactly-2000 / exactly-2001 /
+    // empty-string) are added below.
+
+    #[test]
+    fn discord_truncate_content_returns_content_unchanged_at_exactly_2000_chars() {
+        let content = "x".repeat(DISCORD_MAX_CONTENT_LENGTH);
+        let truncated = truncate_content(&content);
+        assert_eq!(truncated, content);
+        assert_eq!(truncated.chars().count(), DISCORD_MAX_CONTENT_LENGTH);
+    }
+
+    #[test]
+    fn discord_truncate_content_truncates_at_exactly_2001_chars() {
+        let content = "z".repeat(DISCORD_MAX_CONTENT_LENGTH + 1);
+        let truncated = truncate_content(&content);
+        assert_eq!(truncated.chars().count(), DISCORD_MAX_CONTENT_LENGTH);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn discord_truncate_content_handles_empty_string() {
+        assert_eq!(truncate_content(""), "");
+    }
+
+    #[test]
+    fn discord_truncate_content_first_1997_chars_preserve_input_when_exceeding_2000() {
+        // 1:1 with upstream's slice-into-1997-chars assertion inside
+        // the "truncates content exceeding 2000 chars with ellipsis"
+        // case. The Rust port keeps the first
+        // `DISCORD_MAX_CONTENT_LENGTH - 3` chars + `"..."`.
+        let content = "y".repeat(2500);
+        let truncated = truncate_content(&content);
+        let prefix: String = truncated
+            .chars()
+            .take(DISCORD_MAX_CONTENT_LENGTH - 3)
+            .collect();
+        assert_eq!(prefix, "y".repeat(DISCORD_MAX_CONTENT_LENGTH - 3));
+    }
+
     // ---------- describe("deleteMessage") (2 upstream cases) ----------
     // 1:1 with upstream `index.test.ts > describe("deleteMessage")`.
 
