@@ -3989,3 +3989,84 @@ parse_message, post_ephemeral, remove_reaction).
 - **parse_message across 9 adapters**.
 - **State-backend client wire-up** — still blocked on workspace
   runtime decision.
+
+## Slices 357..366 refinement cycle (per-adapter post_ephemeral + Channel postEphemeral + Adapter trait impl sweep)
+
+**Scope:** slices 357..366 (10 merges, covering GChat post_ephemeral,
+Channel::post_ephemeral + start_typing + mention_user, Discord
+channelIdFromThreadId test split + warning cleanup, state-redis/
+state-ioredis/state-pg method-existence mappings, Discord
+truncateContent missing cases, Discord normalizeDiscordEmoji +
+encodeEmoji describe blocks, Teams channel_id_from_thread_id, and
+the cross-cutting Adapter trait impl sweep across 8 adapters).
+
+**Pattern observations**
+
+- The **cross-cutting trait-impl sweep pattern** (slice 366) is the
+  highest-leverage move this cycle. After per-adapter helpers exist
+  as inherent methods, adding the `Adapter` trait impl bodies that
+  delegate via `self.method(args)` (relying on Rust's inherent-
+  method-takes-precedence resolution) is mechanical work that wires
+  many adapters into the cross-cutting dispatcher paths in a single
+  slice. Codify as canonical pattern: extend the trait surface in
+  chat-sdk-chat once, then sweep across all 9 adapters in one slice
+  rather than doing it per-adapter.
+- The **method-existence mapping pattern** (slices 361, 362) for
+  state backends maps upstream's `typeof adapter.X === "function"`
+  cases to existing NotConnected smoke tests via a documented 1:1
+  comment block. Cost: one comment block + 2-3 missing-method
+  smoke tests. Returns: closes the upstream method-existence
+  describe block at 1:1 parity.
+- The **bundled-test split pattern** (slice 360) addresses the
+  brief's "every portable upstream case has a matching Rust test"
+  rule when an earlier slice bundled multiple upstream cases into
+  one Rust test for brevity.
+- The **pure-helper extraction pattern** (slices 355, 357, 364)
+  extracts URL builders / payload builders / response parsers from
+  HTTP-backed methods into standalone `pub fn` helpers so upstream
+  describe blocks can be tested without HTTP mocking.
+
+**Brief tightening applied**
+
+- The `scripts/codex-goal-chat/port-chat-sdk.md` brief tightens to
+  document the **trait-impl sweep pattern**: once an `Adapter` (or
+  `StateAdapter`) trait method exists with a default implementation,
+  the per-adapter trait impl bodies should be added in a single
+  sweep slice (1 commit) rather than per-adapter (N commits).
+
+**Done condition gap analysis**
+
+The terminal Done clause remains unsatisfied — 13 in-progress
+packages still need substantial work. The 10 slices in this cycle
+each ported 2-9 cases (~45 total — ~4-5/slice average). At this
+cadence, reaching ~1200 portable cases requires ~240 more slices.
+**The fastest single lever remains the chat-sdk-chat
+handleIncomingMessage + dispatcher port**, which would unblock ~80
+chat.test.ts + thread.test.ts cases in a single slice. The
+trait-impl sweep pattern (slice 366) is the second-fastest lever
+when there are uniform per-adapter helpers ready to wire through
+the trait surface.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: documents the
+  trait-impl sweep pattern.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat handleIncomingMessage + dispatcher** —
+  highest-leverage remaining work; unblocks ~80 chat.test.ts +
+  thread.test.ts cases.
+- **post_ephemeral across 7 remaining adapters** (Discord/
+  Teams/Telegram/WhatsApp/Messenger/Linear/GitHub default to
+  Unsupported sentinel; document this as a sweep slice). Slack
+  + GChat have native impls.
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting work.
+- **parse_message across 9 adapters**.
+- **GitHub remove_reaction** — multi-step list/match/delete.
+- **GChat remove_reaction** — multi-step list/match/delete via
+  chatApi client.
+- **State-backend client wire-up** — still blocked on workspace
+  runtime decision.
