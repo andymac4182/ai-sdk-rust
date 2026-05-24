@@ -1345,3 +1345,93 @@ A package can flip to **verified** when every upstream case
 (in *all* its test files) is either mapped to a Rust test or
 documented as js-only in this pattern. The state-backends are
 currently in this position pending runtime client wire-up.
+
+## Deferred-adapter-method port pattern (added slice 411)
+
+For optional upstream methods that need a non-trivial Rust port,
+the canonical cadence is 3 slices.
+
+**Phase A — trait extension + dispatcher + basic delegation
+(1 slice)**
+Add the trait method to `Adapter` (or `StateAdapter`) with
+default `Err(AdapterError::Unsupported("method_name"))`. The
+calling site dispatches through it and maps `Unsupported` back
+to the appropriate `ChatError` variant (typically `NotImplemented`).
+Port the 3-5 upstream "basic delegation + return shape" cases via
+a single-purpose test mock. Existing `Err(Unsupported)` callers
+keep passing because the dispatcher preserves the same upstream
+error message.
+
+**Phase B — richer test mocks (1 slice)**
+Add 1-2 more test mocks (e.g. failing variant for error
+propagation; bundled variant for verifying other method calls
+aren't accidentally invoked). Port the 5-7 next-tier upstream
+cases (propagate-errors, no-side-effects, multiple-invocations,
+arg-passthrough, etc.).
+
+**Phase C — wrapper handle for closure-bound methods (1 slice)**
+Upstream's return values often carry closures (e.g.
+`ScheduledMessage.cancel(): Promise<void>`,
+`SentMessage.edit(text): Promise<void>`). Rust closures are not
+`Serialize + Eq`, so wrap the upstream data struct in a
+thread-bound handle that carries `Arc<dyn Adapter>` alongside.
+The handle exposes accessor methods for the data fields + the
+closure-style methods that dispatch through a second adapter
+trait method (e.g. `cancel_scheduled_message`). Port the 3-5
+closure-bound upstream cases via a mock that records the second
+trait method's invocations.
+
+Reference port: slices 403/404/405 (Thread::schedule
+end-to-end). The 3 phases ported 15 of 24 upstream
+`thread.test.ts > describe("schedule()")` cases; the remaining
+6 are PostableMessage-input cases that need a 4th phase
+(input-enum extension).
+
+## Triage-table refresh reminder (added slice 411)
+
+When closing a slice, audit `docs/chat/upstream-parity.md`
+**twice**:
+
+1. **Package description column** (around lines 46-66): append
+   the new slice's contribution to the inline audit trail.
+2. **Per-test-file table** (around lines 117-137): refresh the
+   row(s) for the affected `*.test.ts` file(s) to reflect the
+   new portable / js-only-documented count.
+
+The per-test-file table tends to drift because slices update the
+description column but not the per-file count column. The Stop
+hook reads the per-file table to infer "13 in-progress packages
+remain" — keep these synchronized. Slices 408 and 410 are the
+canonical examples of the doc-only sync slice that catches up the
+table.
+
+## Cross-cutting js-only-documented sweep pattern (added slice 411)
+
+When the same upstream pattern is unrepresentable across N
+crates (e.g. `subclass extensibility` across 9 adapters,
+`@workflow/serde` symbols across 2 classes), enumerate the case
+once per crate in a single sweep slice. Don't make N slices.
+
+Cross-cutting candidates spotted but not yet ported:
+- All 9 adapters' `subclass extensibility` cases (slice 409
+  closed this).
+- The Vitest `mockLogger` / `vi.fn()` test-glue cases that
+  appear across every adapter test file — these are not portable
+  because Rust uses inline `Mutex<Vec<_>>` recorders. Worth
+  enumerating as js-only-documented when porting each adapter's
+  test file.
+
+## Update Brief reminder (added slice 411)
+
+The brief (this file, `scripts/codex-goal-chat/port-chat-sdk.md`)
+is the source of truth that future Claude sessions read on
+startup. After every 5 merge-back cycles:
+1. Append a new entry to `docs/chat/goal-refinements.md` covering
+   the 5 slices.
+2. Append a new section here ("## ... (added slice N)") if a new
+   canonical pattern emerged.
+3. Edit existing sections in place if their wording / examples
+   became stale.
+
+Don't bulk-rewrite the brief — accretive growth keeps the audit
+trail intact.
