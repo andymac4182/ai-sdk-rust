@@ -1146,6 +1146,25 @@ mod tests {
         assert!(!is_telegram_thread_id(""));
     }
 
+    // ---------- describe("TelegramAdapter") > it("encodes and decodes thread IDs") ----------
+    // 1:1 with upstream's named encoder/decoder test (asserts specific
+    // value pairs, not just generic round-trip preservation).
+
+    #[test]
+    fn encodes_and_decodes_thread_ids() {
+        // encode without message_thread_id → "telegram:-100123"
+        assert_eq!(encode_thread_id(-100_123, None), "telegram:-100123");
+        // encode with message_thread_id 42 → "telegram:-100123:42"
+        assert_eq!(
+            encode_thread_id(-100_123, Some(42)),
+            "telegram:-100123:42"
+        );
+        // decode "telegram:-100123:42" → { chat_id: -100123, message_thread_id: 42 }
+        let decoded = decode_thread_id("telegram:-100123:42").unwrap();
+        assert_eq!(decoded.chat_id, -100_123);
+        assert_eq!(decoded.message_thread_id, Some(42));
+    }
+
     #[test]
     fn encode_decode_round_trip_preserves_components() {
         for (chat, msg) in [(1i64, None), (-100123, None), (5, Some(10)), (-2, Some(0))] {
