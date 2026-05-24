@@ -3629,3 +3629,101 @@ module-aliasing test).
   Message JSON revival.
 - **State-backend client wire-up** (state-redis, state-ioredis,
   state-pg) — still blocked on workspace runtime decision.
+
+---
+
+## Slices 319..325 refinement cycle (handle-method sweep deepening + Adapter trait surface expansion)
+
+**What was learned**
+
+- The trait-extension pattern (default-impl trait method →
+  per-adapter override) is now the dominant porting mechanism.
+  Every slice in this window added at least one new
+  `Adapter` or `StateAdapter` default method:
+  - Slice 319: `Adapter::channel_id_from_thread_id`
+  - Slice 320: `Adapter::fetch_channel_info`
+  - Slice 321: `Adapter::post_channel_message`
+  - Slice 325: `Adapter::open_dm`
+  Each adds a single method, returns a typed
+  `Err(Unsupported(...))` or `None` by default, lets every
+  existing adapter compile unchanged, and unblocks 2-4 ported
+  cases. **The bottleneck is no longer trait design; it's identifying
+  the next handle method worth a slice.**
+- The "Channel/Thread to_json/from_json" pattern (slices 322,
+  323) is mechanical once `Message::to_serialized` /
+  `Message::from_serialized` exist. Both `Channel.toJSON` and
+  `Thread.toJSON` returned a `serde_json::Value` with the
+  upstream-shaped `_type` / `adapterName` / etc. discriminator
+  fields; the deserializer takes the adapter externally rather
+  than serializing it (mirroring upstream's
+  `fromJSON(json, adapter)` parameter).
+- `Channel::post` rewrite at slice 321 (route through
+  `post_channel_message`, fall back to `post_message`) required
+  updating 2 existing tests that asserted on `post_message` —
+  this is the kind of test-update churn the trait-extension
+  pattern usually avoids. Lesson: when you change the
+  default routing on an already-tested method, audit the
+  existing tests' expected adapter method first. The cost is
+  low (~3 minutes per test rewrite) but easy to miss.
+- The "upstream describes a method that takes Union[String,
+  Author]" case (chat.openDM, chat.getUser) — port the
+  `String` path first as 3 of 4 cases, defer the `Author` path
+  until the `Author` type gets an `Into<UserId>` trait method.
+  Splitting along the Union argument keeps the slice
+  small without losing test coverage of the underlying flow.
+
+**What is now true that wasn't before**
+
+- 31 additional upstream describe-block cases ported across
+  the slice 319..325 window (channel 9 cases + thread 8 + chat
+  open_dm 3 + message workflow 2 + channel post 2 +
+  serialization 4 + Channel/Thread metadata 3).
+- chat-sdk-chat is at 734 tests (up from 716 at start of
+  window).
+- 4 new optional `Adapter` trait methods, all with default
+  `Unsupported`/`None` impls so every adapter crate compiles
+  unchanged:
+  - `channel_id_from_thread_id(thread_id) -> Option<String>`
+  - `fetch_channel_info(channel_id) -> Result<ChannelInfo>`
+  - `post_channel_message(channel_id, text) -> Result<String>`
+  - `open_dm(user_id) -> Result<String>`
+- `Channel::fetch_metadata` / `Channel::name` cache /
+  `Channel::to_json` / `Channel::from_json` / `Thread::to_json` /
+  `Thread::from_json` / `Thread::channel_id` /
+  `Thread::current_message` / `Thread::with_channel_id` /
+  `Thread::with_current_message` / `Chat::open_dm` /
+  `Chat::infer_adapter_for_user_id` are all on the public Rust
+  API surface.
+
+**Stale or misleading guidance**
+
+- The brief's note "every adapter has its constructor + helpers
+  ported, the next-batch work is not adapter-by-adapter but
+  cross-cutting" (from slice 318 refinement) holds. The pattern
+  is now: extend an `Adapter` trait default → port 2-4 cases
+  per slice. The work is repeating cleanly, just slowly.
+- The "5-merge refinement cadence" is now consistent (last
+  refinement at slice 318 covered 313..317; this entry covers
+  319..325). One-line audits per slice keep the parity row's
+  aggregate test counts current, so they're not drifting.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat post-with-different-formats** (4 cases) — needs
+  `Channel::post(envelope)` accepting raw/markdown/ast/attachments
+  variants + `SentMessage` return type with `.text` + `.attachments`.
+- **chat-sdk-chat chat.openDM Author-argument path** (1 case) —
+  needs `Author::into(UserId)` trait impl.
+- **chat-sdk-chat handleIncomingMessage / onNewMention /
+  onSubscribedMessage / dedup** — biggest remaining surface.
+- **post_object across 9 adapters** — per-platform card/plan/
+  canvas dispatch.
+- **parse_message across 9 adapters** — inverse of post_message.
+- **serialization.test.ts** (49 cases) — Thread/Message JSON
+  revival corpus.
+- **State-backend client wire-up** (state-redis, state-ioredis,
+  state-pg) — blocked on workspace runtime decision.
