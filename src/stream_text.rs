@@ -13035,6 +13035,92 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_serializes_initial_approved_tool_error_before_first_model_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Recovered from tool error.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", true),
+            false,
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                            "No valid token for plugin",
+                        ))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.output == LanguageModelToolResultOutput::error_text(
+                                    "No valid token for plugin"
+                                )
+                    )
+        ));
+        assert_eq!(result.text, "Recovered from tool error.");
+
+        let tool_error_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolResult(result) if result.tool_call_id == "call-1" && result.is_error == Some(true)))
+            .expect("initial tool error is streamed");
+        let start_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::StartStep(_)))
+            .expect("start-step is streamed");
+        assert!(tool_error_index < start_step_index);
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        let tool_error_chunk_index = chunks
+            .iter()
+            .position(|chunk| {
+                chunk["type"] == "tool-output-error"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["errorText"] == "No valid token for plugin"
+            })
+            .expect("initial tool error is in UI stream");
+        let ui_start_step_index = chunks
+            .iter()
+            .position(|chunk| chunk["type"] == "start-step")
+            .expect("UI start-step exists");
+        assert!(tool_error_chunk_index < ui_start_step_index);
+    }
+
+    #[test]
     fn stream_text_automatic_tool_approval_response_streams_before_tool_result() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![

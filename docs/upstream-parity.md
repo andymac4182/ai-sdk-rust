@@ -5013,6 +5013,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving approved initial tool approval responses execute before the first
    provider stream call, are visible to `prepareStep.responseMessages`, and
    emit full-stream/UI tool-result chunks before the first `start-step`.
+   The approved-initial tool error path now has the named Rust counterpart
+   `stream_text_serializes_initial_approved_tool_error_before_first_model_call`,
+   proving an approved prior tool approval whose local executor fails is
+   serialized as an `error-text` tool result in the first provider prompt and
+   emitted as a full-stream/UI tool-error chunk before the first `start-step`.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
