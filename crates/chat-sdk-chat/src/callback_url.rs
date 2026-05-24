@@ -1,8 +1,8 @@
 //! Callback-URL token plumbing for button-action wiring.
 //!
-//! 1:1 port (in progress) of `packages/chat/src/callback-url.ts`.
+//! 1:1 port of `packages/chat/src/callback-url.ts`.
 //!
-//! **What this module ships (pure helpers; no state or network I/O):**
+//! **What this module ships (pure helpers + state path + HTTP path):**
 //!
 //! - [`CALLBACK_TOKEN_PREFIX`] / [`CALLBACK_CACHE_KEY_PREFIX`] /
 //!   [`CALLBACK_TTL_MS`] constants matching upstream values.
@@ -12,16 +12,13 @@
 //!   `value.startsWith(CALLBACK_TOKEN_PREFIX)` checks.
 //! - [`callback_cache_key`] — formatter matching upstream's inline
 //!   `${CALLBACK_CACHE_KEY_PREFIX}${token}` template.
-//!
-//! [`CallbackUrlStore`] — the state-bound `resolveCallbackUrl` /
-//! token-issue surface, ported in slice 120 after the Phase 1.5
-//! StateAdapter trait extension.
-//!
-//! **What is still deferred:**
-//!
-//! - `postToCallbackUrl` — requires an HTTP client. Lands once a
-//!   default HTTP client wires into the workspace (likely `reqwest`
-//!   or `ureq`).
+//! - [`CallbackUrlStore`] — the state-bound `resolveCallbackUrl` /
+//!   token-issue surface (slice 120).
+//! - [`post_to_callback_url`] — HTTP POST wired through an injected
+//!   [`HttpPoster`] trait so callers can plug their preferred client
+//!   without forcing a single runtime choice on the workspace. The
+//!   upstream implementation simply calls `globalThis.fetch`; the
+//!   Rust port retains that shape via `&dyn HttpPoster`.
 
 /// Token prefix that marks a `button.value` as a callback-URL handle.
 /// 1:1 port of upstream `const CALLBACK_TOKEN_PREFIX = "__cb:"`.
@@ -341,6 +338,67 @@ async fn process_actions_element(
         children: processed_children,
         kind: actions.kind,
     })
+}
+
+/// HTTP-client abstraction used by [`post_to_callback_url`]. 1:1
+/// with upstream's `globalThis.fetch` dependency: callers inject
+/// any client (reqwest, ureq, custom mock) that can POST a JSON
+/// body to a URL and return either the HTTP status code on success
+/// or a transport-level error on failure.
+///
+/// Mirrors the upstream test pattern of `vi.spyOn(globalThis,
+/// "fetch")` — the trait sits at the same seam.
+#[async_trait::async_trait]
+pub trait HttpPoster: Send + Sync {
+    /// POST `body` (JSON) to `url` with `Content-Type:
+    /// application/json`. Return the HTTP status code on a completed
+    /// request (even if non-2xx), or an `Err` for transport-level
+    /// failures (DNS, TCP, TLS).
+    async fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+    ) -> Result<u16, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Result of [`post_to_callback_url`]. 1:1 with upstream's `{
+/// error?, status? }` return shape: `error` is `None` on success,
+/// `status` is set whenever the HTTP request completed (regardless
+/// of status code).
+#[derive(Debug, Default)]
+pub struct CallbackPostResult {
+    pub status: Option<u16>,
+    pub error: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+/// 1:1 port of upstream `postToCallbackUrl(url, payload)`. Serialises
+/// `payload` as JSON, POSTs it via [`HttpPoster::post_json`] with
+/// `Content-Type: application/json`, and bundles the response into
+/// [`CallbackPostResult`]:
+///
+/// - **2xx response** → `{ status: Some(code), error: None }`.
+/// - **non-2xx response** → `{ status: Some(code), error: Some(...) }`.
+/// - **transport error** → `{ status: None, error: Some(...) }`.
+pub async fn post_to_callback_url(
+    poster: &dyn HttpPoster,
+    url: &str,
+    payload: &serde_json::Value,
+) -> CallbackPostResult {
+    let body = payload.to_string();
+    match poster.post_json(url, &body).await {
+        Ok(status) if (200..300).contains(&status) => CallbackPostResult {
+            status: Some(status),
+            error: None,
+        },
+        Ok(status) => CallbackPostResult {
+            status: Some(status),
+            error: Some(format!("HTTP {status}").into()),
+        },
+        Err(error) => CallbackPostResult {
+            status: None,
+            error: Some(error),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -816,5 +874,102 @@ mod tests {
             .unwrap();
         assert_eq!(r.url, "https://legacy.example.com");
         assert!(r.original_value.is_none());
+    }
+
+    // ---------- postToCallbackUrl (3 upstream cases) ----------
+
+    /// Mock HTTP poster — the Rust equivalent of `vi.spyOn(globalThis,
+    /// "fetch")`. Records each call (url + body) and returns the
+    /// configured response. `result` is `Ok(status)` for successful
+    /// responses or `Err(message)` for transport errors.
+    struct MockPoster {
+        result: Mutex<Option<Result<u16, String>>>,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockPoster {
+        fn new(result: Result<u16, String>) -> Self {
+            Self {
+                result: Mutex::new(Some(result)),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpPoster for MockPoster {
+        async fn post_json(
+            &self,
+            url: &str,
+            body: &str,
+        ) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.to_string()));
+            match self
+                .result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Err("called twice".to_string()))
+            {
+                Ok(status) => Ok(status),
+                Err(msg) => Err(msg.into()),
+            }
+        }
+    }
+
+    #[test]
+    fn post_to_callback_url_posts_json_payload_to_the_url() {
+        // 1:1 with upstream `it("POSTs JSON payload to the URL")`.
+        let poster = MockPoster::new(Ok(200));
+        let payload = serde_json::json!({
+            "type": "action",
+            "actionId": "approve",
+        });
+        let result = futures_executor::block_on(post_to_callback_url(
+            &poster,
+            "https://example.com/hook",
+            &payload,
+        ));
+        assert!(result.error.is_none(), "got error: {:?}", result.error);
+        let calls = poster.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "https://example.com/hook");
+        // Body shape matches upstream's `JSON.stringify({...})` content,
+        // but serde_json's `json!({...})` ordering for object Values is
+        // alphabetical via BTreeMap (whereas JS preserves insertion
+        // order). The byte-for-byte ordering diverges; assert on both
+        // keys + values being present instead of a literal match.
+        let body = &calls[0].1;
+        assert!(body.contains(r#""type":"action""#), "got: {body}");
+        assert!(body.contains(r#""actionId":"approve""#), "got: {body}");
+    }
+
+    #[test]
+    fn post_to_callback_url_returns_error_for_non_2xx_responses() {
+        // 1:1 with upstream `it("returns error for non-2xx responses")`.
+        let poster = MockPoster::new(Ok(404));
+        let result = futures_executor::block_on(post_to_callback_url(
+            &poster,
+            "https://example.com/hook",
+            &serde_json::json!({}),
+        ));
+        assert!(result.error.is_some(), "expected error for 404 response");
+        assert_eq!(result.status, Some(404));
+    }
+
+    #[test]
+    fn post_to_callback_url_catches_fetch_errors_and_returns_them() {
+        // 1:1 with upstream `it("catches fetch errors and returns them")`.
+        let poster = MockPoster::new(Err("Network error".to_string()));
+        let result = futures_executor::block_on(post_to_callback_url(
+            &poster,
+            "https://example.com/hook",
+            &serde_json::json!({}),
+        ));
+        assert!(result.error.is_some(), "expected error for transport failure");
+        assert!(result.status.is_none(), "status should be unset on transport error");
     }
 }
