@@ -334,6 +334,66 @@ impl Adapter for SlackAdapter {
         })
     }
 
+    /// Post an ephemeral Slack message via `chat.postEphemeral`.
+    /// 1:1 with upstream's text-path `adapter.postEphemeral` (the
+    /// card-rendering branch via Block Kit is deferred — needs
+    /// `cardToBlockKit` infra). Decodes the thread id, builds the
+    /// payload via [`slack_post_ephemeral_payload`] (normalizes
+    /// empty `thread_ts` to absent — upstream `threadTs ||
+    /// undefined`), POSTs to `chat.postEphemeral`, parses via
+    /// [`parse_slack_post_ephemeral_response`] (preserves
+    /// upstream's `result.message_ts || ""` empty-id fallback).
+    async fn post_ephemeral(
+        &self,
+        thread_id: &str,
+        user_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<chat_sdk_chat::types::EphemeralMessage> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("chat.postEphemeral");
+        let body = slack_post_ephemeral_payload(
+            &decoded.channel_id,
+            &decoded.thread_ts,
+            user_id,
+            text,
+        );
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack chat.postEphemeral: {error_code}"
+            )));
+        }
+
+        Ok(parse_slack_post_ephemeral_response(&json, thread_id))
+    }
+
     /// Fetch a Slack channel's name via `conversations.info`. 1:1
     /// with upstream's `adapter.fetchSubject`:
     ///
@@ -792,6 +852,46 @@ pub fn is_slack_thread_id(thread_id: &str) -> bool {
     thread_id.starts_with(THREAD_ID_PREFIX)
 }
 
+/// Build the request payload posted to Slack's `chat.postEphemeral`
+/// endpoint. 1:1 with upstream's text-path payload assembly. Mirrors
+/// upstream's `const threadTs = rawThreadTs || undefined` normalization
+/// — when `thread_ts` is empty, the `thread_ts` field is omitted from
+/// the payload (matching upstream's `JSON.stringify` of `undefined`,
+/// which removes the key entirely).
+pub fn slack_post_ephemeral_payload(
+    channel: &str,
+    thread_ts: &str,
+    user_id: &str,
+    text: &str,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::with_capacity(4);
+    map.insert("channel".to_string(), serde_json::Value::from(channel));
+    map.insert("user".to_string(), serde_json::Value::from(user_id));
+    map.insert("text".to_string(), serde_json::Value::from(text));
+    if !thread_ts.is_empty() {
+        map.insert("thread_ts".to_string(), serde_json::Value::from(thread_ts));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Parse a Slack `chat.postEphemeral` response JSON into an
+/// [`chat_sdk_chat::types::EphemeralMessage`]. 1:1 with upstream's
+/// response-mapping branch. Preserves the `result.message_ts || ""`
+/// fallback — Slack occasionally returns a successful payload
+/// without `message_ts`, and the upstream contract surfaces that as
+/// an empty string rather than a typed error.
+pub fn parse_slack_post_ephemeral_response(
+    json: &serde_json::Value,
+    thread_id: &str,
+) -> chat_sdk_chat::types::EphemeralMessage {
+    chat_sdk_chat::types::EphemeralMessage {
+        id: json["message_ts"].as_str().unwrap_or("").to_string(),
+        thread_id: thread_id.to_string(),
+        used_fallback: false,
+        raw: json.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1121,6 +1221,7 @@ mod tests {
         );
         for method in [
             "chat.postMessage",
+            "chat.postEphemeral",
             "chat.update",
             "chat.delete",
             "conversations.info",
@@ -1315,5 +1416,101 @@ mod tests {
         opts.bot_user_id = Some("U12345".to_string());
         let adapter = SlackAdapter::new(opts);
         assert_eq!(adapter.bot_user_id(), Some("U12345"));
+    }
+
+    // ---------- describe("postEphemeral") (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("postEphemeral")`.
+    // Upstream relies on `mockClient.chat.postEphemeral` to intercept
+    // the Slack Web API call; the Rust port has no HTTP mock layer
+    // here, so we cover the same observable behavior via the pure
+    // [`slack_post_ephemeral_payload`] + [`parse_slack_post_ephemeral_response`]
+    // helpers that the runtime path also flows through. Per-method
+    // URL coverage stays in the parametric `method_url` test below.
+
+    #[test]
+    fn slack_post_ephemeral_method_url_targets_chat_post_ephemeral() {
+        let adapter = SlackAdapter::new(
+            SlackAdapterOptions::new("xoxb", "s").with_api_base("https://slack.example.test/api"),
+        );
+        assert_eq!(
+            adapter.method_url("chat.postEphemeral"),
+            "https://slack.example.test/api/chat.postEphemeral"
+        );
+    }
+
+    #[test]
+    fn slack_post_ephemeral_posts_ephemeral_message_to_a_user() {
+        // 1:1 with upstream "posts an ephemeral message to a user".
+        // Validates the payload includes channel/user/text/thread_ts
+        // (channel decoded from the slack: thread id, thread_ts
+        // preserved when non-empty), and the parsed response surfaces
+        // id/threadId/usedFallback=false.
+        let body = slack_post_ephemeral_payload(
+            "C123",
+            "1234567890.000000",
+            "U_USER_1",
+            "Ephemeral text",
+        );
+        assert_eq!(body["channel"], "C123");
+        assert_eq!(body["user"], "U_USER_1");
+        assert_eq!(body["text"], "Ephemeral text");
+        assert_eq!(body["thread_ts"], "1234567890.000000");
+
+        let response =
+            serde_json::json!({ "ok": true, "message_ts": "1234567890.888888" });
+        let parsed = parse_slack_post_ephemeral_response(
+            &response,
+            "slack:C123:1234567890.000000",
+        );
+        assert_eq!(parsed.id, "1234567890.888888");
+        assert_eq!(parsed.thread_id, "slack:C123:1234567890.000000");
+        assert!(!parsed.used_fallback);
+    }
+
+    #[test]
+    fn slack_post_ephemeral_normalizes_empty_thread_ts_to_undefined() {
+        // 1:1 with upstream "normalizes empty threadTs to undefined".
+        // Decoded `slack:C123:` doesn't parse via `decode_thread_id`
+        // (empty thread_ts is rejected as an invalid thread id), so
+        // upstream's empty-ts shape can't reach the dispatcher in the
+        // Rust port. Validate the helper at the payload-shape layer:
+        // an empty thread_ts is omitted entirely from the JSON body
+        // (matching upstream's `JSON.stringify(undefined)` semantics
+        // which removes the key).
+        let body = slack_post_ephemeral_payload("C123", "", "U_USER_1", "Ephemeral text");
+        assert_eq!(body["channel"], "C123");
+        assert_eq!(body["user"], "U_USER_1");
+        assert!(body.get("thread_ts").is_none());
+    }
+
+    #[test]
+    fn slack_post_ephemeral_handles_empty_message_ts_in_response() {
+        // 1:1 with upstream "handles empty message_ts in response".
+        // Upstream contract: `result.message_ts || ""` — when Slack
+        // omits message_ts on success, the EphemeralMessage.id is the
+        // empty string rather than a typed error.
+        let response = serde_json::json!({ "ok": true });
+        let parsed = parse_slack_post_ephemeral_response(
+            &response,
+            "slack:C123:1234567890.000000",
+        );
+        assert_eq!(parsed.id, "");
+        assert_eq!(parsed.thread_id, "slack:C123:1234567890.000000");
+        assert!(!parsed.used_fallback);
+    }
+
+    #[test]
+    fn slack_post_ephemeral_rejects_non_slack_thread_ids() {
+        // Rust-only: the dispatcher decodes the thread id first; a
+        // non-slack-prefixed id surfaces as InvalidPayload.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.post_ephemeral("teams:CONV:MSG", "U_USER_1", "x"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
     }
 }
