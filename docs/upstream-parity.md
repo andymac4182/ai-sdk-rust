@@ -667,6 +667,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   matching upstream's prior denied approval response case by carrying
   `execution-denied` into the first model prompt while emitting full-stream and
   UI `tool-output-denied` chunks before the first provider `start-step`.
+- 2026-05-25: `packages/ai` provider-executed `streamText` approval
+  continuation parity added
+  `stream_text_sends_approved_provider_executed_tool_approval_response_once`
+  and
+  `stream_text_sends_denied_provider_executed_tool_approval_response_once`,
+  matching upstream's MCP approval approved/denied cases by proving the
+  provider-facing prompt strips the assistant approval-request part and sends
+  the approval response exactly once.
 - 2026-05-24: `packages/ai` `processUIMessageStream` malformed-stream
   parity added named Rust counterparts for upstream
   `process-ui-message-stream.test.ts` missing-start error cases:
@@ -5028,6 +5036,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving a prior denied tool approval is not executed, is converted to an
    `execution-denied` tool result in the first provider prompt, and emits
    full-stream/UI `tool-output-denied` chunks before the first `start-step`.
+   The provider-executed MCP approval-response continuation cases now have
+   named Rust counterparts in
+   `stream_text_sends_approved_provider_executed_tool_approval_response_once`
+   and
+   `stream_text_sends_denied_provider_executed_tool_approval_response_once`,
+   proving approved and denied provider-executed approval responses are sent to
+   the model exactly once without replaying the assistant approval-request
+   part, and that provider-executed tool results/text are surfaced afterward.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,

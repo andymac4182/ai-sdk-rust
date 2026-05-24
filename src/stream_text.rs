@@ -4811,6 +4811,30 @@ mod tests {
         ]
     }
 
+    fn provider_executed_approval_response_prompt(
+        response: LanguageModelToolApprovalResponsePart,
+    ) -> Vec<LanguageModelMessage> {
+        vec![
+            user_message("Shorten this URL: https://example.com"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "mcp-call-1",
+                        "mcp_tool",
+                        json!({ "query": "test" }),
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("mcp-approval-1", "mcp-call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(response),
+            ])),
+        ]
+    }
+
     #[derive(Debug)]
     struct TestSandbox {
         description: String,
@@ -12711,6 +12735,167 @@ mod tests {
                 "approval:mcp-call-2"
             ]
         );
+    }
+
+    #[test]
+    fn stream_text_sends_approved_provider_executed_tool_approval_response_once() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-1", "mcp_tool", r#"{"query":"test"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "mcp-call-1",
+                    "mcp_tool",
+                    NonNullJsonValue::new(json!({ "shortened_url": "https://short.url/abc" }))
+                        .expect("tool result is non-null"),
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Here is your shortened URL: https://short.url/abc",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = provider_executed_approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("mcp-approval-1", true)
+                .with_provider_executed(true),
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_messages(prompt))
+                .expect("prompt converts")
+                .with_tool(Tool::provider_executed(
+                    "mcp_tool",
+                    "test.mcp_tool",
+                    JsonObject::new(),
+                    schema.clone(),
+                    schema,
+                ))
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt.len(), 3);
+        assert!(matches!(
+            &calls[0].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "mcp-call-1"
+                                && part.tool_name == "mcp_tool"
+                                && part.provider_executed == Some(true)
+                    )
+        ));
+        assert!(matches!(
+            &calls[0].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolApprovalResponse(response)
+                            if response.approval_id == "mcp-approval-1"
+                                && response.approved
+                                && response.reason.is_none()
+                    )
+        ));
+        assert_eq!(
+            result.text,
+            "Here is your shortened URL: https://short.url/abc"
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "mcp-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "mcp_tool");
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "shortened_url": "https://short.url/abc" })
+        );
+    }
+
+    #[test]
+    fn stream_text_sends_denied_provider_executed_tool_approval_response_once() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "I understand. The tool execution was not approved.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = provider_executed_approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("mcp-approval-1", false)
+                .with_reason("User denied the request")
+                .with_provider_executed(true),
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_messages(prompt))
+                .expect("prompt converts")
+                .with_tool(Tool::provider_executed(
+                    "mcp_tool",
+                    "test.mcp_tool",
+                    JsonObject::new(),
+                    schema.clone(),
+                    schema,
+                ))
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt.len(), 3);
+        assert!(matches!(
+            &calls[0].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "mcp-call-1"
+                                && part.tool_name == "mcp_tool"
+                                && part.provider_executed == Some(true)
+                    )
+        ));
+        assert!(matches!(
+            &calls[0].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolApprovalResponse(response)
+                            if response.approval_id == "mcp-approval-1"
+                                && !response.approved
+                                && response.reason.as_deref() == Some("User denied the request")
+                    )
+        ));
+        assert_eq!(
+            result.text,
+            "I understand. The tool execution was not approved."
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert!(result.tool_results.is_empty());
     }
 
     #[test]
