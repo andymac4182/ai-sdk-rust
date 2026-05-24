@@ -1342,6 +1342,18 @@ impl OpenAICompatibleCompletionLanguageModel {
             response_metadata = with_response_headers(response_metadata, headers);
         }
 
+        if let Some(logprobs) = choice
+            .and_then(|choice| choice.get("logprobs"))
+            .filter(|value| !value.is_null())
+        {
+            let mut provider_metadata = JsonObject::new();
+            provider_metadata.insert("logprobs".to_string(), logprobs.clone());
+            result = result.with_provider_metadata(ProviderMetadata::from([(
+                self.config.settings.name.clone(),
+                provider_metadata,
+            )]));
+        }
+
         for warning in warnings {
             result = result.with_warning(warning);
         }

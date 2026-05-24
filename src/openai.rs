@@ -2129,7 +2129,8 @@ mod tests {
     use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelUsage};
     use crate::json::JsonValue;
     use crate::language_model::{
-        LanguageModel, LanguageModelCallOptions, LanguageModelFilePart, LanguageModelMessage,
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelTextPart,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
@@ -2922,6 +2923,316 @@ mod tests {
         assert_eq!(
             requests[1].url,
             "https://api.openai.test/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn openai_completion_should_extract_text_response() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_default_response_body("Hello, World!"),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            LanguageModelContent::Text(text) => assert_eq!(text.text, "Hello, World!"),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_completion_should_extract_usage() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let usage = json!({
+            "prompt_tokens": 20,
+            "total_tokens": 25,
+            "completion_tokens": 5
+        });
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_response_body(
+                "",
+                usage.clone(),
+                "stop",
+                "cmpl-usage",
+                1711363706,
+                "gpt-3.5-turbo-instruct",
+            ),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(20));
+        assert_eq!(result.usage.output_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.text, Some(5));
+        assert_eq!(result.usage.raw, usage.as_object().cloned());
+    }
+
+    #[test]
+    fn openai_completion_should_send_request_body() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_default_response_body(""),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(
+            result.request.and_then(|request| request.body),
+            Some(json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_completion_prompt_text(),
+                "stop": ["\nuser:"]
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_completion_should_send_additional_response_information() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let response_body = openai_completion_response_body(
+            "",
+            json!({
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            }),
+            "stop",
+            "test-id",
+            123,
+            "test-model",
+        );
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            response_body,
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+        let response = result.response.expect("response metadata is present");
+
+        assert_eq!(response.id.as_deref(), Some("test-id"));
+        assert_eq!(response.model_id.as_deref(), Some("test-model"));
+        assert_eq!(
+            response.timestamp,
+            Some(time::OffsetDateTime::from_unix_timestamp(123).expect("timestamp is valid"))
+        );
+    }
+
+    #[test]
+    fn openai_completion_should_extract_logprobs() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let logprobs = openai_completion_logprobs();
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_response_body_with_choice(
+                json!({
+                    "text": "",
+                    "index": 0,
+                    "logprobs": logprobs.clone(),
+                    "finish_reason": "stop"
+                }),
+                json!({
+                    "prompt_tokens": 4,
+                    "total_tokens": 34,
+                    "completion_tokens": 30
+                }),
+                "cmpl-logprobs",
+                1711363706,
+                "gpt-3.5-turbo",
+            ),
+            Headers::new(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result =
+            poll_ready(provider.completion("gpt-3.5-turbo").do_generate(
+                openai_completion_call_options().with_provider_options(provider_options),
+            ));
+
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("openai"))
+            .expect("openai provider metadata is present");
+        assert_eq!(metadata.get("logprobs"), Some(&logprobs));
+    }
+
+    #[test]
+    fn openai_completion_should_extract_finish_reason() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_default_response_body(""),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn openai_completion_should_support_unknown_finish_reason() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_response_body(
+                "",
+                json!({
+                    "prompt_tokens": 4,
+                    "total_tokens": 34,
+                    "completion_tokens": 30
+                }),
+                "eos",
+                "cmpl-eos",
+                1711363706,
+                "gpt-3.5-turbo-instruct",
+            ),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Other);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("eos"));
+    }
+
+    #[test]
+    fn openai_completion_should_expose_the_raw_response_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_default_response_body(""),
+            Headers::from([
+                ("content-length".to_string(), "250".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("content-length".to_string(), "250".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_completion_should_pass_the_model_and_the_prompt() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_default_response_body(""),
+            Headers::new(),
+        );
+
+        let _result = poll_ready(
+            provider
+                .completion("gpt-3.5-turbo-instruct")
+                .do_generate(openai_completion_call_options()),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_completion_prompt_text(),
+                "stop": ["\nuser:"]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_completion_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_completion_test_provider(
+            Arc::clone(&captured_requests),
+            openai_completion_default_response_body(""),
+            Headers::new(),
+        )
+        .with_organization("test-organization")
+        .with_project("test-project")
+        .with_header("Custom-Provider-Header", "provider-header-value");
+
+        let _result = poll_ready(
+            provider.completion("gpt-3.5-turbo-instruct").do_generate(
+                openai_completion_call_options()
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request(&captured_requests).headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("openai-organization").map(String::as_str),
+            Some("test-organization")
+        );
+        assert_eq!(
+            headers.get("openai-project").map(String::as_str),
+            Some("test-project")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
         );
     }
 
@@ -4920,6 +5231,119 @@ mod tests {
             .and_then(ProviderApiRequestBody::as_form_data)
             .cloned()
             .expect("form data body is captured")
+    }
+
+    fn openai_completion_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(response_headers.clone()))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_transport(transport)
+    }
+
+    fn openai_completion_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )]),
+        )])
+    }
+
+    fn openai_completion_prompt_text() -> &'static str {
+        "user:\nHello\n\nassistant:\n"
+    }
+
+    fn openai_completion_response_body(
+        content: &str,
+        usage: JsonValue,
+        finish_reason: &str,
+        id: &str,
+        created: i64,
+        model: &str,
+    ) -> JsonValue {
+        openai_completion_response_body_with_choice(
+            json!({
+                "text": content,
+                "index": 0,
+                "finish_reason": finish_reason
+            }),
+            usage,
+            id,
+            created,
+            model,
+        )
+    }
+
+    fn openai_completion_response_body_with_choice(
+        choice: JsonValue,
+        usage: JsonValue,
+        id: &str,
+        created: i64,
+        model: &str,
+    ) -> JsonValue {
+        json!({
+            "id": id,
+            "object": "text_completion",
+            "created": created,
+            "model": model,
+            "choices": [choice],
+            "usage": usage
+        })
+    }
+
+    fn openai_completion_default_response_body(content: &str) -> JsonValue {
+        openai_completion_response_body(
+            content,
+            json!({
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            }),
+            "stop",
+            "cmpl-96cAM1v77r4jXa4qb2NSmRREV5oWB",
+            1711363706,
+            "gpt-3.5-turbo-instruct",
+        )
+    }
+
+    fn openai_completion_logprobs() -> JsonValue {
+        json!({
+            "tokens": [" ever", " after", ".\n\n", "The", " end", "."],
+            "token_logprobs": [
+                -0.0664508,
+                -0.014520033,
+                -1.3820221,
+                -0.7890417,
+                -0.5323165,
+                -0.10247037
+            ],
+            "top_logprobs": [
+                { " ever": -0.0664508 },
+                { " after": -0.014520033 },
+                { ".\n\n": -1.3820221 },
+                { "The": -0.7890417 },
+                { " end": -0.5323165 },
+                { ".": -0.10247037 }
+            ]
+        })
     }
 
     fn openai_embedding_test_provider(
