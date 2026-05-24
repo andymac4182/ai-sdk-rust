@@ -252,6 +252,12 @@ impl MessageSubjectResolver {
     ///   "cache the result" / "cache null result" tests).
     /// - Otherwise calls `adapter.fetch_subject(thread_id)`, caches the
     ///   outcome (including `None`!), and returns it.
+    /// - Adapters that don't implement `fetch_subject` (default trait
+    ///   impl returns `Ok(None)`) get cached as `None` so subsequent
+    ///   calls skip the adapter dispatch entirely — matches upstream's
+    ///   "return null when adapter has no fetchSubject" test which
+    ///   relies on JS optional-chaining `adapter.fetchSubject?.(...)`
+    ///   resolving to `undefined` → `null` cached value.
     /// - Concurrent calls for the same `(adapter, thread_id)` may each
     ///   trigger a fetch since the cache write happens after the
     ///   `await`; the cache then stabilizes (matches upstream's
@@ -270,7 +276,14 @@ impl MessageSubjectResolver {
         {
             return Ok(cached.clone());
         }
-        let subject = adapter.fetch_subject(&message.thread_id).await?;
+        let subject = match adapter.fetch_subject(&message.thread_id).await {
+            Ok(s) => s,
+            // Adapter doesn't support fetch_subject — treat as None
+            // (matches upstream's optional-chaining `adapter.fetchSubject?.(...)`
+            // resolving to undefined → null caching path).
+            Err(crate::types::AdapterError::Unsupported(_)) => None,
+            Err(e) => return Err(e),
+        };
         self.cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -829,15 +842,20 @@ mod tests {
     }
 
     #[test]
-    fn message_subject_resolver_returns_err_when_adapter_does_not_support_fetch_subject() {
+    fn message_subject_resolver_returns_none_when_adapter_does_not_support_fetch_subject() {
+        // 1:1 with upstream `it("should return null when adapter has
+        // no fetchSubject")`. Adapters that don't implement
+        // `fetch_subject` (default trait impl returns `Ok(None)` —
+        // but explicit `Err(Unsupported)` also collapses to `None`
+        // here so the resolver matches upstream's nullable getter
+        // semantics).
         let resolver = MessageSubjectResolver::new();
         let adapter = NoFetchSubjectAdapter;
         let msg = make_message("m1", "slack:C1");
-        let err = block_on(resolver.resolve(&adapter, &msg));
-        assert!(matches!(
-            err,
-            Err(crate::types::AdapterError::Unsupported("fetch_subject"))
-        ));
+        let value = block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert!(value.is_none(), "expected None for Unsupported adapter, got {value:?}");
+        // Second call uses cache, never hits the adapter.
+        block_on(resolver.resolve(&adapter, &msg)).unwrap();
     }
 
     #[test]
@@ -892,5 +910,29 @@ mod tests {
         resolver.invalidate("test", "T1");
         block_on(resolver.resolve(&adapter, &msg)).unwrap();
         assert_eq!(adapter.fetched.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn message_subject_resolver_returns_none_for_default_fetch_subject_impl() {
+        // 1:1 with upstream `it("should return null when no adapter is
+        // set")` (no MessageAdapter wired). In the Rust port the
+        // resolver always needs *an* adapter — but adapters that
+        // don't override `fetch_subject` get the trait default impl
+        // (`Ok(None)`), matching upstream's null-resolver branch.
+        #[derive(Debug, Default)]
+        struct DefaultAdapter;
+        #[async_trait::async_trait]
+        impl crate::types::Adapter for DefaultAdapter {
+            fn name(&self) -> &str {
+                "default"
+            }
+            // No `fetch_subject` override — uses the trait default
+            // which returns `Ok(None)`.
+        }
+        let resolver = MessageSubjectResolver::new();
+        let adapter = DefaultAdapter;
+        let msg = make_message("m1", "slack:C1");
+        let value = block_on(resolver.resolve(&adapter, &msg)).unwrap();
+        assert!(value.is_none());
     }
 }
