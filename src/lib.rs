@@ -304,6 +304,7 @@ pub use open_responses::{
 };
 pub use openai::{
     DEFAULT_OPENAI_BASE_URL, OpenAIProvider, OpenAIProviderSettings, create_openai, openai,
+    openai_local_shell_tool, openai_web_search_tool, openai_web_search_tool_with_args,
 };
 pub use openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,

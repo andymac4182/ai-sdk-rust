@@ -14,6 +14,7 @@ use crate::image_model::{
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
 };
 use crate::json::{JsonArray, JsonObject, JsonValue};
+use crate::language_model::{LanguageModelProviderTool, LanguageModelTool};
 use crate::open_responses::{
     OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
 };
@@ -1189,6 +1190,29 @@ pub fn openai(model_id: impl Into<String>) -> OpenResponsesLanguageModel {
     OpenAIProvider::new().language_model(model_id)
 }
 
+/// Creates the OpenAI web search provider-executed tool with default settings.
+pub fn openai_web_search_tool() -> LanguageModelTool {
+    openai_web_search_tool_with_args(JsonObject::new())
+}
+
+/// Creates the OpenAI web search provider-executed tool with provider arguments.
+pub fn openai_web_search_tool_with_args(args: JsonObject) -> LanguageModelTool {
+    LanguageModelTool::Provider(LanguageModelProviderTool::new(
+        "openai.web_search",
+        "web_search",
+        args,
+    ))
+}
+
+/// Creates the OpenAI local shell provider-defined tool.
+pub fn openai_local_shell_tool() -> LanguageModelTool {
+    LanguageModelTool::Provider(LanguageModelProviderTool::new(
+        "openai.local_shell",
+        "local_shell",
+        JsonObject::new(),
+    ))
+}
+
 fn openai_base_url(settings: &OpenAIProviderSettings) -> String {
     openai_base_url_with_env(settings, || env::var("OPENAI_BASE_URL").ok())
 }
@@ -2117,7 +2141,8 @@ fn openai_skill_upload_result(
 mod tests {
     use super::{
         DEFAULT_OPENAI_BASE_URL, OpenAIErrorData, OpenAIProvider, OpenAIProviderSettings,
-        create_openai,
+        create_openai, openai_local_shell_tool, openai_web_search_tool,
+        openai_web_search_tool_with_args,
     };
     use crate::embed::{EmbedManyOptions, embed_many};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelUsage};
@@ -2127,11 +2152,12 @@ mod tests {
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelUsage};
-    use crate::json::JsonValue;
+    use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -2185,6 +2211,72 @@ mod tests {
                     }
                 })
             }
+        );
+    }
+
+    #[test]
+    fn openai_web_search_tool_matches_upstream_tool_type_contract() {
+        let default_tool = openai_web_search_tool();
+        let LanguageModelTool::Provider(default_provider_tool) = default_tool else {
+            panic!("web search tool should be provider-defined");
+        };
+
+        assert_eq!(default_provider_tool.id, "openai.web_search");
+        assert_eq!(default_provider_tool.name, "web_search");
+        assert!(default_provider_tool.args.is_empty());
+        assert_eq!(
+            serde_json::to_value(&default_provider_tool).expect("provider tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "openai.web_search",
+                "name": "web_search",
+                "args": {}
+            })
+        );
+
+        let mut args = JsonObject::new();
+        args.insert("searchContextSize".to_string(), json!("high"));
+        args.insert("externalWebAccess".to_string(), json!(true));
+        let configured_tool = openai_web_search_tool_with_args(args.clone());
+        let LanguageModelTool::Provider(configured_provider_tool) = configured_tool else {
+            panic!("configured web search tool should be provider-defined");
+        };
+
+        assert_eq!(configured_provider_tool.id, "openai.web_search");
+        assert_eq!(configured_provider_tool.name, "web_search");
+        assert_eq!(configured_provider_tool.args, args);
+        assert_eq!(
+            serde_json::to_value(&configured_provider_tool).expect("provider tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "openai.web_search",
+                "name": "web_search",
+                "args": {
+                    "searchContextSize": "high",
+                    "externalWebAccess": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_local_shell_tool_matches_upstream_tool_type_contract() {
+        let tool = openai_local_shell_tool();
+        let LanguageModelTool::Provider(provider_tool) = tool else {
+            panic!("local shell tool should be provider-defined");
+        };
+
+        assert_eq!(provider_tool.id, "openai.local_shell");
+        assert_eq!(provider_tool.name, "local_shell");
+        assert!(provider_tool.args.is_empty());
+        assert_eq!(
+            serde_json::to_value(&provider_tool).expect("provider tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "openai.local_shell",
+                "name": "local_shell",
+                "args": {}
+            })
         );
     }
 

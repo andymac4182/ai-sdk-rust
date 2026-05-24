@@ -2662,6 +2662,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   mapping upstream `openai-language-model-capabilities.test.ts` table rows
   directly for reasoning-model detection and GPT-5.1+ non-reasoning-parameter
   compatibility.
+- 2026-05-24: OpenAI hosted tool type parity added
+  `openai_web_search_tool_matches_upstream_tool_type_contract` and
+  `openai_local_shell_tool_matches_upstream_tool_type_contract`, mapping
+  upstream `tool/web-search.test-d.ts` and `tool/local-shell.test-d.ts`
+  `Tool<...>` assertions to Rust provider-tool helper constructors with
+  explicit provider ids, names, provider arguments, and serialized tool shapes.
 - 2026-05-20: OpenAI Responses hosted tool include parity added
   `open_responses_provider_adds_hosted_tool_include_options` now covers
   upstream automatic `include` additions for hosted web-search action sources
