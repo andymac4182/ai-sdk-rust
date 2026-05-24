@@ -5133,6 +5133,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    portable upstream test case. The deprecated `experimental_telemetry` alias
    cases for `generateObject`, `streamObject`, `generateText`, `streamText`,
    `embed`, `embedMany`, and `rerank` now have named Rust counterparts.
+   The upstream `streamObject` telemetry integration listener cases now have
+   named Rust counterparts in
+   `stream_object_calls_globally_registered_integration_listeners`,
+   `stream_object_prefers_per_call_integrations_over_global_integrations`,
+   `stream_object_calls_integration_listeners_alongside_user_callbacks`,
+   `stream_object_does_not_break_when_integration_listener_panics`, and
+   `stream_object_supports_multiple_per_call_telemetry_integrations_as_array`,
+   proving global integration fallback, per-call override precedence,
+   user-callback plus integration ordering, panic isolation, and array
+   integration ordering for object streams.
    The upstream `generateObject` `result.request`, `result.response`,
    `result.providerMetadata`, `result.toJsonResponse`, `options.headers`, and
    `options.providerOptions` cases now have named Rust counterparts, including
