@@ -1435,3 +1435,48 @@ startup. After every 5 merge-back cycles:
 
 Don't bulk-rewrite the brief — accretive growth keeps the audit
 trail intact.
+
+## Multi-slice architectural sequence pattern (added slice 421)
+
+For closing large gaps in a single test file (e.g. `chat.test.ts`'s
+~150 unmapped cases), the small-slice cadence (1-3 cases per
+slice) is too slow because each handler-class case requires the
+same scaffolding rebuilt independently. The alternative is a
+multi-slice architectural sequence: 5-8 consecutive slices that
+each land one upstream dispatcher branch.
+
+**Trigger.** The user must explicitly authorize a multi-slice
+architectural commitment. Without that signal, default to
+small-slice cadence (the autonomous loop's safe behavior). Ask
+directly when ratio of unmapped-cases-per-pattern-of-deferral
+crosses a threshold (~50+ cases blocked on the same scaffolding).
+
+**Shape.**
+- One slice per upstream dispatcher branch / handler class.
+- Each slice adds: (a) handler-type alias, (b) registration
+  method on Chat, (c) ChatHandlers field, (d) dispatcher branch,
+  (e) tests covering every portable upstream case in the matching
+  describe block plus 1-2 additive ordering/edge cases.
+- Final slice in the cycle is a refinement entry covering the
+  whole sequence.
+
+**Canonical shape applied in slices 415-420** (chat.test.ts
+handler-trait surface):
+- Phase A: onNewMention (simplest gate)
+- Phase B: onSubscribedMessage (priority over mention)
+- Phase C: onDirectMessage (priority over subscribed via
+  adapter.is_dm)
+- Phase D: onNewMessage + the full cascade fall-through cases
+  (including upstream's DM-mention backward-compat branch)
+- Phase E: onReaction + process_reaction separate async entry
+  point (not on the message-dispatch path)
+- Phase F: onAction + process_action (mirrors reaction shape)
+
+Each slice in the sequence builds on the previous one's
+scaffolding (ChatHandlers grows by one Vec field; the dispatcher
+gets one more priority branch). Tests are easy to write because
+the per-handler-class test mocks (counters, recorders, order
+trackers) follow the same shape.
+
+**Reference**: slices 415-420 in `docs/chat/goal-refinements.md`'s
+"Slices 412..420 refinement cycle" entry.
