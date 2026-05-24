@@ -795,9 +795,8 @@ mod tests {
     // isDM always `false`). Uses the upstream-shape
     // `thread_id::decode_thread_id` so all 4 wire formats decode.
 
-    #[test]
     // ---------- renderFormatted (1 upstream case) ----------
-    #[test]
+
     #[test]
     fn linear_installation_constants_match_upstream() {
         // 1:1 with upstream's private `INSTALLATION_KEY_PREFIX` and
@@ -817,31 +816,63 @@ mod tests {
         assert!(result.contains("Hello world"), "got: {result}");
     }
 
+    // ---------- describe("channelIdFromThreadId") (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("channelIdFromThreadId")`.
+    // Upstream returns the string `"linear:<issueId>"` and throws
+    // `"Invalid Linear thread ID"` for malformed input. The Rust port
+    // returns `Option<String>` per the slice-366 Adapter trait shape;
+    // the throw case maps to `None`.
+
     #[test]
-    fn channel_id_from_thread_id_returns_linear_prefix_plus_issue_id() {
+    fn channel_id_from_thread_id_should_return_issue_level_channel_for_issue_level_thread() {
+        // 1:1 with upstream "should return issue-level channel for
+        // issue-level thread".
         let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
-        // issue-only thread id
-        assert_eq!(
-            adapter
-                .channel_id_from_thread_id("linear:ISSUE-1")
-                .as_deref(),
-            Some("linear:ISSUE-1")
-        );
-        // issue + comment thread id
-        assert_eq!(
-            adapter
-                .channel_id_from_thread_id("linear:ISSUE-1:c:COMMENT-A")
-                .as_deref(),
-            Some("linear:ISSUE-1")
-        );
-        // issue + agent session thread id
+        let result = adapter.channel_id_from_thread_id("linear:issue-123");
+        assert_eq!(result.as_deref(), Some("linear:issue-123"));
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_should_strip_comment_part_for_comment_level_thread() {
+        // 1:1 with upstream "should strip comment part for comment-
+        // level thread".
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
+        let result = adapter.channel_id_from_thread_id("linear:issue-123:c:comment-456");
+        assert_eq!(result.as_deref(), Some("linear:issue-123"));
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_should_return_none_for_invalid_thread_id() {
+        // 1:1 with upstream "should throw for invalid thread ID".
+        // The Rust trait signature returns Option<String> per
+        // slice 366, so the throw case maps to None — the
+        // upstream "Invalid Linear thread ID" error is preserved by
+        // the underlying decode_thread_id helper (tested separately
+        // in `thread_id::tests::decode_throws_on_invalid_prefix`).
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
+        let result = adapter.channel_id_from_thread_id("slack:C123:ts");
+        assert_eq!(result, None);
+    }
+
+    // Additive coverage retained from the prior bundled test —
+    // exercises the 2 deeper formats (agent-session and combined)
+    // that aren't explicitly in upstream's describe block but flow
+    // through the same decode_thread_id path.
+
+    #[test]
+    fn channel_id_from_thread_id_handles_agent_session_format() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
         assert_eq!(
             adapter
                 .channel_id_from_thread_id("linear:ISSUE-1:s:SESSION-X")
                 .as_deref(),
             Some("linear:ISSUE-1")
         );
-        // issue + comment + agent session thread id
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_handles_combined_comment_and_agent_session_format() {
+        let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
         assert_eq!(
             adapter
                 .channel_id_from_thread_id("linear:ISSUE-1:c:COMMENT-A:s:SESSION-X")
