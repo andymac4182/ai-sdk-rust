@@ -129,6 +129,20 @@ impl Thread {
         self.adapter.fetch_subject(&self.thread_id).await
     }
 
+    /// 1:1 port of upstream `Thread.startTyping(status?)`. Delegates
+    /// to [`Adapter::start_typing`] with the bound thread id.
+    pub async fn start_typing(&self, status: Option<&str>) -> AdapterResult<()> {
+        self.adapter.start_typing(&self.thread_id, status).await
+    }
+
+    /// 1:1 port of upstream `Thread.mentionUser(userId)`. Returns the
+    /// Slack-style mention syntax `<@userId>` (upstream hard-codes
+    /// the angle-bracket wrapper independent of platform; per-adapter
+    /// renderers translate to the platform-native form downstream).
+    pub fn mention_user(&self, user_id: &str) -> String {
+        format!("<@{user_id}>")
+    }
+
     fn state_key(&self) -> String {
         format!("{THREAD_STATE_KEY_PREFIX}{}", self.thread_id)
     }
@@ -211,6 +225,7 @@ mod tests {
         post_object_unsupported: bool,
         fetch_subject_calls: AtomicUsize,
         subject_result: Option<String>,
+        start_typing: Mutex<Vec<(String, Option<String>)>>,
     }
 
     #[async_trait::async_trait]
@@ -243,6 +258,17 @@ mod tests {
         async fn fetch_subject(&self, _thread_id: &str) -> AdapterResult<Option<String>> {
             self.fetch_subject_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.subject_result.clone())
+        }
+        async fn start_typing(
+            &self,
+            thread_id: &str,
+            status: Option<&str>,
+        ) -> AdapterResult<()> {
+            self.start_typing
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), status.map(str::to_string)));
+            Ok(())
         }
     }
 
@@ -465,5 +491,44 @@ mod tests {
         block_on(thread.state()).unwrap();
         let get_calls = state.get_calls.lock().unwrap();
         assert_eq!(get_calls.last().unwrap(), "thread-state:slack:C123:1234.5678");
+    }
+
+    // ---------- describe("startTyping") (2 upstream cases) + describe("mentionUser") (2 cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("startTyping")` +
+    // `describe("mentionUser")`.
+
+    #[test]
+    fn thread_start_typing_calls_adapter_start_typing_with_thread_id() {
+        let adapter = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        block_on(thread.start_typing(None)).unwrap();
+        let calls = adapter.start_typing.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123:1234.5678");
+        assert!(calls[0].1.is_none());
+    }
+
+    #[test]
+    fn thread_start_typing_passes_status_to_adapter_start_typing() {
+        let adapter = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        block_on(thread.start_typing(Some("thinking..."))).unwrap();
+        let calls = adapter.start_typing.lock().unwrap();
+        assert_eq!(calls[0].1.as_deref(), Some("thinking..."));
+    }
+
+    #[test]
+    fn thread_mention_user_returns_formatted_mention_string() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        assert_eq!(thread.mention_user("U456"), "<@U456>");
+    }
+
+    #[test]
+    fn thread_mention_user_handles_various_user_id_formats() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        assert_eq!(thread.mention_user("UABC123"), "<@UABC123>");
+        assert_eq!(thread.mention_user("bot-user-id"), "<@bot-user-id>");
     }
 }
