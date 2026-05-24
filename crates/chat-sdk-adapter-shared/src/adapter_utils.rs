@@ -318,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn extract_files_returns_empty_slice_for_postable_raw_without_files() {
+        // 1:1 with upstream `describe("extractFiles") > it("returns
+        // empty array for PostableRaw without files")` — the upstream
+        // test passes `{raw: "Just text"}` without specifying files.
+        // The Rust port uses None for the missing-files signal; same
+        // observable behavior.
+        let msg = AdapterPostableMessage::from(PostableRaw {
+            attachments: None,
+            files: None,
+            raw: "Just text".to_string(),
+        });
+        assert!(extract_files(&msg).is_empty());
+    }
+
+    #[test]
     fn extract_files_returns_empty_slice_for_postable_markdown_without_files() {
         // 1:1 with upstream `describe("extractFiles") > it("returns
         // empty array for PostableMarkdown without files")` — the
