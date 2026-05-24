@@ -718,6 +718,17 @@ pub fn is_gchat_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! ---------- upstream js-only-documented cases (1) ----------
+    //!
+    //! Per the slice-380 type-system-impossible pattern, the 1
+    //! upstream `index.test.ts > describe("subclass extensibility")`
+    //! case is enumerated as js-only-documented here:
+    //!
+    //! - `should expose protected members and methods to subclasses`:
+    //!   TypeScript-class-`protected` access modifier check. Rust
+    //!   uses `pub(crate)` visibility + trait composition rather
+    //!   than class inheritance — the subclass-protected-leak test
+    //!   is unrepresentable by construction.
     use super::*;
     use futures_executor::block_on;
 
