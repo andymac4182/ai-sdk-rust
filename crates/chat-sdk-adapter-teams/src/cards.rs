@@ -12,10 +12,14 @@
 use chat_sdk_adapter_shared::card_utils::{
     BoldFormat, FallbackTextOptions, LineBreak, PlatformName, card_to_fallback_text,
 };
+use chat_sdk_adapter_shared::card_utils::{PlatformName as CardPlatform, map_button_style};
 use chat_sdk_chat::cards::{
-    CardChild, CardElement, DividerElement, ImageElement, LinkElement, TextElement, TextStyle,
+    ActionsChild, ActionsElement, ButtonActionType, ButtonElement, CardChild, CardElement,
+    DividerElement, FieldsElement, ImageElement, LinkButtonElement, LinkElement, SectionElement,
+    TableElement, TextElement, TextStyle,
 };
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
+use chat_sdk_chat::modals::{RadioSelectElement, SelectElement};
 use serde_json::{Value, json};
 
 /// Convert emoji placeholders for Teams output. 1:1 with upstream
@@ -40,15 +44,17 @@ pub const ADAPTIVE_CARD_SCHEMA: &str = "http://adaptivecards.io/schemas/adaptive
 /// with upstream's private `ADAPTIVE_CARD_VERSION = "1.4"`.
 pub const ADAPTIVE_CARD_VERSION: &str = "1.4";
 
-/// 1:1 port of upstream `cardToAdaptiveCard(card)`. Partial:
-/// handles title / subtitle / imageUrl / Text / Image / Divider /
-/// Link branches. Action Row + Fields + Section + Table + Select /
-/// RadioSelect branches are deferred to follow-up slices. Returns
-/// the AdaptiveCard JSON shape directly — the upstream class wrapper
+/// 1:1 port of upstream `cardToAdaptiveCard(card)`. Handles
+/// title / subtitle / imageUrl / Text / Image / Divider / Actions
+/// / Section / Fields / Link / Table branches plus Select /
+/// RadioSelect inside Actions (with auto-injected submit when
+/// inputs are present without buttons). Returns the AdaptiveCard
+/// JSON shape directly — the upstream class wrapper
 /// (`@microsoft/teams.cards`) is omitted because the assertions all
 /// run against the serialised JSON via `toMatchObject({...})`.
 pub fn card_to_adaptive_card(card: &CardElement) -> Value {
     let mut body: Vec<Value> = Vec::new();
+    let mut actions: Vec<Value> = Vec::new();
 
     if let Some(title) = card.title.as_deref().filter(|t| !t.is_empty()) {
         body.push(json!({
@@ -80,17 +86,21 @@ pub fn card_to_adaptive_card(card: &CardElement) -> Value {
     for child in &card.children {
         let result = convert_child_to_adaptive(child);
         body.extend(result.elements);
-        // Actions accumulator: collected but emitted at card-level,
-        // not body-level. Currently no action-emitting branches are
-        // implemented (deferred), so this is dropped.
+        actions.extend(result.actions);
     }
 
-    json!({
+    let mut adaptive = json!({
         "type": "AdaptiveCard",
         "$schema": ADAPTIVE_CARD_SCHEMA,
         "version": ADAPTIVE_CARD_VERSION,
         "body": body,
-    })
+    });
+
+    if !actions.is_empty() {
+        adaptive["actions"] = Value::Array(actions);
+    }
+
+    adaptive
 }
 
 /// 1:1 with upstream's inline `interface ConvertResult`. Bundles
@@ -99,17 +109,10 @@ pub fn card_to_adaptive_card(card: &CardElement) -> Value {
 #[derive(Debug, Default)]
 struct ConvertResult {
     elements: Vec<Value>,
-    /// Card-level actions accumulator. Unused by the current
-    /// branches (Action Row branch is deferred); kept on the type
-    /// so future slices can plug `Actions` / `Section` results in
-    /// without changing the function signature.
-    #[allow(dead_code)]
     actions: Vec<Value>,
 }
 
-/// 1:1 port of upstream `convertChildToAdaptive(child)`. Returns
-/// `ConvertResult { elements: [], actions: [] }` for any child whose
-/// renderer branch is still deferred.
+/// 1:1 port of upstream `convertChildToAdaptive(child)`.
 fn convert_child_to_adaptive(child: &CardChild) -> ConvertResult {
     match child {
         CardChild::Text(t) => ConvertResult {
@@ -124,13 +127,20 @@ fn convert_child_to_adaptive(child: &CardChild) -> ConvertResult {
             elements: vec![convert_divider_to_element(d)],
             actions: Vec::new(),
         },
+        CardChild::Actions(a) => convert_actions_to_elements(a),
+        CardChild::Section(s) => convert_section_to_elements(s),
+        CardChild::Fields(f) => ConvertResult {
+            elements: vec![convert_fields_to_element(f)],
+            actions: Vec::new(),
+        },
         CardChild::Link(l) => ConvertResult {
             elements: vec![convert_link_to_element(l)],
             actions: Vec::new(),
         },
-        // Actions / Section / Fields / Table branches land in
-        // follow-up slices.
-        _ => ConvertResult::default(),
+        CardChild::Table(t) => ConvertResult {
+            elements: vec![convert_table_to_element(t)],
+            actions: Vec::new(),
+        },
     }
 }
 
@@ -187,6 +197,255 @@ fn convert_link_to_element(element: &LinkElement) -> Value {
         "type": "TextBlock",
         "text": format!("[{}]({})", convert_emoji(&element.label), element.url),
         "wrap": true,
+    })
+}
+
+/// 1:1 with upstream `convertActionsToElements(element)`. Buttons /
+/// LinkButtons become card-level `actions`. Select / RadioSelect
+/// become body elements. When the Actions block contains inputs but
+/// no buttons, auto-injects a `SubmitAction` with `actionId =
+/// AUTO_SUBMIT_ACTION_ID` (Teams inputs don't auto-submit like
+/// Slack does).
+fn convert_actions_to_elements(element: &ActionsElement) -> ConvertResult {
+    let mut actions: Vec<Value> = Vec::new();
+    let mut elements: Vec<Value> = Vec::new();
+    let mut has_buttons = false;
+    let mut has_inputs = false;
+
+    for child in &element.children {
+        match child {
+            ActionsChild::Button(b) => {
+                has_buttons = true;
+                actions.push(convert_button_to_action(b));
+            }
+            ActionsChild::LinkButton(b) => {
+                actions.push(convert_link_button_to_action(b));
+            }
+            ActionsChild::Select(s) => {
+                has_inputs = true;
+                elements.push(convert_select_to_element(s));
+            }
+            ActionsChild::RadioSelect(r) => {
+                has_inputs = true;
+                elements.push(convert_radio_select_to_element(r));
+            }
+        }
+    }
+
+    if has_inputs && !has_buttons {
+        actions.push(json!({
+            "type": "Action.Submit",
+            "title": "Submit",
+            "data": { "actionId": AUTO_SUBMIT_ACTION_ID },
+        }));
+    }
+
+    ConvertResult { elements, actions }
+}
+
+/// 1:1 with upstream `convertButtonToAction(button)`. Emits an
+/// `Action.Submit` carrying `actionId` + `value` in `data`. For
+/// `actionType: "modal"` buttons, also adds `msteams: { type:
+/// "task/fetch" }` to the data hash so Teams opens a dialog.
+fn convert_button_to_action(button: &ButtonElement) -> Value {
+    let mut data = json!({
+        "actionId": button.id,
+        "value": button.value,
+    });
+
+    if button.action_type == Some(ButtonActionType::Modal) {
+        data["msteams"] = json!({ "type": "task/fetch" });
+    }
+
+    let mut action = json!({
+        "type": "Action.Submit",
+        "title": convert_emoji(&button.label),
+        "data": data,
+    });
+
+    if let Some(style) = map_button_style(button.style, CardPlatform::Teams) {
+        action["style"] = Value::String(style.to_string());
+    }
+
+    action
+}
+
+/// 1:1 with upstream `convertLinkButtonToAction(button)`. Emits an
+/// `Action.OpenUrl` action carrying the link URL.
+fn convert_link_button_to_action(button: &LinkButtonElement) -> Value {
+    let mut action = json!({
+        "type": "Action.OpenUrl",
+        "title": convert_emoji(&button.label),
+        "url": button.url,
+    });
+
+    if let Some(style) = map_button_style(button.style, CardPlatform::Teams) {
+        action["style"] = Value::String(style.to_string());
+    }
+
+    action
+}
+
+/// 1:1 with upstream `convertSelectToElement(select)`. Emits an
+/// `Input.ChoiceSet` with `style: "compact"`. `isRequired` is the
+/// inverse of `select.optional` (default required).
+fn convert_select_to_element(select: &SelectElement) -> Value {
+    let choices: Vec<Value> = select
+        .options
+        .iter()
+        .map(|opt| {
+            json!({
+                "title": convert_emoji(&opt.label),
+                "value": opt.value,
+            })
+        })
+        .collect();
+
+    let mut element = json!({
+        "type": "Input.ChoiceSet",
+        "id": select.id,
+        "label": convert_emoji(&select.label),
+        "style": "compact",
+        "isRequired": !select.optional.unwrap_or(false),
+        "choices": choices,
+    });
+
+    if let Some(placeholder) = select.placeholder.as_deref().filter(|p| !p.is_empty()) {
+        element["placeholder"] = Value::String(placeholder.to_string());
+    }
+    if let Some(initial) = select.initial_option.as_deref().filter(|v| !v.is_empty()) {
+        element["value"] = Value::String(initial.to_string());
+    }
+
+    element
+}
+
+/// 1:1 with upstream `convertRadioSelectToElement(radioSelect)`.
+/// Emits an `Input.ChoiceSet` with `style: "expanded"` (no
+/// placeholder for radio inputs).
+fn convert_radio_select_to_element(radio: &RadioSelectElement) -> Value {
+    let choices: Vec<Value> = radio
+        .options
+        .iter()
+        .map(|opt| {
+            json!({
+                "title": convert_emoji(&opt.label),
+                "value": opt.value,
+            })
+        })
+        .collect();
+
+    let mut element = json!({
+        "type": "Input.ChoiceSet",
+        "id": radio.id,
+        "label": convert_emoji(&radio.label),
+        "style": "expanded",
+        "isRequired": !radio.optional.unwrap_or(false),
+        "choices": choices,
+    });
+
+    if let Some(initial) = radio.initial_option.as_deref().filter(|v| !v.is_empty()) {
+        element["value"] = Value::String(initial.to_string());
+    }
+
+    element
+}
+
+/// 1:1 with upstream `convertSectionToElements(element)`. Wraps
+/// the section's body-elements in a `Container`; card-level
+/// actions accumulated by child Actions blocks bubble up
+/// untouched.
+fn convert_section_to_elements(element: &SectionElement) -> ConvertResult {
+    let mut container_items: Vec<Value> = Vec::new();
+    let mut actions: Vec<Value> = Vec::new();
+
+    for child in &element.children {
+        let result = convert_child_to_adaptive(child);
+        container_items.extend(result.elements);
+        actions.extend(result.actions);
+    }
+
+    let mut elements: Vec<Value> = Vec::new();
+    if !container_items.is_empty() {
+        elements.push(json!({
+            "type": "Container",
+            "items": container_items,
+        }));
+    }
+
+    ConvertResult { elements, actions }
+}
+
+/// 1:1 with upstream `convertFieldsToElement(element)`. Emits a
+/// `FactSet` of `{ title, value }` facts.
+fn convert_fields_to_element(element: &FieldsElement) -> Value {
+    let facts: Vec<Value> = element
+        .children
+        .iter()
+        .map(|field| {
+            json!({
+                "title": convert_emoji(&field.label),
+                "value": convert_emoji(&field.value),
+            })
+        })
+        .collect();
+
+    json!({
+        "type": "FactSet",
+        "facts": facts,
+    })
+}
+
+/// 1:1 with upstream `convertTableToElement(element)`. Emits a
+/// `Container` of `ColumnSet`s — first the header row with bolder
+/// text, then a `ColumnSet` per data row. Each cell is a
+/// stretch-width `Column` containing a wrapped `TextBlock`.
+fn convert_table_to_element(element: &TableElement) -> Value {
+    let header_columns: Vec<Value> = element
+        .headers
+        .iter()
+        .map(|h| {
+            json!({
+                "type": "Column",
+                "width": "stretch",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": convert_emoji(h),
+                        "weight": "Bolder",
+                        "wrap": true,
+                    }
+                ],
+            })
+        })
+        .collect();
+
+    let mut items: Vec<Value> = Vec::new();
+    items.push(json!({ "type": "ColumnSet", "columns": header_columns }));
+
+    for row in &element.rows {
+        let cols: Vec<Value> = row
+            .iter()
+            .map(|cell| {
+                json!({
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": convert_emoji(cell),
+                            "wrap": true,
+                        }
+                    ],
+                })
+            })
+            .collect();
+        items.push(json!({ "type": "ColumnSet", "columns": cols }));
+    }
+
+    json!({
+        "type": "Container",
+        "items": items,
     })
 }
 
@@ -465,5 +724,381 @@ mod tests {
         assert_eq!(body[0]["type"], "Container");
         assert_eq!(body[0]["separator"], true);
         assert_eq!(body[0]["items"], serde_json::json!([]));
+    }
+
+    // ---------- cardToAdaptiveCard interactive branches (10 upstream cases + 1 additive Table) ----------
+
+    use chat_sdk_chat::cards::{
+        ButtonActionType, ButtonStyle, LinkButtonElement, LinkButtonKind, LinkKind,
+    };
+    use chat_sdk_chat::modals::{
+        RadioSelectElement, RadioSelectKind, SelectElement, SelectKind, SelectOptionElement,
+    };
+
+    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+        ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style,
+            kind: ButtonKind::Button,
+            value: value.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn adaptive_card_converts_actions_with_buttons_to_card_level_actions() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
+                    ActionsChild::Button(button("reject", "Reject", Some(ButtonStyle::Danger), Some("data-123"))),
+                    ActionsChild::Button(button("skip", "Skip", None, None)),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        assert_eq!(adaptive["body"].as_array().unwrap().len(), 0);
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 3);
+
+        assert_eq!(actions[0]["type"], "Action.Submit");
+        assert_eq!(actions[0]["title"], "Approve");
+        assert_eq!(actions[0]["data"]["actionId"], "approve");
+        assert!(actions[0]["data"]["value"].is_null());
+        assert_eq!(actions[0]["style"], "positive");
+
+        assert_eq!(actions[1]["type"], "Action.Submit");
+        assert_eq!(actions[1]["title"], "Reject");
+        assert_eq!(actions[1]["data"]["actionId"], "reject");
+        assert_eq!(actions[1]["data"]["value"], "data-123");
+        assert_eq!(actions[1]["style"], "destructive");
+
+        assert_eq!(actions[2]["type"], "Action.Submit");
+        assert_eq!(actions[2]["title"], "Skip");
+        assert_eq!(actions[2]["data"]["actionId"], "skip");
+        assert!(actions[2]["data"]["value"].is_null());
+    }
+
+    #[test]
+    fn adaptive_card_converts_link_buttons_to_action_open_url() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::LinkButton(LinkButtonElement {
+                    label: "View Docs".to_string(),
+                    style: Some(ButtonStyle::Primary),
+                    kind: LinkButtonKind::LinkButton,
+                    url: "https://example.com/docs".to_string(),
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["type"], "Action.OpenUrl");
+        assert_eq!(actions[0]["title"], "View Docs");
+        assert_eq!(actions[0]["url"], "https://example.com/docs");
+        assert_eq!(actions[0]["style"], "positive");
+    }
+
+    #[test]
+    fn adaptive_card_converts_fields_to_fact_set() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Fields(FieldsElement {
+                children: vec![
+                    FieldElement {
+                        label: "Status".to_string(),
+                        value: "Active".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                    FieldElement {
+                        label: "Priority".to_string(),
+                        value: "High".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                ],
+                kind: FieldsKind::Fields,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "FactSet");
+        assert_eq!(
+            body[0]["facts"],
+            serde_json::json!([
+                { "title": "Status", "value": "Active" },
+                { "title": "Priority", "value": "High" },
+            ])
+        );
+    }
+
+    #[test]
+    fn adaptive_card_wraps_section_children_in_a_container() {
+        use chat_sdk_chat::cards::{SectionElement, SectionKind};
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Section(SectionElement {
+                children: vec![text("Inside section")],
+                kind: SectionKind::Section,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "Container");
+        assert_eq!(body[0]["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn adaptive_card_converts_a_complete_card() {
+        let c = CardElement {
+            title: Some("Order #1234".to_string()),
+            subtitle: Some("Status update".to_string()),
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                text("Your order has been shipped!"),
+                CardChild::Fields(FieldsElement {
+                    children: vec![
+                        FieldElement {
+                            label: "Tracking".to_string(),
+                            value: "ABC123".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                        FieldElement {
+                            label: "ETA".to_string(),
+                            value: "Dec 25".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                    ],
+                    kind: FieldsKind::Fields,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![ActionsChild::Button(button(
+                        "track",
+                        "Track Package",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    ))],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        };
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 4);
+        assert_eq!(body[0]["type"], "TextBlock"); // title
+        assert_eq!(body[1]["type"], "TextBlock"); // subtitle
+        assert_eq!(body[2]["type"], "TextBlock"); // text
+        assert_eq!(body[3]["type"], "FactSet"); // fields
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["title"], "Track Package");
+    }
+
+    #[test]
+    fn adaptive_card_adds_msteams_task_fetch_hint_for_action_type_modal() {
+        let mut b = button("open-dialog", "Open", None, None);
+        b.action_type = Some(ButtonActionType::Modal);
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Button(b)],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["type"], "Action.Submit");
+        assert_eq!(actions[0]["title"], "Open");
+        assert_eq!(actions[0]["data"]["actionId"], "open-dialog");
+        assert_eq!(
+            actions[0]["data"]["msteams"],
+            serde_json::json!({ "type": "task/fetch" })
+        );
+    }
+
+    fn opt(label: &str, value: &str) -> SelectOptionElement {
+        SelectOptionElement {
+            description: None,
+            label: label.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn adaptive_card_converts_select_to_compact_choice_set_input_in_body() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Select(SelectElement {
+                    id: "color".to_string(),
+                    initial_option: None,
+                    label: "Pick a color".to_string(),
+                    optional: None,
+                    options: vec![opt("Red", "red"), opt("Blue", "blue")],
+                    placeholder: Some("Choose...".to_string()),
+                    kind: SelectKind::Select,
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "Input.ChoiceSet");
+        assert_eq!(body[0]["id"], "color");
+        assert_eq!(body[0]["label"], "Pick a color");
+        assert_eq!(body[0]["style"], "compact");
+        assert_eq!(body[0]["isRequired"], true);
+        assert_eq!(body[0]["placeholder"], "Choose...");
+        let choices = body[0]["choices"].as_array().unwrap();
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0]["title"], "Red");
+        assert_eq!(choices[0]["value"], "red");
+
+        // Auto-injects submit
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["type"], "Action.Submit");
+        assert_eq!(actions[0]["title"], "Submit");
+        assert_eq!(actions[0]["data"]["actionId"], "__auto_submit");
+    }
+
+    #[test]
+    fn adaptive_card_converts_radio_select_to_expanded_choice_set_input_in_body() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::RadioSelect(RadioSelectElement {
+                    id: "plan".to_string(),
+                    initial_option: None,
+                    label: "Choose Plan".to_string(),
+                    optional: None,
+                    options: vec![opt("Free", "free"), opt("Pro", "pro")],
+                    kind: RadioSelectKind::RadioSelect,
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "Input.ChoiceSet");
+        assert_eq!(body[0]["id"], "plan");
+        assert_eq!(body[0]["label"], "Choose Plan");
+        assert_eq!(body[0]["style"], "expanded");
+        assert_eq!(body[0]["isRequired"], true);
+
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["type"], "Action.Submit");
+        assert_eq!(actions[0]["data"]["actionId"], "__auto_submit");
+    }
+
+    #[test]
+    fn adaptive_card_does_not_auto_inject_submit_when_buttons_are_present() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Select(SelectElement {
+                        id: "color".to_string(),
+                        initial_option: None,
+                        label: "Color".to_string(),
+                        optional: None,
+                        options: vec![opt("Red", "red")],
+                        placeholder: None,
+                        kind: SelectKind::Select,
+                    }),
+                    ActionsChild::Button(button(
+                        "submit",
+                        "Submit",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    )),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "Input.ChoiceSet");
+        assert_eq!(body[0]["id"], "color");
+        let actions = adaptive["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["type"], "Action.Submit");
+        assert_eq!(actions[0]["title"], "Submit");
+    }
+
+    #[test]
+    fn adaptive_card_converts_cardlink_to_text_block_with_markdown_link() {
+        use chat_sdk_chat::cards::LinkElement;
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Link(LinkElement {
+                label: "Click here".to_string(),
+                kind: LinkKind::Link,
+                url: "https://example.com".to_string(),
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "TextBlock");
+        assert_eq!(body[0]["text"], "[Click here](https://example.com)");
+        assert_eq!(body[0]["wrap"], true);
+    }
+
+    // ---------- additive Table coverage ----------
+
+    #[test]
+    fn adaptive_card_converts_table_to_container_of_column_sets() {
+        use chat_sdk_chat::cards::{TableElement, TableKind};
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Table(TableElement {
+                align: None,
+                headers: vec!["Name".to_string(), "Status".to_string()],
+                rows: vec![
+                    vec!["Alpha".to_string(), "OK".to_string()],
+                    vec!["Beta".to_string(), "FAIL".to_string()],
+                ],
+                kind: TableKind::Table,
+            })],
+        );
+        let adaptive = card_to_adaptive_card(&c);
+        let body = adaptive["body"].as_array().unwrap();
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["type"], "Container");
+        let items = body[0]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3); // header + 2 rows
+        assert_eq!(items[0]["type"], "ColumnSet");
+        let header_cols = items[0]["columns"].as_array().unwrap();
+        assert_eq!(header_cols.len(), 2);
+        assert_eq!(header_cols[0]["items"][0]["text"], "Name");
+        assert_eq!(header_cols[0]["items"][0]["weight"], "Bolder");
+        assert_eq!(items[1]["columns"][0]["items"][0]["text"], "Alpha");
+        assert_eq!(items[2]["columns"][1]["items"][0]["text"], "FAIL");
     }
 }
