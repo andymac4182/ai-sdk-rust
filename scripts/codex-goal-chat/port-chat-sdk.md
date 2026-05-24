@@ -479,6 +479,29 @@ during slice 3 of this port — the ai-sdk session had been merging right
 through the leaked lock because `mkdir` was failing for it too and it
 had its own recovery path, leaving the chat session stuck.
 
+**Stale-lock recovery (directory case, slice 439 refinement).** The
+shared lock is a *directory* by convention (`mkdir`-based). When the
+other session's process crashes mid-merge it can leak the directory
+too. Before treating a directory-style lock as stale you MUST confirm
+all three signals (any one of them on its own is not enough):
+
+1. `stat /tmp/ai-sdk-rust-main-merge.lock` shows mtime older than the
+   most recent `origin/main` commit (`git -C "$main_repo" log -1
+   --format=%ad origin/main`). The lock holder updates main quickly
+   once it acquires; a 20+ minute gap means it never got that far.
+2. `lsof /tmp/ai-sdk-rust-main-merge.lock` returns nothing (the
+   holding process is gone — `lsof` on a directory shows openers).
+3. No active `cargo` / `git` / `codex` processes belong to the other
+   session (`ps aux | grep -E "cargo|git" | grep -v claude` is
+   empty). The other session's harness keeps the codex binary alive
+   even between subprocesses, so look at child processes only.
+
+Then `rmdir /tmp/ai-sdk-rust-main-merge.lock` and retry. Observed once
+during slice 435 of this port — the ai-sdk codex session crashed
+mid-merge leaving the directory; 28 minutes elapsed with no main
+commit. After confirming all 3 signals, cleared via `rmdir` and merged
+chat slice 434 successfully.
+
 While holding the lock:
 
 ```sh
@@ -497,11 +520,15 @@ cargo test --workspace --all-features
 
 git -C "$main_repo" checkout main
 git -C "$main_repo" pull --ff-only origin main
-git -C "$main_repo" status --short
+git -C "$main_repo" status --short --untracked-files=no
 ```
 
-If the main checkout is dirty, stop and report. Do not stash, reset, or
-overwrite it.
+If the main checkout is dirty (tracked files), stop and report. Do not
+stash, reset, or overwrite it. The `--untracked-files=no` flag is
+non-negotiable (slice 439 refinement): an untracked `.claude/` worktree-
+metadata directory in `main_repo` would otherwise show up as `??` and
+trip the dirty check, blocking every merge-back. Only tracked-file
+changes block the merge.
 
 Merge and push (atomic — push only runs if every check passes):
 
@@ -704,6 +731,41 @@ Plan:
 This is a multi-slice session (5-10 slices) and should not be
 attempted mid-additive-helper-streak. Start a fresh dedicated
 session.
+
+## Typed-client-getter js-only-documented pattern (added slice 439)
+
+When porting an upstream adapter that ships a typed-class getter
+(e.g. slack `webClient` returning `WebClient`, github `octokit`
+returning `Octokit`, linear `linearClient` returning `LinearClient`),
+the upstream describe block usually has 5-6 cases that exercise:
+
+1. The typed-class instance check (`expect(x).toBeInstanceOf(Y)`).
+2. Per-call referential equality (`expect(a.x).toBe(a.x)`).
+3. A deprecated `client` alias mirror.
+4. Multi-workspace property-throw without ALS request context.
+5. ALS-based per-request resolution under a `with*Token(...)` scope.
+
+All five are js-only-documented by construction in the Rust port:
+- HTTP is held as an opaque `reqwest::Client` — no Rust analogue
+  for the typed wrapper class.
+- The Rust port holds `Client` by value (`Clone`-shared underlying
+  pool); per-call referential equality is moot.
+- The deprecated alias was never shipped.
+- Per-request context is plumbed through function parameters, not
+  thread-local storage; property-throw + ALS-based getter shapes
+  have no Rust equivalent.
+
+**Slice shape (~10 minutes each):** extend the adapter's
+`mod tests` header from "(1) subclass extensibility" to "(6)
+typed-client-getter cases enumerated", append a per-case bullet
+naming the upstream describe + reasoning, append a per-case
+sentence to the parity ledger row, run the adapter's test suite
+to confirm no regression, commit + merge. Slices 435 (github),
+436 (linear), 437 (slack), 438 (discord gateway Partials) all
+landed this way.
+
+When 5+ consecutive slices follow this pattern, fold the lesson
+back into the brief here rather than re-deriving it.
 
 ## Consumer-class port pattern (added slice 121)
 
