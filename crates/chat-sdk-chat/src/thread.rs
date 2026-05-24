@@ -306,6 +306,22 @@ impl Thread {
         format!("<@{user_id}>")
     }
 
+    /// 1:1 port of upstream `Thread.createSentMessageFromMessage(msg)`.
+    /// Wraps an existing [`crate::message::Message`] as a
+    /// [`SentMessage`] with edit/delete/add-reaction/remove-reaction
+    /// capabilities bound to this thread's adapter. The Message
+    /// fields are preserved as-is — accessors on `SentMessage`
+    /// delegate to the wrapped Message.
+    pub fn create_sent_message_from_message(
+        &self,
+        message: crate::message::Message,
+    ) -> SentMessage {
+        SentMessage {
+            message,
+            adapter: self.adapter.clone(),
+        }
+    }
+
     /// 1:1 port of upstream `Thread.subscribe()`. Records the
     /// subscription in the bound state adapter, then calls
     /// `adapter.on_thread_subscribe(thread_id)` (default no-op).
@@ -413,6 +429,95 @@ impl Thread {
             _ => new_state,
         };
         state.set(&key, merged, Some(THREAD_STATE_TTL_MS)).await
+    }
+}
+
+/// 1:1 port of upstream `interface SentMessage<TRawMessage>`. Wraps
+/// a [`crate::message::Message`] with edit / delete / addReaction /
+/// removeReaction capabilities bound to the adapter that posted it.
+/// Constructed via [`Thread::create_sent_message_from_message`] or
+/// returned from `Thread::post` (once that surfaces SentMessage —
+/// currently it returns `String` message id; SentMessage construction
+/// from a post-result lands in a follow-up slice).
+#[derive(Clone)]
+pub struct SentMessage {
+    message: crate::message::Message,
+    adapter: Arc<dyn Adapter>,
+}
+
+impl std::fmt::Debug for SentMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SentMessage")
+            .field("message", &self.message)
+            .field("adapter", &self.adapter.name())
+            .finish()
+    }
+}
+
+impl SentMessage {
+    /// Borrow the wrapped [`crate::message::Message`].
+    pub fn message(&self) -> &crate::message::Message {
+        &self.message
+    }
+
+    /// 1:1 with upstream `sent.id` field (delegates to wrapped Message).
+    pub fn id(&self) -> &str {
+        &self.message.id
+    }
+
+    /// 1:1 with upstream `sent.text` field.
+    pub fn text(&self) -> &str {
+        &self.message.text
+    }
+
+    /// 1:1 with upstream `sent.threadId` field.
+    pub fn thread_id(&self) -> &str {
+        &self.message.thread_id
+    }
+
+    /// 1:1 with upstream `sent.author` field.
+    pub fn author(&self) -> &crate::types::Author {
+        &self.message.author
+    }
+
+    /// 1:1 with upstream `sent.metadata` field.
+    pub fn metadata(&self) -> &crate::types::MessageMetadata {
+        &self.message.metadata
+    }
+
+    /// 1:1 with upstream `sent.attachments` field.
+    pub fn attachments(&self) -> &[crate::types::Attachment] {
+        &self.message.attachments
+    }
+
+    /// 1:1 port of upstream `SentMessage.delete()`. Delegates to
+    /// `adapter.delete_message(thread_id, message_id)`.
+    pub async fn delete(&self) -> AdapterResult<()> {
+        self.adapter
+            .delete_message(&self.message.thread_id, &self.message.id)
+            .await
+    }
+
+    /// 1:1 port of upstream `SentMessage.addReaction(emoji)`.
+    pub async fn add_reaction(&self, emoji: &str) -> AdapterResult<()> {
+        self.adapter
+            .add_reaction(&self.message.thread_id, &self.message.id, emoji)
+            .await
+    }
+
+    /// 1:1 port of upstream `SentMessage.removeReaction(emoji)`.
+    pub async fn remove_reaction(&self, emoji: &str) -> AdapterResult<()> {
+        self.adapter
+            .remove_reaction(&self.message.thread_id, &self.message.id, emoji)
+            .await
+    }
+
+    /// 1:1 port of upstream `SentMessage.edit(text)`. Returns the
+    /// updated message id from the adapter's `edit_message` call.
+    pub async fn edit(&self, text: &str) -> AdapterResult<String> {
+        self.adapter
+            .edit_message(&self.message.thread_id, &self.message.id, text)
+            .await
     }
 }
 
@@ -849,6 +954,27 @@ mod tests {
         block_on(thread.unsubscribe()).unwrap();
         let result = block_on(thread.is_subscribed()).unwrap();
         assert!(!result);
+    }
+
+    // ---------- describe("createSentMessageFromMessage") (1 of 4+ cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("createSentMessageFromMessage")
+    // > it("should wrap a Message as a SentMessage with same fields")`.
+    // The remaining cases (edit/delete/addReaction/removeReaction
+    // capabilities) require HTTP mocking infrastructure to assert
+    // adapter calls — deferred to a follow-up slice.
+
+    #[test]
+    fn thread_create_sent_message_from_message_wraps_with_same_fields() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let msg = sample_message("msg-1", "Hello world");
+        let sent = thread.create_sent_message_from_message(msg.clone());
+        assert_eq!(sent.id(), "msg-1");
+        assert_eq!(sent.text(), "Hello world");
+        assert_eq!(sent.thread_id(), msg.thread_id);
+        assert_eq!(sent.author(), &msg.author);
+        assert_eq!(sent.metadata(), &msg.metadata);
+        assert_eq!(sent.attachments(), &msg.attachments[..]);
     }
 
     // ---------- describe("recentMessages getter/setter") (4 cases) ----------
