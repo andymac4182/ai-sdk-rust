@@ -2711,6 +2711,17 @@ where
             ),
         )
         .await;
+        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal.as_ref()) {
+            abort_reason = abort_part.reason.clone();
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::Abort(abort_part),
+                on_chunk.as_ref(),
+            )
+            .await;
+            aborted = true;
+            break;
+        }
         let local_tool_results =
             apply_stream_text_transforms_to_tool_results(local_tool_results, &transforms);
         for tool_result in &local_tool_results {
@@ -10059,6 +10070,96 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].steps.is_empty());
         assert_eq!(events[0].reason, Some(json!("client-disconnected")));
+    }
+
+    #[test]
+    fn stream_text_aborts_during_tool_execution_before_tool_result() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let abort_events = Arc::new(Mutex::new(Vec::<StreamTextOnAbortEvent>::new()));
+        let events = Arc::clone(&abort_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Use the tool")])
+                .with_abort_signal(abort_signal)
+                .with_tool(Tool::new("tool1", input_schema).with_execute(
+                    move |_input, _options| {
+                        let abort_controller = abort_controller.clone();
+                        async move {
+                            abort_controller.abort_with_reason("tool-aborted");
+                            Ok(json!("result1"))
+                        }
+                    },
+                ))
+                .with_on_abort(move |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().expect("abort events lock").push(event);
+                    }
+                }),
+        ));
+
+        assert!(result.steps.is_empty());
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolResult(_)))
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::FinishStep(_)))
+        );
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            json!([
+                { "type": "start" },
+                {
+                    "type": "start-step",
+                    "request": {},
+                    "warnings": []
+                },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call-1",
+                    "toolName": "tool1",
+                    "input": { "value": "value" }
+                },
+                { "type": "abort", "reason": "tool-aborted" }
+            ])
+        );
+
+        let events = abort_events.lock().expect("abort events lock");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].steps.is_empty());
+        assert_eq!(events[0].reason, Some(json!("tool-aborted")));
     }
 
     #[test]

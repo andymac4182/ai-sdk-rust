@@ -4953,6 +4953,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    value to the callback. Rust consumes the materialized stream result rather
    than a Web `ReadableStream`, so JavaScript thrown `Error` object identity is
    represented as provider error JSON.
+   The upstream `streamText` abort-during-tool-execution case now has the
+   named Rust counterpart
+   `stream_text_aborts_during_tool_execution_before_tool_result`, proving a
+   local tool-triggered abort stops before tool-result and finish-step
+   emission and calls `onAbort` with only previously completed steps.
    The upstream automatic approval and automatic denial tool-approval stream
    cases now have Rust coverage in
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`
