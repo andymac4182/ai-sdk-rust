@@ -457,6 +457,22 @@ impl<T: ChatTransport> Chat<T> {
         )])
     }
 
+    pub fn add_dynamic_tool_output(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        output: impl Into<JsonValue>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::ToolOutputAvailable {
+            tool_call_id: tool_call_id.into(),
+            output: output.into(),
+            provider_executed: None,
+            provider_metadata: None,
+            tool_metadata: None,
+            preliminary: None,
+            dynamic: Some(true),
+        }])
+    }
+
     pub fn add_tool_error(
         &mut self,
         tool_call_id: impl Into<String>,
@@ -2926,6 +2942,59 @@ mod tests {
                             "state": "output-error",
                             "input": { "testArg": "test-value" },
                             "errorText": "test-error"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_add_dynamic_tool_output_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::ToolInputAvailable {
+                tool_call_id: "tool-call-0".to_string(),
+                tool_name: "test-tool".to_string(),
+                input: json!({ "testArg": "test-value" }),
+                provider_executed: None,
+                provider_metadata: None,
+                tool_metadata: None,
+                dynamic: Some(true),
+                title: None,
+            },
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
+            .expect("dynamic tool output is added");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
                         }
                     ]
                 }
