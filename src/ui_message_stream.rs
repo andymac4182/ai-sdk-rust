@@ -1723,7 +1723,7 @@ impl StreamingUiMessageState {
             _ => UiMessage::new(message_id, UiMessageRole::Assistant),
         };
 
-        Self {
+        let mut state = Self {
             message,
             finish_reason: None,
             aborted: false,
@@ -1735,6 +1735,38 @@ impl StreamingUiMessageState {
             tool_input_text: BTreeMap::new(),
             approval_tool_call_ids: BTreeMap::new(),
             data_part_indices: BTreeMap::new(),
+        };
+        state.seed_existing_part_indices();
+        state
+    }
+
+    fn seed_existing_part_indices(&mut self) {
+        for (index, part) in self.message.parts.iter().enumerate() {
+            let part_type = ui_message_part_type(part);
+
+            if matches!(part_type, Some("dynamic-tool"))
+                || part_type.is_some_and(|part_type| part_type.starts_with("tool-"))
+            {
+                if let Some(tool_call_id) = part.get("toolCallId").and_then(JsonValue::as_str) {
+                    self.tool_part_indices
+                        .insert(tool_call_id.to_string(), index);
+
+                    if let Some(approval_id) = part
+                        .get("approval")
+                        .and_then(|approval| approval.get("id"))
+                        .and_then(JsonValue::as_str)
+                    {
+                        self.approval_tool_call_ids
+                            .insert(approval_id.to_string(), tool_call_id.to_string());
+                    }
+                }
+            }
+
+            if part_type.is_some_and(|part_type| part_type.starts_with("data-")) {
+                if let Some(id) = part.get("id").and_then(JsonValue::as_str) {
+                    self.data_part_indices.insert(id.to_string(), index);
+                }
+            }
         }
     }
 }
@@ -4828,6 +4860,248 @@ mod tests {
                     "reason": "trusted internal tool"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_existing_static_tool_after_approval() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": true }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        let updates = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::tool_output_available("call-1", json!("result1")),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "Hello, world!"),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed static tool execution processes");
+
+        assert_eq!(
+            serde_json::to_value(&updates[0].parts[1]).expect("part serializes"),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "output-available",
+                "input": { "value": "value" },
+                "output": "result1",
+                "approval": { "id": "id-1", "approved": true }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "value" },
+                    "output": "result1",
+                    "approval": { "id": "id-1", "approved": true }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "Hello, world!", "state": "done" }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_existing_dynamic_tool_after_approval() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": true }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!("result1"),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: Some(true),
+                },
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "Hello, world!"),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed dynamic tool execution processes");
+
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "value" },
+                    "output": "result1",
+                    "approval": { "id": "id-1", "approved": true }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "Hello, world!", "state": "done" }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_replaces_existing_preliminary_tool_outputs_after_approval() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": true }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        let updates = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!("preliminary-result"),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!("final-result"),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::tool_output_available("call-1", json!("final-result")),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "Hello, world!"),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed preliminary tool execution processes");
+
+        assert_eq!(updates[0].parts[1]["preliminary"], json!(true));
+        assert_eq!(updates[0].parts[1]["output"], json!("preliminary-result"));
+        assert_eq!(updates[1].parts[1]["preliminary"], json!(true));
+        assert_eq!(updates[1].parts[1]["output"], json!("final-result"));
+        assert!(updates[2].parts[1].get("preliminary").is_none());
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "value" },
+                    "output": "final-result",
+                    "approval": { "id": "id-1", "approved": true }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "Hello, world!", "state": "done" }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_existing_tool_denial_after_approval_response() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": false }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        let updates = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::tool_output_denied("call-1", "tool1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "I did not execute the tool."),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed denied dynamic tool execution processes");
+
+        assert_eq!(updates[0].parts[1]["state"], json!("output-denied"));
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-denied",
+                    "input": { "value": "value" },
+                    "approval": { "id": "id-1", "approved": false }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "I did not execute the tool.", "state": "done" }
+            ])
         );
     }
 

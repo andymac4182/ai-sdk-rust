@@ -641,6 +641,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   `process_ui_message_stream_preserves_automatic_approval_metadata_through_execution`.
   Rust now tracks approval ids so approval responses mutate the original tool
   UI part instead of appending raw approval chunks.
+- 2026-05-25: `packages/ai` `processUIMessageStream` resumed approved-tool
+  execution parity added named Rust counterparts for upstream initial tool
+  execution after approval, preliminary resumed outputs, and execution denial:
+  `process_ui_message_stream_updates_existing_static_tool_after_approval`,
+  `process_ui_message_stream_updates_existing_dynamic_tool_after_approval`,
+  `process_ui_message_stream_replaces_existing_preliminary_tool_outputs_after_approval`,
+  and
+  `process_ui_message_stream_updates_existing_tool_denial_after_approval_response`.
+  `StreamingUiMessageState::new` now seeds tool, approval, and data part
+  indexes from an existing assistant message so resumed chunks mutate prior UI
+  parts before appending the next step.
 - 2026-05-24: `packages/ai` `processUIMessageStream` malformed-stream
   parity added named Rust counterparts for upstream
   `process-ui-message-stream.test.ts` missing-start error cases:
