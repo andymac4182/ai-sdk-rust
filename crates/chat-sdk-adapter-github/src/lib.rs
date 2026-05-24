@@ -828,17 +828,42 @@ mod tests {
     // (collapses to `github:<owner>/<repo>`) and `adapter.isDM(_) ->
     // false` (GitHub conversations are always issue/PR threads).
 
+    // ---------- describe("renderFormatted") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("renderFormatted")`.
+
     #[test]
-    // ---------- renderFormatted (1 upstream case) ----------
-    #[test]
-    fn render_formatted_should_render_markdown_from_ast() {
+    fn render_formatted_should_render_simple_markdown() {
+        // 1:1 with upstream "should render simple markdown".
         use chat_sdk_chat::markdown::{Node, paragraph, root, text};
         let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
         let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
             text("Hello world"),
         )]))]));
         let result = adapter.render_formatted(&ast);
-        assert!(result.contains("Hello world"), "got: {result}");
+        assert_eq!(result.trim(), "Hello world");
+    }
+
+    #[test]
+    fn render_formatted_should_render_bold_text() {
+        // 1:1 with upstream "should render bold text".
+        use chat_sdk_chat::markdown::{Node, paragraph, root, strong, text};
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Strong(
+            strong(vec![Node::Text(text("bold"))]),
+        )]))]));
+        let result = adapter.render_formatted(&ast);
+        assert_eq!(result.trim(), "**bold**");
+    }
+
+    // ---------- describe("startTyping") (1 upstream case) ----------
+
+    #[test]
+    fn start_typing_should_be_a_no_op() {
+        // 1:1 with upstream "should be a no-op". The Rust port's
+        // start_typing returns Ok(()) without dispatching anywhere.
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        block_on(adapter.start_typing("github:acme/app:42", None)).unwrap();
+        block_on(adapter.start_typing("github:acme/app:42", Some("thinking..."))).unwrap();
     }
 
     #[test]
