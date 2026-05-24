@@ -26,7 +26,11 @@
 use std::sync::Arc;
 
 use crate::postable_object::{PostableDispatchError, post_postable_object};
-use crate::types::{Adapter, AdapterResult};
+use crate::types::{Adapter, AdapterResult, StateAdapter, StateResult, THREAD_STATE_TTL_MS};
+
+/// 1:1 with upstream's private
+/// `const THREAD_STATE_KEY_PREFIX = "thread-state:"`.
+pub const THREAD_STATE_KEY_PREFIX: &str = "thread-state:";
 
 /// Cross-platform thread handle. 1:1 port (in progress) of upstream
 /// `class Thread`.
@@ -34,6 +38,7 @@ use crate::types::{Adapter, AdapterResult};
 pub struct Thread {
     adapter: Arc<dyn Adapter>,
     thread_id: String,
+    state_adapter: Option<Arc<dyn StateAdapter>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -47,11 +52,38 @@ impl std::fmt::Debug for Thread {
 
 impl Thread {
     /// 1:1 port of upstream `new Thread({ adapter, threadId })`.
+    /// Created without a state adapter — `state()` / `set_state()`
+    /// require [`Thread::with_state_adapter`] (or upstream's lazy
+    /// singleton resolution when ported).
     pub fn new(adapter: Arc<dyn Adapter>, thread_id: impl Into<String>) -> Self {
         Self {
             adapter,
             thread_id: thread_id.into(),
+            state_adapter: None,
         }
+    }
+
+    /// 1:1 port of upstream `new ThreadImpl({ adapter, id,
+    /// stateAdapter })`. Required when callers want to use
+    /// [`Self::state`] / [`Self::set_state`] without the (not yet
+    /// ported) singleton fallback path.
+    pub fn with_state_adapter(
+        adapter: Arc<dyn Adapter>,
+        thread_id: impl Into<String>,
+        state_adapter: Arc<dyn StateAdapter>,
+    ) -> Self {
+        Self {
+            adapter,
+            thread_id: thread_id.into(),
+            state_adapter: Some(state_adapter),
+        }
+    }
+
+    /// Borrow the bound state adapter, if any. Returns `None` when
+    /// [`Thread::new`] was used (upstream falls back to the chat
+    /// singleton; not yet ported in Rust).
+    pub fn state_adapter(&self) -> Option<&Arc<dyn StateAdapter>> {
+        self.state_adapter.as_ref()
     }
 
     /// Thread-id accessor. 1:1 with upstream `get threadId(): string`.
@@ -95,6 +127,67 @@ impl Thread {
     /// default `Ok(None)`.
     pub async fn subject(&self) -> AdapterResult<Option<String>> {
         self.adapter.fetch_subject(&self.thread_id).await
+    }
+
+    fn state_key(&self) -> String {
+        format!("{THREAD_STATE_KEY_PREFIX}{}", self.thread_id)
+    }
+
+    /// 1:1 port of upstream `Thread.state` getter. Reads the stored
+    /// state value via the bound [`StateAdapter`]. Returns
+    /// `Ok(None)` when no state has been set, the bound adapter
+    /// has expired the key, or when the Thread was built without a
+    /// state adapter (matches upstream's `null` resolution).
+    pub async fn state(&self) -> StateResult<Option<serde_json::Value>> {
+        let Some(state) = self.state_adapter.as_ref() else {
+            return Ok(None);
+        };
+        state.get(&self.state_key()).await
+    }
+
+    /// 1:1 port of upstream `Thread.setState(newState, options?)`.
+    /// Merges `new_state` with any existing state under the same
+    /// key (shallow merge, matching upstream's `{ ...existing,
+    /// ...newState }` spread). State persists for
+    /// [`THREAD_STATE_TTL_MS`] milliseconds. No-op when the Thread
+    /// was built without a state adapter (matches upstream's lazy-
+    /// singleton fallback, which Rust hasn't ported yet — the
+    /// no-op is the safe default).
+    pub async fn set_state(&self, new_state: serde_json::Value) -> StateResult<()> {
+        self.set_state_with_options(new_state, false).await
+    }
+
+    /// 1:1 port of upstream `Thread.setState(newState, { replace:
+    /// true })`. Overwrites any existing state under the key
+    /// instead of merging.
+    pub async fn set_state_replace(&self, new_state: serde_json::Value) -> StateResult<()> {
+        self.set_state_with_options(new_state, true).await
+    }
+
+    async fn set_state_with_options(
+        &self,
+        new_state: serde_json::Value,
+        replace: bool,
+    ) -> StateResult<()> {
+        let Some(state) = self.state_adapter.as_ref() else {
+            return Ok(());
+        };
+        let key = self.state_key();
+        if replace {
+            return state.set(&key, new_state, Some(THREAD_STATE_TTL_MS)).await;
+        }
+        let merged = match state.get(&key).await? {
+            Some(serde_json::Value::Object(mut existing)) => {
+                if let serde_json::Value::Object(incoming) = new_state {
+                    for (k, v) in incoming {
+                        existing.insert(k, v);
+                    }
+                }
+                serde_json::Value::Object(existing)
+            }
+            _ => new_state,
+        };
+        state.set(&key, merged, Some(THREAD_STATE_TTL_MS)).await
     }
 }
 
@@ -227,5 +320,150 @@ mod tests {
         block_on(thread.post("a")).unwrap();
         block_on(cloned.post("b")).unwrap();
         assert_eq!(adapter.post_message.lock().unwrap().len(), 2);
+    }
+
+    // ---------- Per-thread state (8 upstream cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("Per-thread state")`.
+
+    use crate::types::StateAdapter;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    /// 1:1 with upstream `createMockState()` (vi.fn()-backed
+    /// HashMap). Records all `get` / `set` calls so tests can
+    /// assert on call shape.
+    #[derive(Debug, Default)]
+    struct MockState {
+        cache: StdMutex<HashMap<String, serde_json::Value>>,
+        get_calls: StdMutex<Vec<String>>,
+        set_calls: StdMutex<Vec<(String, serde_json::Value, Option<u64>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for MockState {
+        async fn get(&self, key: &str) -> StateResult<Option<serde_json::Value>> {
+            self.get_calls.lock().unwrap().push(key.to_string());
+            Ok(self.cache.lock().unwrap().get(key).cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            self.set_calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), value.clone(), ttl_ms));
+            self.cache.lock().unwrap().insert(key.to_string(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> StateResult<()> {
+            self.cache.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn thread_with_state() -> (Thread, Arc<MockState>) {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state.clone() as Arc<dyn StateAdapter>,
+        );
+        (thread, state)
+    }
+
+    #[test]
+    fn per_thread_state_returns_none_when_no_state_has_been_set() {
+        let (thread, _state) = thread_with_state();
+        let value = block_on(thread.state()).unwrap();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn per_thread_state_returns_stored_state() {
+        let (thread, state) = thread_with_state();
+        state
+            .cache
+            .lock()
+            .unwrap()
+            .insert(
+                "thread-state:slack:C123:1234.5678".to_string(),
+                serde_json::json!({ "aiMode": true }),
+            );
+        let value = block_on(thread.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "aiMode": true })));
+    }
+
+    #[test]
+    fn per_thread_state_sets_state_and_retrieves_it() {
+        let (thread, _state) = thread_with_state();
+        block_on(thread.set_state(serde_json::json!({ "aiMode": true }))).unwrap();
+        let value = block_on(thread.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "aiMode": true })));
+    }
+
+    #[test]
+    fn per_thread_state_merges_state_by_default() {
+        let (thread, _state) = thread_with_state();
+        block_on(thread.set_state(serde_json::json!({ "aiMode": true }))).unwrap();
+        block_on(thread.set_state(serde_json::json!({ "counter": 5 }))).unwrap();
+        let value = block_on(thread.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "aiMode": true, "counter": 5 })));
+    }
+
+    #[test]
+    fn per_thread_state_overwrites_existing_keys_when_merging() {
+        let (thread, _state) = thread_with_state();
+        block_on(thread.set_state(serde_json::json!({ "aiMode": true, "counter": 1 }))).unwrap();
+        block_on(thread.set_state(serde_json::json!({ "counter": 10 }))).unwrap();
+        let value = block_on(thread.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "aiMode": true, "counter": 10 })));
+    }
+
+    #[test]
+    fn per_thread_state_replaces_entire_state_when_replace_option_is_true() {
+        let (thread, _state) = thread_with_state();
+        block_on(thread.set_state(serde_json::json!({ "aiMode": true, "counter": 5 }))).unwrap();
+        block_on(thread.set_state_replace(serde_json::json!({ "counter": 10 }))).unwrap();
+        let value = block_on(thread.state()).unwrap();
+        assert_eq!(value, Some(serde_json::json!({ "counter": 10 })));
+    }
+
+    #[test]
+    fn per_thread_state_uses_correct_key_prefix_for_state_storage() {
+        let (thread, state) = thread_with_state();
+        block_on(thread.set_state(serde_json::json!({ "aiMode": true }))).unwrap();
+        let set_calls = state.set_calls.lock().unwrap();
+        let last = set_calls.last().unwrap();
+        assert_eq!(last.0, "thread-state:slack:C123:1234.5678");
+        assert_eq!(last.1, serde_json::json!({ "aiMode": true }));
+        assert_eq!(last.2, Some(THREAD_STATE_TTL_MS));
+    }
+
+    #[test]
+    fn per_thread_state_calls_get_with_correct_key() {
+        let (thread, state) = thread_with_state();
+        block_on(thread.state()).unwrap();
+        let get_calls = state.get_calls.lock().unwrap();
+        assert_eq!(get_calls.last().unwrap(), "thread-state:slack:C123:1234.5678");
     }
 }
