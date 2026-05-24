@@ -2709,6 +2709,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-chat-language-model.test.ts` strict tool-call request/result cases
   to the OpenAI provider facade by asserting required and specific
   `tool_choice` request bodies and parsed assistant tool-call content.
+- 2026-05-24: OpenAI chat usage/provider-metadata parity added
+  `openai_chat_should_return_cached_tokens_in_prompt_details_tokens` and
+  `openai_chat_should_return_prediction_tokens_in_provider_metadata`, mapping
+  upstream `openai-chat-language-model.test.ts` prompt `cached_tokens` usage
+  and completion `accepted_prediction_tokens`/`rejected_prediction_tokens`
+  provider-metadata cases through the OpenAI provider facade.
 - 2026-05-24: OpenAI chat response-format request-body parity added
   `openai_chat_should_not_send_response_format_when_response_format_is_text`,
   `openai_chat_should_forward_json_response_format_as_json_object_without_schema`,

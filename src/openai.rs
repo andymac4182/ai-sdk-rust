@@ -3379,6 +3379,111 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_return_cached_tokens_in_prompt_details_tokens() {
+        let provider = openai_chat_test_provider_with_json_response(json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 20,
+                "total_tokens": 35,
+                "prompt_tokens_details": {
+                    "cached_tokens": 1152
+                }
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        }));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-4o-mini")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(15));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(1152));
+        assert_eq!(result.usage.input_tokens.cache_write, None);
+        assert_eq!(result.usage.input_tokens.no_cache, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(20));
+        assert_eq!(result.usage.output_tokens.text, Some(20));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("prompt_tokens_details"))
+                .and_then(|details| details.get("cached_tokens")),
+            Some(&json!(1152))
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_return_prediction_tokens_in_provider_metadata() {
+        let provider = openai_chat_test_provider_with_json_response(json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 20,
+                "total_tokens": 35,
+                "completion_tokens_details": {
+                    "accepted_prediction_tokens": 123,
+                    "rejected_prediction_tokens": 456
+                }
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        }));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-4o-mini")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("acceptedPredictionTokens")),
+            Some(&json!(123))
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("rejectedPredictionTokens")),
+            Some(&json!(456))
+        );
+    }
+
+    #[test]
     fn openai_chat_reasoning_model_should_clear_unsupported_standard_settings() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("o4-mini", |options| {
