@@ -1584,7 +1584,7 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
   upstream tests + re-export module (slice 170).
 - `crates/chat-sdk-adapter-slack/Cargo.toml`: dev-deps
   `base64 = "0.22"` + `rand = "0.8"` (slice 170).
-- `crates/chat-sdk-adapter-linear/src/utils.rs`: 3 upstream +
+- `crates/chat-sdk-adapter-linear/src/linear_functions.rs`: 3 upstream +
   4 additive tests + 2 helpers (slice 171).
 - `crates/chat-sdk-adapter-teams/src/errors.rs`: 12 ported
   upstream tests + `handle_teams_error` dispatcher (slice 172).
@@ -1871,7 +1871,7 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
 
 - **`stringify_markdown` was the single highest-leverage
   unblock.** Slice 186 added a hand-written mdast stringifier to
-  chat-sdk-chat (no `mdast_util_to_markdown` Rust crate available;
+  chat-sdk-chat (no `mdast-to-markdown` Rust crate available;
   the upstream `markdown` Rust crate has no inverse). 14 tests in
   chat-sdk-chat. This unblocked Linear/GitHub/Messenger/WhatsApp/
   GChat markdown converters - 4 ports landed in slices 186-190
@@ -2272,7 +2272,7 @@ cases ported.
   slices, the smallest *remaining* unported chunks per adapter are
   quite different from the original src-file-count order. A real-world
   ordering based on actual remaining work would be:
-  1. Linear `utils.rs` follow-ups + GitHub small remaining (~50 LOC)
+  1. Linear helper follow-ups + GitHub small remaining (~50 LOC)
   2. Messenger Generic Template (~25 cases, requires JSON shape)
   3. WhatsApp interactive-message branch (5 cases)
   4. Discord cards.test.ts (508 LOC)
@@ -2316,7 +2316,7 @@ cases ported.
 ### 2026-05-24 - slices 212..218
 
 Slices reviewed: 212 Slack cards.rs scaffold + WhatsApp explicit Link/Table
-arms; 213 GChat thread_utils.rs port (14 cases); 214 GChat user_info.rs port
+arms; 213 GChat thread_id.rs port (14 cases); 214 GChat user_info.rs port
 (14 cases using MemoryStateAdapter); 215 GChat workspace_events.rs partial
 port (4 portable Pub/Sub cases); 216 Linear thread_id.rs port (18 cases);
 217 Teams markdown.rs port (39 cases - the last missing adapter markdown
@@ -2332,7 +2332,7 @@ converter); 218 Teams cards.rs fallback-text wrapper (2 cases).
   Messenger - check whether they need a thin wrapper too). The brief should
   list this as a "find existing shared helper before porting per-adapter"
   pattern.
-- **`thread_id` / `thread_utils` ports are easy 1:1 wins.** Slices 213
+- **`thread_id` ports are easy 1:1 wins.** Slices 213
   (GChat), 216 (Linear) each ported the canonical wire-format + 14-18
   tests in a single slice. Discord/Slack/Teams/etc don't expose
   `encodeThreadId` / `decodeThreadId` as public methods, but the ones

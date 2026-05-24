@@ -10,7 +10,7 @@
 
 pub mod cards;
 pub mod markdown;
-pub mod thread_utils;
+pub mod thread_id;
 pub mod user_info;
 pub mod workspace_events;
 
@@ -208,7 +208,7 @@ impl GchatAdapter {
     /// decodes and returns `gchat:<spaceName>`. Returns `None` when
     /// `thread_id` isn't a Google Chat-encoded value.
     pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
-        let decoded = crate::thread_utils::decode_thread_id(thread_id).ok()?;
+        let decoded = crate::thread_id::decode_thread_id(thread_id).ok()?;
         Some(format!("gchat:{}", decoded.space_name))
     }
 
@@ -216,7 +216,7 @@ impl GchatAdapter {
     /// `adapter.isDM(threadId)` which delegates to `isDMThread` and
     /// just checks for the `:dm` suffix.
     pub fn is_dm(&self, thread_id: &str) -> bool {
-        crate::thread_utils::is_dm_thread(thread_id)
+        crate::thread_id::is_dm_thread(thread_id)
     }
 
     /// Render formatted content to Google-Chat-flavored markdown.

@@ -1,4 +1,4 @@
-//! Google Chat thread-id encoding/decoding utilities.
+//! Google Chat thread-id encoding/decoding helpers.
 //!
 //! 1:1 port of `packages/adapter-gchat/src/thread-utils.ts`. Encodes a
 //! Google Chat space + optional thread + DM marker into the canonical
