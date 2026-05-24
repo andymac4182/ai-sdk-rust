@@ -4080,6 +4080,11 @@ mod tests {
     }
 
     #[test]
+    fn chat_approved_auto_send_should_update_tool_invocation_to_show_approval_response() {
+        assert_chat_tool_approval_response_forwards_follow_up_options();
+    }
+
+    #[test]
     fn chat_add_tool_approval_response_should_forward_options_to_make_request_when_auto_sending() {
         assert_chat_tool_approval_response_forwards_follow_up_options();
     }
