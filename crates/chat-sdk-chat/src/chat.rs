@@ -96,6 +96,15 @@ impl std::error::Error for OpenDmError {}
 pub enum GetUserError {
     /// No adapter pattern matched the user id.
     UnknownUserIdFormat(String),
+    /// Numeric user id matched multiple registered adapters
+    /// (Discord/Telegram/GitHub). 1:1 with upstream's
+    /// `throw new ChatError(..., "AMBIGUOUS_USER_ID")` when
+    /// `candidates.length > 1`. Carries the conflicting adapter
+    /// names so callers can disambiguate.
+    AmbiguousUserId {
+        user_id: String,
+        candidates: Vec<String>,
+    },
     /// The inferred adapter rejected `get_user` (most often
     /// `AdapterError::Unsupported("get_user")`).
     AdapterError(String),
@@ -107,6 +116,11 @@ impl fmt::Display for GetUserError {
             Self::UnknownUserIdFormat(id) => {
                 write!(f, "Cannot infer adapter from userId \"{id}\"")
             }
+            Self::AmbiguousUserId { user_id, candidates } => write!(
+                f,
+                "Numeric userId \"{user_id}\" is ambiguous between adapters: {}. Call the platform's adapter directly (e.g. `adapter.getUser(userId)`).",
+                candidates.join(", ")
+            ),
             Self::AdapterError(msg) => write!(f, "get_user failed: {msg}"),
         }
     }
@@ -554,9 +568,37 @@ impl Chat {
         &self,
         user_id: &str,
     ) -> Result<Option<crate::types::UserInfo>, GetUserError> {
-        let adapter = self
-            .infer_adapter_for_user_id(user_id)
-            .ok_or_else(|| GetUserError::UnknownUserIdFormat(user_id.to_string()))?;
+        // 1:1 with upstream: numeric IDs check collision across
+        // discord/telegram/github registered adapters. Returns
+        // AmbiguousUserId when >1 candidate, otherwise the single
+        // matching adapter. Non-numeric IDs fall through to the
+        // priority-order infer helper.
+        let adapter = if is_numeric_user_id(user_id) {
+            let mut candidates: Vec<String> = Vec::new();
+            if is_discord_snowflake(user_id) && self.get_adapter("discord").is_some() {
+                candidates.push("discord".to_string());
+            }
+            if self.get_adapter("telegram").is_some() {
+                candidates.push("telegram".to_string());
+            }
+            if self.get_adapter("github").is_some() {
+                candidates.push("github".to_string());
+            }
+            if candidates.len() > 1 {
+                return Err(GetUserError::AmbiguousUserId {
+                    user_id: user_id.to_string(),
+                    candidates,
+                });
+            }
+            if let Some(name) = candidates.first() {
+                self.get_adapter(name)
+            } else {
+                self.infer_adapter_for_user_id(user_id)
+            }
+        } else {
+            self.infer_adapter_for_user_id(user_id)
+        }
+        .ok_or_else(|| GetUserError::UnknownUserIdFormat(user_id.to_string()))?;
         adapter
             .get_user(user_id)
             .await
@@ -1616,6 +1658,42 @@ mod tests {
             .unwrap();
         assert_eq!(user.full_name, "Alice Smith");
         assert_eq!(adapter.calls.lock().unwrap().as_slice(), &["12345".to_string()]);
+    }
+
+    #[test]
+    fn chat_get_user_should_throw_ambiguous_user_id_when_numeric_id_matches_multiple_registered_adapters() {
+        // 1:1 with upstream `it("should throw AMBIGUOUS_USER_ID
+        // when numeric id matches multiple registered adapters")`.
+        // Registers both telegram + github so a numeric id matches
+        // both candidates.
+        let telegram = Arc::new(GetUserAdapter::new("telegram", Some(alice())));
+        let github = Arc::new(GetUserAdapter::new("github", Some(alice())));
+        let state: Arc<dyn StateAdapter> = Arc::new(NullState);
+        let adapters: Vec<Arc<dyn Adapter>> = vec![
+            telegram.clone() as Arc<dyn Adapter>,
+            github.clone() as Arc<dyn Adapter>,
+        ];
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters,
+            ..Default::default()
+        });
+        let err = futures_executor::block_on(chat.get_user("12345")).unwrap_err();
+        match err {
+            GetUserError::AmbiguousUserId {
+                ref user_id,
+                ref candidates,
+            } => {
+                assert_eq!(user_id, "12345");
+                assert!(candidates.contains(&"telegram".to_string()));
+                assert!(candidates.contains(&"github".to_string()));
+            }
+            other => panic!("expected AmbiguousUserId, got {other:?}"),
+        }
+        assert!(err.to_string().contains("ambiguous between adapters"));
+        // Neither adapter was called.
+        assert!(telegram.calls.lock().unwrap().is_empty());
+        assert!(github.calls.lock().unwrap().is_empty());
     }
 
     #[test]
