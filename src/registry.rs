@@ -14,7 +14,11 @@ use crate::provider_middleware::{
     WrappedProvider, WrappedProviderWithImageModelMiddleware, wrap_provider,
     wrap_provider_with_image_model_middleware,
 };
+use crate::reranking_model::RerankingModel;
 use crate::skills::Skills;
+use crate::speech_model::SpeechModel;
+use crate::transcription_model::TranscriptionModel;
+use crate::video_model::VideoModel;
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,6 +156,34 @@ pub struct CustomProviderWithSkills<P, S> {
     skills: S,
 }
 
+/// Custom provider wrapper that exposes direct transcription model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithTranscriptionModel<P, TM> {
+    provider: P,
+    transcription_models: Vec<(String, TM)>,
+}
+
+/// Custom provider wrapper that exposes direct speech model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithSpeechModel<P, SM> {
+    provider: P,
+    speech_models: Vec<(String, SM)>,
+}
+
+/// Custom provider wrapper that exposes direct reranking model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithRerankingModel<P, RM> {
+    provider: P,
+    reranking_models: Vec<(String, RM)>,
+}
+
+/// Custom provider wrapper that exposes direct video model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithVideoModel<P, VM> {
+    provider: P,
+    video_models: Vec<(String, VM)>,
+}
+
 impl<LM, EM, IM> Default for NoFallbackProvider<LM, EM, IM> {
     fn default() -> Self {
         Self {
@@ -242,6 +274,54 @@ impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
             skills,
         }
     }
+
+    /// Registers a transcription model by model id.
+    pub fn with_transcription_model<TM>(
+        self,
+        model_id: impl Into<String>,
+        model: TM,
+    ) -> CustomProviderWithTranscriptionModel<Self, TM> {
+        CustomProviderWithTranscriptionModel {
+            provider: self,
+            transcription_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a speech model by model id.
+    pub fn with_speech_model<SM>(
+        self,
+        model_id: impl Into<String>,
+        model: SM,
+    ) -> CustomProviderWithSpeechModel<Self, SM> {
+        CustomProviderWithSpeechModel {
+            provider: self,
+            speech_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a reranking model by model id.
+    pub fn with_reranking_model<RM>(
+        self,
+        model_id: impl Into<String>,
+        model: RM,
+    ) -> CustomProviderWithRerankingModel<Self, RM> {
+        CustomProviderWithRerankingModel {
+            provider: self,
+            reranking_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a video model by model id.
+    pub fn with_video_model<VM>(
+        self,
+        model_id: impl Into<String>,
+        model: VM,
+    ) -> CustomProviderWithVideoModel<Self, VM> {
+        CustomProviderWithVideoModel {
+            provider: self,
+            video_models: vec![(model_id.into(), model)],
+        }
+    }
 }
 
 impl<P, F> CustomProviderWithFiles<P, F> {
@@ -303,6 +383,173 @@ where
             .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
             .map(Ok)
             .unwrap_or_else(|| self.fallback_provider.image_model(model_id))
+    }
+}
+
+impl<P, TM> Provider for CustomProviderWithTranscriptionModel<P, TM>
+where
+    P: Provider,
+    TM: TranscriptionModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, TM> ProviderWithTranscriptionModel for CustomProviderWithTranscriptionModel<P, TM>
+where
+    P: Provider,
+    TM: TranscriptionModel + Clone,
+{
+    type TranscriptionModel = TM;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        self.transcription_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::TranscriptionModel))
+    }
+}
+
+impl<P, SM> Provider for CustomProviderWithSpeechModel<P, SM>
+where
+    P: Provider,
+    SM: SpeechModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, SM> ProviderWithSpeechModel for CustomProviderWithSpeechModel<P, SM>
+where
+    P: Provider,
+    SM: SpeechModel + Clone,
+{
+    type SpeechModel = SM;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        self.speech_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::SpeechModel))
+    }
+}
+
+impl<P, RM> Provider for CustomProviderWithRerankingModel<P, RM>
+where
+    P: Provider,
+    RM: RerankingModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, RM> ProviderWithRerankingModel for CustomProviderWithRerankingModel<P, RM>
+where
+    P: Provider,
+    RM: RerankingModel + Clone,
+{
+    type RerankingModel = RM;
+
+    fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError> {
+        self.reranking_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::RerankingModel))
+    }
+}
+
+impl<P, VM> Provider for CustomProviderWithVideoModel<P, VM>
+where
+    P: Provider,
+    VM: VideoModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, VM> ProviderWithVideoModel for CustomProviderWithVideoModel<P, VM>
+where
+    P: Provider,
+    VM: VideoModel + Clone,
+{
+    type VideoModel = VM;
+
+    fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+        self.video_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::VideoModel))
     }
 }
 
@@ -1373,6 +1620,138 @@ mod tests {
 
         assert_eq!(ProviderWithFiles::files(&provider), files);
         assert_eq!(ProviderWithSkills::skills(&provider), skills);
+    }
+
+    #[test]
+    fn custom_provider_transcription_model_should_return_the_transcription_model_if_it_exists() {
+        let model = StaticTranscriptionModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-transcription-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_transcription_model("test-model", model.clone());
+
+        assert_eq!(provider.transcription_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_transcription_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_transcription_model(
+                    "other-model",
+                    StaticTranscriptionModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-transcription-model".to_string(),
+                    },
+                );
+        let error = provider
+            .transcription_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::TranscriptionModel);
+    }
+
+    #[test]
+    fn custom_provider_speech_model_should_return_the_speech_model_if_it_exists() {
+        let model = StaticSpeechModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-speech-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_speech_model("test-model", model.clone());
+
+        assert_eq!(provider.speech_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_speech_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_speech_model(
+                    "other-model",
+                    StaticSpeechModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-speech-model".to_string(),
+                    },
+                );
+        let error = provider
+            .speech_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::SpeechModel);
+    }
+
+    #[test]
+    fn custom_provider_reranking_model_should_return_the_reranking_model_if_it_exists() {
+        let model = StaticRerankingModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-reranking-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_reranking_model("test-model", model.clone());
+
+        assert_eq!(provider.reranking_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_reranking_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_reranking_model(
+                    "other-model",
+                    StaticRerankingModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-reranking-model".to_string(),
+                    },
+                );
+        let error = provider
+            .reranking_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::RerankingModel);
+    }
+
+    #[test]
+    fn custom_provider_video_model_should_return_the_video_model_if_it_exists() {
+        let model = StaticVideoModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-video-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_video_model("test-model", model.clone());
+
+        assert_eq!(provider.video_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_video_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_video_model(
+                    "other-model",
+                    StaticVideoModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-video-model".to_string(),
+                    },
+                );
+        let error = provider
+            .video_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::VideoModel);
     }
 
     #[derive(Clone, Debug)]
