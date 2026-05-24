@@ -19,7 +19,7 @@ pub const UI_MESSAGE_STREAM_VERSION_HEADER: &str = "x-vercel-ai-ui-message-strea
 pub const UI_MESSAGE_STREAM_VERSION: &str = "v1";
 
 /// A subset of upstream UI-message stream chunks.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
@@ -440,6 +440,510 @@ pub enum UiMessageChunk {
         /// Metadata to merge into the UI message.
         message_metadata: JsonValue,
     },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+enum UiMessageChunkTagged {
+    Start {
+        #[serde(default)]
+        message_id: Option<String>,
+        #[serde(default)]
+        message_metadata: Option<JsonValue>,
+    },
+    StartStep,
+    TextStart {
+        id: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    TextDelta {
+        id: String,
+        delta: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    TextEnd {
+        id: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningStart {
+        id: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningDelta {
+        id: String,
+        delta: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningEnd {
+        id: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    File {
+        media_type: String,
+        url: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningFile {
+        media_type: String,
+        url: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    SourceUrl {
+        source_id: String,
+        url: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    SourceDocument {
+        source_id: String,
+        media_type: String,
+        title: String,
+        #[serde(default)]
+        filename: Option<String>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ToolInputStart {
+        tool_call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default)]
+        dynamic: Option<bool>,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    ToolInputDelta {
+        tool_call_id: String,
+        input_text_delta: String,
+    },
+    ToolInputAvailable {
+        tool_call_id: String,
+        tool_name: String,
+        input: JsonValue,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default)]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default)]
+        dynamic: Option<bool>,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    ToolInputError {
+        tool_call_id: String,
+        tool_name: String,
+        input: JsonValue,
+        error_text: String,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default)]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default)]
+        dynamic: Option<bool>,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    ToolOutputAvailable {
+        tool_call_id: String,
+        output: JsonValue,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default)]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default)]
+        preliminary: Option<bool>,
+        #[serde(default)]
+        dynamic: Option<bool>,
+    },
+    ToolOutputError {
+        tool_call_id: String,
+        error_text: String,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default)]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default)]
+        dynamic: Option<bool>,
+    },
+    ToolApprovalRequest {
+        approval_id: String,
+        tool_call_id: String,
+        #[serde(default)]
+        is_automatic: Option<bool>,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ToolApprovalResponse {
+        approval_id: String,
+        approved: bool,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+    },
+    ToolOutputDenied {
+        tool_call_id: String,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        provider_executed: Option<bool>,
+        #[serde(default)]
+        dynamic: Option<bool>,
+    },
+    Custom {
+        kind: String,
+        #[serde(default)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    Data {
+        data_type: String,
+        #[serde(default)]
+        id: Option<String>,
+        data: JsonValue,
+        #[serde(default)]
+        transient: Option<bool>,
+    },
+    Error {
+        error_text: String,
+    },
+    Abort {
+        #[serde(default)]
+        reason: Option<JsonValue>,
+    },
+    FinishStep,
+    Finish {
+        #[serde(default)]
+        finish_reason: Option<FinishReason>,
+        #[serde(default)]
+        message_metadata: Option<JsonValue>,
+    },
+    MessageMetadata {
+        message_metadata: JsonValue,
+    },
+}
+
+impl From<UiMessageChunkTagged> for UiMessageChunk {
+    fn from(chunk: UiMessageChunkTagged) -> Self {
+        match chunk {
+            UiMessageChunkTagged::Start {
+                message_id,
+                message_metadata,
+            } => Self::Start {
+                message_id,
+                message_metadata,
+            },
+            UiMessageChunkTagged::StartStep => Self::StartStep,
+            UiMessageChunkTagged::TextStart {
+                id,
+                provider_metadata,
+            } => Self::TextStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::TextEnd {
+                id,
+                provider_metadata,
+            } => Self::TextEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningStart {
+                id,
+                provider_metadata,
+            } => Self::ReasoningStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningEnd {
+                id,
+                provider_metadata,
+            } => Self::ReasoningEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::File {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::File {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            } => Self::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            } => Self::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunkTagged::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            } => Self::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            },
+            UiMessageChunkTagged::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunkTagged::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunkTagged::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            } => Self::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            },
+            UiMessageChunkTagged::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            } => Self::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            },
+            UiMessageChunkTagged::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            } => Self::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            } => Self::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            },
+            UiMessageChunkTagged::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            } => Self::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            },
+            UiMessageChunkTagged::Custom {
+                kind,
+                provider_metadata,
+            } => Self::Custom {
+                kind,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            } => Self::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            },
+            UiMessageChunkTagged::Error { error_text } => Self::Error { error_text },
+            UiMessageChunkTagged::Abort { reason } => Self::Abort { reason },
+            UiMessageChunkTagged::FinishStep => Self::FinishStep,
+            UiMessageChunkTagged::Finish {
+                finish_reason,
+                message_metadata,
+            } => Self::Finish {
+                finish_reason,
+                message_metadata,
+            },
+            UiMessageChunkTagged::MessageMetadata { message_metadata } => {
+                Self::MessageMetadata { message_metadata }
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UiMessageChunk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = JsonValue::deserialize(deserializer)?;
+        if let Some(data_type) = value
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .filter(|part_type| part_type.starts_with("data-"))
+            .map(ToString::to_string)
+        {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct DataWireChunk {
+                #[serde(default)]
+                id: Option<String>,
+                data: JsonValue,
+                #[serde(default)]
+                transient: Option<bool>,
+            }
+
+            let data =
+                serde_json::from_value::<DataWireChunk>(value).map_err(serde::de::Error::custom)?;
+            return Ok(Self::Data {
+                data_type,
+                id: data.id,
+                data: data.data,
+                transient: data.transient,
+            });
+        }
+
+        serde_json::from_value::<UiMessageChunkTagged>(value)
+            .map(Self::from)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Role of an upstream UI message.
@@ -4060,6 +4564,65 @@ mod tests {
                 "type": "tool-output-denied",
                 "toolCallId": "call-1"
             })
+        );
+    }
+
+    #[test]
+    fn ui_message_chunk_deserializes_dynamic_data_wire_chunk() {
+        let chunk = serde_json::from_value::<UiMessageChunk>(json!({
+            "type": "data-weather",
+            "id": "weather-1",
+            "data": { "temperature": 22 },
+            "transient": true
+        }))
+        .expect("dynamic data chunk deserializes");
+
+        assert_eq!(
+            chunk,
+            UiMessageChunk::Data {
+                data_type: "data-weather".to_string(),
+                id: Some("weather-1".to_string()),
+                data: json!({ "temperature": 22 }),
+                transient: Some(true)
+            }
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_accepts_dynamic_data_wire_chunks() {
+        let chunk = serde_json::from_value::<UiMessageChunk>(json!({
+            "type": "data-weather",
+            "id": "weather-1",
+            "data": { "temperature": 22 }
+        }))
+        .expect("dynamic data chunk deserializes");
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                chunk,
+                serde_json::from_value::<UiMessageChunk>(json!({
+                    "type": "data-weather",
+                    "id": "weather-1",
+                    "data": { "temperature": 24 }
+                }))
+                .expect("replacement data chunk deserializes"),
+            ],
+            false,
+        )
+        .expect("dynamic data chunks process");
+
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                {
+                    "type": "data-weather",
+                    "id": "weather-1",
+                    "data": { "temperature": 24 }
+                }
+            ])
         );
     }
 
