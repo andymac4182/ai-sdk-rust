@@ -1471,6 +1471,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   missing-result validation without being sent to providers, and consecutive
   tool-role messages collapse into one provider-facing tool message containing
   the actual tool result.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` tool-result URL
+  content parity added named Rust detection counterparts
+  `prompt_has_url_files_should_detect_url_content_in_tool_results` and
+  `prompt_has_url_files_should_detect_url_content_in_assistant_tool_results`
+  for the upstream `prompt/convert-to-language-model-prompt.test.ts` tool and
+  assistant tool-result URL download-trigger locations. Rust high-level
+  generate/stream entry points use this detector to call provider
+  `supported_urls()` when URL-backed files appear in tool-result multipart
+  content; the JavaScript custom async `download` callback shape remains a JS
+  prompt-boundary API and is not exposed by the current Rust prompt converter.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

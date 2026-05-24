@@ -9,10 +9,11 @@ use crate::generate_text::MissingToolResultsError;
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
-    LanguageModelAssistantContentPart, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelReasoningEffort, LanguageModelSystemMessage, LanguageModelTextPart,
-    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelUserContentPart,
-    LanguageModelUserMessage,
+    LanguageModelAssistantContentPart, LanguageModelFileData, LanguageModelMessage,
+    LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelSystemMessage,
+    LanguageModelTextPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+    LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+    LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
 use crate::provider_utils::{FilePartData, convert_to_base64};
@@ -919,10 +920,43 @@ pub(crate) fn prompt_has_url_files(prompt: &LanguageModelPrompt) -> bool {
             LanguageModelUserContentPart::File(file) => matches!(file.data, FileData::Url { .. }),
             LanguageModelUserContentPart::Text(_) => false,
         }),
-        LanguageModelMessage::System(_)
-        | LanguageModelMessage::Assistant(_)
-        | LanguageModelMessage::Tool(_) => false,
+        LanguageModelMessage::Assistant(message) => message.content.iter().any(|part| match part {
+            LanguageModelAssistantContentPart::File(file) => {
+                matches!(file.data, FileData::Url { .. })
+            }
+            LanguageModelAssistantContentPart::ReasoningFile(file) => {
+                matches!(file.data, LanguageModelFileData::Url { .. })
+            }
+            LanguageModelAssistantContentPart::ToolResult(result) => {
+                tool_result_output_has_url_files(&result.output)
+            }
+            LanguageModelAssistantContentPart::Text(_)
+            | LanguageModelAssistantContentPart::Custom(_)
+            | LanguageModelAssistantContentPart::Reasoning(_)
+            | LanguageModelAssistantContentPart::ToolCall(_)
+            | LanguageModelAssistantContentPart::ToolApprovalRequest(_) => false,
+        }),
+        LanguageModelMessage::Tool(message) => message.content.iter().any(|part| match part {
+            LanguageModelToolContentPart::ToolResult(result) => {
+                tool_result_output_has_url_files(&result.output)
+            }
+            LanguageModelToolContentPart::ToolApprovalResponse(_) => false,
+        }),
+        LanguageModelMessage::System(_) => false,
     })
+}
+
+fn tool_result_output_has_url_files(output: &LanguageModelToolResultOutput) -> bool {
+    match output {
+        LanguageModelToolResultOutput::Content { value } => value.iter().any(|part| {
+            matches!(part, LanguageModelToolResultContentPart::File(file) if matches!(file.data, FileData::Url { .. }))
+        }),
+        LanguageModelToolResultOutput::Text { .. }
+        | LanguageModelToolResultOutput::Json { .. }
+        | LanguageModelToolResultOutput::ExecutionDenied { .. }
+        | LanguageModelToolResultOutput::ErrorText { .. }
+        | LanguageModelToolResultOutput::ErrorJson { .. } => false,
+    }
 }
 
 /// Converts prompt data content to a base64-encoded string.
@@ -1231,7 +1265,7 @@ mod tests {
         convert_message_for_language_model_prompt, convert_to_language_model_prompt,
         convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
         get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
-        prepare_tool_choice, standardize_prompt,
+        prepare_tool_choice, prompt_has_url_files, standardize_prompt,
     };
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
@@ -1857,6 +1891,53 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn prompt_has_url_files_should_detect_url_content_in_tool_results() {
+        let prompt = vec![
+            assistant_message(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("toolCallId", "toolName", json!({})),
+            )]),
+            tool_message(vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/image.png")
+                                    .expect("valid URL"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                ),
+            )]),
+        ];
+
+        assert!(prompt_has_url_files(&prompt));
+    }
+
+    #[test]
+    fn prompt_has_url_files_should_detect_url_content_in_assistant_tool_results() {
+        let prompt = vec![assistant_message(vec![
+            LanguageModelAssistantContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/assistant-image.png")
+                                .expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                ]),
+            )),
+        ])];
+
+        assert!(prompt_has_url_files(&prompt));
     }
 
     #[test]
