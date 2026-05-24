@@ -66,6 +66,9 @@ pub fn truncate_message(text: &str) -> String {
     format!("{}...", &text[..cut])
 }
 
+/// 1:1 with upstream's default `userName ?? "bot"` constant.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`MessengerAdapter::new`]. 1:1 with upstream
 /// `interface MessengerAdapterOptions`.
 #[derive(Debug, Clone)]
@@ -75,6 +78,12 @@ pub struct MessengerAdapterOptions {
     /// Webhook verify token. Used by Meta to confirm webhook
     /// ownership during setup.
     pub verify_token: String,
+    /// Optional Facebook app secret. When set, [`crate::webhook::verify_messenger_signature`]
+    /// can verify webhook payloads using a stored secret; when
+    /// `None`, callers must pass the secret explicitly each call.
+    pub app_secret: Option<String>,
+    /// Optional display name (defaults to [`DEFAULT_USER_NAME`]).
+    pub user_name: Option<String>,
     /// Optional Graph API base URL override (defaults to
     /// [`DEFAULT_GRAPH_BASE`]).
     pub graph_base: Option<String>,
@@ -87,6 +96,8 @@ impl MessengerAdapterOptions {
         Self {
             page_access_token: page_access_token.into(),
             verify_token: verify_token.into(),
+            app_secret: None,
+            user_name: None,
             graph_base: None,
         }
     }
@@ -100,6 +111,11 @@ impl MessengerAdapterOptions {
     /// Effective Graph API base URL with default applied.
     pub fn effective_graph_base(&self) -> &str {
         self.graph_base.as_deref().unwrap_or(DEFAULT_GRAPH_BASE)
+    }
+
+    /// Effective `userName` with default applied.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -143,6 +159,17 @@ impl MessengerAdapter {
     /// Effective Graph API base URL.
     pub fn graph_base(&self) -> &str {
         self.options.effective_graph_base()
+    }
+
+    /// 1:1 with upstream `readonly appSecret?: string`.
+    pub fn app_secret(&self) -> Option<&str> {
+        self.options.app_secret.as_deref()
+    }
+
+    /// 1:1 with upstream `readonly userName: string` (with default
+    /// applied).
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
     }
 
     /// Graph API version used in URLs. 1:1 with upstream's
@@ -655,5 +682,30 @@ mod tests {
         assert_eq!(adapter.page_access_token(), "page-tok");
         assert_eq!(adapter.verify_token(), "verify-tok");
         assert_eq!(adapter.graph_base(), "https://example.test");
+    }
+
+    // ---------- createMessengerAdapter create-instance (2 cases) ----------
+    // 1:1 with the portable subset of upstream `index.test.ts >
+    // describe("createMessengerAdapter") > describe("factory function")`.
+    // The env-var-driven "throws when X is missing" cases need an
+    // env-var resolution factory; documented as deferred.
+
+    #[test]
+    fn messenger_adapter_creates_an_instance() {
+        let opts = MessengerAdapterOptions::new("page-token", "verify-token");
+        let adapter = MessengerAdapter::new(opts);
+        assert_eq!(adapter.name(), "messenger");
+        // Default userName = "bot".
+        assert_eq!(adapter.user_name(), "bot");
+    }
+
+    #[test]
+    fn messenger_adapter_uses_provided_user_name_and_app_secret() {
+        let mut opts = MessengerAdapterOptions::new("page-token", "verify-token");
+        opts.user_name = Some("custombot".to_string());
+        opts.app_secret = Some("secret".to_string());
+        let adapter = MessengerAdapter::new(opts);
+        assert_eq!(adapter.user_name(), "custombot");
+        assert_eq!(adapter.app_secret(), Some("secret"));
     }
 }
