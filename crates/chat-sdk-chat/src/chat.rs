@@ -5163,6 +5163,76 @@ mod tests {
     }
 
     #[test]
+    fn handle_incoming_message_sets_is_mention_true_in_subscribed_thread_when_mentioned() {
+        // 1:1 with upstream `describe("isMention property") > it("should
+        // set isMention=true in subscribed thread when mentioned")` —
+        // even when the dispatcher routes through the subscribed-
+        // message branch (because the thread is subscribed), the
+        // walker still computes is_mention from the message text and
+        // sets it on the message before the subscribed handler runs.
+        let (chat, adapter) = chat_with_named_bot(Some("slack-bot"), None);
+        let observed_is_mention = Arc::new(std::sync::Mutex::new(None::<Option<bool>>));
+        let captured = observed_is_mention.clone();
+        chat.on_subscribed_message(move |_thread, msg| {
+            let captured = captured.clone();
+            let is_mention = msg.is_mention;
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(is_mention);
+            })
+        });
+        // Subscribe the thread BEFORE dispatching the message.
+        futures_executor::block_on(chat.state.subscribe("slack:C123:1234.5678")).unwrap();
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "Hey @slack-bot help me".to_string();
+        msg.is_mention = None; // walker should compute true
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(
+            *observed_is_mention.lock().unwrap(),
+            Some(Some(true)),
+            "subscribed handler should observe is_mention = Some(true)"
+        );
+        assert_eq!(msg.is_mention, Some(true));
+    }
+
+    #[test]
+    fn handle_incoming_message_sets_is_mention_to_false_when_bot_is_not_mentioned() {
+        // 1:1 with upstream `describe("isMention property") > it("should
+        // set isMention=false when bot is not mentioned")` — the
+        // dispatcher sets `is_mention = prior || computed`; when both
+        // are false, the message's is_mention field is Some(false).
+        // The handler is registered via `on_new_message(HELP_REGEX, _)`
+        // so the dispatcher still fires it on text match, but the
+        // walker computes false because no `@slack-bot` appears in
+        // the text.
+        let (chat, adapter) = chat_with_named_bot(Some("slack-bot"), None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let help_re = regex::Regex::new(r"(?i)\bhelp\b").unwrap();
+        chat.on_new_message(help_re, move |_thread, _msg| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "I need help".to_string();
+        msg.is_mention = None; // walker should compute false (no @bot)
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg,
+        ))
+        .unwrap();
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(msg.is_mention, Some(false));
+    }
+
+    #[test]
     fn handle_incoming_message_preserves_pre_set_is_mention_via_or() {
         // 1:1 with upstream `message.isMention = message.isMention
         // || detectMention(...)`. Pre-set Some(true) survives even
