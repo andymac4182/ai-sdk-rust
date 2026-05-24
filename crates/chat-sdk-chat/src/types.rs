@@ -1276,6 +1276,16 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    /// Called when the parent `Chat` instance binds this adapter.
+    /// 1:1 with upstream `initialize(chat: ChatInstance): Promise<void>`
+    /// minus the `ChatInstance` argument — upstream uses it to capture
+    /// a reference for later self-singleton lookup; in the Rust port
+    /// adapters reach `Chat` via [`crate::chat_singleton::get_chat_singleton`].
+    /// Default no-op so existing adapters compile unchanged.
+    async fn initialize(&self) -> AdapterResult<()> {
+        Ok(())
+    }
+
     /// Fetch the subject of a thread (the channel topic or DM partner
     /// label). 1:1 with upstream `fetchSubject(threadId): Promise<string
     /// | null>`. The default returns `Ok(None)` so adapters that don't
@@ -1427,6 +1437,14 @@ pub trait StateAdapter: Send + Sync + std::fmt::Debug {
     /// expirations). 1:1 with upstream `disconnect?: () =>
     /// Promise<void>`. Default no-op for in-memory backends.
     async fn disconnect(&self) -> StateResult<()> {
+        Ok(())
+    }
+
+    /// Open the state-backend connection. 1:1 with upstream
+    /// `connect(): Promise<void>` — called once by `Chat` during
+    /// initialization. Default no-op for in-memory backends that
+    /// hold no real connections.
+    async fn connect(&self) -> StateResult<()> {
         Ok(())
     }
 
