@@ -2433,6 +2433,88 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_send_prediction_extension_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "prediction": {
+                    "type": "content",
+                    "content": "Hello, World!"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "prediction": {
+                    "type": "content",
+                    "content": "Hello, World!"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_store_extension_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "store": true
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_metadata_extension_values() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "metadata": {
+                    "custom": "value"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "metadata": {
+                    "custom": "value"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn openai_chat_should_send_prompt_cache_key_extension_value() {
         let provider_options: ProviderOptions = serde_json::from_value(json!({
             "openai": {

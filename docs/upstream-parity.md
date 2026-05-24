@@ -2670,15 +2670,18 @@ focused tests for each portable behavior before changing rows to `verified`.
   explicit provider ids, names, provider arguments, and serialized tool shapes.
 - 2026-05-24: OpenAI chat provider-option extension parity added
   `openai_chat_should_send_max_completion_tokens_extension_setting`,
+  `openai_chat_should_send_prediction_extension_setting`,
+  `openai_chat_should_send_store_extension_setting`,
+  `openai_chat_should_send_metadata_extension_values`,
   `openai_chat_should_send_prompt_cache_key_extension_value`,
   `openai_chat_should_send_prompt_cache_retention_extension_value`,
   `openai_chat_should_send_safety_identifier_extension_value`,
   `openai_chat_should_send_service_tier_flex_processing_setting`, and
   `openai_chat_should_send_service_tier_priority_processing_setting`, mapping
   upstream `openai-chat-language-model.test.ts` chat extension request-body
-  cases for `maxCompletionTokens`, prompt-cache settings, `safetyIdentifier`,
-  and basic `serviceTier` flex/priority serialization through the OpenAI
-  provider facade.
+  cases for `maxCompletionTokens`, `prediction`, `store`, `metadata`,
+  prompt-cache settings, `safetyIdentifier`, and basic `serviceTier`
+  flex/priority serialization through the OpenAI provider facade.
 - 2026-05-20: OpenAI Responses hosted tool include parity added
   `open_responses_provider_adds_hosted_tool_include_options` now covers
   upstream automatic `include` additions for hosted web-search action sources
