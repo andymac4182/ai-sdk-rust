@@ -222,6 +222,21 @@ pub type SubscribedMessageHandler = Arc<
     dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
 >;
 
+/// 1:1 with upstream `DirectMessageHandler<TState>` — invoked for
+/// every message in a DM thread (`adapter.is_dm(thread_id) == true`)
+/// when at least one DM handler is registered. DM handlers take
+/// priority over both subscribed and mention handlers. The closure
+/// receives a [`crate::channel::Channel`] as a third argument
+/// (matching upstream's `(thread, message, channel)` signature) so
+/// adopters can post channel-scoped replies (or look up channel
+/// metadata) inside the handler.
+pub type DirectMessageHandler = Arc<
+    dyn Fn(Thread, crate::message::Message, crate::channel::Channel) -> HandlerFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -230,6 +245,7 @@ pub type SubscribedMessageHandler = Arc<
 struct ChatHandlers {
     mention: Arc<std::sync::Mutex<Vec<MentionHandler>>>,
     subscribed: Arc<std::sync::Mutex<Vec<SubscribedMessageHandler>>>,
+    direct_message: Arc<std::sync::Mutex<Vec<DirectMessageHandler>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -456,6 +472,30 @@ impl Chat {
             .push(Arc::new(handler));
     }
 
+    /// 1:1 port of upstream `chat.onDirectMessage(handler)`. Registers
+    /// a handler that fires for every message in a DM thread (per
+    /// `adapter.is_dm(thread_id)`) when at least one DM handler is
+    /// registered. DM handlers take priority over subscribed and
+    /// mention handlers — a subscribed DM thread still routes to
+    /// `onDirectMessage`, not `onSubscribedMessage`.
+    ///
+    /// If no DM handlers are registered, DM threads fall through to
+    /// the normal mention/subscribed cascade (matches upstream's
+    /// "fall through to onNewMention" behavior).
+    pub fn on_direct_message<F>(&self, handler: F)
+    where
+        F: Fn(Thread, crate::message::Message, crate::channel::Channel) -> HandlerFuture
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handlers
+            .direct_message
+            .lock()
+            .unwrap()
+            .push(Arc::new(handler));
+    }
+
     /// 1:1 port of upstream `chat.transcripts` getter. Panics when
     /// transcripts were not configured at construction (matches
     /// upstream's `throw new Error("chat.transcripts is not
@@ -611,22 +651,32 @@ impl Chat {
             }
         }
 
-        // Handler dispatch (slices 415, 416). Snapshot each handler
-        // list under a short lock then drop the guard before awaiting
-        // so handler invocations don't hold the registration mutex.
-        // Multi-handler dispatch is sequential to match upstream's
-        // `await` loop semantics.
+        // Handler dispatch (slices 415, 416, 417). Snapshot each
+        // handler list under a short lock then drop the guard before
+        // awaiting so handler invocations don't hold the registration
+        // mutex. Multi-handler dispatch is sequential to match
+        // upstream's `await` loop semantics.
         //
-        // Routing priority (Phase A+B scope):
-        // 1. If the thread is subscribed → dispatch to
+        // Routing priority (Phase A+B+C scope):
+        // 1. If `adapter.is_dm(thread_id)` AND at least one DM
+        //    handler is registered → dispatch to `onDirectMessage`
+        //    handlers; SKIP subscribed/mention dispatch (DM handlers
+        //    absorb subscribed + mention per upstream's "subscribed
+        //    DM threads route to onDirectMessage" rule).
+        // 2. Else if the thread is subscribed → dispatch to
         //    `onSubscribedMessage` handlers and SKIP mention dispatch
         //    (subscribed handlers absorb mentions per upstream).
-        // 2. Else if `message.is_mention == Some(true)` → dispatch
+        // 3. Else if `message.is_mention == Some(true)` → dispatch
         //    to `onNewMention` handlers.
         //
-        // Full routing (DM → onDirectMessage; pattern → onNewMessage;
-        // detectMention walker computing is_mention; lock/concurrency
-        // dispatch) lands in Phases C-E.
+        // Falls through to next priority level when no handlers are
+        // registered for the matched class. This matches upstream's
+        // "fall through to onNewMention when no DM handlers
+        // registered" semantics.
+        //
+        // Full routing (pattern → onNewMessage; detectMention walker
+        // computing is_mention; lock/concurrency dispatch) lands in
+        // Phases D-E.
         //
         // Skip dispatch entirely if the dispatching adapter isn't in
         // the registered map (upstream tests sometimes pass a
@@ -634,25 +684,42 @@ impl Chat {
         // per the `Ok(true)` return contract.
         let adapter_arc = self.adapters.get(adapter.name()).cloned();
         if let Some(adapter_arc) = adapter_arc {
-            let is_subscribed = self
-                .state
-                .is_subscribed(_thread_id)
-                .await
-                .unwrap_or(false);
-
-            if is_subscribed {
-                let handlers_snapshot: Vec<SubscribedMessageHandler> =
-                    self.handlers.subscribed.lock().unwrap().clone();
-                for handler in handlers_snapshot {
+            let is_dm = adapter.is_dm(_thread_id).unwrap_or(false);
+            let dm_handlers: Vec<DirectMessageHandler> =
+                self.handlers.direct_message.lock().unwrap().clone();
+            let dm_dispatched = if is_dm && !dm_handlers.is_empty() {
+                let channel_id = crate::channel::derive_channel_id(&*adapter_arc, _thread_id);
+                for handler in dm_handlers {
                     let thread = Thread::new(adapter_arc.clone(), _thread_id);
-                    handler(thread, message.clone()).await;
+                    let channel = crate::channel::Channel::new(adapter_arc.clone(), &channel_id);
+                    handler(thread, message.clone(), channel).await;
                 }
-            } else if message.is_mention == Some(true) {
-                let handlers_snapshot: Vec<MentionHandler> =
-                    self.handlers.mention.lock().unwrap().clone();
-                for handler in handlers_snapshot {
-                    let thread = Thread::new(adapter_arc.clone(), _thread_id);
-                    handler(thread, message.clone()).await;
+                true
+            } else {
+                false
+            };
+
+            if !dm_dispatched {
+                let is_subscribed = self
+                    .state
+                    .is_subscribed(_thread_id)
+                    .await
+                    .unwrap_or(false);
+
+                if is_subscribed {
+                    let handlers_snapshot: Vec<SubscribedMessageHandler> =
+                        self.handlers.subscribed.lock().unwrap().clone();
+                    for handler in handlers_snapshot {
+                        let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                        handler(thread, message.clone()).await;
+                    }
+                } else if message.is_mention == Some(true) {
+                    let handlers_snapshot: Vec<MentionHandler> =
+                        self.handlers.mention.lock().unwrap().clone();
+                    for handler in handlers_snapshot {
+                        let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                        handler(thread, message.clone()).await;
+                    }
                 }
             }
         }
@@ -2469,6 +2536,196 @@ mod tests {
         let mut msg = dispatched_message("msg-1", false);
         futures_executor::block_on(
             chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    // ---------- describe("onDirectMessage") — slice 417 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("onDirectMessage")`.
+    // Phase C (slice 417) adds the `Chat::on_direct_message`
+    // registration + the dispatcher's DM-thread priority branch:
+    // when `adapter.is_dm(thread_id)` returns true AND at least one
+    // DM handler is registered, the DM handler fires and the
+    // subscribed/mention branches are skipped. The handler receives
+    // a `Channel` as a third argument (matching upstream's
+    // `(thread, message, channel)` signature).
+    //
+    // Falls through to the next priority level when no DM handlers
+    // are registered (upstream's "fall through to onNewMention when
+    // no DM handlers" semantics).
+
+    fn chat_with_dm_adapter() -> (Chat, Arc<OpenDmAdapter>) {
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter = Arc::new(OpenDmAdapter {
+            name: "slack".to_string(),
+            ..Default::default()
+        });
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            ..Default::default()
+        });
+        (chat, adapter)
+    }
+
+    #[test]
+    fn on_direct_message_routes_dms_to_dm_handler_with_channel() {
+        // 1:1 with upstream "should route DMs to directMessage
+        // handler with channel". Both handlers registered; thread is
+        // DM-shape (slack:D...); DM handler fires, mention handler
+        // does NOT; handler receives the channel.
+        let (chat, adapter) = chat_with_dm_adapter();
+        let dm_calls = Arc::new(AtomicUsize::new(0));
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let observed_channel: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let d = dm_calls.clone();
+        let oc = observed_channel.clone();
+        chat.on_direct_message(move |_thread, _msg, channel| {
+            let d = d.clone();
+            let oc = oc.clone();
+            let cid = channel.channel_id().to_string();
+            Box::pin(async move {
+                d.fetch_add(1, AtomicOrdering::SeqCst);
+                *oc.lock().unwrap() = Some(cid);
+            })
+        });
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true); // even with mention, DM wins
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(dm_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 0);
+        // Channel id is derived from thread id via OpenDmAdapter
+        // (default: returns None, so derive_channel_id falls back to
+        // the thread id itself).
+        assert_eq!(
+            observed_channel.lock().unwrap().as_deref(),
+            Some("slack:DU123:1234.5678")
+        );
+    }
+
+    #[test]
+    fn on_direct_message_falls_through_to_on_new_mention_when_no_dm_handlers_registered() {
+        // 1:1 with upstream "should fall through to onNewMention
+        // when no DM handlers registered". DM-shape thread, mention
+        // handler registered but no DM handler — falls through to
+        // mention dispatch.
+        let (chat, adapter) = chat_with_dm_adapter();
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_direct_message_routes_subscribed_dm_threads_to_dm_not_subscribed() {
+        // 1:1 with upstream "should route subscribed DM threads to
+        // onDirectMessage, not onSubscribedMessage". DM thread that
+        // is ALSO subscribed; both DM + subscribed handlers
+        // registered. DM wins.
+        let (chat, adapter) = chat_with_dm_adapter();
+        let dm_calls = Arc::new(AtomicUsize::new(0));
+        let subscribed_calls = Arc::new(AtomicUsize::new(0));
+        let d = dm_calls.clone();
+        chat.on_direct_message(move |_thread, _msg, _channel| {
+            let c = d.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let s = subscribed_calls.clone();
+        chat.on_subscribed_message(move |_thread, _msg| {
+            let c = s.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        futures_executor::block_on(chat.state.subscribe("slack:DU123:1234.5678")).unwrap();
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(dm_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(subscribed_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_direct_message_does_not_route_non_dm_mentions_to_dm_handler() {
+        // 1:1 with upstream "should not route non-DM mentions to
+        // directMessage handler". Non-DM thread with a mention; DM
+        // handler should NOT fire, mention handler SHOULD.
+        let (chat, adapter) = chat_with_dm_adapter();
+        let dm_calls = Arc::new(AtomicUsize::new(0));
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let d = dm_calls.clone();
+        chat.on_direct_message(move |_thread, _msg, _channel| {
+            let c = d.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(dm_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_direct_message_invokes_all_registered_handlers_in_order() {
+        // Additive: multi-handler dispatch ordering for DM handlers.
+        let (chat, adapter) = chat_with_dm_adapter();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_direct_message(move |_thread, _msg, _channel| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_direct_message(move |_thread, _msg, _channel| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
         )
         .unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
