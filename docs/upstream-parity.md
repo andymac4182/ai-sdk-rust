@@ -2768,6 +2768,23 @@ focused tests for each portable behavior before changing rows to `verified`.
   provider-metadata assertions by storing `choice.logprobs.content` under
   `providerMetadata.openai.logprobs` for OpenAI chat generate and stream
   results.
+- 2026-05-24: OpenAI chat stream request and finish parity added
+  `openai_chat_stream_should_stream_text_deltas`,
+  `openai_chat_stream_should_handle_error_stream_parts`,
+  `openai_chat_stream_should_send_request_body`,
+  `openai_chat_stream_should_expose_the_raw_response_headers`,
+  `openai_chat_stream_should_pass_the_messages_and_the_model`,
+  `openai_chat_stream_should_pass_headers`,
+  `openai_chat_stream_should_return_cached_tokens_in_provider_metadata`,
+  `openai_chat_stream_should_return_prediction_tokens_in_provider_metadata`,
+  `openai_chat_stream_should_send_store_extension_setting`,
+  `openai_chat_stream_should_send_metadata_extension_values`,
+  `openai_chat_stream_should_send_service_tier_flex_processing_setting`, and
+  `openai_chat_stream_should_send_service_tier_priority_processing_setting`,
+  mapping the upstream non-Responses OpenAI chat streaming text, error, request
+  body, raw headers, request headers, streamed usage/provider metadata, store,
+  metadata, and service-tier cases. The OpenAI provider now enables upstream
+  `stream_options.include_usage` for OpenAI chat and completion streams.
 - 2026-05-24: OpenAI chat model-specific request rule parity added
   `openai_chat_reasoning_model_should_clear_unsupported_standard_settings`,
   `openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens`,

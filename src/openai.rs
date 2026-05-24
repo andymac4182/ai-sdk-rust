@@ -792,7 +792,8 @@ impl OpenAIProvider {
         let mut settings =
             OpenAICompatibleProviderSettings::new(provider_name, openai_base_url(&self.settings))
                 .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION))
-                .with_supports_structured_outputs(true);
+                .with_supports_structured_outputs(true)
+                .with_include_usage(true);
 
         for (name, value) in openai_headers(&self.settings) {
             settings = settings.with_header(name.clone(), value.clone());
@@ -2870,6 +2871,620 @@ mod tests {
                 .and_then(|metadata| metadata.get("openai"))
                 .and_then(|metadata| metadata.get("logprobs")),
             Some(&logprobs)
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_stream_text_deltas() {
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 1,
+                        "delta": {
+                            "content": "Hello"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 1,
+                        "delta": {
+                            "content": ", "
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 1,
+                        "delta": {
+                            "content": "World!"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "logprobs": openai_chat_logprobs(),
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 244,
+                    "completion_tokens": 227
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::ResponseMetadata(metadata))
+                if metadata.id.as_deref() == Some("chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP")
+                    && metadata.model_id.as_deref() == Some("gpt-3.5-turbo-0613")
+                    && metadata.timestamp
+                        == Some(time::OffsetDateTime::from_unix_timestamp(1702657020).unwrap())
+        ));
+        assert!(matches!(
+            result.stream.get(2),
+            Some(LanguageModelStreamPart::TextStart(start)) if start.id == "txt-0"
+        ));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Hello", ", ", "World!"]
+        );
+        assert!(matches!(
+            result
+                .stream
+                .iter()
+                .rev()
+                .find(|part| matches!(part, LanguageModelStreamPart::TextEnd(_))),
+            Some(LanguageModelStreamPart::TextEnd(end)) if end.id == "txt-0"
+        ));
+        let finish = openai_chat_stream_finish(&result.stream);
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.finish_reason.raw.as_deref(), Some("stop"));
+        assert_eq!(finish.usage.input_tokens.total, Some(17));
+        assert_eq!(finish.usage.output_tokens.total, Some(227));
+    }
+
+    #[test]
+    fn openai_chat_stream_should_handle_error_stream_parts() {
+        let provider = openai_chat_test_provider_with_stream_response(
+            "data: {\"error\":{\"message\":\"The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error.\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\ndata: [DONE]\n\n",
+        );
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::Error(error))
+                if error.error
+                    == json!("The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error.")
+        ));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+                    && finish.finish_reason.raw.is_none()
+                    && finish.usage == Default::default()
+        ));
+    }
+
+    #[test]
+    fn openai_chat_stream_should_send_request_body() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(
+            result.request.and_then(|request| request.body),
+            Some(json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_expose_the_raw_response_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::from([
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_pass_the_messages_and_the_model() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::new(),
+        );
+
+        let _result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::new(),
+        )
+        .with_organization("test-organization")
+        .with_project("test-project")
+        .with_header("Custom-Provider-Header", "provider-header-value");
+
+        let _result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request(&captured_requests).headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("openai-organization").map(String::as_str),
+            Some("test-organization")
+        );
+        assert_eq!(
+            headers.get("openai-project").map(String::as_str),
+            Some("test-project")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_return_cached_tokens_in_provider_metadata() {
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "completion_tokens": 20,
+                    "total_tokens": 35,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 1152
+                    }
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        let finish = openai_chat_stream_finish(&result.stream);
+        assert_eq!(finish.usage.input_tokens.total, Some(15));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(1152));
+        assert_eq!(finish.usage.input_tokens.cache_write, None);
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(20));
+        assert_eq!(finish.usage.output_tokens.text, Some(20));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            finish
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("prompt_tokens_details"))
+                .and_then(|details| details.get("cached_tokens")),
+            Some(&json!(1152))
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_return_prediction_tokens_in_provider_metadata() {
+        let provider = openai_chat_test_provider_with_stream_response(sse_body([
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-96aZqmeDpA9IPD6tACY8djkMsJCMP",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "gpt-3.5-turbo-0613",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "completion_tokens": 20,
+                    "total_tokens": 35,
+                    "completion_tokens_details": {
+                        "accepted_prediction_tokens": 123,
+                        "rejected_prediction_tokens": 456
+                    }
+                }
+            }),
+        ]));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-3.5-turbo")
+                .do_stream(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        let finish = openai_chat_stream_finish(&result.stream);
+        assert_eq!(
+            finish
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("acceptedPredictionTokens")),
+            Some(&json!(123))
+        );
+        assert_eq!(
+            finish
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("rejectedPredictionTokens")),
+            Some(&json!(456))
+        );
+        assert_eq!(
+            finish
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("completion_tokens_details"))
+                .and_then(|details| details.get("accepted_prediction_tokens")),
+            Some(&json!(123))
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_send_store_extension_setting() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::new(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "store": true,
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_send_metadata_extension_values() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::new(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "metadata": {
+                    "custom": "value"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            provider.chat("gpt-3.5-turbo").do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_json_body(&captured_requests),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "metadata": {
+                    "custom": "value"
+                },
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_send_service_tier_flex_processing_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "flex"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_stream_captured_body_with_provider_options("o4-mini", provider_options),
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "service_tier": "flex",
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_stream_should_send_service_tier_priority_processing_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "priority"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_stream_captured_body_with_provider_options("gpt-4o-mini", provider_options),
+            json!({
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "service_tier": "priority",
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            })
         );
     }
 
@@ -5587,7 +6202,10 @@ mod tests {
                 "model": "gpt-3.5-turbo-instruct",
                 "prompt": openai_completion_prompt_text(),
                 "stop": ["\nuser:"],
-                "stream": true
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
             }))
         );
     }
@@ -5644,7 +6262,10 @@ mod tests {
                 "model": "gpt-3.5-turbo-instruct",
                 "prompt": openai_completion_prompt_text(),
                 "stop": ["\nuser:"],
-                "stream": true
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
             })
         );
     }
@@ -7868,6 +8489,86 @@ mod tests {
         OpenAIProvider::new()
             .with_api_key("test-api-key")
             .with_transport(transport)
+    }
+
+    fn openai_chat_test_provider_with_stream_response_and_capture(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: impl Into<String>,
+        response_headers: Headers,
+    ) -> OpenAIProvider {
+        let response_body = response_body.into();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.clone(),
+                )
+                .with_headers(response_headers.clone()))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+    }
+
+    fn openai_chat_stream_finish(
+        stream: &[LanguageModelStreamPart],
+    ) -> &crate::language_model::LanguageModelStreamFinish {
+        stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream finish part is present")
+    }
+
+    fn openai_chat_stream_captured_body_with_provider_options(
+        model_id: &str,
+        provider_options: ProviderOptions,
+    ) -> JsonValue {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider_with_stream_response_and_capture(
+            Arc::clone(&captured_requests),
+            openai_chat_empty_stream_body(),
+            Headers::new(),
+        );
+
+        let _result = poll_ready(
+            provider.chat(model_id).do_stream(
+                LanguageModelCallOptions::new(openai_chat_user_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        captured_json_body(&captured_requests)
+    }
+
+    fn openai_chat_empty_stream_body() -> String {
+        sse_body([json!({
+            "id": "chatcmpl-empty-stream",
+            "object": "chat.completion.chunk",
+            "created": 1702657020,
+            "model": "gpt-3.5-turbo-0613",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 0,
+                "total_tokens": 1
+            }
+        })])
     }
 
     fn openai_completion_test_provider(
