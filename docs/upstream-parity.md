@@ -1191,6 +1191,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_text_handles_multiple_provider_executed_tool_approval_requests`,
   proving multiple provider-executed tool calls keep their matching approval
   requests and stream ordering.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` unknown-tool repair
+  parity added
+  `stream_text_repairs_unknown_streamed_tool_name_before_execution`, proving
+  streamed unknown tool names invoke the repair callback with `NoSuchToolError`
+  context and emit the repaired executable tool call/result.
 - 2026-05-23: `packages/ai` `ToolLoopAgent` tool approval parity added
   named Rust counterparts for the upstream generate and stream
   `toolApproval: { testTool: 'user-approval' }` blocking cases. The tests are

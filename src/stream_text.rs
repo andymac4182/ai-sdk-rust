@@ -4497,7 +4497,8 @@ mod tests {
     use super::*;
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{
-        GenerateTextContentPart, NormalizedToolApprovalStatus, has_tool_call,
+        GenerateTextContentPart, NormalizedToolApprovalStatus, ToolCallRepairOptions,
+        ToolCallRepairOriginalError, has_tool_call,
     };
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
@@ -11858,5 +11859,72 @@ mod tests {
         assert_eq!(result.tool_results.len(), 1);
         assert_eq!(result.tool_results[0].output["city"], "BRISBANE");
         assert_eq!(result.tool_results[0].is_error, None);
+    }
+
+    #[test]
+    fn stream_text_repairs_unknown_streamed_tool_name_before_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "forecast", "{}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "calledWith": input,
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_call_repair(move |options| {
+                    let repair_options = Arc::clone(&repair_options_for_closure);
+                    async move {
+                        repair_options
+                            .lock()
+                            .expect("repair options lock")
+                            .push(options);
+                        Ok::<Option<LanguageModelToolCall>, String>(Some(
+                            LanguageModelToolCall::new("call-1", "weather", "{}"),
+                        ))
+                    }
+                }),
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert_eq!(repair_options[0].tool_call.tool_name, "forecast");
+        assert_eq!(repair_options[0].tool_call.input, "{}");
+        assert!(matches!(
+            &repair_options[0].error,
+            ToolCallRepairOriginalError::NoSuchTool(error)
+                if error.tool_name() == "forecast"
+                    && error.available_tools() == Some(&["weather".to_string()][..])
+        ));
+        drop(repair_options);
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "weather");
+        assert_eq!(result.tool_calls[0].input, json!({}));
+        assert_eq!(result.tool_calls[0].invalid, None);
+        assert_eq!(result.tool_calls[0].error, None);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_name, "weather");
+        assert_eq!(result.tool_results[0].input, json!({}));
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+        assert_eq!(result.tool_results[0].output["calledWith"], json!({}));
     }
 }
