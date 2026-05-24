@@ -365,17 +365,27 @@ impl Thread {
     /// matches `Err(AdapterError::Unsupported)` and re-surfaces it
     /// as [`crate::errors::ChatError::NotImplemented`]. Other adapter
     /// errors propagate verbatim via [`crate::errors::ChatError::Adapter`].
+    ///
+    /// Returns a [`ScheduledMessageHandle`] that bundles the adapter-
+    /// returned [`crate::types::ScheduledMessage`] with a `cancel()`
+    /// method dispatching through [`crate::types::Adapter::cancel_scheduled_message`].
+    /// This mirrors upstream's `ScheduledMessage.cancel(): Promise<void>`
+    /// closure — the closure can't live on a Serialize+Eq struct so
+    /// the cancellation handle lives on the thread-bound wrapper.
     pub async fn schedule(
         &self,
         text: &str,
         post_at_unix_ms: u64,
-    ) -> Result<crate::types::ScheduledMessage, crate::errors::ChatError> {
+    ) -> Result<ScheduledMessageHandle, crate::errors::ChatError> {
         match self
             .adapter
             .schedule_message(&self.thread_id, text, post_at_unix_ms)
             .await
         {
-            Ok(scheduled) => Ok(scheduled),
+            Ok(scheduled) => Ok(ScheduledMessageHandle {
+                scheduled,
+                adapter: self.adapter.clone(),
+            }),
             Err(crate::types::AdapterError::Unsupported(_)) => {
                 Err(crate::errors::ChatError::not_implemented_feature(
                     "Scheduled messages are not supported by this adapter",
@@ -523,6 +533,77 @@ impl Thread {
 /// currently it returns `String` message id; SentMessage construction
 /// from a post-result lands in a follow-up slice).
 #[derive(Clone)]
+/// 1:1 with upstream `ScheduledMessage`-with-`cancel()` shape. The
+/// upstream interface embeds the `cancel(): Promise<void>` closure on
+/// the value itself; the Rust port keeps [`crate::types::ScheduledMessage`]
+/// as a pure Serialize+Eq struct and binds the cancellation closure
+/// here via the adapter that produced it.
+pub struct ScheduledMessageHandle {
+    scheduled: crate::types::ScheduledMessage,
+    adapter: Arc<dyn Adapter>,
+}
+
+impl std::fmt::Debug for ScheduledMessageHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScheduledMessageHandle")
+            .field("scheduled", &self.scheduled)
+            .field("adapter", &self.adapter.name())
+            .finish()
+    }
+}
+
+impl ScheduledMessageHandle {
+    /// Borrow the wrapped [`crate::types::ScheduledMessage`].
+    pub fn scheduled(&self) -> &crate::types::ScheduledMessage {
+        &self.scheduled
+    }
+
+    /// 1:1 with upstream `scheduled.scheduledMessageId`.
+    pub fn scheduled_message_id(&self) -> &str {
+        &self.scheduled.scheduled_message_id
+    }
+
+    /// 1:1 with upstream `scheduled.channelId`.
+    pub fn channel_id(&self) -> &str {
+        &self.scheduled.channel_id
+    }
+
+    /// 1:1 with upstream `scheduled.postAt` (Date → u64 epoch millis).
+    pub fn post_at_unix_ms(&self) -> u64 {
+        self.scheduled.post_at_unix_ms
+    }
+
+    /// 1:1 with upstream `scheduled.raw`.
+    pub fn raw(&self) -> &serde_json::Value {
+        &self.scheduled.raw
+    }
+
+    /// 1:1 with upstream `scheduled.cancel(): Promise<void>`.
+    /// Dispatches through [`crate::types::Adapter::cancel_scheduled_message`].
+    pub async fn cancel(&self) -> Result<(), crate::errors::ChatError> {
+        match self
+            .adapter
+            .cancel_scheduled_message(
+                &self.scheduled.channel_id,
+                &self.scheduled.scheduled_message_id,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(crate::types::AdapterError::Unsupported(_)) => Err(
+                crate::errors::ChatError::not_implemented_feature(
+                    "Scheduled message cancellation is not supported by this adapter",
+                    "scheduling",
+                ),
+            ),
+            Err(other) => Err(crate::errors::ChatError::new(
+                format!("{other}"),
+                "ADAPTER_ERROR",
+            )),
+        }
+    }
+}
+
 pub struct SentMessage {
     message: crate::message::Message,
     adapter: Arc<dyn Adapter>,
@@ -1599,7 +1680,7 @@ mod tests {
         });
         let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
         let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
-        assert_eq!(result.scheduled_message_id, "Q999");
+        assert_eq!(result.scheduled_message_id(), "Q999");
     }
 
     #[test]
@@ -1613,7 +1694,7 @@ mod tests {
         });
         let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
         let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
-        assert_eq!(result.channel_id, "C456");
+        assert_eq!(result.channel_id(), "C456");
     }
 
     #[test]
@@ -1628,7 +1709,7 @@ mod tests {
         });
         let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
         let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
-        assert_eq!(result.post_at_unix_ms, CUSTOM_UNIX_MS);
+        assert_eq!(result.post_at_unix_ms(), CUSTOM_UNIX_MS);
     }
 
     #[test]
@@ -1649,7 +1730,7 @@ mod tests {
         });
         let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
         let result = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
-        assert_eq!(result.raw, raw);
+        assert_eq!(result.raw(), &raw);
     }
 
     // ---------- describe("schedule()") — additional slice 404 cases ----------
@@ -1780,9 +1861,9 @@ mod tests {
         // mockResolvedValueOnce gives Q1/Q2/Q3 distinct ids; the Rust
         // mock doesn't need that to verify multi-schedule per-thread
         // dispatch, which is the upstream invariant).
-        assert_eq!(s1.scheduled_message_id, "Q123");
-        assert_eq!(s2.scheduled_message_id, "Q123");
-        assert_eq!(s3.scheduled_message_id, "Q123");
+        assert_eq!(s1.scheduled_message_id(), "Q123");
+        assert_eq!(s2.scheduled_message_id(), "Q123");
+        assert_eq!(s3.scheduled_message_id(), "Q123");
         assert_eq!(adapter.schedule_calls.lock().unwrap().len(), 3);
     }
 
@@ -1799,6 +1880,127 @@ mod tests {
         let calls = adapter.schedule_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, "Plain text");
+    }
+
+    // ---------- describe("schedule()") cancel() — slice 405 ----------
+    //
+    // Slice 405 adds [`ScheduledMessageHandle`] (Thread::schedule
+    // return type) which bundles the adapter-returned ScheduledMessage
+    // with a cancel() method dispatching through
+    // Adapter::cancel_scheduled_message. The 4 upstream cancel()
+    // describe cases are now mapped via a CancelingAdapter test mock
+    // with serial scheduledMessageIds + a per-id cancel counter and
+    // optional rejection mode.
+
+    #[derive(Debug, Default)]
+    struct CancelingAdapter {
+        next_id: AtomicUsize,
+        schedule_calls: Mutex<Vec<(String, String, u64)>>,
+        cancel_calls: Mutex<Vec<(String, String)>>,
+        cancel_should_fail_with: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for CancelingAdapter {
+        fn name(&self) -> &str {
+            "canceling"
+        }
+        async fn schedule_message(
+            &self,
+            thread_id: &str,
+            text: &str,
+            post_at_unix_ms: u64,
+        ) -> AdapterResult<crate::types::ScheduledMessage> {
+            self.schedule_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                text.to_string(),
+                post_at_unix_ms,
+            ));
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(crate::types::ScheduledMessage {
+                scheduled_message_id: format!("Q{id}"),
+                channel_id: "C123".to_string(),
+                post_at_unix_ms,
+                raw: serde_json::Value::Null,
+            })
+        }
+        async fn cancel_scheduled_message(
+            &self,
+            channel_id: &str,
+            scheduled_message_id: &str,
+        ) -> AdapterResult<()> {
+            self.cancel_calls.lock().unwrap().push((
+                channel_id.to_string(),
+                scheduled_message_id.to_string(),
+            ));
+            if let Some(msg) = self.cancel_should_fail_with {
+                return Err(AdapterError::Io(std::io::Error::other(msg).into()));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn thread_schedule_should_return_a_cancel_function() {
+        // 1:1 with upstream "should return a cancel function". The
+        // Rust equivalent is "cancel() is a method on the handle that
+        // returns a Future"; we verify by being able to call it.
+        let adapter = Arc::new(CancelingAdapter::default());
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let handle = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        // .cancel() exists as a callable async method.
+        block_on(handle.cancel()).unwrap();
+    }
+
+    #[test]
+    fn thread_schedule_should_invoke_cancel_without_errors() {
+        // 1:1 with upstream "should invoke cancel without errors".
+        let adapter = Arc::new(CancelingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let handle = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        block_on(handle.cancel()).unwrap();
+        let cancel_calls = adapter.cancel_calls.lock().unwrap();
+        assert_eq!(cancel_calls.len(), 1);
+        assert_eq!(cancel_calls[0].0, "C123");
+        assert_eq!(cancel_calls[0].1, "Q1");
+    }
+
+    #[test]
+    fn thread_schedule_should_propagate_errors_from_cancel() {
+        // 1:1 with upstream "should propagate errors from cancel".
+        let adapter = Arc::new(CancelingAdapter {
+            cancel_should_fail_with: Some("already sent"),
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let handle = block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        let err = block_on(handle.cancel()).expect_err("expected cancel error");
+        assert!(
+            err.message().contains("already sent"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            !err.is_not_implemented(),
+            "Io errors must not coerce into NotImplemented"
+        );
+    }
+
+    #[test]
+    fn thread_schedule_should_cancel_individual_messages_independently() {
+        // 1:1 with upstream "should cancel individual messages
+        // independently". Two scheduled messages on the same thread;
+        // cancelling one only invokes cancel for that specific id.
+        let adapter = Arc::new(CancelingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let s1 = block_on(thread.schedule("First", FUTURE_UNIX_MS)).unwrap();
+        let _s2 = block_on(thread.schedule("Second", FUTURE_UNIX_MS)).unwrap();
+        block_on(s1.cancel()).unwrap();
+        let cancel_calls = adapter.cancel_calls.lock().unwrap();
+        assert_eq!(cancel_calls.len(), 1);
+        assert_eq!(cancel_calls[0].1, "Q1");
+        // Q2 was never cancelled.
+        assert!(cancel_calls.iter().all(|(_, id)| id != "Q2"));
     }
 
     #[test]
