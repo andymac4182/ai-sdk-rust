@@ -4809,6 +4809,64 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
+    /// Recording adapter that captures `post_channel_message` calls
+    /// for the slash-command `event.channel.post(...)` test.
+    #[derive(Debug, Default)]
+    struct SlashChannelPostAdapter {
+        post_channel_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for SlashChannelPostAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn post_channel_message(
+            &self,
+            channel_id: &str,
+            text: &str,
+        ) -> AdapterResult<String> {
+            self.post_channel_calls
+                .lock()
+                .unwrap()
+                .push((channel_id.to_string(), text.to_string()));
+            Ok("channel-msg-id".to_string())
+        }
+    }
+
+    #[test]
+    fn on_slash_command_event_channel_post_routes_to_adapter_post_channel_message() {
+        // 1:1 with upstream "should provide channel.post method".
+        // The slash handler calls `event.channel.post(text)` which
+        // routes through `Channel::post` → `Adapter::post_channel_message`
+        // with the event's `channel_id` (no normalization).
+        let recorder: Arc<SlashChannelPostAdapter> = Arc::new(SlashChannelPostAdapter::default());
+        let adapter: Arc<dyn Adapter> = recorder.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let i = invoked.clone();
+        chat.on_slash_command(move |event| {
+            let i = i.clone();
+            let ch = event.channel.clone();
+            Box::pin(async move {
+                let _ = ch.post("Hello from slash command!").await;
+                i.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        assert_eq!(invoked.load(AtomicOrdering::SeqCst), 1);
+        let calls = recorder.post_channel_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C456");
+        assert_eq!(calls[0].1, "Hello from slash command!");
+    }
+
     // ---------- describe("Options Load") — slice 423 ----------
     //
     // 1:1 with upstream `chat.test.ts > describe("Options Load")`.
