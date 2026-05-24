@@ -2689,8 +2689,22 @@ fn merge_openai_compatible_chat_additional_options(body: &mut JsonObject, option
             key.as_str(),
             "user" | "reasoningEffort" | "textVerbosity" | "strictJsonSchema"
         ) {
-            body.insert(key.clone(), value.clone());
+            body.insert(
+                openai_compatible_chat_body_option_name(key).to_string(),
+                value.clone(),
+            );
         }
+    }
+}
+
+fn openai_compatible_chat_body_option_name(name: &str) -> &str {
+    match name {
+        "maxCompletionTokens" => "max_completion_tokens",
+        "promptCacheKey" => "prompt_cache_key",
+        "promptCacheRetention" => "prompt_cache_retention",
+        "safetyIdentifier" => "safety_identifier",
+        "serviceTier" => "service_tier",
+        _ => name,
     }
 }
 

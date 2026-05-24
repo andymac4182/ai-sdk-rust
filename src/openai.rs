@@ -2409,6 +2409,150 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_send_max_completion_tokens_extension_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "maxCompletionTokens": 255
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("o4-mini", provider_options),
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "max_completion_tokens": 255
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_prompt_cache_key_extension_value() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "promptCacheKey": "test-cache-key-123"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "prompt_cache_key": "test-cache-key-123"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_prompt_cache_retention_extension_value() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "promptCacheRetention": "24h"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "prompt_cache_retention": "24h"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_safety_identifier_extension_value() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "safetyIdentifier": "test-safety-identifier-123"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-3.5-turbo", provider_options),
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "safety_identifier": "test-safety-identifier-123"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_service_tier_flex_processing_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "flex"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("o4-mini", provider_options),
+            json!({
+                "model": "o4-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "service_tier": "flex"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_should_send_service_tier_priority_processing_setting() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "priority"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            openai_chat_captured_body_with_provider_options("gpt-4o-mini", provider_options),
+            json!({
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "service_tier": "priority"
+            })
+        );
+    }
+
+    #[test]
     fn openai_provider_language_model_uses_responses_endpoint() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -5665,6 +5809,69 @@ mod tests {
             .and_then(ProviderApiRequestBody::as_form_data)
             .cloned()
             .expect("form data body is captured")
+    }
+
+    fn openai_chat_captured_body_with_provider_options(
+        model_id: &str,
+        provider_options: ProviderOptions,
+    ) -> JsonValue {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_chat_test_provider(Arc::clone(&captured_requests));
+
+        let _result = poll_ready(
+            provider.chat(model_id).do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        captured_json_body(&captured_requests)
+    }
+
+    fn openai_chat_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-openai",
+                        "created": 1711115037,
+                        "model": "gpt-3.5-turbo",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
     }
 
     fn openai_completion_test_provider(
