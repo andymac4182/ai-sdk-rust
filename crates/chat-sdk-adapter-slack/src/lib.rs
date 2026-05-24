@@ -1238,15 +1238,25 @@ mod tests {
         assert_eq!(UNFURL_POLL_MS, 150);
     }
 
+    // ---------- describe("renderFormatted") (1 upstream case) ----------
+    // 1:1 with upstream `index.test.ts > describe("renderFormatted")
+    // > it("renders AST to standard markdown (Slack now accepts
+    // markdown natively)")`. The previous generic "Hello world" test
+    // exercised the pass-through path but didn't assert upstream's
+    // specific `**bold**` expectation from the strong-node example.
+
     #[test]
-    fn render_formatted_should_render_markdown_from_ast() {
-        use chat_sdk_chat::markdown::{Node, paragraph, root, text};
+    fn render_formatted_renders_ast_to_standard_markdown() {
+        // 1:1 with upstream — a root paragraph wrapping a `strong`
+        // node renders as `**bold**` (Slack now accepts standard
+        // markdown natively, hence the same shape as Discord).
+        use chat_sdk_chat::markdown::{Node, paragraph, root, strong, text};
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("bot-token", "signing"));
-        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Text(
-            text("Hello world"),
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Strong(
+            strong(vec![Node::Text(text("bold"))]),
         )]))]));
         let result = adapter.render_formatted(&ast);
-        assert!(result.contains("Hello world"), "got: {result}");
+        assert_eq!(result.trim(), "**bold**");
     }
 
     // ---------- describe("channelIdFromThreadId") (2 upstream cases) ----------
