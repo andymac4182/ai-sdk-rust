@@ -907,6 +907,18 @@ pub fn parse_slack_post_ephemeral_response(
 
 #[cfg(test)]
 mod tests {
+    //! ---------- upstream js-only-documented cases (1) ----------
+    //!
+    //! Per the slice-380 type-system-impossible pattern, the 1
+    //! upstream `index.test.ts > describe("subclass extensibility")`
+    //! case is enumerated as js-only-documented here:
+    //!
+    //! - `should expose protected members and methods to subclasses`:
+    //!   TypeScript-class-`protected` access modifier check (verifies
+    //!   subclasses can reach `logger` / `formatConverter` / etc on
+    //!   the base class). Rust uses `pub(crate)` visibility +
+    //!   trait composition rather than class inheritance; the
+    //!   subclass-leak test is unrepresentable by construction.
     use super::*;
     use futures_executor::block_on;
 

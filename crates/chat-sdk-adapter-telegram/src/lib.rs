@@ -870,6 +870,19 @@ mod tests {
     //! HTTP-bound methods will land once the workspace commits to an
     //! async runtime; these tests lock in the pure config + thread-id
     //! helpers.
+    //!
+    //! ---------- upstream js-only-documented cases (1) ----------
+    //!
+    //! Per the slice-380 type-system-impossible pattern, the 1
+    //! upstream `index.test.ts > describe("subclass extensibility")`
+    //! case is enumerated as js-only-documented here:
+    //!
+    //! - `should expose protected members and methods to subclasses`:
+    //!   TypeScript-class-`protected` access modifier check. Rust
+    //!   doesn't use class inheritance; `pub(crate)` visibility +
+    //!   trait composition provide the same modularity surface but
+    //!   the protected-member-leaks-to-subclass test is unrepresentable
+    //!   in Rust by construction (no JS prototype-chain access).
     use super::*;
     use futures_executor::block_on;
 
