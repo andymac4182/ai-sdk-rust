@@ -3562,6 +3562,11 @@ mod tests {
     }
 
     #[test]
+    fn chat_should_delay_tool_output_submission_until_the_stream_is_finished() {
+        assert_chat_tool_output_does_not_submit_without_follow_up();
+    }
+
+    #[test]
     fn chat_should_not_send_message_when_send_automatically_when_returns_false_via_promise() {
         assert_chat_tool_output_does_not_submit_without_follow_up();
     }

@@ -2329,15 +2329,18 @@ focused tests for each portable behavior before changing rows to `verified`.
   follow-up request behavior that preserves the submitted tool output state.
 - 2026-05-25: `packages/ai` `Chat.addToolOutput` resend gating/options parity
   added `chat_should_not_submit_message_when_tool_output_is_added_without_follow_up`
+  plus the upstream-named
+  `chat_should_delay_tool_output_submission_until_the_stream_is_finished`,
   and
   `chat_should_not_send_message_when_send_automatically_when_returns_false_via_promise`,
   and expanded `chat_should_submit_message_when_a_tool_output_is_added`,
   covering the portable upstream `ui/chat.test.ts` no-auto-send predicate and
-  false async predicate cases plus addToolOutput options forwarding by proving
-  Rust tool-output mutation does not make a second transport call until
-  explicit follow-up submission and that the follow-up request forwards both
-  custom headers and body properties. JavaScript Promise timing is represented
-  at Rust's explicit follow-up gate boundary.
+  false async predicate cases plus the delayed submission/options forwarding
+  paths by proving Rust tool-output mutation does not make a second transport
+  call until explicit follow-up submission and that the follow-up request
+  forwards both custom headers and body properties. JavaScript Promise and
+  controlled `ReadableStream` timing are represented at Rust's explicit
+  follow-up gate boundary.
 - 2026-05-25: `packages/ai` `Chat.addToolApprovalResponse` approved-flow
   parity added `chat_should_add_tool_approval_response_to_the_latest_assistant_message`
   `chat_should_submit_message_when_a_tool_approval_response_is_added`, and
