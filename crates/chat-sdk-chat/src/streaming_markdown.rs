@@ -705,6 +705,203 @@ mod tests {
         assert!(result.contains("| 1 | 2 |"), "got: {result}");
     }
 
+    // ---------- getCommittableText (5 portable upstream cases) ----------
+
+    #[test]
+    fn get_committable_text_should_hold_back_table_rows() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Text\n\n| A | B |\n");
+        let committable = r.get_committable_text();
+        assert!(!committable.contains("| A | B |"), "got: {committable}");
+        assert!(committable.contains("Text"), "got: {committable}");
+    }
+
+    #[test]
+    fn get_committable_text_should_wrap_confirmed_table_in_code_fence() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Text\n\n| A | B |\n|---|---|\n| 1 | 2 |\n");
+        let committable = r.get_committable_text();
+        assert!(committable.contains("```"), "got: {committable}");
+        assert!(committable.contains("| A | B |"), "got: {committable}");
+        assert!(committable.contains("| 1 | 2 |"), "got: {committable}");
+        assert!(committable.contains("Text"), "got: {committable}");
+    }
+
+    #[test]
+    fn get_committable_text_should_not_buffer_inside_code_fence() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("```\n| A |\n");
+        assert!(r.get_committable_text().contains("| A |"));
+    }
+
+    #[test]
+    fn get_committable_text_should_return_full_text_after_finish() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Text\n\n| A | B |\n");
+        assert!(!r.get_committable_text().contains("| A | B |"));
+        r.finish();
+        assert!(r.get_committable_text().contains("| A | B |"));
+    }
+
+    // ---------- append-only delta simulation (6 portable cases) ----------
+    // 1:1 with upstream's `simulateAppendStream` helper + the
+    // table/wrap-toggle/monotonic/end-of-stream cases. Inline-marker
+    // healing cases (Hello **wor / unclosed-bold / etc.) depend on
+    // remend and are js-only-documented at the module header.
+
+    /// 1:1 with upstream's `simulateAppendStream(chunks, options?)`
+    /// test helper. Returns `(appended_text, deltas, final_text)`.
+    fn simulate_append_stream(
+        chunks: &[&str],
+        options: Option<StreamingMarkdownRendererOptions>,
+    ) -> (String, Vec<String>, String) {
+        let mut r = StreamingMarkdownRenderer::new(options.unwrap_or_default());
+        let mut last_appended = String::new();
+        let mut deltas: Vec<String> = Vec::new();
+
+        for chunk in chunks {
+            r.push(chunk);
+            let committable = r.get_committable_text();
+            let delta = committable[last_appended.len()..].to_string();
+            if !delta.is_empty() {
+                deltas.push(delta);
+                last_appended = committable;
+            }
+        }
+
+        r.finish();
+        let final_committable = r.get_committable_text();
+        let final_delta = final_committable[last_appended.len()..].to_string();
+        if !final_delta.is_empty() {
+            deltas.push(final_delta);
+        }
+
+        let final_text = r.get_text().to_string();
+        let appended_text = deltas.join("");
+        (appended_text, deltas, final_text)
+    }
+
+    #[test]
+    fn append_only_plain_text_streams_without_modification() {
+        let (appended, _, _) = simulate_append_stream(&["Hello ", "World", "!\n"], None);
+        assert_eq!(appended, "Hello World!\n");
+    }
+
+    #[test]
+    fn append_only_table_is_wrapped_in_code_fence() {
+        let (appended, _, _) = simulate_append_stream(
+            &[
+                "Intro\n\n",
+                "| A | B |\n",
+                "|---|---|\n",
+                "| 1 | 2 |\n",
+                "| 3 | 4 |\n",
+                "\nAfter table\n",
+            ],
+            None,
+        );
+        assert!(appended.contains("```\n| A | B |"), "got: {appended}");
+        assert!(appended.contains("| 1 | 2 |"));
+        assert!(appended.contains("| 3 | 4 |"));
+        assert!(appended.contains("```\n\nAfter table"));
+        // Intro should appear before the code fence.
+        assert!(appended.find("Intro").unwrap() < appended.find("```").unwrap());
+    }
+
+    #[test]
+    fn append_only_table_can_stream_without_code_fence_when_wrapping_disabled() {
+        let (appended, _, _) = simulate_append_stream(
+            &[
+                "Intro\n\n",
+                "| A | B |\n",
+                "|---|---|\n",
+                "| 1 | 2 |\n",
+                "| 3 | 4 |\n",
+                "\nAfter table\n",
+            ],
+            Some(StreamingMarkdownRendererOptions {
+                wrap_tables_for_append: false,
+            }),
+        );
+        assert!(appended.contains("| A | B |"));
+        assert!(appended.contains("| 1 | 2 |"));
+        assert!(appended.contains("| 3 | 4 |"));
+        assert!(appended.contains("After table"));
+        assert!(!appended.contains("```"));
+    }
+
+    #[test]
+    fn append_only_table_at_end_of_stream_is_flushed_on_finish() {
+        let (appended, deltas, _) = simulate_append_stream(
+            &["Text\n\n", "| A | B |\n", "|---|---|\n", "| 1 | 2 |\n"],
+            None,
+        );
+        assert!(appended.contains("| A | B |"));
+        assert!(appended.contains("```"));
+        assert!(!deltas.is_empty());
+    }
+
+    #[test]
+    fn append_only_concatenated_deltas_are_monotonic() {
+        // Core invariant: every committable is a prefix-extension of
+        // the previous one.
+        let mut r = StreamingMarkdownRenderer::default();
+        let mut last_appended = String::new();
+        let mut deltas: Vec<String> = Vec::new();
+        let chunks = [
+            "Hello world\n",
+            "\n",
+            "| A | B |\n",
+            "| - | - |\n",
+            "| 1 | 2 |\n",
+            "\nDone\n",
+        ];
+        for chunk in chunks {
+            r.push(chunk);
+            let committable = r.get_committable_text();
+            assert!(
+                committable.starts_with(&last_appended),
+                "monotonicity broken: committable={committable:?} last_appended={last_appended:?}"
+            );
+            let delta = committable[last_appended.len()..].to_string();
+            if !delta.is_empty() {
+                deltas.push(delta);
+                last_appended = committable;
+            }
+        }
+        r.finish();
+        let final_committable = r.get_committable_text();
+        assert!(final_committable.starts_with(&last_appended));
+        let final_delta = final_committable[last_appended.len()..].to_string();
+        if !final_delta.is_empty() {
+            deltas.push(final_delta);
+        }
+        assert_eq!(deltas.join(""), final_committable);
+    }
+
+    #[test]
+    fn append_only_real_world_table_streams_correctly() {
+        let header = "| ID | Name | Department | Age | Salary | City | Join Date |\n";
+        let sep = "| - | - | - | - | - | - | - |\n";
+        let rows = [
+            "| 1 | Alice Johnson | Engineering | 28 | $75,000 | New York | 2021-03-15 |\n",
+            "| 2 | Bob Smith | Marketing | 35 | $68,000 | Los Angeles | 2019-07-22 |\n",
+            "| 3 | Carol Davis | Finance | 31 | $82,000 | Chicago | 2021-01-10 |\n",
+        ];
+        let mut chunks: Vec<&str> = vec!["Here's a table:\n\n", header, sep];
+        chunks.extend(rows.iter().copied());
+
+        let (appended, _, final_text) = simulate_append_stream(&chunks, None);
+        assert!(appended.contains("Alice Johnson"), "got: {appended}");
+        assert!(appended.contains("Bob Smith"));
+        assert!(appended.contains("Carol Davis"));
+        assert!(appended.contains("```"));
+        assert!(appended.contains("Join Date"));
+        assert!(!appended.contains("JoinJoin"));
+        assert!(final_text.contains("Alice Johnson"));
+        assert!(final_text.contains("| 3 |"));
+    }
+
     #[test]
     fn streaming_renderer_should_render_real_world_table_with_single_dash_separators_progressively() {
         let mut r = StreamingMarkdownRenderer::default();
