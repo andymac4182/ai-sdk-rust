@@ -735,17 +735,51 @@ pub fn is_linear_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (6) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream `index.test.ts` cases are enumerated as
+    //! js-only-documented here because they exercise behavior that
+    //! is unrepresentable in the Rust port by construction:
     //!
-    //! - `should expose protected members and methods to subclasses`:
-    //!   TypeScript-class-`protected` access modifier check. Rust
-    //!   uses `pub(crate)` visibility + trait composition rather
-    //!   than class inheritance — the subclass-protected-leak test
-    //!   is unrepresentable by construction.
+    //! 1. `describe("subclass extensibility") > should expose
+    //!    protected members and methods to subclasses` — TypeScript
+    //!    `protected` access modifier check. Rust uses
+    //!    `pub(crate)` visibility + trait composition rather than
+    //!    class inheritance.
+    //!
+    //! 2. `describe("linearClient getter") > should return the
+    //!    underlying LinearClient in apiKey mode` — asserts the
+    //!    getter returns a `LinearClient` typed-class instance
+    //!    with an `.issue(...)` method. Rust has no `LinearClient`
+    //!    equivalent — HTTP/GraphQL is held as an opaque
+    //!    `reqwest::Client`; the "type identity" assertion is moot.
+    //!
+    //! 3. `describe("linearClient getter") > should return the
+    //!    same instance across calls in single-tenant mode` —
+    //!    LinearClient-instance referential equality. The Rust
+    //!    port's `Client` is shared by value (Clone-shared
+    //!    underlying pool); per-call referential equality is moot.
+    //!
+    //! 4. `describe("linearClient getter") > should expose the
+    //!    same instance via the deprecated "client" alias` —
+    //!    alias-name backwards-compat. The Rust port never shipped
+    //!    the deprecated alias, so there is nothing to assert.
+    //!
+    //! 5. `describe("linearClient getter") > should throw in
+    //!    multi-tenant OAuth mode when called outside a webhook`
+    //!    — runtime "no token context" throw via AsyncLocalStorage.
+    //!    The Rust port surfaces the equivalent via typed errors
+    //!    at the per-installation call sites (e.g. webhook
+    //!    handler), rather than via a property getter, so the
+    //!    property-throw shape is unrepresentable.
+    //!
+    //! 6. `describe("linearClient getter") > should resolve the
+    //!    per-org LinearClient when accessed inside a webhook
+    //!    context` — AsyncLocalStorage-based request-context
+    //!    resolution. The Rust port plumbs per-request client
+    //!    state through function parameters rather than thread-
+    //!    local context, so the ALS-based getter is moot.
     use super::*;
     use futures_executor::block_on;
 
