@@ -2703,6 +2703,18 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-chat-language-model.test.ts` `should pass tools and toolChoice` to
   the OpenAI provider facade by asserting function-tool JSON Schema request
   shaping and specific `tool_choice` serialization.
+- 2026-05-24: OpenAI chat basic generate parity added
+  `openai_chat_should_extract_text_response`,
+  `openai_chat_should_extract_usage`,
+  `openai_chat_should_send_request_body`,
+  `openai_chat_should_send_additional_response_information`,
+  `openai_chat_should_expose_the_raw_response_headers`,
+  `openai_chat_should_pass_the_model_and_the_messages`, and
+  `openai_chat_should_pass_headers`, mapping the upstream
+  `openai-chat-language-model.test.ts` basic non-streaming chat cases through
+  the OpenAI provider facade for generated text content, usage accounting, raw
+  request body capture, response id/timestamp/model/body metadata, response
+  headers, model/message request shaping, and provider/request header merging.
 - 2026-05-24: OpenAI chat annotation/citation parity added
   `openai_chat_should_parse_annotations_and_citations`, mapping upstream
   `openai-chat-language-model.test.ts` `should parse annotations/citations` by
