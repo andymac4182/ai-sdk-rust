@@ -66,6 +66,26 @@ pub fn decode_thread_id(thread_id: &str) -> Result<TeamsThreadId, AdapterError> 
     })
 }
 
+/// Derive the channel-level thread id from a Teams thread id. 1:1
+/// port of upstream `channelIdFromThreadId(threadId)` — strips the
+/// `;messageid=…` suffix from the decoded `conversation_id` (Teams
+/// channel threads encode the parent message id as a query-string
+/// suffix on the conversation id), then re-encodes. For thread ids
+/// without a `;messageid=` suffix (channel-level / DM / group-chat)
+/// the result is identical to the input.
+///
+/// Returns the input verbatim when decoding fails — matches
+/// upstream's pass-through behavior for unparseable ids.
+pub fn channel_id_from_thread_id(thread_id: &str) -> String {
+    let Ok(mut decoded) = decode_thread_id(thread_id) else {
+        return thread_id.to_string();
+    };
+    if let Some(idx) = decoded.conversation_id.find(";messageid=") {
+        decoded.conversation_id.truncate(idx);
+    }
+    encode_thread_id(&decoded)
+}
+
 /// Check whether `thread_id` encodes a Direct Message conversation.
 /// 1:1 port of upstream `isDM(threadId)`: decodes the thread, then
 /// tests `!conversation_id.starts_with("19:")` (Teams convention:
@@ -169,5 +189,31 @@ mod tests {
             service_url: "https://smba.trafficmanager.net/teams/".to_string(),
         });
         assert!(!is_dm_thread(&thread_id));
+    }
+
+    // ---------- describe("channelIdFromThreadId") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("channelIdFromThreadId")`.
+
+    #[test]
+    fn channel_id_from_thread_id_strips_messageid_from_thread_id() {
+        let thread_id = encode_thread_id(&TeamsThreadId {
+            conversation_id: "19:abc@thread.tacv2;messageid=1767297849909".to_string(),
+            service_url: "https://smba.trafficmanager.net/teams/".to_string(),
+        });
+        let channel_id = channel_id_from_thread_id(&thread_id);
+        let decoded = decode_thread_id(&channel_id).unwrap();
+        assert_eq!(decoded.conversation_id, "19:abc@thread.tacv2");
+        assert!(!decoded.conversation_id.contains(";messageid="));
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_same_id_when_no_messageid_present() {
+        let thread_id = encode_thread_id(&TeamsThreadId {
+            conversation_id: "19:abc@thread.tacv2".to_string(),
+            service_url: "https://smba.trafficmanager.net/teams/".to_string(),
+        });
+        let channel_id = channel_id_from_thread_id(&thread_id);
+        let decoded = decode_thread_id(&channel_id).unwrap();
+        assert_eq!(decoded.conversation_id, "19:abc@thread.tacv2");
     }
 }
