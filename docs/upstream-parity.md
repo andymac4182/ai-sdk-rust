@@ -1065,6 +1065,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   `tool_loop_agent_generate_passes_tools_context_to_tool_execution_surfaces`,
   proving validated per-tool context reaches the local executor plus
   tool-execution start/end callbacks.
+- 2026-05-25: `packages/ai` `ToolLoopAgent` stream-side call-options schema
+  parity added `tool_loop_agent_stream_rejects_invalid_call_options_schema_before_model_call`
+  and `tool_loop_agent_stream_passes_valid_call_options_schema`, matching the
+  upstream `stream` call-options type/call-path cases and proving the schema
+  gate blocks invalid per-call options before streaming begins.
+- 2026-05-25: `packages/ai` `ToolLoopAgent` prepare-call context merge parity
+  added `tool_loop_agent_prepare_call_receives_merged_runtime_and_tools_context`,
+  proving default runtime/tools context values merge with per-call overrides
+  before the prepared call reaches `prepare_call`.
 - 2026-05-24: `packages/ai` `InferAgentUIMessage` type-level parity added
   named Rust counterparts for upstream `infer-agent-ui-message.test-d.ts`:
   `infer_agent_ui_message_should_not_contain_arbitrary_static_tools_when_no_tools_are_provided`
