@@ -850,6 +850,24 @@ mod tests {
     }
 
     #[test]
+    fn transcripts_api_delete_returns_no_error_for_unknown_user_key() {
+        // 1:1 with upstream `it("returns deleted: 0 for unknown
+        // userKey")`. Upstream returns `{deleted: 0}` to report no
+        // entries were removed. The Rust API returns `()` from
+        // `delete`, so the equivalent observable semantic is: calling
+        // delete on an unknown key succeeds without error and the
+        // subsequent count remains 0 (no spurious tombstone leaks).
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        // No append for "unknown-user" — call delete on the empty key.
+        block_on(api.delete("unknown-user")).unwrap();
+        // Count stays 0 since the tombstone gets filtered.
+        assert_eq!(block_on(api.count("unknown-user")).unwrap(), 0);
+        // List stays empty.
+        assert!(block_on(api.list("unknown-user", None)).unwrap().is_empty());
+    }
+
+    #[test]
     fn transcripts_api_delete_called_twice_does_not_double_count() {
         // 1:1 with upstream `it("does not double-count if delete is
         // called twice")`. The Rust delete API returns `()`, so the
