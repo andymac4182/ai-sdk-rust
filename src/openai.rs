@@ -2155,9 +2155,10 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFilePart, LanguageModelMessage, LanguageModelReasoningEffort,
-        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
+        LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -3041,6 +3042,77 @@ mod tests {
                 "verbosity": "low"
             })
         );
+    }
+
+    #[test]
+    fn openai_chat_should_pass_tools_and_tool_choice() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false,
+            "$schema": "http://json-schema.org/draft-07/schema#"
+        })
+        .as_object()
+        .cloned()
+        .expect("schema is an object");
+
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-3.5-turbo", |options| {
+                options
+                    .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                        "test-tool",
+                        input_schema,
+                    )))
+                    .with_tool_choice(LanguageModelToolChoice::Tool {
+                        tool_name: "test-tool".to_string(),
+                    })
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {
+                        "name": "test-tool"
+                    }
+                },
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "test-tool",
+                            "parameters": {
+                                "$schema": "http://json-schema.org/draft-07/schema#",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "value": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "value"
+                                ],
+                                "type": "object"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]

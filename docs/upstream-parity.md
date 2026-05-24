@@ -2698,6 +2698,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   provider-default`, top-level `reasoning`, provider-option
   `reasoningEffort` low/high/xhigh precedence, and `textVerbosity` to
   `verbosity` through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat tool request-body parity added
+  `openai_chat_should_pass_tools_and_tool_choice`, mapping upstream
+  `openai-chat-language-model.test.ts` `should pass tools and toolChoice` to
+  the OpenAI provider facade by asserting function-tool JSON Schema request
+  shaping and specific `tool_choice` serialization.
 - 2026-05-24: OpenAI chat logprobs provider-metadata parity added
   `openai_chat_should_extract_logprobs_provider_metadata` and
   `openai_chat_stream_should_extract_logprobs_provider_metadata`, mapping
