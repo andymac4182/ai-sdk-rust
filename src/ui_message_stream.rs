@@ -363,8 +363,9 @@ pub enum UiMessageChunk {
         /// Tool call identifier.
         tool_call_id: String,
 
-        /// Tool name.
-        tool_name: String,
+        /// Optional tool name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
 
         /// Whether the provider would execute the tool.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1553,7 +1554,7 @@ impl UiMessageChunk {
     ) -> Self {
         Self::ToolOutputDenied {
             tool_call_id: tool_call_id.into(),
-            tool_name: tool_name.into(),
+            tool_name: Some(tool_name.into()),
             provider_executed: None,
             dynamic: None,
         }
@@ -4033,6 +4034,32 @@ mod tests {
                     "toolCallId": "call-1"
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn ui_message_chunk_deserializes_tool_output_denied_without_tool_name() {
+        let chunk = serde_json::from_value::<UiMessageChunk>(json!({
+            "type": "tool-output-denied",
+            "toolCallId": "call-1"
+        }))
+        .expect("tool-output-denied chunk deserializes without toolName");
+
+        assert_eq!(
+            chunk,
+            UiMessageChunk::ToolOutputDenied {
+                tool_call_id: "call-1".to_string(),
+                tool_name: None,
+                provider_executed: None,
+                dynamic: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(chunk).expect("chunk serializes"),
+            json!({
+                "type": "tool-output-denied",
+                "toolCallId": "call-1"
+            })
         );
     }
 

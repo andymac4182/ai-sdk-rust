@@ -652,6 +652,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   `StreamingUiMessageState::new` now seeds tool, approval, and data part
   indexes from an existing assistant message so resumed chunks mutate prior UI
   parts before appending the next step.
+- 2026-05-25: `packages/ai` `tool-output-denied` UI-message chunk wire
+  parity added `ui_message_chunk_deserializes_tool_output_denied_without_tool_name`,
+  matching upstream `process-ui-message-stream.test.ts` denial chunks that only
+  carry `toolCallId`. Rust still preserves `toolName` when callers provide it.
 - 2026-05-24: `packages/ai` `processUIMessageStream` malformed-stream
   parity added named Rust counterparts for upstream
   `process-ui-message-stream.test.ts` missing-start error cases:
