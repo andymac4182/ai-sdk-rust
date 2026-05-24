@@ -251,6 +251,89 @@ struct MessagePattern {
     handler: MessageHandler,
 }
 
+/// 1:1 with upstream `ReactionEvent` minus the `thread` field. The
+/// dispatcher constructs the [`Thread`] from `thread_id` and the
+/// dispatching adapter before invoking the handler.
+#[derive(Clone, Debug)]
+pub struct ReactionEventInput {
+    /// Normalized emoji value (`{{emoji:name}}` placeholder).
+    pub emoji: crate::types::EmojiValue,
+    /// Platform-native emoji string as received from the source
+    /// (e.g. Slack `+1`, Teams `like`).
+    pub raw_emoji: String,
+    /// `true` for reaction-added events, `false` for reaction-removed
+    /// events.
+    pub added: bool,
+    /// Author of the reaction.
+    pub user: crate::types::Author,
+    /// Platform message id the reaction is attached to.
+    pub message_id: String,
+    /// Platform thread id containing the reacting message.
+    pub thread_id: String,
+    /// Platform-specific raw event payload.
+    pub raw: serde_json::Value,
+}
+
+/// 1:1 with upstream `ReactionEvent` — the input shape plus a
+/// dispatcher-constructed [`Thread`] handle for posting back.
+#[derive(Clone, Debug)]
+pub struct ReactionEvent {
+    pub emoji: crate::types::EmojiValue,
+    pub raw_emoji: String,
+    pub added: bool,
+    pub user: crate::types::Author,
+    pub message_id: String,
+    pub thread_id: String,
+    pub raw: serde_json::Value,
+    pub thread: Thread,
+}
+
+/// 1:1 with upstream `EmojiFilter` — either a normalized
+/// [`crate::types::EmojiValue`] or a platform-native raw-emoji
+/// string. A filter matches when the reaction event's `emoji.name`
+/// equals the filter's emoji name OR when the raw-emoji string
+/// matches the filter exactly (1:1 with upstream's `match` helper).
+#[derive(Clone, Debug)]
+pub enum EmojiFilter {
+    /// Match the reaction by normalized emoji name. Mirrors the
+    /// upstream `EmojiValue` filter form.
+    Emoji(crate::types::EmojiValue),
+    /// Match the reaction by raw-emoji string. Mirrors the upstream
+    /// `string` filter form.
+    Raw(String),
+}
+
+impl From<crate::types::EmojiValue> for EmojiFilter {
+    fn from(v: crate::types::EmojiValue) -> Self {
+        Self::Emoji(v)
+    }
+}
+
+impl From<String> for EmojiFilter {
+    fn from(s: String) -> Self {
+        Self::Raw(s)
+    }
+}
+
+impl From<&str> for EmojiFilter {
+    fn from(s: &str) -> Self {
+        Self::Raw(s.to_string())
+    }
+}
+
+/// 1:1 with upstream `ReactionHandler` — invoked once per filtered
+/// reaction event.
+pub type ReactionHandler =
+    Arc<dyn Fn(ReactionEvent) -> HandlerFuture + Send + Sync + 'static>;
+
+/// Stored filter+handler pair for [`Chat::on_reaction_filtered`].
+struct ReactionRegistration {
+    /// `None` means "match all reactions" (1:1 with upstream's
+    /// no-filter `onReaction(handler)` form).
+    filters: Option<Vec<EmojiFilter>>,
+    handler: ReactionHandler,
+}
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -261,6 +344,7 @@ struct ChatHandlers {
     subscribed: Arc<std::sync::Mutex<Vec<SubscribedMessageHandler>>>,
     direct_message: Arc<std::sync::Mutex<Vec<DirectMessageHandler>>>,
     message_patterns: Arc<std::sync::Mutex<Vec<MessagePattern>>>,
+    reaction: Arc<std::sync::Mutex<Vec<ReactionRegistration>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -528,6 +612,101 @@ impl Chat {
             pattern,
             handler: Arc::new(handler),
         });
+    }
+
+    /// 1:1 port of upstream `chat.onReaction(handler)` no-filter
+    /// overload. Registers a handler that fires for every reaction
+    /// event (except reactions from the bot itself).
+    pub fn on_reaction<F>(&self, handler: F)
+    where
+        F: Fn(ReactionEvent) -> HandlerFuture + Send + Sync + 'static,
+    {
+        self.handlers.reaction.lock().unwrap().push(ReactionRegistration {
+            filters: None,
+            handler: Arc::new(handler),
+        });
+    }
+
+    /// 1:1 port of upstream `chat.onReaction(emojiFilters, handler)`
+    /// filter overload. Registers a handler that fires only for
+    /// reactions matching any of the supplied [`EmojiFilter`]s — a
+    /// reaction matches when its normalized `emoji.name` equals the
+    /// filter's emoji name OR its `raw_emoji` string equals the
+    /// filter's raw string.
+    pub fn on_reaction_filtered<F, I, E>(&self, filters: I, handler: F)
+    where
+        F: Fn(ReactionEvent) -> HandlerFuture + Send + Sync + 'static,
+        I: IntoIterator<Item = E>,
+        E: Into<EmojiFilter>,
+    {
+        let filters: Vec<EmojiFilter> = filters.into_iter().map(Into::into).collect();
+        self.handlers.reaction.lock().unwrap().push(ReactionRegistration {
+            filters: Some(filters),
+            handler: Arc::new(handler),
+        });
+    }
+
+    /// 1:1 port of upstream `chat.processReaction(event)`. Dispatches
+    /// the reaction to every registered [`ReactionHandler`] whose
+    /// filter matches (or any handler with no filter). Skips
+    /// dispatch when `event.user.is_me` (upstream's "skip reactions
+    /// from self" gate). The dispatcher constructs the [`Thread`]
+    /// from `event.thread_id` and the dispatching adapter.
+    pub async fn process_reaction(&self, adapter: &dyn Adapter, event: ReactionEventInput) {
+        // 1:1 with upstream "Skip reactions from self".
+        if event.user.is_me {
+            return;
+        }
+
+        let adapter_arc = match self.adapters.get(adapter.name()).cloned() {
+            Some(a) => a,
+            None => return,
+        };
+
+        let handlers_snapshot: Vec<(Option<Vec<EmojiFilter>>, ReactionHandler)> = self
+            .handlers
+            .reaction
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.filters.clone(), r.handler.clone()))
+            .collect();
+
+        for (filters, handler) in handlers_snapshot {
+            let matches = match filters {
+                None => true,
+                Some(filters) => filters.iter().any(|f| {
+                    // 1:1 with upstream `chat.ts:1660-1680`: for each
+                    // filter, extract the "filter name" string and
+                    // match against EITHER the normalized
+                    // `event.emoji.name` OR the raw `event.raw_emoji`.
+                    // This lets the same `["thumbs_up"]` filter match
+                    // both `(emoji=thumbs_up, raw=+1)` (Slack) and
+                    // `(emoji=thumbs_up, raw=like)` (Teams).
+                    let filter_name = match f {
+                        EmojiFilter::Emoji(value) => value.name.as_str(),
+                        EmojiFilter::Raw(s) => s.as_str(),
+                    };
+                    filter_name == event.emoji.name.as_str()
+                        || filter_name == event.raw_emoji.as_str()
+                }),
+            };
+            if !matches {
+                continue;
+            }
+            let thread = Thread::new(adapter_arc.clone(), &event.thread_id);
+            let reaction = ReactionEvent {
+                emoji: event.emoji.clone(),
+                raw_emoji: event.raw_emoji.clone(),
+                added: event.added,
+                user: event.user.clone(),
+                message_id: event.message_id.clone(),
+                thread_id: event.thread_id.clone(),
+                raw: event.raw.clone(),
+                thread,
+            };
+            handler(reaction).await;
+        }
     }
 
     /// 1:1 port of upstream `chat.transcripts` getter. Panics when
@@ -2976,6 +3155,251 @@ mod tests {
         assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
         // The dispatcher mutated message.is_mention to true.
         assert_eq!(msg.is_mention, Some(true));
+    }
+
+    // ---------- describe("Reactions") — slice 419 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("Reactions")`.
+    // Phase E (slice 419) adds the `Chat::on_reaction` +
+    // `Chat::on_reaction_filtered` registration surface +
+    // `Chat::process_reaction` async dispatcher. The dispatcher
+    // skips reactions from the bot itself (event.user.is_me) and
+    // fires every registered handler whose filter matches.
+    //
+    // The handler receives a [`ReactionEvent`] with a Thread bound
+    // to the dispatching adapter (matching upstream's behavior).
+
+    fn make_reaction_event(emoji_name: &str, raw_emoji: &str, is_me: bool) -> ReactionEventInput {
+        ReactionEventInput {
+            emoji: crate::types::EmojiValue::new(emoji_name),
+            raw_emoji: raw_emoji.to_string(),
+            added: true,
+            user: Author {
+                user_id: "U123".to_string(),
+                user_name: "user".to_string(),
+                full_name: "Test User".to_string(),
+                is_bot: BotStatus::Known(is_me),
+                is_me,
+            },
+            message_id: "msg-1".to_string(),
+            thread_id: "slack:C123:1234.5678".to_string(),
+            raw: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn on_reaction_calls_handler_for_all_reactions() {
+        // 1:1 with upstream "should call onReaction handler for all
+        // reactions". No-filter overload fires for every reaction.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_emoji: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let c = calls.clone();
+        let oe = observed_emoji.clone();
+        chat.on_reaction(move |event| {
+            let c = c.clone();
+            let oe = oe.clone();
+            let name = event.emoji.name.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+                *oe.lock().unwrap() = Some(name);
+            })
+        });
+        let event = make_reaction_event("thumbs_up", "+1", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(observed_emoji.lock().unwrap().as_deref(), Some("thumbs_up"));
+    }
+
+    #[test]
+    fn on_reaction_filtered_calls_handler_for_matching_emoji_only() {
+        // 1:1 with upstream "should call onReaction handler for
+        // specific emoji". Filter is ["thumbs_up", "heart"]; only
+        // thumbs_up matches, fire matches; another emoji (fire)
+        // does not.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_emoji: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let c = calls.clone();
+        let oe = observed_emoji.clone();
+        chat.on_reaction_filtered(["thumbs_up", "heart"], move |event| {
+            let c = c.clone();
+            let oe = oe.clone();
+            let name = event.emoji.name.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+                *oe.lock().unwrap() = Some(name);
+            })
+        });
+        let thumbs_event = make_reaction_event("thumbs_up", "+1", false);
+        let fire_event = make_reaction_event("fire", "fire", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), thumbs_event));
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), fire_event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(observed_emoji.lock().unwrap().as_deref(), Some("thumbs_up"));
+    }
+
+    #[test]
+    fn on_reaction_skips_reactions_from_self() {
+        // 1:1 with upstream "should skip reactions from self".
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_reaction(move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_reaction_event("thumbs_up", "+1", true); // is_me=true
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_reaction_filtered_matches_by_raw_emoji_string() {
+        // 1:1 with upstream "should match by rawEmoji when specified
+        // in filter". Filter contains "+1" raw string; event with
+        // raw_emoji="+1" matches.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_reaction_filtered(["+1"], move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_reaction_event("thumbs_up", "+1", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_reaction_handles_removed_reactions() {
+        // 1:1 with upstream "should handle removed reactions". The
+        // added=false event reaches the handler with added=false.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed_added: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let oa = observed_added.clone();
+        chat.on_reaction(move |event| {
+            let oa = oa.clone();
+            let added = event.added;
+            Box::pin(async move {
+                *oa.lock().unwrap() = Some(added);
+            })
+        });
+        let mut event = make_reaction_event("thumbs_up", "+1", false);
+        event.added = false;
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(*observed_added.lock().unwrap(), Some(false));
+    }
+
+    #[test]
+    fn on_reaction_filtered_matches_teams_style_raw_emoji_via_normalized_name() {
+        // 1:1 with upstream "should match Teams-style reactions
+        // (EmojiValue with string filter)". Filter is an emoji name
+        // ("thumbs_up"); event has raw_emoji="like" (Teams native)
+        // but emoji.name="thumbs_up" (normalized). The normalized
+        // name match should fire the handler.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_reaction_filtered(
+            ["thumbs_up", "heart", "fire", "rocket"],
+            move |_event| {
+                let c = c.clone();
+                Box::pin(async move {
+                    c.fetch_add(1, AtomicOrdering::SeqCst);
+                })
+            },
+        );
+        let event = make_reaction_event("thumbs_up", "like", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_reaction_filtered_matches_by_emoji_value() {
+        // 1:1 with upstream "should match EmojiValue by object
+        // identity" — Rust port uses structural equality on
+        // EmojiValue.name (no JS object identity), but same observable
+        // contract.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_reaction_filtered(
+            [crate::types::EmojiValue::new("thumbs_up")],
+            move |_event| {
+                let c = c.clone();
+                Box::pin(async move {
+                    c.fetch_add(1, AtomicOrdering::SeqCst);
+                })
+            },
+        );
+        let event = make_reaction_event("thumbs_up", "like", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_reaction_event_includes_thread_property() {
+        // 1:1 with upstream "should include thread property in
+        // ReactionEvent". The dispatcher constructs a Thread from
+        // the event.thread_id and binds it to the dispatching
+        // adapter; the handler observes thread.thread_id() and
+        // adapter_name().
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_reaction(move |event| {
+            let o = o.clone();
+            let tid = event.thread.thread_id().to_string();
+            let name = event.thread.adapter_name().to_string();
+            Box::pin(async move {
+                *o.lock().unwrap() = Some((tid, name));
+            })
+        });
+        let event = make_reaction_event("thumbs_up", "+1", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        let obs = observed.lock().unwrap();
+        assert_eq!(
+            obs.as_ref().map(|(t, a)| (t.as_str(), a.as_str())),
+            Some(("slack:C123:1234.5678", "slack"))
+        );
+    }
+
+    #[test]
+    fn on_reaction_invokes_multiple_handlers_in_order() {
+        // Additive: multi-handler dispatch fires in registration
+        // order; mix of no-filter and filtered handlers.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_reaction(move |_event| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_reaction_filtered(["thumbs_up"], move |_event| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        let o3 = order.clone();
+        chat.on_reaction_filtered(["fire"], move |_event| {
+            let o = o3.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(3);
+            })
+        });
+        let event = make_reaction_event("thumbs_up", "+1", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        // handlers 1 and 2 fire; 3 ("fire") does not match
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
     #[test]
