@@ -5313,3 +5313,115 @@ POSTs, concurrency strategies, attachment rehydration, action
 callbackUrl error logging, `MemoryStateAdapter::no_op()` test
 helper, ThreadImpl.fromJSON "throw on unknown adapter on access"
 adapter-registry mechanism.)
+
+## Cycle 471..475 (handler-event sub-API completion + ledger correctness sweep)
+
+Driven by an interactive `/goal` session (Claude Code, not the
+autonomous-loop runner). The slice cadence was identical to the
+autonomous shape — small portable cases, full validation, lock-
+serialized merge, push — but every slice was a single human-
+visible step.
+
+**What the brief got wrong or left out**
+
+- **The slice-59 "Next Unported Work Queue" snapshot is now ~400
+  slices stale.** It still says `packages/chat` is at 74% with 11
+  modules mapped; the current ledger reports 99% with 19 modules
+  and 924+ colocated tests. Future readers picking up the work
+  shouldn't trust the queue's "Realistic remaining slice budget"
+  guess (200-300 chat-finishing slices) — the actual remaining
+  scope is the handful of structural items in the chat.test.ts
+  triage row plus the adapter/state-backend ports. Tighten:
+  rewrite the queue from the test-file triage table, not the
+  inventory snapshot.
+
+- **The test-file triage table itself was 5+ slices stale in
+  multiple rows.** Slice 472 found that the Message.toJSON,
+  Message.fromJSON, and Thread.toJSON rows all under-counted
+  ports (e.g. the ledger said Message.toJSON 8/9 but Rust had
+  9/9 + an additive 10th). The triage row's per-block counts
+  drift because slices that close a describe-block usually
+  update the *handler-class* row ("Reactions 9/9 portable")
+  but not the triage table's per-file column. Tighten: when a
+  slice closes a sub-block, update both columns in the same
+  edit, OR drop the per-file count and only keep the handler-
+  class count.
+
+- **Type-system-impossible enumeration is not just for JSX.** Slice
+  472 enumerated `ThreadImpl.fromJSON > "should throw error for
+  unknown adapter on access"` as type-system-impossible: Rust's
+  `Thread::from_json(json, adapter)` requires the adapter at
+  construction, so the upstream "deferred throw on .adapter
+  read" failure mode is unreachable. Pattern: any upstream test
+  that asserts an error fired by a *missing-at-runtime*
+  optional argument that Rust requires at construction is
+  type-system-impossible — and the reviver-layer fallback
+  (`Revived::PassThrough` when singleton lookup fails) is
+  safer-by-construction than the upstream throw. Add to the
+  type-system-impossible cookbook in the brief.
+
+- **`event.thread.post` / `event.channel.post` is the same shape
+  across all 4 handler classes.** Slices 471, 474, 475 ported
+  the slash-command, action, and reaction variants of "should
+  allow posting from event.thread/channel" with identical
+  structure: an inline `RecordingAdapter` that records
+  `post_message` (or `post_channel_message` for slash) +
+  asserts the dispatched event handle routes to it. Pattern:
+  when porting a new handler-class event surface, expect a
+  `should allow posting from event.X` case in upstream's
+  describe block; reuse this slice shape rather than designing
+  from scratch.
+
+- **isDM dispatcher gap was already paid for, just not wired
+  through.** Slice 473 found that `Chat::handle_incoming_message`
+  was already calling `adapter.is_dm(thread_id)` at line 1846
+  but discarding the result for handler-bound Threads. The fix
+  was a one-line change to `make_thread` (chain `.with_is_dm`)
+  — the upstream test fell out for free. Pattern: when a
+  describe-block is partially-mapped with handler-class cases
+  still deferred, check whether the dispatcher already computes
+  the needed value before writing new infrastructure.
+
+**Stale or misleading guidance**
+
+- The brief's `Phase 1.5 trait-extension session (added slice 114)`
+  block describes adding the Adapter/StateAdapter traits as
+  prerequisite for `callback_url`, `transcripts`, etc. That work
+  is already done (the traits exist with the full method set,
+  and the consumer modules are wired). The brief should mark
+  this section "completed in slices 115..280" rather than read
+  as forward-looking guidance.
+
+- The brief's "Multi-session reality" section repeats the slice-59
+  scope estimate ("~200-300 more slices for chat.ts"). Move this
+  to a historical-note section dated 2026-05-23 so a fresh
+  session doesn't anchor on it.
+
+**Edits applied**
+
+- `docs/chat/upstream-parity.md`: corrected stale per-describe
+  counts on the chat.test.ts row (Slash Commands 7/9, Reactions
+  9/9, Actions 6/15, isDM 3/3) and the serialization.test.ts row
+  (Message.toJSON 9/9, Message.fromJSON 5/5, Thread.toJSON 6/6,
+  Thread.fromJSON 7/8 portable + 1 type-system-impossible).
+- `crates/chat-sdk-chat/src/thread.rs`: enumerated the
+  ThreadImpl.fromJSON unknown-adapter case as type-system-
+  impossible in the test-mod header (slice 472).
+- `crates/chat-sdk-chat/src/chat.rs`: wired
+  `Thread::with_is_dm(adapter.is_dm(thread_id))` into the
+  dispatcher's `make_thread` closure so handler-bound Threads
+  observe DM status (slice 473).
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- Tighten the brief's slice-59 "Next Unported Work Queue" to
+  reflect 2026-05-25 state instead of 2026-05-23.
+- Mark the `Phase 1.5 trait-extension session` block as
+  completed.
+- Move "Multi-session reality" estimate to historical-note
+  section.
+- Inherit all prior unchanged deferreds (action/modal
+  callbackUrl POSTs, concurrency strategies, attachment
+  rehydration, action callbackUrl error logging,
+  `MemoryStateAdapter::no_op()` test helper).
