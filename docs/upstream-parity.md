@@ -2054,7 +2054,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/stream_object.rs`, mapping upstream `result.fullStream` object-output
   ordering with object deltas, text deltas, and final finish metadata.
 - 2026-05-21: `streamObject` text response parity added
-  `stream_object_result_text_stream_and_response_match_upstream_object_chunks`
+  `stream_object_result_text_stream_sends_text_stream`,
+  `stream_object_result_to_text_stream_response_creates_response_with_text_stream`,
   and
   `stream_object_result_pipe_text_stream_to_response_writes_default_headers_chunks_and_end`
   in `src/stream_object.rs`, mapping upstream `result.textStream`,

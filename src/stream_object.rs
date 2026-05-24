@@ -2004,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_object_result_text_stream_and_response_match_upstream_object_chunks() {
+    fn stream_object_result_text_stream_sends_text_stream() {
         let model = MockLanguageModel::new()
             .with_stream_result(LanguageModelStreamResult::new(object_stream()));
 
@@ -2020,6 +2020,16 @@ mod tests {
             " }".to_string(),
         ];
         assert_eq!(result.text_stream, expected_chunks);
+    }
+
+    #[test]
+    fn stream_object_result_to_text_stream_response_creates_response_with_text_stream() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
 
         let response = result.to_text_stream_response(TextStreamResponseInit::new());
         assert_eq!(response.status, 200);
@@ -2029,7 +2039,7 @@ mod tests {
         );
         assert_eq!(
             response.decoded_body().expect("response body decodes"),
-            expected_chunks
+            result.text_stream
         );
     }
 
