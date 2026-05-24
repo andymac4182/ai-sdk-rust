@@ -334,6 +334,56 @@ struct ReactionRegistration {
     handler: ReactionHandler,
 }
 
+/// 1:1 with upstream `ActionEvent` minus the `thread` and
+/// `openModal` fields. The dispatcher constructs the [`Thread`]
+/// from `thread_id`; `openModal` lands in a follow-up slice.
+#[derive(Clone, Debug)]
+pub struct ActionEventInput {
+    /// Block-kit / cards action id (e.g. `"approve"`).
+    pub action_id: String,
+    /// Optional action value payload (e.g. `"order-123"`).
+    pub value: Option<String>,
+    /// Author of the action (button click / menu selection).
+    pub user: crate::types::Author,
+    /// Platform message id the action originated from.
+    pub message_id: String,
+    /// Platform thread id containing the action surface.
+    pub thread_id: String,
+    /// Platform-specific raw event payload.
+    pub raw: serde_json::Value,
+}
+
+/// 1:1 with upstream `ActionEvent` — the input shape plus a
+/// dispatcher-constructed [`Thread`] handle for posting back. The
+/// upstream `openModal` callback is deferred until the
+/// `Adapter::open_modal` trait method lands behind a follow-up
+/// slice; for now adopters can call `chat.open_modal` directly via
+/// the existing modal pipeline.
+#[derive(Clone, Debug)]
+pub struct ActionEvent {
+    pub action_id: String,
+    pub value: Option<String>,
+    pub user: crate::types::Author,
+    pub message_id: String,
+    pub thread_id: String,
+    pub raw: serde_json::Value,
+    pub thread: Thread,
+}
+
+/// 1:1 with upstream `ActionHandler` — invoked per matching action
+/// event. Receives the dispatcher-constructed [`ActionEvent`].
+pub type ActionHandler =
+    Arc<dyn Fn(ActionEvent) -> HandlerFuture + Send + Sync + 'static>;
+
+/// Stored filter+handler pair for [`Chat::on_action_filtered`].
+struct ActionRegistration {
+    /// `None` means "match all actions" (1:1 with upstream's
+    /// no-filter `onAction(handler)` form). Otherwise matches when
+    /// the event's `action_id` equals any string in the vec.
+    filters: Option<Vec<String>>,
+    handler: ActionHandler,
+}
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -345,6 +395,7 @@ struct ChatHandlers {
     direct_message: Arc<std::sync::Mutex<Vec<DirectMessageHandler>>>,
     message_patterns: Arc<std::sync::Mutex<Vec<MessagePattern>>>,
     reaction: Arc<std::sync::Mutex<Vec<ReactionRegistration>>>,
+    action: Arc<std::sync::Mutex<Vec<ActionRegistration>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -652,6 +703,86 @@ impl Chat {
     /// dispatch when `event.user.is_me` (upstream's "skip reactions
     /// from self" gate). The dispatcher constructs the [`Thread`]
     /// from `event.thread_id` and the dispatching adapter.
+    /// 1:1 port of upstream `chat.onAction(handler)` no-filter
+    /// overload. Registers a handler that fires for every action
+    /// event (except actions from the bot itself).
+    pub fn on_action<F>(&self, handler: F)
+    where
+        F: Fn(ActionEvent) -> HandlerFuture + Send + Sync + 'static,
+    {
+        self.handlers.action.lock().unwrap().push(ActionRegistration {
+            filters: None,
+            handler: Arc::new(handler),
+        });
+    }
+
+    /// 1:1 port of upstream `chat.onAction(actionIds, handler)`
+    /// filter overload. Registers a handler that fires only for
+    /// actions whose `action_id` equals any of the supplied
+    /// filter strings. Accepts both single-string (`"approve"`) and
+    /// array (`["approve", "reject"]`) forms via the `IntoIterator`
+    /// signature.
+    pub fn on_action_filtered<F, I, S>(&self, action_ids: I, handler: F)
+    where
+        F: Fn(ActionEvent) -> HandlerFuture + Send + Sync + 'static,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let filters: Vec<String> = action_ids.into_iter().map(Into::into).collect();
+        self.handlers.action.lock().unwrap().push(ActionRegistration {
+            filters: Some(filters),
+            handler: Arc::new(handler),
+        });
+    }
+
+    /// 1:1 port of upstream `chat.processAction(event)`. Dispatches
+    /// the action to every registered [`ActionHandler`] whose filter
+    /// matches (or any handler with no filter). Skips dispatch when
+    /// `event.user.is_me` (upstream's "skip actions from self"
+    /// gate). The dispatcher constructs the [`Thread`] from
+    /// `event.thread_id` and the dispatching adapter.
+    pub async fn process_action(&self, adapter: &dyn Adapter, event: ActionEventInput) {
+        // 1:1 with upstream "Skip actions from self".
+        if event.user.is_me {
+            return;
+        }
+
+        let adapter_arc = match self.adapters.get(adapter.name()).cloned() {
+            Some(a) => a,
+            None => return,
+        };
+
+        let handlers_snapshot: Vec<(Option<Vec<String>>, ActionHandler)> = self
+            .handlers
+            .action
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.filters.clone(), r.handler.clone()))
+            .collect();
+
+        for (filters, handler) in handlers_snapshot {
+            let matches = match filters {
+                None => true,
+                Some(filters) => filters.iter().any(|f| f.as_str() == event.action_id.as_str()),
+            };
+            if !matches {
+                continue;
+            }
+            let thread = Thread::new(adapter_arc.clone(), &event.thread_id);
+            let action = ActionEvent {
+                action_id: event.action_id.clone(),
+                value: event.value.clone(),
+                user: event.user.clone(),
+                message_id: event.message_id.clone(),
+                thread_id: event.thread_id.clone(),
+                raw: event.raw.clone(),
+                thread,
+            };
+            handler(action).await;
+        }
+    }
+
     pub async fn process_reaction(&self, adapter: &dyn Adapter, event: ReactionEventInput) {
         // 1:1 with upstream "Skip reactions from self".
         if event.user.is_me {
@@ -3399,6 +3530,185 @@ mod tests {
         let event = make_reaction_event("thumbs_up", "+1", false);
         futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
         // handlers 1 and 2 fire; 3 ("fire") does not match
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    // ---------- describe("Actions") — slice 420 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("Actions")`. Phase
+    // F (slice 420) mirrors the slice-419 reaction pattern for
+    // action events (button clicks, menu selections, etc.).
+    //
+    // Skips actions from self (event.user.is_me); fires every
+    // registered handler whose filter matches; constructs the
+    // Thread from event.thread_id bound to the dispatching adapter.
+
+    fn make_action_event(action_id: &str, value: Option<&str>, is_me: bool) -> ActionEventInput {
+        ActionEventInput {
+            action_id: action_id.to_string(),
+            value: value.map(str::to_string),
+            user: Author {
+                user_id: "U123".to_string(),
+                user_name: "user".to_string(),
+                full_name: "Test User".to_string(),
+                is_bot: BotStatus::Known(is_me),
+                is_me,
+            },
+            message_id: "msg-1".to_string(),
+            thread_id: "slack:C123:1234.5678".to_string(),
+            raw: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn on_action_calls_handler_for_all_actions() {
+        // 1:1 with upstream "should call onAction handler for all
+        // actions". No-filter overload fires for every action.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed: Arc<Mutex<Option<(String, Option<String>)>>> = Arc::new(Mutex::new(None));
+        let c = calls.clone();
+        let o = observed.clone();
+        chat.on_action(move |event| {
+            let c = c.clone();
+            let o = o.clone();
+            let id = event.action_id.clone();
+            let v = event.value.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+                *o.lock().unwrap() = Some((id, v));
+            })
+        });
+        let event = make_action_event("approve", Some("order-123"), false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        let obs = observed.lock().unwrap();
+        assert_eq!(
+            obs.as_ref().map(|(id, v)| (id.as_str(), v.as_deref())),
+            Some(("approve", Some("order-123")))
+        );
+    }
+
+    #[test]
+    fn on_action_filtered_calls_handler_for_matching_action_ids_only() {
+        // 1:1 with upstream "should call onAction handler for
+        // specific action IDs". Filter is ["approve", "reject"];
+        // approve matches, skip does not.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let c = calls.clone();
+        let o = observed.clone();
+        chat.on_action_filtered(["approve", "reject"], move |event| {
+            let c = c.clone();
+            let o = o.clone();
+            let id = event.action_id.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+                *o.lock().unwrap() = Some(id);
+            })
+        });
+        let approve = make_action_event("approve", None, false);
+        let skip = make_action_event("skip", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), approve));
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), skip));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(observed.lock().unwrap().as_deref(), Some("approve"));
+    }
+
+    #[test]
+    fn on_action_filtered_accepts_single_action_id_string() {
+        // 1:1 with upstream "should call onAction handler for
+        // single action ID". The IntoIterator-of-String signature
+        // accepts both `["approve"]` and (via the impl Iterator
+        // for [&str; 1]) a single-element array, matching upstream's
+        // `onAction(string, handler)` overload.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_action_filtered(["approve"], move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_action_event("approve", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_action_skips_actions_from_self() {
+        // 1:1 with upstream "should skip actions from self".
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_action(move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_action_event("approve", None, true); // is_me=true
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_action_event_includes_thread_property() {
+        // 1:1 with upstream "should include thread property in
+        // ActionEvent". The dispatcher constructs a Thread from
+        // the event.thread_id bound to the dispatching adapter.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_action(move |event| {
+            let o = o.clone();
+            let tid = event.thread.thread_id().to_string();
+            let name = event.thread.adapter_name().to_string();
+            Box::pin(async move {
+                *o.lock().unwrap() = Some((tid, name));
+            })
+        });
+        let event = make_action_event("approve", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        let obs = observed.lock().unwrap();
+        assert_eq!(
+            obs.as_ref().map(|(t, a)| (t.as_str(), a.as_str())),
+            Some(("slack:C123:1234.5678", "slack"))
+        );
+    }
+
+    #[test]
+    fn on_action_invokes_multiple_handlers_in_order() {
+        // Additive: multi-handler dispatch fires in registration
+        // order; mix of no-filter and filtered handlers.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_action(move |_event| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_action_filtered(["approve"], move |_event| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        let o3 = order.clone();
+        chat.on_action_filtered(["reject"], move |_event| {
+            let o = o3.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(3);
+            })
+        });
+        let event = make_action_event("approve", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        // handlers 1 and 2 fire; 3 ("reject") does not match
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
