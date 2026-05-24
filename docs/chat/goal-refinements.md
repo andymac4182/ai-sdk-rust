@@ -3253,3 +3253,104 @@ module-aliasing test).
   the workspace to decide on `sqlx` vs `tokio-postgres` vs
   `deadpool` etc. Picking a backend would unlock ~50 tests per
   crate.
+
+---
+
+## Slices 287..299 refinement cycle (audit + transcripts close-out + adapter constructor pattern)
+
+**What was learned**
+
+- `TranscriptsApi` upstream uses a different shape (Message-
+  object-driven append/list) than the Rust port (explicit
+  `AppendTranscriptInput`). The shape divergence makes some upstream
+  test cases not mappable 1:1 — e.g. "no-ops when Message has no
+  userKey" is impossible because user_key is required in the input.
+  The right call: port the behavior-equivalent cases (list filters,
+  delete semantics, max-per-user eviction, formatted round-trip),
+  acknowledge the shape divergence in the row notes, and don't
+  invent fake 1:1 mappings.
+- Type-system-enforced upstream tests should be ported as
+  type-level invariants. Example: upstream "rejects malformed
+  duration strings" throws at construction; the Rust port enforces
+  via `RetentionPolicy::Duration(DurationString)` where bad strings
+  fail to parse. The test asserts on `parse::<DurationString>()`
+  returning `Err`, not on a runtime constructor panic. Pattern:
+  "1:1 with upstream's runtime validation at parse time" — call
+  out the type-system enforcement explicitly so future audits
+  don't flag it as "deferred".
+- Adapter constructor describe blocks have a recurring pattern:
+  upstream supports multiple auth shapes (Token | App | OAuth) +
+  optional `userName` / `botUserId` / `webhookSecret` /
+  `apiBase`. The Rust port can match this with: (a) a `XxxAuth`
+  discriminated union enum, (b) a `DEFAULT_USER_NAME = "bot"`
+  const + `effective_user_name()` getter, (c) optional fields on
+  `XxxAdapterOptions` for the other fields. Once that shape is in
+  place, 3-5 upstream cases port immediately. Applied this cycle
+  to: GitHub (5 cases), Linear (3), Discord (3), Slack (4), Teams
+  (1). Total: 16 upstream cases ported across 5 adapters with
+  minimal per-adapter churn.
+- Env-var-driven constructor tests (Telegram, Messenger) are NOT
+  in this pattern — they need env-var resolution helpers added to
+  the Rust adapter constructors. That's its own slice (or skip,
+  marking as JS-only since Rust adopters configure via code).
+- chat-sdk-chat's stale "301 Rust tests total" footer in the
+  upstream-parity.md row was caught during a doc audit (slice
+  287). The accurate count was 679 at that point, now 695+. Lesson:
+  add a per-cycle audit step that grep's the doc for stale
+  aggregate numbers — they accumulate quickly when individual
+  module rows get extended but the aggregate footer isn't
+  refreshed.
+
+**What is now true that wasn't before**
+
+- TranscriptsApi has 17/24 upstream describe-block cases mapped
+  (list filters complete; append+count+delete describes mostly
+  complete; 7 cases marked shape-divergent or JS-only).
+- 5 adapters have constructor describe block coverage: GitHub
+  (5 cases), Linear (3), Discord (3), Slack (4), Teams (1 +
+  1 JS-only). Adapter-options structs now carry the upstream
+  field set (auth variant, webhook_secret, user_name, bot_user_id
+  where applicable) consistently.
+- chat-sdk-chat is at 695 tests; lifecycle surface (initialize,
+  shutdown, transcripts, try_new) is feature-complete.
+  StreamingMarkdownRenderer ported at 38/51 portable cases (13
+  remend-dependent ones documented js-only).
+
+**Stale or misleading guidance**
+
+- The brief's "every portable upstream case must have a matching
+  Rust test" can be interpreted too literally. Counter-example:
+  upstream `it("rejects malformed duration strings")` tests
+  runtime construction throwing; in Rust the same invariant is
+  enforced at compile time via the type system. The right test
+  isn't "constructor panics with bad string" (the input would
+  fail to even reach the constructor) but "DurationString::parse
+  rejects the string". Document this interpretation rule in
+  goal-refinements: "ports may shift from runtime assertion to
+  type-level enforcement; when they do, the Rust test asserts
+  on the parse failure rather than the runtime panic."
+- The brief's "5-cycle refinement" cadence drifted to ~13 slices
+  before this entry. Earlier refinement entries had cleaner
+  5-slice windows; later cycles port smaller slices (1-5 cases
+  each) which inflates the count. Either (a) reset the cadence
+  to "5 commits" rather than "5 slices", or (b) acknowledge the
+  longer window is fine when individual slices are smaller.
+  Going forward: refinement at every 10 commits is the practical
+  cadence.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Telegram + Messenger env-var-driven constructor tests** —
+  need env-var resolution in adapter factories before they port.
+- **State-backend client wire-up** — still blocked on workspace
+  runtime decision.
+- **Adapter `index.test.ts` integration suites** — most need
+  per-adapter HTTP-mock infrastructure (vi.spyOn(fetch) →
+  reqwest-mock or `HttpClient` trait).
+- **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** Streaming /
+  handleIncomingMessage / dedup describe blocks — multi-slice,
+  gated on `Adapter::stream` trait extension.

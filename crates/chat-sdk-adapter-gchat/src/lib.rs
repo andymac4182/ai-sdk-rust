@@ -692,4 +692,21 @@ mod tests {
         assert_eq!(adapter.subject_email(), "bot@example.com");
         assert_eq!(adapter.api_base(), "https://example.test/v1");
     }
+
+    // ---------- GoogleChatAdapter create-instance (1 portable case) ----------
+    // 1:1 with upstream `index.test.ts > describe("GoogleChatAdapter")
+    // > it("should create an adapter instance")`. Upstream's
+    // `it("should export createGoogleChatAdapter function")` is
+    // JS-only — Rust's module system makes constructors visible at
+    // compile time.
+
+    #[test]
+    fn google_chat_adapter_creates_an_instance() {
+        let opts = GchatAdapterOptions::new(
+            "{\"type\":\"service_account\"}",
+            "bot@example.com",
+        );
+        let adapter = GchatAdapter::new(opts);
+        assert_eq!(adapter.name(), "gchat");
+    }
 }
