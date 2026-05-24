@@ -314,11 +314,17 @@ impl Adapter for SlackAdapter {
         })?;
 
         let url = self.method_url("chat.postMessage");
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "channel": decoded.channel_id,
             "text": text,
-            "thread_ts": decoded.thread_ts,
         });
+        // 1:1 with upstream's `threadTs = rawThreadTs || undefined`
+        // normalization — omit the field when the thread id encodes
+        // no parent message (Slack rejects empty thread_ts with
+        // `invalid_thread_ts`).
+        if let Some(thread_ts) = decoded.thread_ts_or_none() {
+            body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+        }
 
         let response = self
             .http
@@ -721,16 +727,18 @@ impl Adapter for SlackAdapter {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
         })?;
 
-        // Top-level (non-threaded) messages have thread_ts == ts
-        // for the parent of the same message; the upstream check
-        // is purely "no threadTs at all" which our encoding never
-        // emits, so we always proceed.
+        // 1:1 with upstream `if (!threadTs) { return; }` — start_typing
+        // is a no-op when the thread id encodes no parent message,
+        // since assistant.threads.setStatus requires a thread context.
+        let Some(thread_ts) = decoded.thread_ts_or_none() else {
+            return Ok(());
+        };
 
         let url = self.method_url("assistant.threads.setStatus");
         let display_status = status.unwrap_or("Typing...");
         let body = serde_json::json!({
             "channel_id": decoded.channel_id,
-            "thread_ts": decoded.thread_ts,
+            "thread_ts": thread_ts,
             "status": display_status,
             "loading_messages": [display_status],
         });
@@ -848,15 +856,41 @@ impl DecodedSlackThreadId {
     pub fn is_group(&self) -> bool {
         self.channel_id.starts_with('G')
     }
+
+    /// 1:1 with upstream's `rawThreadTs || undefined` normalization
+    /// applied at every Slack API call site (post_message,
+    /// edit_message, etc). Slack rejects `thread_ts: ""` with
+    /// `invalid_thread_ts`, so callers must omit the field entirely
+    /// when the thread id encodes no parent message (i.e. the thread
+    /// id is `slack:CHANNEL` or `slack:CHANNEL:`).
+    pub fn thread_ts_or_none(&self) -> Option<&str> {
+        if self.thread_ts.is_empty() {
+            None
+        } else {
+            Some(&self.thread_ts)
+        }
+    }
 }
 
-/// Decode a Slack thread id.
+/// Decode a Slack thread id. 1:1 with upstream `decodeThreadId(_)`:
+/// accepts `slack:CHANNEL`, `slack:CHANNEL:`, and
+/// `slack:CHANNEL:THREAD_TS`; rejects wrong-prefix, empty-channel,
+/// and >2-segment shapes. Empty / missing `THREAD_TS` is normalized
+/// to an empty `thread_ts` field; callers use
+/// [`DecodedSlackThreadId::thread_ts_or_none`] to apply upstream's
+/// `rawThreadTs || undefined` normalization before passing to the
+/// Slack API.
 pub fn decode_thread_id(thread_id: &str) -> Option<DecodedSlackThreadId> {
     let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
-    let mut parts = suffix.splitn(2, ':');
-    let channel_id = parts.next()?;
-    let thread_ts = parts.next()?;
-    if channel_id.is_empty() || thread_ts.is_empty() {
+    let parts: Vec<&str> = suffix.split(':').collect();
+    // After stripping `slack:`, the remainder must split into 1 or 2
+    // colon-separated segments. Upstream pre-strip parts: 2 or 3 total.
+    let (channel_id, thread_ts) = match parts.len() {
+        1 => (parts[0], ""),
+        2 => (parts[0], parts[1]),
+        _ => return None,
+    };
+    if channel_id.is_empty() {
         return None;
     }
     Some(DecodedSlackThreadId {
@@ -1035,18 +1069,73 @@ mod tests {
         assert!(!decoded.is_dm());
     }
 
+    // ---------- describe("decodeThreadId") (4 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("decodeThreadId")`.
+    // Upstream's decoder is permissive — it accepts `slack:CHANNEL`
+    // (no threadTs) and `slack:CHANNEL:` (empty threadTs) as valid
+    // shapes with `threadTs = ""`, and only throws on wrong-prefix or
+    // >2-segment shapes. Previous Rust port was too strict (rejected
+    // `slack:CHANNEL` and `slack:CHANNEL:`); slice 454 makes it match
+    // upstream + adds `thread_ts_or_none()` normalization at JSON
+    // call sites to preserve upstream's `rawThreadTs || undefined`
+    // semantic.
+
     #[test]
-    fn decode_thread_id_returns_none_for_other_prefixes() {
-        assert!(decode_thread_id("teams:CONV:MSG").is_none());
-        assert!(decode_thread_id("gchat:A:B").is_none());
-        assert!(decode_thread_id("").is_none());
+    fn decode_thread_id_decodes_thread_id_with_empty_thread_ts() {
+        // 1:1 with upstream `decodeThreadId > decodes thread ID with
+        // empty threadTs`.
+        let decoded = decode_thread_id("slack:C12345:").unwrap();
+        assert_eq!(decoded.channel_id, "C12345");
+        assert_eq!(decoded.thread_ts, "");
+        assert_eq!(decoded.thread_ts_or_none(), None);
     }
 
     #[test]
-    fn decode_thread_id_returns_none_for_missing_components() {
-        assert!(decode_thread_id("slack:onlyone").is_none());
+    fn decode_thread_id_decodes_channel_only_id() {
+        // 1:1 with upstream `decodeThreadId > decodes channel-only ID
+        // (no threadTs)`.
+        let decoded = decode_thread_id("slack:C12345").unwrap();
+        assert_eq!(decoded.channel_id, "C12345");
+        assert_eq!(decoded.thread_ts, "");
+        assert_eq!(decoded.thread_ts_or_none(), None);
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_other_prefixes() {
+        // 1:1 with upstream `decodeThreadId > throws on invalid thread
+        // ID format` (wrong-prefix subset). The Rust port maps the
+        // throw to None per the Option<DecodedSlackThreadId> shape.
+        assert!(decode_thread_id("teams:CONV:MSG").is_none());
+        assert!(decode_thread_id("gchat:A:B").is_none());
+        assert!(decode_thread_id("").is_none());
+        assert!(decode_thread_id("invalid").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_too_many_segments() {
+        // 1:1 with upstream `decodeThreadId > throws on invalid thread
+        // ID format` (extra-segments subset) — `slack:A:B:C:D` has
+        // 5 total parts (1 prefix + 4 segments) so the >2-segment-
+        // after-prefix branch in the decoder returns None.
+        assert!(decode_thread_id("slack:A:B:C:D").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_empty_channel() {
+        // Additive: `slack::1234.5` has empty channel id which is
+        // rejected. Upstream's behavior would technically accept this
+        // as `{channel: "", threadTs: "1234.5"}` then fail downstream;
+        // the Rust port rejects up front. Documented divergence —
+        // upstream lacks an explicit test for this shape.
         assert!(decode_thread_id("slack::1234.5").is_none());
-        assert!(decode_thread_id("slack:C123:").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_bare_prefix() {
+        // 1:1 with upstream `decodeThreadId > throws on invalid thread
+        // ID format` — bare `slack` has no `:` so strip_prefix returns
+        // None.
+        assert!(decode_thread_id("slack").is_none());
     }
 
     // ---------- channel_id_from_thread_id + is_dm ----------
