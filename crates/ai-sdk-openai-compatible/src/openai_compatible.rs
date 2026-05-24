@@ -27,12 +27,12 @@ use ai_sdk_provider::language_model::{
     LanguageModelGenerateResult, LanguageModelMessage, LanguageModelRawStreamPart,
     LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEffort,
     LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice, LanguageModelUsage,
-    OutputTokenUsage,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
+    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+    LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
+    LanguageModelUrlSource, LanguageModelUsage, OutputTokenUsage,
 };
 use ai_sdk_provider::provider::{
     ApiCallError, ProviderMetadata, ProviderOptions, SpecificationVersion,
@@ -3598,6 +3598,10 @@ fn openai_compatible_response_content(
         content.push(LanguageModelContent::File(file));
     }
 
+    for source in openai_compatible_annotation_sources(message.get("annotations")) {
+        content.push(LanguageModelContent::Source(source));
+    }
+
     if let Some(tool_calls) = message.get("tool_calls").and_then(JsonValue::as_array) {
         for (index, tool_call) in tool_calls.iter().enumerate() {
             let Some(function) = tool_call.get("function") else {
@@ -3635,6 +3639,31 @@ fn openai_compatible_response_content(
     }
 
     content
+}
+
+fn openai_compatible_annotation_sources(value: Option<&JsonValue>) -> Vec<LanguageModelSource> {
+    value
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(openai_compatible_annotation_source)
+        .collect()
+}
+
+fn openai_compatible_annotation_source(value: &JsonValue) -> Option<LanguageModelSource> {
+    if value.get("type").and_then(JsonValue::as_str) != Some("url_citation") {
+        return None;
+    }
+
+    let citation = value.get("url_citation")?;
+    let url = citation.get("url").and_then(JsonValue::as_str)?;
+    let mut source = LanguageModelUrlSource::new(generate_id(), url);
+
+    if let Some(title) = citation.get("title").and_then(JsonValue::as_str) {
+        source = source.with_title(title);
+    }
+
+    Some(LanguageModelSource::Url(source))
 }
 
 fn openai_compatible_image_files(value: Option<&JsonValue>) -> Vec<LanguageModelFile> {

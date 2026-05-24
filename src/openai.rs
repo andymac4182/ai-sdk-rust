@@ -3117,6 +3117,69 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_parse_annotations_and_citations() {
+        let provider = openai_chat_test_provider_with_json_response(json!({
+            "id": "chatcmpl-95ZTZkhr0mHNKqerQfiwkuox3PHAd",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "gpt-3.5-turbo-0125",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Based on the search results [doc1], I found information.",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url_citation": {
+                                    "start_index": 24,
+                                    "end_index": 29,
+                                    "url": "https://example.com/doc1.pdf",
+                                    "title": "Document 1"
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            },
+            "system_fingerprint": "fp_3bc1b5746c"
+        }));
+
+        let result = poll_ready(
+            provider
+                .chat("gpt-4o-mini")
+                .do_generate(LanguageModelCallOptions::new(openai_chat_user_prompt())),
+        );
+
+        assert_eq!(result.content.len(), 2);
+        match &result.content[0] {
+            LanguageModelContent::Text(text) => assert_eq!(
+                text.text,
+                "Based on the search results [doc1], I found information."
+            ),
+            other => panic!("expected text content, got {other:?}"),
+        }
+        match &result.content[1] {
+            LanguageModelContent::Source(source) => match source {
+                crate::language_model::LanguageModelSource::Url(url_source) => {
+                    assert!(!url_source.id.is_empty());
+                    assert_eq!(url_source.url, "https://example.com/doc1.pdf");
+                    assert_eq!(url_source.title.as_deref(), Some("Document 1"));
+                }
+                other => panic!("expected URL source, got {other:?}"),
+            },
+            other => panic!("expected source content, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn openai_chat_should_not_send_response_format_when_response_format_is_text() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {
