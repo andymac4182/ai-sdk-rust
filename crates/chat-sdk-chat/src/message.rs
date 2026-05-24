@@ -1074,8 +1074,8 @@ mod tests {
         )
     }
 
-    // ---------- describe("getSubject") (6 upstream cases) ----------
-    // 1:1 with upstream `message.test.ts > describe("getSubject")`.
+    // ---------- describe("subject") (6 upstream cases) ----------
+    // 1:1 with upstream `message.test.ts > describe("subject")`.
     // The 2 unreachable upstream cases below are documented per the
     // slice-380 type-system-impossible pattern:
     //
