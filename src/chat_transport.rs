@@ -3024,7 +3024,9 @@ mod tests {
         chat.add_tool_output("tool-call-0", json!("test-output"))
             .expect("tool output is added");
         chat.submit_latest_assistant_message(
-            ChatRequestOptions::new().with_body_property("session", json!("s1")),
+            ChatRequestOptions::new()
+                .with_header("x-custom", "test-value")
+                .with_body_property("session", json!("s1")),
         )
         .expect("assistant message submits after tool output");
 
@@ -3034,6 +3036,10 @@ mod tests {
         assert_eq!(follow_up.trigger, ChatTransportTrigger::SubmitMessage);
         assert_eq!(follow_up.chat_id, "chat-1");
         assert_eq!(follow_up.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            follow_up.request.headers.get("x-custom"),
+            Some(&"test-value".to_string())
+        );
         assert_eq!(
             follow_up.request.body,
             Some(JsonObject::from_iter([(
@@ -3074,6 +3080,54 @@ mod tests {
         assert_eq!(
             event.message.as_ref().map(|message| message.id.as_str()),
             Some("assistant-1")
+        );
+    }
+
+    #[test]
+    fn chat_should_not_submit_message_when_tool_output_is_added_without_follow_up() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "tool-call-0",
+                "test-tool",
+                json!({ "testArg": "test-value" }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_output("tool-call-0", json!("test-output"))
+            .expect("tool output is added");
+
+        assert_eq!(chat.transport().captured_sends().len(), 1);
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
         );
     }
 

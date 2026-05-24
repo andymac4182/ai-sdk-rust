@@ -2311,6 +2311,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   portable upstream `ui/chat.test.ts` tool-error submission, dynamic-tool
   follow-up response folding into the same assistant message, and failed
   follow-up request behavior that preserves the submitted tool output state.
+- 2026-05-25: `packages/ai` `Chat.addToolOutput` resend gating/options parity
+  added `chat_should_not_submit_message_when_tool_output_is_added_without_follow_up`
+  and expanded `chat_should_submit_message_when_a_tool_output_is_added`,
+  covering the portable upstream `ui/chat.test.ts` no-auto-send predicate case
+  and addToolOutput options forwarding by proving Rust tool-output mutation
+  does not make a second transport call until explicit follow-up submission and
+  that the follow-up request forwards both custom headers and body properties.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
