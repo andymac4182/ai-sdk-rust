@@ -184,8 +184,18 @@ impl SlackAdapter {
     /// thread and returns `slack:<channel>`. Returns `None` when
     /// `thread_id` isn't a Slack-encoded value.
     pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
-        let decoded = decode_thread_id(thread_id)?;
-        Some(format!("{THREAD_ID_PREFIX}{}", decoded.channel_id))
+        // 1:1 with upstream `channelIdFromThreadId(threadId)` which
+        // returns `slack:<channel>` for any well-prefixed thread id,
+        // including `slack:C456:` (empty threadTs) and bare
+        // `slack:C456` (no threadTs). The stricter `decode_thread_id`
+        // helper requires a non-empty threadTs (used by post_message
+        // etc), so this path parses the suffix directly.
+        let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
+        let channel_id = suffix.split(':').next()?;
+        if channel_id.is_empty() {
+            return None;
+        }
+        Some(format!("{THREAD_ID_PREFIX}{channel_id}"))
     }
 
     /// Predicate: is the conversation a 1:1 DM? 1:1 with upstream's
@@ -1129,15 +1139,53 @@ mod tests {
         assert!(result.contains("Hello world"), "got: {result}");
     }
 
+    // ---------- describe("channelIdFromThreadId") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("channelIdFromThreadId")`.
+    // Previously a single `channel_id_from_thread_id_strips_the_thread_ts_suffix`
+    // test bundled upstream's case 1 ("extracts channel ID from thread
+    // ID"); upstream's case 2 ("works with empty threadTs") wasn't
+    // covered. Per the slice-451 split-and-rename pattern, the bundle
+    // is now split into one Rust test per upstream case, and the
+    // `channel_id_from_thread_id` helper was made more permissive to
+    // match upstream's behavior on `slack:C456:` (empty threadTs).
+
     #[test]
-    fn channel_id_from_thread_id_strips_the_thread_ts_suffix() {
+    fn channel_id_from_thread_id_extracts_channel_id_from_thread_id() {
+        // 1:1 with upstream `channelIdFromThreadId > extracts channel
+        // ID from thread ID` — `slack:C123:1234567890.000000` ->
+        // `slack:C123`.
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("bot-token", "signing"));
         assert_eq!(
             adapter
-                .channel_id_from_thread_id("slack:C123:1.0")
+                .channel_id_from_thread_id("slack:C123:1234567890.000000")
                 .as_deref(),
             Some("slack:C123")
         );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_works_with_empty_thread_ts() {
+        // 1:1 with upstream `channelIdFromThreadId > works with empty
+        // threadTs` — `slack:C456:` (trailing colon, empty threadTs)
+        // -> `slack:C456`. Previously the strict `decode_thread_id`
+        // helper rejected this and `channel_id_from_thread_id`
+        // returned None, diverging from upstream.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("bot-token", "signing"));
+        assert_eq!(
+            adapter.channel_id_from_thread_id("slack:C456:").as_deref(),
+            Some("slack:C456")
+        );
+    }
+
+    // ---------- additive Rust-side coverage ----------
+
+    #[test]
+    fn channel_id_from_thread_id_handles_dm_channels() {
+        // Additive (not in upstream's `channelIdFromThreadId` describe):
+        // exercises the DM-channel-prefix path the additional encoder
+        // tests already cover, so the helper's behavior is locked in
+        // for adapter trait callers.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("bot-token", "signing"));
         assert_eq!(
             adapter
                 .channel_id_from_thread_id("slack:DABC:1700000000.000200")
@@ -1148,6 +1196,8 @@ mod tests {
 
     #[test]
     fn channel_id_from_thread_id_returns_none_for_non_slack_ids() {
+        // Additive: upstream throws ValidationError on wrong prefix;
+        // the Rust port maps that to None per the Adapter trait shape.
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "signing"));
         assert!(adapter.channel_id_from_thread_id("discord:G:C:1").is_none());
         assert!(adapter.channel_id_from_thread_id("").is_none());
