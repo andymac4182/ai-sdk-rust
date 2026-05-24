@@ -17,12 +17,13 @@ use crate::generate_text::{
     GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
     GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextTool,
     GenerateTextToolCall, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
-    GenerateTextToolResult, LanguageModelCallEndEvent, LanguageModelCallStartEvent, PrepareStep,
-    PrepareStepOptions, PrepareStepResult, StepToolApprovalResponse, StopCondition,
-    ToolApprovalConfiguration, ToolApprovalResponseOutput, ToolCallNotFoundForApprovalError,
-    ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
-    apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
-    generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
+    GenerateTextToolOutputDenied, GenerateTextToolResult, LanguageModelCallEndEvent,
+    LanguageModelCallStartEvent, PrepareStep, PrepareStepOptions, PrepareStepResult,
+    StepToolApprovalResponse, StopCondition, ToolApprovalConfiguration, ToolApprovalResponseOutput,
+    ToolCallNotFoundForApprovalError, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
+    ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
+    filter_active_language_model_tools, generate_text_call_id,
+    generate_text_tool_result_from_language_model_tool_result,
     initial_tool_approval_response_message, invoke_tool_input_available_callback,
     invoke_tool_input_delta_callback, invoke_tool_input_start_callback, is_stop_condition_met,
     mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
@@ -609,6 +610,9 @@ pub enum TextStreamPart {
 
     /// Provider-executed tool result.
     ToolResult(GenerateTextToolResult),
+
+    /// Denied tool output.
+    ToolOutputDenied(GenerateTextToolOutputDenied),
 
     /// Provider-specific generated content.
     Custom(LanguageModelCustomContent),
@@ -2144,6 +2148,15 @@ impl StreamTextResult {
                     }
                     push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
+                TextStreamPart::ToolOutputDenied(part) => {
+                    chunks.push(UiMessageChunk::ToolOutputDenied {
+                        tool_call_id: part.tool_call_id.clone(),
+                        tool_name: None,
+                        provider_executed: part.provider_executed,
+                        dynamic: part.dynamic,
+                    });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
+                }
                 TextStreamPart::Custom(part) => {
                     chunks.push(UiMessageChunk::Custom {
                         kind: part.kind.clone(),
@@ -2461,6 +2474,14 @@ where
             push_text_stream_part(
                 &mut parts,
                 TextStreamPart::ToolResult(tool_result),
+                on_chunk.as_ref(),
+            )
+            .await;
+        }
+        for denied_tool_output in initial_response.denied_tool_outputs {
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolOutputDenied(denied_tool_output),
                 on_chunk.as_ref(),
             )
             .await;
@@ -4461,6 +4482,7 @@ fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
             | TextStreamPart::ToolInputDelta(_)
             | TextStreamPart::ToolCall(_)
             | TextStreamPart::ToolResult(_)
+            | TextStreamPart::ToolOutputDenied(_)
             | TextStreamPart::Custom(_)
             | TextStreamPart::Source(_)
             | TextStreamPart::Raw(_)
@@ -13118,6 +13140,112 @@ mod tests {
             .position(|chunk| chunk["type"] == "start-step")
             .expect("UI start-step exists");
         assert!(tool_error_chunk_index < ui_start_step_index);
+    }
+
+    #[test]
+    fn stream_text_streams_initial_denied_tool_approval_before_first_model_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", false),
+            false,
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({ "forecast": "sunny" }))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(execute_count.load(Ordering::SeqCst), 0);
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(&calls[0].prompt[..3], prompt.as_slice());
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "weather"
+                                && matches!(
+                                    part.output,
+                                    LanguageModelToolResultOutput::ExecutionDenied { .. }
+                                )
+                    )
+        ));
+        assert_eq!(result.text, "Hello, world!");
+        assert!(result.tool_results.is_empty());
+
+        let denied_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolOutputDenied(denied) if denied.tool_call_id == "call-1" && denied.tool_name == "weather"))
+            .expect("initial denied tool output is streamed");
+        let start_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::StartStep(_)))
+            .expect("start-step is streamed");
+        assert!(denied_index < start_step_index);
+
+        let full_stream = serde_json::to_value(&result.parts).expect("parts serialize");
+        assert!(
+            full_stream
+                .as_array()
+                .expect("parts are an array")
+                .iter()
+                .any(|part| part["type"] == "tool-output-denied"
+                    && part["toolCallId"] == "call-1"
+                    && part["toolName"] == "weather")
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        let tool_denied_chunk_index = chunks
+            .iter()
+            .position(|chunk| {
+                chunk["type"] == "tool-output-denied"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk.get("toolName").is_none()
+            })
+            .expect("initial denied tool output is in UI stream");
+        let ui_start_step_index = chunks
+            .iter()
+            .position(|chunk| chunk["type"] == "start-step")
+            .expect("UI start-step exists");
+        assert!(tool_denied_chunk_index < ui_start_step_index);
     }
 
     #[test]

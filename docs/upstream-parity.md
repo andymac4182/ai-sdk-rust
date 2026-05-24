@@ -662,6 +662,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   parity added `ui_message_chunk_deserializes_tool_output_denied_without_tool_name`,
   matching upstream `process-ui-message-stream.test.ts` denial chunks that only
   carry `toolCallId`. Rust still preserves `toolName` when callers provide it.
+- 2026-05-25: `packages/ai` `streamText` initial denied approval parity added
+  `stream_text_streams_initial_denied_tool_approval_before_first_model_call`,
+  matching upstream's prior denied approval response case by carrying
+  `execution-denied` into the first model prompt while emitting full-stream and
+  UI `tool-output-denied` chunks before the first provider `start-step`.
 - 2026-05-24: `packages/ai` `processUIMessageStream` malformed-stream
   parity added named Rust counterparts for upstream
   `process-ui-message-stream.test.ts` missing-start error cases:
@@ -5018,6 +5023,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving an approved prior tool approval whose local executor fails is
    serialized as an `error-text` tool result in the first provider prompt and
    emitted as a full-stream/UI tool-error chunk before the first `start-step`.
+   The denied-initial tool approval path now has the named Rust counterpart
+   `stream_text_streams_initial_denied_tool_approval_before_first_model_call`,
+   proving a prior denied tool approval is not executed, is converted to an
+   `execution-denied` tool result in the first provider prompt, and emits
+   full-stream/UI `tool-output-denied` chunks before the first `start-step`.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,

@@ -6234,6 +6234,7 @@ pub(crate) fn update_pending_deferred_provider_tool_calls(
 pub(crate) struct InitialToolApprovalResponse {
     pub(crate) message: LanguageModelMessage,
     pub(crate) tool_results: Vec<GenerateTextToolResult>,
+    pub(crate) denied_tool_outputs: Vec<GenerateTextToolOutputDenied>,
 }
 
 pub(crate) async fn initial_tool_approval_response_message(
@@ -6282,6 +6283,12 @@ pub(crate) async fn initial_tool_approval_response_message(
         content.push(LanguageModelToolContentPart::ToolResult(part));
     }
 
+    let denied_tool_outputs = approvals
+        .denied_tool_approvals
+        .iter()
+        .map(denied_initial_tool_approval_output_part)
+        .collect::<Vec<_>>();
+
     content.extend(
         approvals
             .denied_tool_approvals
@@ -6296,6 +6303,7 @@ pub(crate) async fn initial_tool_approval_response_message(
         Some(InitialToolApprovalResponse {
             message: LanguageModelMessage::Tool(LanguageModelToolMessage::new(content)),
             tool_results,
+            denied_tool_outputs,
         })
     }
 }
@@ -6325,6 +6333,21 @@ fn denied_initial_tool_approval_result_part(
         approval.tool_call.tool_name.clone(),
         denied_initial_tool_approval_output(approval),
     )
+}
+
+fn denied_initial_tool_approval_output_part(
+    approval: &CollectedToolApproval,
+) -> GenerateTextToolOutputDenied {
+    let mut output = GenerateTextToolOutputDenied::new(
+        approval.tool_call.tool_call_id.clone(),
+        approval.tool_call.tool_name.clone(),
+    );
+
+    if let Some(provider_executed) = approval.tool_call.provider_executed {
+        output = output.with_provider_executed(provider_executed);
+    }
+
+    output
 }
 
 fn denied_initial_tool_approval_output(
