@@ -864,6 +864,60 @@ mod tests {
         assert!(block_on(api.list("u1", None)).unwrap().is_empty());
     }
 
+    // ---------- additional append/count describe block cases (3 upstream) ----------
+
+    #[test]
+    fn transcripts_api_append_assistant_message_with_explicit_user_key() {
+        // 1:1 with upstream `it("appends an assistant message with
+        // explicit userKey")`. The Rust API takes `user_key` as a
+        // required field on `AppendTranscriptInput` rather than as
+        // an `options` arg, so the test just shows the assistant
+        // role round-trips through the entry.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        let entry = block_on(api.append(input_for_thread(
+            "mike@acme.com",
+            "slack",
+            "slack:C:T",
+            TranscriptRole::Assistant,
+            "Hello, Mike",
+        )))
+        .unwrap();
+        assert_eq!(entry.role, TranscriptRole::Assistant);
+        assert_eq!(entry.user_key, "mike@acme.com");
+        assert_eq!(entry.text, "Hello, Mike");
+        assert!(entry.platform_message_id.is_none());
+    }
+
+    #[test]
+    fn transcripts_api_append_passes_retention_duration_string_through_as_ttl_ms() {
+        // 1:1 with upstream `it("passes retention duration string
+        // through as ttlMs")`. The Rust impl resolves
+        // `TranscriptsConfig.retention` to milliseconds via the same
+        // `parse_duration` path; we assert the resolved retention
+        // ms matches 7 * 24 * 60 * 60 * 1000.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                retention: Some(crate::types::RetentionPolicy::Duration("7d".parse().unwrap())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(api.retention_ms(), Some(7 * 24 * 60 * 60 * 1000));
+        block_on(api.append(sample_input("u1"))).unwrap();
+        // Append succeeds with the retention configured.
+        assert_eq!(block_on(api.count("u1")).unwrap(), 1);
+    }
+
+    #[test]
+    fn transcripts_api_count_returns_zero_for_unknown_user_key() {
+        // 1:1 with upstream `it("returns 0 for unknown userKey")`.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        assert_eq!(block_on(api.count("nobody")).unwrap(), 0);
+    }
+
     // ---------- maxPerUser eviction describe block (1 upstream case) ----------
 
     #[test]
