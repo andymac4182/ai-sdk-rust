@@ -1873,6 +1873,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream case where refined tool input must reach the emitted
   tool-call part, local tool-result part, language-model-call-end callback, and
   tool-execution-start callback.
+- 2026-05-25: `packages/ai` `invokeToolCallbacksFromStream` parity tightened
+  the named Rust counterpart
+  `stream_text_invokes_tool_input_lifecycle_callbacks_from_stream` for upstream
+  `generate-text/invoke-tool-callbacks-from-stream.test.ts`: it now proves
+  streamed text/tool-input/tool-call chunks pass through in order while
+  `onInputStart`, both `onInputDelta` callbacks, and `onInputAvailable` receive
+  the runtime context, original messages, tool-call id, parsed input, and the
+  caller abort signal.
 - 2026-05-25: `packages/ai` `streamLanguageModelCall` generated call-id
   callback parity added the named Rust counterpart
   `stream_text_generates_consistent_call_id_for_language_model_callbacks`,

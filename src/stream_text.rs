@@ -9987,8 +9987,13 @@ mod tests {
         let start_recorded = Arc::clone(&recorded);
         let delta_recorded = Arc::clone(&recorded);
         let available_recorded = Arc::clone(&recorded);
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
                 LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
                     "call-1", "tool1",
                 )),
@@ -10015,6 +10020,7 @@ mod tests {
         let result = poll_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Call the tool")])
                 .with_runtime_context(runtime_context.clone())
+                .with_abort_signal(abort_signal)
                 .with_tool(
                     Tool::new("tool1", input_schema)
                         .with_on_input_start(move |options| {
@@ -10063,6 +10069,37 @@ mod tests {
             result.tool_calls[0].input,
             json!({ "value": "Sparkle Day" })
         );
+        assert_eq!(result.text, "hello");
+        assert_eq!(
+            result
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    TextStreamPart::TextDelta(part) => Some(format!("text:{}", part.text)),
+                    TextStreamPart::ToolInputStart(part) => {
+                        Some(format!("tool-input-start:{}", part.tool_name))
+                    }
+                    TextStreamPart::ToolInputDelta(part) => {
+                        Some(format!("tool-input-delta:{}", part.delta))
+                    }
+                    TextStreamPart::ToolInputEnd(part) => {
+                        Some(format!("tool-input-end:{}", part.id))
+                    }
+                    TextStreamPart::ToolCall(part) => {
+                        Some(format!("tool-call:{}", part.tool_name))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                "text:hello",
+                "tool-input-start:tool1",
+                r#"tool-input-delta:{"value":""#,
+                r#"tool-input-delta:Sparkle Day"}"#,
+                "tool-input-end:call-1",
+                "tool-call:tool1",
+            ]
+        );
         assert_eq!(
             recorded.lock().expect("recorded lock").as_slice(),
             [
@@ -10081,7 +10118,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 }),
                 json!({
                     "type": "onInputDelta",
@@ -10099,7 +10136,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 }),
                 json!({
                     "type": "onInputDelta",
@@ -10117,7 +10154,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 }),
                 json!({
                     "type": "onInputAvailable",
@@ -10135,7 +10172,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 })
             ]
         );
