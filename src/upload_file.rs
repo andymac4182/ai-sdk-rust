@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_data::FileDataContent;
 use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
-use crate::provider::ProviderOptions;
+use crate::provider::{ProviderOptions, ProviderWithFiles};
 use crate::provider_utils::{convert_base64_to_bytes, detect_media_type};
 
 /// File data accepted by the high-level `upload_file` helper.
@@ -150,6 +150,18 @@ where
     api.upload_file(options.into_call_options()).await
 }
 
+/// Uploads a file by resolving the files interface from a provider-v4 provider.
+pub async fn upload_file_with_provider<P>(
+    provider: &P,
+    options: UploadFileOptions,
+) -> UploadFileResult
+where
+    P: ProviderWithFiles + ?Sized,
+{
+    let files = provider.files();
+    upload_file(&files, options).await
+}
+
 fn resolve_upload_file_media_type(
     data: &FilesUploadFileData,
     media_type: Option<String>,
@@ -210,12 +222,16 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
+    use super::{
+        UploadFileData, UploadFileOptions, UploadFileResult, upload_file, upload_file_with_provider,
+    };
     use crate::file_data::{FileDataContent, ProviderReference};
     use crate::files::{
         Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult,
     };
-    use crate::provider::ProviderOptions;
+    use crate::mock_models::{MockEmbeddingModel, MockImageModel, MockLanguageModel};
+    use crate::provider::{ModelType, NoSuchModelError, Provider, ProviderOptions};
+    use crate::provider::{ProviderWithFiles, SpecificationVersion};
 
     #[derive(Clone, Default)]
     struct RecordingFiles {
@@ -258,6 +274,50 @@ mod tests {
                     .with_media_type(options.media_type)
                     .with_filename(options.filename.unwrap_or_else(|| "uploaded".to_string())),
             )
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingFilesProvider {
+        files: RecordingFiles,
+    }
+
+    impl RecordingFilesProvider {
+        fn new(files: RecordingFiles) -> Self {
+            Self { files }
+        }
+    }
+
+    impl Provider for RecordingFilesProvider {
+        type LanguageModel = MockLanguageModel;
+        type EmbeddingModel = MockEmbeddingModel;
+        type ImageModel = MockImageModel;
+
+        fn specification_version(&self) -> SpecificationVersion {
+            SpecificationVersion::V4
+        }
+
+        fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::LanguageModel))
+        }
+
+        fn embedding_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+        }
+
+        fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+        }
+    }
+
+    impl ProviderWithFiles for RecordingFilesProvider {
+        type Files = RecordingFiles;
+
+        fn files(&self) -> Self::Files {
+            self.files.clone()
         }
     }
 
@@ -376,5 +436,29 @@ mod tests {
                 .with_media_type("application/pdf")
                 .with_filename("spec.pdf")
         );
+    }
+
+    #[test]
+    fn upload_file_resolves_files_v4_from_provider_v4_with_files_method() {
+        let files = RecordingFiles::default();
+        let provider = RecordingFilesProvider::new(files.clone());
+
+        let result = poll_ready(upload_file_with_provider(
+            &provider,
+            UploadFileOptions::new(vec![1_u8]).with_filename("test.pdf"),
+        ));
+
+        let calls = files.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            FilesUploadFileCallOptions::new(
+                FilesUploadFileData::data(FileDataContent::Bytes(vec![1])),
+                "application/octet-stream",
+            )
+            .with_filename("test.pdf")
+        );
+
+        assert_eq!(result.filename.as_deref(), Some("test.pdf"));
     }
 }

@@ -485,9 +485,12 @@ pub use ui_message_stream::{
     process_text_stream, process_ui_message_stream, read_ui_message_stream,
     safe_validate_ui_messages, transform_text_to_ui_message_stream, validate_ui_messages,
 };
-pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
+pub use upload_file::{
+    UploadFileData, UploadFileOptions, UploadFileResult, upload_file, upload_file_with_provider,
+};
 pub use upload_skill::{
     UploadSkillFile, UploadSkillFileData, UploadSkillOptions, UploadSkillResult, upload_skill,
+    upload_skill_with_provider,
 };
 pub use util::{
     AbortSignalSource, AbortTimeoutHandle, AbortTimeoutOptions, AsyncIterableStream,

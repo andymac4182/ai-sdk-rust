@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::FileDataContent;
-use crate::provider::ProviderOptions;
+use crate::provider::{ProviderOptions, ProviderWithSkills};
 use crate::skills::{
     Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
@@ -173,6 +173,18 @@ where
     api.upload_skill(options.into_call_options()).await
 }
 
+/// Uploads a skill by resolving the skills interface from a provider-v4 provider.
+pub async fn upload_skill_with_provider<P>(
+    provider: &P,
+    options: UploadSkillOptions,
+) -> UploadSkillResult
+where
+    P: ProviderWithSkills + ?Sized,
+{
+    let skills = provider.skills();
+    upload_skill(&skills, options).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -185,9 +197,14 @@ mod tests {
 
     use super::{
         UploadSkillFile, UploadSkillFileData, UploadSkillOptions, UploadSkillResult, upload_skill,
+        upload_skill_with_provider,
     };
     use crate::file_data::{FileDataContent, ProviderReference};
-    use crate::provider::ProviderOptions;
+    use crate::mock_models::{MockEmbeddingModel, MockImageModel, MockLanguageModel};
+    use crate::provider::{
+        ModelType, NoSuchModelError, Provider, ProviderOptions, ProviderWithSkills,
+        SpecificationVersion,
+    };
     use crate::skills::{
         Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
     };
@@ -236,6 +253,50 @@ mod tests {
                     options.display_title.unwrap_or_else(|| "Skill".to_string()),
                 ),
             )
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingSkillsProvider {
+        skills: RecordingSkills,
+    }
+
+    impl RecordingSkillsProvider {
+        fn new(skills: RecordingSkills) -> Self {
+            Self { skills }
+        }
+    }
+
+    impl Provider for RecordingSkillsProvider {
+        type LanguageModel = MockLanguageModel;
+        type EmbeddingModel = MockEmbeddingModel;
+        type ImageModel = MockImageModel;
+
+        fn specification_version(&self) -> SpecificationVersion {
+            SpecificationVersion::V4
+        }
+
+        fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::LanguageModel))
+        }
+
+        fn embedding_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+        }
+
+        fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+        }
+    }
+
+    impl ProviderWithSkills for RecordingSkillsProvider {
+        type Skills = RecordingSkills;
+
+        fn skills(&self) -> Self::Skills {
+            self.skills.clone()
         }
     }
 
@@ -393,5 +454,33 @@ mod tests {
             result,
             UploadSkillResult::new(expected_reference).with_display_title("My Skill")
         );
+    }
+
+    #[test]
+    fn upload_skill_resolves_skills_v4_from_provider_v4_with_skills_method() {
+        let skills = RecordingSkills::default();
+        let provider = RecordingSkillsProvider::new(skills.clone());
+
+        let result = poll_ready(upload_skill_with_provider(
+            &provider,
+            UploadSkillOptions::new(vec![UploadSkillFile::new(
+                "test.ts",
+                UploadSkillFileData::data("aGVsbG8="),
+            )])
+            .with_display_title("My Skill"),
+        ));
+
+        let calls = skills.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            SkillsUploadSkillCallOptions::new(vec![SkillsFile::new(
+                "test.ts",
+                SkillsFileData::data(FileDataContent::Base64("aGVsbG8=".to_string())),
+            )])
+            .with_display_title("My Skill")
+        );
+
+        assert_eq!(result.display_title.as_deref(), Some("My Skill"));
     }
 }
