@@ -2052,6 +2052,18 @@ focused tests for each portable behavior before changing rows to `verified`.
   retryable pre-stream 500/429 failures, successful response streaming after
   retry, and preservation of standardized system/user prompts across retry
   attempts.
+- 2026-05-24: `streamText` `result.consumeStream` parity added
+  `StreamTextResult::consume_stream` and
+  `StreamTextResult::consume_stream_with_on_error`, with named Rust
+  counterparts
+  `stream_text_result_consume_stream_ignores_abort_error_during_stream_consumption`,
+  `stream_text_result_consume_stream_ignores_response_aborted_error_during_stream_consumption`,
+  `stream_text_result_consume_stream_ignores_any_errors_during_stream_consumption`,
+  and
+  `stream_text_result_consume_stream_calls_on_error_callback_with_the_error`.
+  Rust consumes the materialized stream result and reports provider error JSON
+  to the callback instead of exposing Web `ReadableStream` thrown `Error`
+  object identity.
 - 2026-05-21: `packages/ai` retry utility parity added named Rust counterparts
   for every portable upstream `util/retry-with-exponential-backoff.test.ts`
   case in `src/retry.rs`, including rate-limit `retry-after-ms`, `retry-after`
@@ -4352,6 +4364,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_result_supports_text_ui_message_and_full_stream_from_single_result`,
    proving text-stream, full-stream, and UI-message views can be read from the
    same materialized `StreamTextResult`.
+   The upstream `result.consumeStream` error-handling cases now have named
+   Rust counterparts in `stream_text_result_consume_stream_*`, proving
+   consumption ignores AbortError, ResponseAborted, and generic provider
+   errors by default while `consume_stream_with_on_error` reports the error
+   value to the callback. Rust consumes the materialized stream result rather
+   than a Web `ReadableStream`, so JavaScript thrown `Error` object identity is
+   represented as provider error JSON.
    The upstream automatic approval and automatic denial tool-approval stream
    cases now have Rust coverage in
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`

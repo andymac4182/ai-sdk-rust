@@ -1846,6 +1846,23 @@ impl StreamTextResult {
         self.steps.last()
     }
 
+    /// Consumes the materialized stream result, ignoring provider error parts.
+    pub fn consume_stream(&self) {
+        self.consume_stream_with_on_error(|_| {});
+    }
+
+    /// Consumes the materialized stream result and reports provider error parts.
+    pub fn consume_stream_with_on_error<F>(&self, mut on_error: F)
+    where
+        F: FnMut(&JsonValue),
+    {
+        for part in &self.parts {
+            if let TextStreamPart::Error(error_part) = part {
+                on_error(&error_part.error);
+            }
+        }
+    }
+
     /// Converts collected stream parts into UI-message stream chunks.
     pub fn to_ui_message_stream(&self) -> Vec<UiMessageChunk> {
         self.to_ui_message_stream_with_options(StreamTextUiMessageStreamOptions::default())
@@ -8097,6 +8114,92 @@ mod tests {
                 "errorText": "custom error message: error"
             }))
         );
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_ignores_abort_error_during_stream_consumption() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "name": "AbortError",
+                "message": "Stream aborted"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        result.consume_stream();
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_ignores_response_aborted_error_during_stream_consumption()
+    {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "name": "ResponseAborted",
+                "message": "Response aborted"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        result.consume_stream();
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_ignores_any_errors_during_stream_consumption() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "Some error"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        result.consume_stream();
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_calls_on_error_callback_with_the_error() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "Some error"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+        let mut captured_errors = Vec::new();
+
+        result.consume_stream_with_on_error(|error| captured_errors.push(error.clone()));
+
+        assert_eq!(captured_errors, vec![json!({ "message": "Some error" })]);
     }
 
     #[test]
