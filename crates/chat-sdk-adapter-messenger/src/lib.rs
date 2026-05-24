@@ -334,6 +334,21 @@ impl Adapter for MessengerAdapter {
         ))
     }
 
+    /// Messenger does not expose reactions via the API. 1:1 with
+    /// upstream's `adapter.removeReaction` — same `ValidationError`
+    /// shape as `add_reaction`.
+    async fn remove_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "Messenger does not support reactions via API".to_string(),
+        ))
+    }
+
     /// Send a Messenger typing indicator via the Send API
     /// `sender_action: typing_on`. 1:1 with upstream's
     /// `adapter.startTyping` (status arg ignored — upstream's
@@ -740,6 +755,23 @@ mod tests {
         let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.add_reaction("messenger:USER", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not support reactions"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_is_unsupported_with_validation_error() {
+        // 1:1 with upstream `index.test.ts > it("throws on
+        // removeReaction")`. Messenger has no reactions API; upstream
+        // throws `ValidationError`; the Rust port surfaces
+        // `AdapterError::InvalidPayload` with the same message body.
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.remove_reaction("messenger:USER_123", "mid.1", "thumbsup"));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("does not support reactions"));
