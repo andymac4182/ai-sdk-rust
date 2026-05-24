@@ -520,6 +520,7 @@ mod tests {
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
@@ -786,6 +787,25 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test future only awaits ready futures"),
         }
+    }
+
+    fn embedding_provider_options(value: serde_json::Value) -> crate::provider::ProviderOptions {
+        serde_json::from_value(value).expect("provider options deserialize")
+    }
+
+    fn transform_default_embedding_settings(
+        settings: EmbeddingModelDefaultSettings,
+        params: EmbeddingModelCallOptions,
+    ) -> EmbeddingModelCallOptions {
+        let middleware = default_embedding_settings_middleware(settings);
+        let transformed = middleware
+            .transform_params(EmbeddingModelTransformParamsOptions::new(
+                params,
+                &StaticEmbeddingModel,
+            ))
+            .expect("default settings implements transform params");
+
+        poll_ready(transformed)
     }
 
     #[test]
@@ -1084,6 +1104,116 @@ mod tests {
         let params = poll_ready(transformed);
 
         assert_eq!(params.headers, None);
+        assert_eq!(params.provider_options, None);
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_merge_headers() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new()
+                .with_header("X-Custom-Header", "test")
+                .with_header("X-Another-Header", "test2"),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                .with_header("X-Custom-Header", "test2"),
+        );
+
+        assert_eq!(
+            params.headers,
+            Some(BTreeMap::from([
+                ("X-Custom-Header".to_string(), "test2".to_string()),
+                ("X-Another-Header".to_string(), "test2".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_default_headers() {
+        let mut settings = EmbeddingModelDefaultSettings::new();
+        settings.headers = Some(BTreeMap::new());
+
+        let params = transform_default_embedding_settings(
+            settings,
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                .with_header("X-Param-Header", "param"),
+        );
+
+        assert_eq!(
+            params.headers,
+            Some(BTreeMap::from([(
+                "X-Param-Header".to_string(),
+                "param".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_param_headers() {
+        let mut call_options = EmbeddingModelCallOptions::new(vec!["hello world".to_string()]);
+        call_options.headers = Some(BTreeMap::new());
+
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new().with_header("X-Default-Header", "default"),
+            call_options,
+        );
+
+        assert_eq!(
+            params.headers,
+            Some(BTreeMap::from([(
+                "X-Default-Header".to_string(),
+                "default".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_both_headers_being_undefined() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new(),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()]),
+        );
+
+        assert_eq!(params.headers, None);
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_default_provider_options() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new()
+                .with_provider_options(embedding_provider_options(json!({}))),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()]).with_provider_options(
+                embedding_provider_options(json!({ "openai": { "user": "param-user" } })),
+            ),
+        );
+
+        assert_eq!(
+            serde_json::to_value(params.provider_options).expect("provider options serialize"),
+            json!({ "openai": { "user": "param-user" } })
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_param_provider_options() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new().with_provider_options(embedding_provider_options(
+                json!({ "anthropic": { "user": "default-user" } }),
+            )),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                .with_provider_options(embedding_provider_options(json!({}))),
+        );
+
+        assert_eq!(
+            serde_json::to_value(params.provider_options).expect("provider options serialize"),
+            json!({ "anthropic": { "user": "default-user" } })
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_both_provider_options_being_undefined() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new(),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()]),
+        );
+
         assert_eq!(params.provider_options, None);
     }
 }
