@@ -460,22 +460,24 @@ pub use transcription_model::{
 };
 pub use ui_message_stream::{
     CreateUiMessageStreamOptions, HandleUiMessageStreamFinishOptions, ReadUiMessageStreamOptions,
-    ResponseUiMessageId, StreamingUiMessageState, UI_MESSAGE_STREAM_CONTENT_TYPE,
-    UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER, UiMessage, UiMessageChunk,
-    UiMessageRole, UiMessageStreamCreateErrorFunction, UiMessageStreamCreateErrorHandler,
-    UiMessageStreamFinishCallback, UiMessageStreamFinishCallbackEvent,
-    UiMessageStreamFinishCallbackFunction, UiMessageStreamFinishEvent, UiMessageStreamOnFinish,
-    UiMessageStreamOnFinishFunction, UiMessageStreamProcessError, UiMessageStreamResponse,
-    UiMessageStreamResponseInit, UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
+    ResponseUiMessageId, SafeValidateUiMessagesResult, StreamingUiMessageState,
+    UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER,
+    UiMessage, UiMessageChunk, UiMessageRole, UiMessageStreamCreateErrorFunction,
+    UiMessageStreamCreateErrorHandler, UiMessageStreamFinishCallback,
+    UiMessageStreamFinishCallbackEvent, UiMessageStreamFinishCallbackFunction,
+    UiMessageStreamFinishEvent, UiMessageStreamOnFinish, UiMessageStreamOnFinishFunction,
+    UiMessageStreamProcessError, UiMessageStreamResponse, UiMessageStreamResponseInit,
+    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
     UiMessageStreamStepFinishCallback, UiMessageStreamStepFinishCallbackEvent,
-    UiMessageStreamStepFinishCallbackFunction, UiMessageStreamWriter, create_ui_message_stream,
+    UiMessageStreamStepFinishCallbackFunction, UiMessageStreamWriter, UiMessageValidationError,
+    UiMessageValidationOptions, UiMessageValidationTool, create_ui_message_stream,
     create_ui_message_stream_response, create_ui_message_stream_with_result,
     get_response_ui_message_id, get_static_tool_name, handle_ui_message_stream_finish,
     is_custom_content_ui_part, is_data_ui_part, is_dynamic_tool_ui_part, is_static_tool_ui_part,
     is_tool_ui_part, last_assistant_message_is_complete_with_approval_responses,
     last_assistant_message_is_complete_with_tool_calls, pipe_ui_message_stream_to_response,
     process_text_stream, process_ui_message_stream, read_ui_message_stream,
-    transform_text_to_ui_message_stream,
+    safe_validate_ui_messages, transform_text_to_ui_message_stream, validate_ui_messages,
 };
 pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
 pub use upload_skill::{

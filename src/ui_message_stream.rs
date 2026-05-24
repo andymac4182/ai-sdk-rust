@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::FinishReason;
-use crate::provider::ProviderMetadata;
-use crate::provider_utils::normalize_headers;
-use crate::util::merge_objects;
+use crate::provider::{ProviderMetadata, TypeValidationContext, TypeValidationError};
+use crate::provider_utils::{FlexibleSchema, normalize_headers, validate_types};
+use crate::util::{InvalidArgumentError, merge_objects};
 
 /// Default content type used by upstream UI-message stream response helpers.
 pub const UI_MESSAGE_STREAM_CONTENT_TYPE: &str = "text/event-stream";
@@ -555,6 +555,661 @@ pub fn is_custom_content_ui_part(part: &JsonValue) -> bool {
 /// Checks whether a UI message part is a data part.
 pub fn is_data_ui_part(part: &JsonValue) -> bool {
     ui_message_part_type(part).is_some_and(|part_type| part_type.starts_with("data-"))
+}
+
+/// Tool schemas used by [`validate_ui_messages`] to validate UI tool input and output parts.
+#[derive(Clone, Debug)]
+pub struct UiMessageValidationTool {
+    /// Schema used to validate available tool input values.
+    pub input_schema: FlexibleSchema<JsonValue>,
+
+    /// Optional schema used to validate output values in `output-available` parts.
+    pub output_schema: Option<FlexibleSchema<JsonValue>>,
+}
+
+impl UiMessageValidationTool {
+    /// Creates validation schemas for one UI tool.
+    pub fn new(input_schema: impl Into<FlexibleSchema<JsonValue>>) -> Self {
+        Self {
+            input_schema: input_schema.into(),
+            output_schema: None,
+        }
+    }
+
+    /// Adds an output schema for `output-available` parts.
+    pub fn with_output_schema(
+        mut self,
+        output_schema: impl Into<FlexibleSchema<JsonValue>>,
+    ) -> Self {
+        self.output_schema = Some(output_schema.into());
+        self
+    }
+}
+
+/// Options accepted by [`validate_ui_messages`] and [`safe_validate_ui_messages`].
+#[derive(Clone, Debug, Default)]
+pub struct UiMessageValidationOptions {
+    /// UI messages to validate. `None` mirrors upstream's nullish parameter error.
+    pub messages: Option<JsonValue>,
+
+    /// Optional schema used to validate each message metadata value.
+    pub metadata_schema: Option<FlexibleSchema<JsonValue>>,
+
+    /// Optional schemas keyed by the suffix of `data-*` UI parts.
+    pub data_schemas: BTreeMap<String, FlexibleSchema<JsonValue>>,
+
+    /// Optional tool schemas keyed by static `tool-*` names.
+    pub tools: BTreeMap<String, UiMessageValidationTool>,
+}
+
+/// Error returned by [`validate_ui_messages`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum UiMessageValidationError {
+    /// The top-level `messages` argument was missing.
+    InvalidArgument(InvalidArgumentError),
+
+    /// A message, part, metadata value, data value, tool input, or tool output failed validation.
+    TypeValidation(TypeValidationError),
+}
+
+impl fmt::Display for UiMessageValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidArgument(error) => error.fmt(formatter),
+            Self::TypeValidation(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for UiMessageValidationError {}
+
+impl From<InvalidArgumentError> for UiMessageValidationError {
+    fn from(error: InvalidArgumentError) -> Self {
+        Self::InvalidArgument(error)
+    }
+}
+
+impl From<TypeValidationError> for UiMessageValidationError {
+    fn from(error: TypeValidationError) -> Self {
+        Self::TypeValidation(error)
+    }
+}
+
+/// Result returned by [`safe_validate_ui_messages`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum SafeValidateUiMessagesResult {
+    /// Validation succeeded and returns the original normalized JSON messages.
+    Success { data: Vec<JsonValue> },
+
+    /// Validation failed and returns the upstream-style error.
+    Failure { error: UiMessageValidationError },
+}
+
+impl SafeValidateUiMessagesResult {
+    /// Returns whether validation succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    /// Returns whether validation failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure { .. })
+    }
+}
+
+/// Validates UI messages using the portable runtime rules from upstream `validateUIMessages`.
+pub fn validate_ui_messages(
+    options: UiMessageValidationOptions,
+) -> Result<Vec<JsonValue>, UiMessageValidationError> {
+    match safe_validate_ui_messages(options) {
+        SafeValidateUiMessagesResult::Success { data } => Ok(data),
+        SafeValidateUiMessagesResult::Failure { error } => Err(error),
+    }
+}
+
+/// Validates UI messages and returns an explicit success/failure result.
+pub fn safe_validate_ui_messages(
+    options: UiMessageValidationOptions,
+) -> SafeValidateUiMessagesResult {
+    match validate_ui_messages_inner(options) {
+        Ok(data) => SafeValidateUiMessagesResult::Success { data },
+        Err(error) => SafeValidateUiMessagesResult::Failure { error },
+    }
+}
+
+fn validate_ui_messages_inner(
+    options: UiMessageValidationOptions,
+) -> Result<Vec<JsonValue>, UiMessageValidationError> {
+    let Some(messages) = options.messages else {
+        return Err(InvalidArgumentError::new(
+            "messages",
+            JsonValue::Null,
+            "messages parameter must be provided",
+        )
+        .into());
+    };
+
+    let messages_array = messages.as_array().ok_or_else(|| {
+        TypeValidationError::with_cause_message(messages.clone(), "messages must be an array", None)
+    })?;
+
+    if messages_array.is_empty() {
+        return Err(TypeValidationError::with_cause_message(
+            messages.clone(),
+            "Messages array must not be empty",
+            None,
+        )
+        .into());
+    }
+
+    for (message_index, message) in messages_array.iter().enumerate() {
+        validate_ui_message_structure(message)?;
+
+        let message_object = message.as_object().expect("message structure validates");
+        let message_id = message_object
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .expect("message id validates");
+
+        if let Some(metadata_schema) = &options.metadata_schema {
+            let metadata = message_object
+                .get("metadata")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            validate_types(
+                metadata,
+                metadata_schema.clone(),
+                Some(
+                    TypeValidationContext::new()
+                        .with_field(format!("messages[{message_index}].metadata"))
+                        .with_entity_id(message_id),
+                ),
+            )?;
+        }
+
+        let parts = message_object
+            .get("parts")
+            .and_then(JsonValue::as_array)
+            .expect("message parts validate");
+
+        for (part_index, part) in parts.iter().enumerate() {
+            validate_ui_message_part_structure(part)?;
+            validate_ui_message_part_schema(
+                part,
+                message_index,
+                part_index,
+                &options.data_schemas,
+                &options.tools,
+            )?;
+        }
+    }
+
+    Ok(messages_array.clone())
+}
+
+fn validate_ui_message_structure(message: &JsonValue) -> Result<(), TypeValidationError> {
+    let object = require_object(message, message, "message must be an object")?;
+    require_string(object, "id", message)?;
+    require_enum(object, "role", &["system", "user", "assistant"], message)?;
+
+    let parts = object
+        .get("parts")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| {
+            TypeValidationError::with_cause_message(message.clone(), "parts must be an array", None)
+        })?;
+
+    if parts.is_empty() {
+        return Err(TypeValidationError::with_cause_message(
+            message.clone(),
+            "Message must contain at least one part",
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_ui_message_part_structure(part: &JsonValue) -> Result<(), TypeValidationError> {
+    let object = require_object(part, part, "message part must be an object")?;
+    let part_type = require_string(object, "type", part)?;
+
+    match part_type {
+        "text" | "reasoning" => {
+            require_string(object, "text", part)?;
+            optional_enum(object, "state", &["streaming", "done"], part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "custom" => {
+            require_string(object, "kind", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "source-url" => {
+            require_string(object, "sourceId", part)?;
+            require_string(object, "url", part)?;
+            optional_string(object, "title", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "source-document" => {
+            require_string(object, "sourceId", part)?;
+            require_string(object, "mediaType", part)?;
+            require_string(object, "title", part)?;
+            optional_string(object, "filename", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "file" => {
+            require_string(object, "mediaType", part)?;
+            optional_string(object, "filename", part)?;
+            require_string(object, "url", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "reasoning-file" => {
+            require_string(object, "mediaType", part)?;
+            require_string(object, "url", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "step-start" => {}
+        "dynamic-tool" => validate_ui_tool_part_structure(object, part, true)?,
+        part_type if part_type.starts_with("data-") => {
+            require_key(object, "data", part)?;
+        }
+        part_type if part_type.starts_with("tool-") => {
+            validate_ui_tool_part_structure(object, part, false)?
+        }
+        _ => {
+            return Err(TypeValidationError::with_cause_message(
+                part.clone(),
+                format!("Unsupported UI message part type {part_type}"),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ui_tool_part_structure(
+    object: &JsonObject,
+    part: &JsonValue,
+    dynamic: bool,
+) -> Result<(), TypeValidationError> {
+    if dynamic {
+        require_string(object, "toolName", part)?;
+    }
+    require_string(object, "toolCallId", part)?;
+    optional_object(object, "toolMetadata", part)?;
+    optional_bool(object, "providerExecuted", part)?;
+    optional_object(object, "callProviderMetadata", part)?;
+    let state = require_string(object, "state", part)?;
+
+    match state {
+        "input-streaming" => {
+            reject_keys(object, &["output", "errorText", "approval"], part)?;
+        }
+        "input-available" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText", "approval"], part)?;
+        }
+        "approval-requested" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText"], part)?;
+            validate_approval(object.get("approval"), part, ApprovalKind::Requested)?;
+        }
+        "approval-responded" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText"], part)?;
+            validate_approval(object.get("approval"), part, ApprovalKind::Responded)?;
+        }
+        "output-available" => {
+            require_key(object, "input", part)?;
+            require_key(object, "output", part)?;
+            reject_keys(object, &["errorText"], part)?;
+            optional_object(object, "resultProviderMetadata", part)?;
+            optional_bool(object, "preliminary", part)?;
+            if object.contains_key("approval") {
+                validate_approval(object.get("approval"), part, ApprovalKind::ApprovedOutput)?;
+            }
+        }
+        "output-error" => {
+            optional_object(object, "resultProviderMetadata", part)?;
+            optional_string(object, "errorText", part)?;
+            require_string(object, "errorText", part)?;
+            reject_keys(object, &["output"], part)?;
+            if object.contains_key("approval") {
+                validate_approval(object.get("approval"), part, ApprovalKind::ApprovedOutput)?;
+            }
+        }
+        "output-denied" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText"], part)?;
+            validate_approval(object.get("approval"), part, ApprovalKind::DeniedOutput)?;
+        }
+        _ => {
+            return Err(TypeValidationError::with_cause_message(
+                part.clone(),
+                format!("Unsupported tool part state {state}"),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ui_message_part_schema(
+    part: &JsonValue,
+    message_index: usize,
+    part_index: usize,
+    data_schemas: &BTreeMap<String, FlexibleSchema<JsonValue>>,
+    tools: &BTreeMap<String, UiMessageValidationTool>,
+) -> Result<(), TypeValidationError> {
+    let object = part.as_object().expect("part structure validates");
+    let part_type = object
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .expect("part type validates");
+
+    if part_type.starts_with("data-") && !data_schemas.is_empty() {
+        let data_name = part_type.trim_start_matches("data-");
+        let data = object.get("data").cloned().unwrap_or(JsonValue::Null);
+        let data_id = object.get("id").and_then(JsonValue::as_str);
+        let context = TypeValidationContext::new()
+            .with_field(format!(
+                "messages[{message_index}].parts[{part_index}].data"
+            ))
+            .with_entity_name(data_name);
+        let context = match data_id {
+            Some(id) => context.with_entity_id(id),
+            None => context,
+        };
+
+        let Some(data_schema) = data_schemas.get(data_name) else {
+            return Err(TypeValidationError::new(
+                data,
+                format!("No data schema found for data part {data_name}"),
+                Some(context),
+            ));
+        };
+
+        validate_types(data, data_schema.clone(), Some(context))?;
+    }
+
+    if part_type.starts_with("tool-") && !tools.is_empty() {
+        let tool_name = part_type.trim_start_matches("tool-");
+        let state = object
+            .get("state")
+            .and_then(JsonValue::as_str)
+            .expect("tool state validates");
+        let tool_call_id = object
+            .get("toolCallId")
+            .and_then(JsonValue::as_str)
+            .expect("tool call id validates");
+
+        let Some(tool) = tools.get(tool_name) else {
+            if matches!(state, "output-available" | "output-error" | "output-denied") {
+                return Ok(());
+            }
+
+            return Err(TypeValidationError::new(
+                object.get("input").cloned().unwrap_or(JsonValue::Null),
+                format!("No tool schema found for tool part {tool_name}"),
+                Some(
+                    TypeValidationContext::new()
+                        .with_field(format!(
+                            "messages[{message_index}].parts[{part_index}].input"
+                        ))
+                        .with_entity_name(tool_name)
+                        .with_entity_id(tool_call_id),
+                ),
+            ));
+        };
+
+        if matches!(state, "input-available" | "output-available")
+            || (state == "output-error" && object.contains_key("input"))
+        {
+            validate_types(
+                object.get("input").cloned().unwrap_or(JsonValue::Null),
+                tool.input_schema.clone(),
+                Some(
+                    TypeValidationContext::new()
+                        .with_field(format!(
+                            "messages[{message_index}].parts[{part_index}].input"
+                        ))
+                        .with_entity_name(tool_name)
+                        .with_entity_id(tool_call_id),
+                ),
+            )?;
+        }
+
+        if state == "output-available" {
+            if let Some(output_schema) = &tool.output_schema {
+                validate_types(
+                    object.get("output").cloned().unwrap_or(JsonValue::Null),
+                    output_schema.clone(),
+                    Some(
+                        TypeValidationContext::new()
+                            .with_field(format!(
+                                "messages[{message_index}].parts[{part_index}].output"
+                            ))
+                            .with_entity_name(tool_name)
+                            .with_entity_id(tool_call_id),
+                    ),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalKind {
+    Requested,
+    Responded,
+    ApprovedOutput,
+    DeniedOutput,
+}
+
+fn validate_approval(
+    approval: Option<&JsonValue>,
+    part: &JsonValue,
+    kind: ApprovalKind,
+) -> Result<(), TypeValidationError> {
+    let approval = approval.ok_or_else(|| {
+        TypeValidationError::with_cause_message(part.clone(), "approval must be provided", None)
+    })?;
+    let approval_object = require_object(approval, part, "approval must be an object")?;
+    require_string(approval_object, "id", part)?;
+    optional_bool(approval_object, "isAutomatic", part)?;
+    optional_string(approval_object, "reason", part)?;
+
+    match kind {
+        ApprovalKind::Requested => {
+            reject_keys(approval_object, &["approved", "reason"], part)?;
+        }
+        ApprovalKind::Responded => {
+            require_bool(approval_object, "approved", part)?;
+        }
+        ApprovalKind::ApprovedOutput => {
+            require_bool_value(approval_object, "approved", true, part)?;
+        }
+        ApprovalKind::DeniedOutput => {
+            require_bool_value(approval_object, "approved", false, part)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn require_object<'a>(
+    value: &'a JsonValue,
+    whole_value: &JsonValue,
+    message: impl Into<String>,
+) -> Result<&'a JsonObject, TypeValidationError> {
+    value
+        .as_object()
+        .ok_or_else(|| TypeValidationError::with_cause_message(whole_value.clone(), message, None))
+}
+
+fn require_key<'a>(
+    object: &'a JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<&'a JsonValue, TypeValidationError> {
+    object.get(key).ok_or_else(|| {
+        TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be provided"),
+            None,
+        )
+    })
+}
+
+fn require_string<'a>(
+    object: &'a JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<&'a str, TypeValidationError> {
+    require_key(object, key, whole_value)?
+        .as_str()
+        .ok_or_else(|| {
+            TypeValidationError::with_cause_message(
+                whole_value.clone(),
+                format!("{key} must be a string"),
+                None,
+            )
+        })
+}
+
+fn optional_string(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.get(key).is_some_and(|value| !value.is_string()) {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be a string"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_bool(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<bool, TypeValidationError> {
+    require_key(object, key, whole_value)?
+        .as_bool()
+        .ok_or_else(|| {
+            TypeValidationError::with_cause_message(
+                whole_value.clone(),
+                format!("{key} must be a boolean"),
+                None,
+            )
+        })
+}
+
+fn require_bool_value(
+    object: &JsonObject,
+    key: &str,
+    expected: bool,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    let value = require_bool(object, key, whole_value)?;
+    if value != expected {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be {expected}"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn optional_bool(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.get(key).is_some_and(|value| !value.is_boolean()) {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be a boolean"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn optional_object(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.get(key).is_some_and(|value| !value.is_object()) {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be an object"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_enum<'a>(
+    object: &'a JsonObject,
+    key: &str,
+    variants: &[&str],
+    whole_value: &JsonValue,
+) -> Result<&'a str, TypeValidationError> {
+    let value = require_string(object, key, whole_value)?;
+    if variants.contains(&value) {
+        Ok(value)
+    } else {
+        Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be one of {}", variants.join(", ")),
+            None,
+        ))
+    }
+}
+
+fn optional_enum(
+    object: &JsonObject,
+    key: &str,
+    variants: &[&str],
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.contains_key(key) {
+        require_enum(object, key, variants, whole_value)?;
+    }
+
+    Ok(())
+}
+
+fn reject_keys(
+    object: &JsonObject,
+    keys: &[&str],
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    for key in keys {
+        if object.contains_key(*key) {
+            return Err(TypeValidationError::with_cause_message(
+                whole_value.clone(),
+                format!("{key} must not be present"),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Checks whether the last assistant message has complete non-provider tool calls.
@@ -2317,6 +2972,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::provider_utils::{Schema, ValidationResult};
     use serde_json::json;
 
     #[test]
@@ -3221,6 +3877,783 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
             "type": "text",
             "text": "some text"
         })));
+    }
+
+    fn schema_named(name: &'static str) -> FlexibleSchema<JsonValue> {
+        Schema::new(JsonObject::new())
+            .with_validator(move |value| {
+                let valid = match name {
+                    "metadata" => value.get("foo").and_then(JsonValue::as_str).is_some(),
+                    "string" => value.is_string(),
+                    "number" => value.is_number(),
+                    "input-location" => value.get("location").and_then(JsonValue::as_str).is_some(),
+                    "output-weather" => value.get("weather").and_then(JsonValue::as_str).is_some(),
+                    _ => true,
+                };
+
+                if valid {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure(format!("{name} schema mismatch"))
+                }
+            })
+            .into()
+    }
+
+    fn validate_messages(messages: JsonValue) -> Result<Vec<JsonValue>, UiMessageValidationError> {
+        validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_invalid_argument_error_when_messages_parameter_is_null() {
+        let error = validate_ui_messages(UiMessageValidationOptions::default())
+            .expect_err("missing messages should fail");
+
+        assert!(matches!(
+            error,
+            UiMessageValidationError::InvalidArgument(_)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Invalid argument for parameter messages: messages parameter must be provided"
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_messages_array_is_empty() {
+        let error = validate_messages(json!([])).expect_err("empty array should fail");
+
+        assert!(matches!(error, UiMessageValidationError::TypeValidation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("Messages array must not be empty")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_message_has_empty_parts_array()
+    {
+        let error = validate_messages(json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": []
+            }
+        ]))
+        .expect_err("empty parts should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Message must contain at least one part")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_user_message_with_metadata_when_no_metadata_schema_is_provided()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "metadata": { "foo": "bar" },
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_user_message_with_metadata() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "metadata": { "foo": "bar" },
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            }
+        ]);
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            metadata_schema: Some(schema_named("metadata")),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_metadata_is_invalid() {
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "metadata": { "foo": 123 },
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])),
+            metadata_schema: Some(schema_named("metadata")),
+            ..Default::default()
+        })
+        .expect_err("invalid metadata should fail");
+
+        assert!(error.to_string().contains("messages[0].metadata"));
+        assert!(error.to_string().contains("id: \"1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_text_part_with_provider_metadata() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": [{
+                    "type": "text",
+                    "text": "Hello, world!",
+                    "providerMetadata": {
+                        "someProvider": { "custom": "metadata" }
+                    }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_user_message_with_a_text_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_custom_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "custom",
+                    "kind": "test-provider.compaction",
+                    "providerMetadata": {
+                        "openai": { "itemId": "cmp_123" }
+                    }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_custom_part_without_provider_metadata()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "custom",
+                    "kind": "openai.compaction"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_reasoning_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "reasoning",
+                    "text": "The answer needs weather data.",
+                    "state": "done"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_source_url_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "source-url",
+                    "sourceId": "source-1",
+                    "url": "https://example.com",
+                    "title": "Example"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_source_document_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "source-document",
+                    "sourceId": "source-1",
+                    "mediaType": "text/plain",
+                    "title": "Example",
+                    "filename": "example.txt"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_file_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "filename": "image.png",
+                    "url": "data:image/png;base64,AA=="
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_step_start_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{ "type": "step-start" }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_two_data_parts() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "data-city", "id": "city-1", "data": "Brisbane" },
+                    { "type": "data-temperature", "id": "temp-1", "data": 27 }
+                ]
+            }
+        ]);
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("city".to_string(), schema_named("string"));
+        data_schemas.insert("temperature".to_string(), schema_named("number"));
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            data_schemas,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_data_is_invalid() {
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("city".to_string(), schema_named("string"));
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{ "type": "data-city", "id": "city-1", "data": 123 }]
+                }
+            ])),
+            data_schemas,
+            ..Default::default()
+        })
+        .expect_err("invalid data should fail");
+
+        assert!(error.to_string().contains("messages[0].parts[0].data"));
+        assert!(error.to_string().contains("city"));
+        assert!(error.to_string().contains("id: \"city-1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_there_is_no_data_schema_for_a_data_part()
+     {
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("other".to_string(), schema_named("string"));
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{ "type": "data-city", "id": "city-1", "data": "Brisbane" }]
+                }
+            ])),
+            data_schemas,
+            ..Default::default()
+        })
+        .expect_err("missing data schema should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("No data schema found for data part city")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_output_error_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "errorText": "failed"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_input_streaming_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-streaming"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_input_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-available",
+                    "input": { "location": "Brisbane" }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_output_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_dynamic_tool_part_in_output_error_state_when_input_key_is_absent()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "errorText": "failed"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_tool_input_when_state_is_input_available() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-available",
+                    "input": { "location": "Brisbane" }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_tool_input_and_output_when_state_is_output_available() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location"))
+                .with_output_schema(schema_named("output-weather")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_tool_input_validation_when_state_is_output_error_and_there_is_no_input()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "errorText": "failed"
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(messages),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_error_when_no_tool_schema_is_found() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "input-available",
+                        "input": { "location": "Brisbane" }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        })
+        .expect_err("missing tool schema should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("No tool schema found for tool part weather")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_validation_for_tool_part_in_output_available_state_when_tool_schema_is_missing()
+     {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(json!([
+                    {
+                        "id": "1",
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool-weather",
+                            "toolCallId": "tool-1",
+                            "state": "output-available",
+                            "input": { "unexpected": true },
+                            "output": { "anything": true }
+                        }]
+                    }
+                ])),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_automatic_approval_reasons_on_output_parts() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true,
+                        "reason": "automatic",
+                        "isAutomatic": true
+                    }
+                }]
+            }
+        ]);
+
+        assert!(validate_messages(messages).is_ok());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_error_when_tool_input_validation_fails() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "input-available",
+                        "input": { "city": "Brisbane" }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        })
+        .expect_err("invalid tool input should fail");
+
+        assert!(error.to_string().contains("messages[0].parts[0].input"));
+        assert!(error.to_string().contains("weather"));
+        assert!(error.to_string().contains("id: \"tool-1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_error_when_tool_output_validation_fails() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location"))
+                .with_output_schema(schema_named("output-weather")),
+        );
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "output-available",
+                        "input": { "location": "Brisbane" },
+                        "output": { "temperature": 27 }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        })
+        .expect_err("invalid tool output should fail");
+
+        assert!(error.to_string().contains("messages[0].parts[0].output"));
+        assert!(error.to_string().contains("weather"));
+        assert!(error.to_string().contains("id: \"tool-1\""));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_success_result_for_valid_messages() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])),
+            ..Default::default()
+        });
+
+        assert!(result.is_success());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_messages_parameter_is_null() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions::default());
+
+        assert!(matches!(
+            result,
+            SafeValidateUiMessagesResult::Failure {
+                error: UiMessageValidationError::InvalidArgument(_)
+            }
+        ));
     }
 
     #[test]
