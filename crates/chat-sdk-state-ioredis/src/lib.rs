@@ -306,6 +306,22 @@ mod tests {
         }
     }
 
+    // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
+    //
+    // The following 4 upstream `index.test.ts` cases are js-only or
+    // require a live Redis cluster and have no matching Rust test:
+    //
+    // - `should export createIoRedisState function`: JS module-loader
+    //   check (`typeof createIoRedisState === "function"`). Rust's
+    //   module system makes the export visible at compile time.
+    // - 3 `describe.skip("integration tests")` cases — explicitly
+    //   skipped upstream too; would need a live Redis cluster
+    //   (cluster mode + Sentinel).
+    //
+    // Remaining upstream cases are mapped (5 method-existence mapped
+    // to NotConnected smoke tests below + 8 NotConnected smoke
+    // tests + 3 generate_token additive tests).
+
     // ---------- upstream "should have X method" mappings (2 of 5) ----------
     // 1:1 with upstream `index.test.ts` cases:
     //
