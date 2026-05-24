@@ -452,9 +452,9 @@ pub fn is_teams_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (3) ----------
+    //! ---------- upstream js-only-documented cases (4) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, 3 upstream
+    //! Per the slice-380 type-system-impossible pattern, 4 upstream
     //! `index.test.ts` cases are enumerated as js-only-documented:
     //!
     //! - `describe("subclass extensibility") > should expose protected
@@ -481,6 +481,15 @@ mod tests {
     //!   adapter dependency (logging is plumbed via the `log` crate's
     //!   static dispatch elsewhere); the constructor-default-logger
     //!   fallback shape is moot.
+    //!
+    //! - `describe("TeamsAdapter") > should export createTeamsAdapter
+    //!   function` — asserts `typeof createTeamsAdapter === "function"`.
+    //!   Rust's module system makes the `pub fn new` constructor
+    //!   visible at compile time; missing exports become compilation
+    //!   errors, not runtime assertion failures. (Slice 458 formalizes
+    //!   what was previously an inline note at the
+    //!   `teams_adapter_creates_an_instance_with_app_credentials`
+    //!   test site.)
     use super::*;
     use futures_executor::block_on;
 

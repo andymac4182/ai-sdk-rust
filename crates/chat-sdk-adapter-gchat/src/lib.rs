@@ -714,7 +714,7 @@ pub fn is_gchat_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (2) ----------
+    //! ---------- upstream js-only-documented cases (3) ----------
     //!
     //! Per the slice-380 type-system-impossible pattern, the
     //! following upstream `index.test.ts` cases are enumerated as
@@ -735,6 +735,14 @@ mod tests {
     //!    is plumbed via the `log` crate's static dispatch
     //!    elsewhere); the constructor-default-logger shape is
     //!    moot.
+    //!
+    //! 3. `describe("GoogleChatAdapter") > should export
+    //!    createGoogleChatAdapter function` — asserts that
+    //!    `typeof createGoogleChatAdapter === "function"`. Rust's
+    //!    module system makes the `pub fn try_create_gchat_adapter`
+    //!    factory visible at compile time, so a runtime function-
+    //!    exists check doesn't apply; missing exports become
+    //!    compilation errors, not runtime assertion failures.
     use super::*;
     use futures_executor::block_on;
 
