@@ -482,6 +482,39 @@ mod tests {
     //     - "should deserialize via WORKFLOW_DESERIALIZE"
     //     - "should round-trip via WORKFLOW_SERIALIZE and WORKFLOW_DESERIALIZE"
 
+    // ---------- describe("chat.reviver()") + describe("standalone reviver()")
+    //   "should revive both Thread and Message in same payload" — js-only-documented (slice 445) ----------
+    //
+    // Upstream's `serialization.test.ts > describe("chat.reviver()")` at
+    // line 681 and `describe("standalone reviver()")` at line 833 both
+    // ship a "should revive both Thread and Message in same payload"
+    // case that asserts a single JSON.parse(reviver) call promotes
+    // *both* a chat:Thread envelope and a chat:Message envelope nested
+    // under the same top-level object into typed instances:
+    //
+    //   const parsed = JSON.parse(payload, chat.reviver());
+    //   expect(parsed.thread).toBeInstanceOf(ThreadImpl);
+    //   expect(parsed.message.metadata.dateSent).toBeInstanceOf(Date);
+    //
+    // The Rust port's `revive_walk` returns a `Value` (not a Revived
+    // enum), so a typed-instance promotion on a sub-tree is
+    // unrepresentable by construction:
+    //   - `Thread` wraps `Arc<dyn Adapter>` and can't be re-encoded
+    //     into a `Value` slot.
+    //   - `Message` round-trips through `to_serialized` which keeps
+    //     the wire shape but loses the typed-instance distinction.
+    //
+    // The semantic equivalent in Rust is to use `revive_value` per
+    // sub-tree (with a singleton registered) to get Revived::Thread +
+    // Revived::Message instances independently. This is already
+    // covered by slice 443's `revive_value_promotes_chat_thread_*` /
+    // slice 374's chat:Message walk tests. The combined-walk case is
+    // js-only because JS's dynamic typing lets a single recursive walk
+    // produce a heterogeneously-typed object tree — a shape Rust's
+    // static type system rejects by construction. Enumerated here for
+    // parity accounting; 2 upstream cases (1 in chat.reviver(), 1 in
+    // standalone reviver()).
+
     // ---------- describe("standalone reviver()") additional js-only case ----------
     // Upstream "should be usable directly as JSON.parse second argument"
     // (serialization.test.ts:887) is js-only-documented: it asserts
