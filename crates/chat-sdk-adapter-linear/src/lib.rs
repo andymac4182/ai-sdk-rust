@@ -471,6 +471,22 @@ impl Adapter for LinearAdapter {
     ) -> chat_sdk_chat::types::AdapterResult<()> {
         Ok(())
     }
+
+    /// 1:1 with upstream's known-limitation `removeReaction(...)`:
+    /// Linear's `reactionDelete` mutation requires the reaction id,
+    /// which the SDK doesn't currently track (the adapter would
+    /// need to fetch the comment's reactions and look up the right
+    /// id by emoji + user). Returns `Ok(())` as a documented no-op
+    /// instead of throwing — matches upstream's behavior of logging
+    /// a warning and resolving the promise.
+    async fn remove_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        Ok(())
+    }
 }
 
 impl LinearAdapter {
@@ -1292,5 +1308,29 @@ mod tests {
         )
         .expect("config api url wins");
         assert_eq!(adapter.api_url(), Some("https://config-linear.example.com"));
+    }
+
+    // ---------- describe("removeReaction") (1 upstream case) ----------
+    // 1:1 with upstream `index.test.ts > describe("removeReaction")`.
+    // Linear's removeReaction is a documented no-op (the
+    // reaction-id lookup needed for `reactionDelete` isn't tracked
+    // by the adapter yet). Upstream asserts the logger.warn was
+    // called; the Rust port doesn't yet have logger plumbing, so
+    // the equivalent assertion is that the call resolves without
+    // error.
+
+    #[test]
+    fn linear_remove_reaction_returns_ok_for_unsupported_reaction_id_lookup() {
+        use futures_executor::block_on;
+        let adapter = LinearAdapter::new(LinearAdapterOptions {
+            auth: LinearAuth::ApiKey("test-api-key".to_string()),
+            graphql_url: None,
+            webhook_secret: Some("secret".to_string()),
+            user_name: Some("test-bot".to_string()),
+            api_url: None,
+            mode: LinearMode::Comments,
+        });
+        let result = block_on(adapter.remove_reaction("linear:issue-123", "comment-1", "heart"));
+        assert!(result.is_ok());
     }
 }

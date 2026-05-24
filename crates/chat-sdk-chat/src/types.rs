@@ -1363,6 +1363,20 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported("add_reaction"))
     }
 
+    /// Remove a reaction from `message_id` in `thread_id`. 1:1 with
+    /// upstream `removeReaction(threadId, messageId, emoji):
+    /// Promise<void>`. Symmetric with [`Self::add_reaction`] — the
+    /// `emoji` is the same platform-native short-name. Default
+    /// returns `Err(Unsupported("remove_reaction"))`.
+    async fn remove_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> AdapterResult<()> {
+        Err(AdapterError::Unsupported("remove_reaction"))
+    }
+
     /// Signal the human user that the bot is composing a reply. 1:1
     /// with upstream `startTyping(threadId, status?): Promise<void>`.
     /// `status` is an optional platform-specific status line (e.g.
