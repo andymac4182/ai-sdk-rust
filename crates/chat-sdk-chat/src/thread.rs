@@ -815,6 +815,28 @@ mod tests {
     //! describe block; 18 are already 1:1 ported (slices 385,
     //! 403..405) and the other 4 are deferred behind PostableMessage
     //! input shapes that require the `from_full_stream` integration.
+    //!
+    //! ---------- upstream type-system-impossible cases (1) ----------
+    //!
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream `serialization.test.ts > describe("ThreadImpl.fromJSON()")`
+    //! case is enumerated here because it asserts a runtime behavior
+    //! that the Rust port makes structurally impossible (slice 472):
+    //!
+    //! 1. `should throw error for unknown adapter on access`
+    //!    (serialization.test.ts:185) — upstream `ThreadImpl.fromJSON(json)`
+    //!    takes no adapter argument and defers adapter resolution
+    //!    until `thread.adapter` is read, which throws if no matching
+    //!    adapter is registered on the chat singleton. The Rust
+    //!    `Thread::from_json(json, adapter)` signature requires the
+    //!    caller to provide the adapter at construction, so the
+    //!    "unknown adapter on access" error state is unreachable.
+    //!    The reviver-layer entry point (`crate::reviver::revive_value`)
+    //!    falls through to `Revived::PassThrough` when no singleton is
+    //!    registered or the requested adapter name is not found
+    //!    (see [`crate::reviver`] `chat:Thread` branch, slice 443) —
+    //!    again a safer-by-construction behavior than the upstream
+    //!    deferred throw.
     use super::*;
     use crate::postable_object::postable_envelope;
     use crate::types::{AdapterError, AdapterResult};
