@@ -545,6 +545,58 @@ mod tests {
     }
 
     #[test]
+    fn to_serialized_should_serialize_links_without_fetch_message() {
+        // 1:1 with upstream `describe("Message.toJSON()") > it("should
+        // serialize links without fetchMessage")` — the wire shape
+        // includes url / title / description / imageUrl / siteName
+        // and excludes any callback fields. The Rust LinkPreview type
+        // has no fetchMessage callback by construction (the type
+        // system enforces the exclusion), so this test asserts the
+        // pure data wire-shape round-trip.
+        let mut msg = sample_message();
+        msg.links = vec![
+            LinkPreview {
+                url: "https://example.com".to_string(),
+                title: Some("Example".to_string()),
+                description: None,
+                image_url: None,
+                site_name: None,
+            },
+            LinkPreview {
+                url: "https://vercel.com".to_string(),
+                title: None,
+                description: None,
+                image_url: None,
+                site_name: Some("Vercel".to_string()),
+            },
+        ];
+        let json = serde_json::to_value(msg.to_serialized()).unwrap();
+        let links = json["links"].as_array().expect("links present");
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0]["url"], "https://example.com");
+        assert_eq!(links[0]["title"], "Example");
+        assert_eq!(links[1]["url"], "https://vercel.com");
+        assert_eq!(links[1]["siteName"], "Vercel");
+        // fetchMessage callback field is absent by construction.
+        assert!(links[0].get("fetchMessage").is_none());
+    }
+
+    #[test]
+    fn to_serialized_should_omit_links_when_empty() {
+        // 1:1 with upstream `describe("Message.toJSON()") > it("should
+        // omit links when empty")` — the SerializedMessage.links
+        // field is `Option<Vec<LinkPreview>>` and the to_serialized
+        // helper maps an empty Vec to `None`, which serde omits via
+        // the default-skip serde attr on the SerializedMessage struct.
+        let msg = sample_message();
+        let json = serde_json::to_value(msg.to_serialized()).unwrap();
+        assert!(
+            json.get("links").is_none() || json["links"].is_null(),
+            "links should be omitted from the wire shape when empty, got: {json}"
+        );
+    }
+
+    #[test]
     fn to_serialized_should_produce_json_serializable_output() {
         // 1:1 with upstream `describe("Message.toJSON()") > it("should
         // produce JSON-serializable output")` — the serialized form
