@@ -7,7 +7,10 @@
 //! deferred to a follow-up slice.
 
 use chat_sdk_adapter_shared::errors::AdapterError;
-use chat_sdk_chat::cards::{CardChild, CardElement, card_child_to_fallback_text};
+use chat_sdk_chat::cards::{
+    ActionsChild, ActionsElement, ButtonElement, ButtonStyle, CardChild, CardElement,
+    FieldsElement, LinkButtonElement, SectionElement, card_child_to_fallback_text,
+};
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use chat_sdk_chat::markdown::table_element_to_ascii;
 
@@ -109,11 +112,57 @@ pub struct DiscordEmbedField {
     pub inline: Option<bool>,
 }
 
-/// Discord message-component action row (placeholder). The
-/// `cardToDiscordPayload` Action-Row rendering branch is deferred;
-/// this slice returns an empty Vec for the action-row component.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DiscordActionRow {}
+/// Discord button-style enum. 1:1 with `discord-api-types/v10`
+/// `ButtonStyle`. Numeric values are stable per the Discord API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DiscordButtonStyle {
+    Primary = 1,
+    Secondary = 2,
+    Success = 3,
+    Danger = 4,
+    Link = 5,
+}
+
+/// Discord button component. 1:1 with upstream `DiscordButton` (type
+/// `APIButtonComponent`). `type` is always `2` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordButton {
+    /// Discord component type — always `2` for buttons.
+    pub component_type: u8,
+    pub style: DiscordButtonStyle,
+    pub label: String,
+    /// Custom-id for interactive (non-link) buttons.
+    pub custom_id: Option<String>,
+    /// URL for link buttons (style = [`DiscordButtonStyle::Link`]).
+    pub url: Option<String>,
+    /// Whether the button is disabled. Omitted (None) when the
+    /// upstream renderer didn't set it — matches upstream's `if
+    /// (button.disabled) { discordButton.disabled = true; }`.
+    pub disabled: Option<bool>,
+}
+
+/// Discord message-component action row. 1:1 with upstream
+/// `DiscordActionRow` (type `APIActionRowComponent`). `type` is
+/// always `1` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordActionRow {
+    /// Discord component type — always `1` for action rows.
+    pub component_type: u8,
+    pub components: Vec<DiscordButton>,
+}
+
+impl Default for DiscordActionRow {
+    fn default() -> Self {
+        Self {
+            component_type: 1,
+            components: Vec::new(),
+        }
+    }
+}
+
+/// Discord allows a maximum of 5 components per action row.
+pub const DISCORD_ACTION_ROW_MAX_COMPONENTS: usize = 5;
 
 /// Result of [`card_to_discord_payload`]. 1:1 with upstream
 /// `{embeds, components}` return shape.
@@ -124,8 +173,8 @@ pub struct DiscordPayload {
 }
 
 /// Convert a [`CardElement`] to a Discord message payload (embeds
-/// + components). Partial 1:1 port of upstream
-/// `cardToDiscordPayload(card)`. Currently handles:
+/// + components). 1:1 port of upstream `cardToDiscordPayload(card)`.
+/// Handles:
 ///
 /// - `title` -> `embed.title`
 /// - `subtitle` -> `embed.description`
@@ -136,16 +185,22 @@ pub struct DiscordPayload {
 /// - `Divider` children -> horizontal line marker `"───────────"`
 /// - `Image` children -> no-op (Discord embeds support only one
 ///   image at the card level)
-/// - `Fields` children -> `embed.fields`
+/// - `Actions` children -> [`DiscordActionRow`]s (chunked 5/row)
+/// - `Section` children -> recursively flattened
+/// - `Fields` children -> `embed.fields` (inline = true)
 /// - `Link` children -> markdown `[label](url)` in description
 ///
-/// **Deferred:** `Actions`/`Section`/`Table`/`CardLink` rendering
-/// and the full Action Row component output.
+/// **Deferred:** `Table` and `CardLink` rendering branches; Select /
+/// RadioSelect components inside `Actions` (silently dropped — only
+/// `Button` and `LinkButton` are emitted, matching upstream's
+/// `filter((child) => child.type === "button" || child.type ===
+/// "link-button")`).
 pub fn card_to_discord_payload(card: &CardElement) -> DiscordPayload {
     let mut embed = DiscordEmbed {
         color: Some(DISCORD_EMBED_DEFAULT_COLOR),
         ..Default::default()
     };
+    let mut components: Vec<DiscordActionRow> = Vec::new();
 
     if let Some(title) = card.title.as_deref().filter(|t| !t.is_empty()) {
         embed.title = Some(convert_emoji(title));
@@ -162,7 +217,7 @@ pub fn card_to_discord_payload(card: &CardElement) -> DiscordPayload {
     let mut text_parts: Vec<String> = Vec::new();
 
     for child in &card.children {
-        process_child(child, &mut text_parts, &mut embed.fields);
+        process_child(child, &mut text_parts, &mut embed.fields, &mut components);
     }
 
     if !text_parts.is_empty() {
@@ -175,7 +230,7 @@ pub fn card_to_discord_payload(card: &CardElement) -> DiscordPayload {
 
     DiscordPayload {
         embeds: vec![embed],
-        components: Vec::new(),
+        components,
     }
 }
 
@@ -183,16 +238,11 @@ fn process_child(
     child: &CardChild,
     text_parts: &mut Vec<String>,
     fields: &mut Vec<DiscordEmbedField>,
+    components: &mut Vec<DiscordActionRow>,
 ) {
     match child {
         CardChild::Text(t) => {
-            let converted = convert_emoji(&t.content);
-            let styled = match t.style {
-                Some(chat_sdk_chat::cards::TextStyle::Bold) => format!("**{converted}**"),
-                Some(chat_sdk_chat::cards::TextStyle::Muted) => format!("*{converted}*"),
-                _ => converted,
-            };
-            text_parts.push(styled);
+            text_parts.push(convert_text_element(t));
         }
         CardChild::Image(_) => {
             // Discord embeds support only one image (set at the
@@ -204,20 +254,120 @@ fn process_child(
         CardChild::Divider(_) => {
             text_parts.push("───────────".to_string());
         }
+        CardChild::Actions(a) => {
+            components.extend(convert_actions_to_rows(a));
+        }
+        CardChild::Section(s) => {
+            process_section_element(s, text_parts, fields, components);
+        }
         CardChild::Fields(f) => {
-            for field in &f.children {
-                fields.push(DiscordEmbedField {
-                    name: convert_emoji(&field.label),
-                    value: convert_emoji(&field.value),
-                    inline: None,
-                });
-            }
+            convert_fields_element(f, fields);
         }
         CardChild::Link(l) => {
             text_parts.push(format!("[{}]({})", convert_emoji(&l.label), l.url));
         }
-        // Actions / Section / Table / CardLink rendering deferred.
+        // Table / CardLink rendering deferred.
         _ => {}
+    }
+}
+
+/// 1:1 with upstream `convertTextElement(element)`. Applies style:
+/// `bold` -> `**...**`, `muted` -> `*...*` (italic approximation,
+/// since Discord has no muted).
+fn convert_text_element(element: &chat_sdk_chat::cards::TextElement) -> String {
+    let text = convert_emoji(&element.content);
+    match element.style {
+        Some(chat_sdk_chat::cards::TextStyle::Bold) => format!("**{text}**"),
+        Some(chat_sdk_chat::cards::TextStyle::Muted) => format!("*{text}*"),
+        _ => text,
+    }
+}
+
+/// 1:1 with upstream `convertActionsToRows(element)`. Filters out
+/// non-button children, then chunks the remaining buttons into
+/// action rows of at most 5.
+fn convert_actions_to_rows(element: &ActionsElement) -> Vec<DiscordActionRow> {
+    let buttons: Vec<DiscordButton> = element
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            ActionsChild::Button(b) => convert_button_element(b).ok(),
+            ActionsChild::LinkButton(b) => Some(convert_link_button_element(b)),
+            _ => None,
+        })
+        .collect();
+
+    buttons
+        .chunks(DISCORD_ACTION_ROW_MAX_COMPONENTS)
+        .map(|chunk| DiscordActionRow {
+            component_type: 1,
+            components: chunk.to_vec(),
+        })
+        .collect()
+}
+
+/// 1:1 with upstream `convertButtonElement(button)`. Returns a
+/// `ValidationError` when `encode_discord_custom_id` rejects the
+/// id/value pair — upstream surfaces this as a thrown exception.
+fn convert_button_element(button: &ButtonElement) -> Result<DiscordButton, AdapterError> {
+    let custom_id = encode_discord_custom_id(&button.id, button.value.as_deref())?;
+    Ok(DiscordButton {
+        component_type: 2,
+        style: get_button_style(button.style),
+        label: button.label.clone(),
+        custom_id: Some(custom_id),
+        url: None,
+        disabled: button.disabled.and_then(|d| if d { Some(true) } else { None }),
+    })
+}
+
+/// 1:1 with upstream `convertLinkButtonElement(button)`. Always
+/// emits style = [`DiscordButtonStyle::Link`].
+fn convert_link_button_element(button: &LinkButtonElement) -> DiscordButton {
+    DiscordButton {
+        component_type: 2,
+        style: DiscordButtonStyle::Link,
+        label: button.label.clone(),
+        custom_id: None,
+        url: Some(button.url.clone()),
+        disabled: None,
+    }
+}
+
+/// 1:1 with upstream `getButtonStyle(style)`. Maps card-level
+/// `ButtonStyle` to Discord-API `ButtonStyle`; `Default` and all
+/// other variants collapse to `Secondary`.
+fn get_button_style(style: Option<ButtonStyle>) -> DiscordButtonStyle {
+    match style {
+        Some(ButtonStyle::Primary) => DiscordButtonStyle::Primary,
+        Some(ButtonStyle::Danger) => DiscordButtonStyle::Danger,
+        _ => DiscordButtonStyle::Secondary,
+    }
+}
+
+/// 1:1 with upstream `processSectionElement(element, ...)`.
+/// Recursively flattens section children into the parent embed's
+/// text/fields/components.
+fn process_section_element(
+    element: &SectionElement,
+    text_parts: &mut Vec<String>,
+    fields: &mut Vec<DiscordEmbedField>,
+    components: &mut Vec<DiscordActionRow>,
+) {
+    for child in &element.children {
+        process_child(child, text_parts, fields, components);
+    }
+}
+
+/// 1:1 with upstream `convertFieldsElement(element, fields)`. All
+/// fields are emitted `inline: true`.
+fn convert_fields_element(element: &FieldsElement, fields: &mut Vec<DiscordEmbedField>) {
+    for field in &element.children {
+        fields.push(DiscordEmbedField {
+            name: convert_emoji(&field.label),
+            value: convert_emoji(&field.value),
+            inline: Some(true),
+        });
     }
 }
 
@@ -295,9 +445,9 @@ fn child_to_fallback_text(child: &CardChild) -> Option<String> {
 mod tests {
     use super::*;
     use chat_sdk_chat::cards::{
-        ActionsChild, ActionsElement, ActionsKind, ButtonElement, ButtonKind, CardKind,
+        ActionsChild, ActionsElement, ActionsKind, ButtonElement, ButtonKind, ButtonStyle, CardKind,
         DividerElement, DividerKind, FieldElement, FieldKind, FieldsElement, FieldsKind,
-        SectionElement, SectionKind, TextElement, TextKind,
+        LinkButtonElement, LinkButtonKind, SectionElement, SectionKind, TextElement, TextKind,
     };
 
     fn card(title: Option<&str>, subtitle: Option<&str>, children: Vec<CardChild>) -> CardElement {
@@ -436,6 +586,281 @@ mod tests {
         assert!(description.contains("Before"), "got: {description}");
         assert!(description.contains("───────────"), "got: {description}");
         assert!(description.contains("After"), "got: {description}");
+    }
+
+    // ---------- cardToDiscordPayload Action Row + Section + Fields (8 cases) ----------
+
+    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+        ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style,
+            kind: ButtonKind::Button,
+            value: value.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn converts_actions_with_buttons() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
+                    ActionsChild::Button(button("reject", "Reject", Some(ButtonStyle::Danger), Some("data-123"))),
+                    ActionsChild::Button(button("skip", "Skip", None, None)),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.components.len(), 1);
+        assert_eq!(payload.components[0].component_type, 1);
+        let buttons = &payload.components[0].components;
+        assert_eq!(buttons.len(), 3);
+        assert_eq!(
+            buttons[0],
+            DiscordButton {
+                component_type: 2,
+                style: DiscordButtonStyle::Primary,
+                label: "Approve".to_string(),
+                custom_id: Some("approve".to_string()),
+                url: None,
+                disabled: None,
+            }
+        );
+        assert_eq!(
+            buttons[1],
+            DiscordButton {
+                component_type: 2,
+                style: DiscordButtonStyle::Danger,
+                label: "Reject".to_string(),
+                custom_id: Some("reject\ndata-123".to_string()),
+                url: None,
+                disabled: None,
+            }
+        );
+        assert_eq!(
+            buttons[2],
+            DiscordButton {
+                component_type: 2,
+                style: DiscordButtonStyle::Secondary,
+                label: "Skip".to_string(),
+                custom_id: Some("skip".to_string()),
+                url: None,
+                disabled: None,
+            }
+        );
+    }
+
+    #[test]
+    fn sets_disabled_on_button_when_specified() {
+        let mut cancel = button("cancel", "Cancelled", Some(ButtonStyle::Danger), None);
+        cancel.disabled = Some(true);
+        let retry = button("retry", "Retry", None, None);
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::Button(cancel), ActionsChild::Button(retry)],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let payload = card_to_discord_payload(&c);
+        let buttons = &payload.components[0].components;
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(
+            buttons[0],
+            DiscordButton {
+                component_type: 2,
+                style: DiscordButtonStyle::Danger,
+                label: "Cancelled".to_string(),
+                custom_id: Some("cancel".to_string()),
+                url: None,
+                disabled: Some(true),
+            }
+        );
+        assert_eq!(
+            buttons[1],
+            DiscordButton {
+                component_type: 2,
+                style: DiscordButtonStyle::Secondary,
+                label: "Retry".to_string(),
+                custom_id: Some("retry".to_string()),
+                url: None,
+                disabled: None,
+            }
+        );
+    }
+
+    #[test]
+    fn converts_link_buttons_using_link_style() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::LinkButton(LinkButtonElement {
+                    label: "View Docs".to_string(),
+                    style: None,
+                    kind: LinkButtonKind::LinkButton,
+                    url: "https://example.com/docs".to_string(),
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.components.len(), 1);
+        assert_eq!(payload.components[0].component_type, 1);
+        let buttons = &payload.components[0].components;
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(
+            buttons[0],
+            DiscordButton {
+                component_type: 2,
+                style: DiscordButtonStyle::Link,
+                label: "View Docs".to_string(),
+                custom_id: None,
+                url: Some("https://example.com/docs".to_string()),
+                disabled: None,
+            }
+        );
+    }
+
+    #[test]
+    fn converts_fields_to_embed_fields() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Fields(FieldsElement {
+                children: vec![
+                    FieldElement {
+                        label: "Status".to_string(),
+                        value: "Active".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                    FieldElement {
+                        label: "Priority".to_string(),
+                        value: "High".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                ],
+                kind: FieldsKind::Fields,
+            })],
+        );
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds[0].fields.len(), 2);
+        assert_eq!(
+            payload.embeds[0].fields[0],
+            DiscordEmbedField {
+                name: "Status".to_string(),
+                value: "Active".to_string(),
+                inline: Some(true),
+            }
+        );
+        assert_eq!(
+            payload.embeds[0].fields[1],
+            DiscordEmbedField {
+                name: "Priority".to_string(),
+                value: "High".to_string(),
+                inline: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn flattens_section_children() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Section(SectionElement {
+                children: vec![
+                    text("Inside section"),
+                    CardChild::Divider(DividerElement {
+                        kind: DividerKind::Divider,
+                    }),
+                ],
+                kind: SectionKind::Section,
+            })],
+        );
+        let payload = card_to_discord_payload(&c);
+        let description = payload.embeds[0].description.as_deref().unwrap_or("");
+        assert!(description.contains("Inside section"), "got: {description}");
+        assert!(description.contains("───────────"), "got: {description}");
+    }
+
+    #[test]
+    fn converts_a_complete_card() {
+        let c = CardElement {
+            title: Some("Order #1234".to_string()),
+            subtitle: Some("Status update".to_string()),
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                text("Your order has been shipped!"),
+                CardChild::Divider(DividerElement {
+                    kind: DividerKind::Divider,
+                }),
+                CardChild::Fields(FieldsElement {
+                    children: vec![
+                        FieldElement {
+                            label: "Tracking".to_string(),
+                            value: "ABC123".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                        FieldElement {
+                            label: "ETA".to_string(),
+                            value: "Dec 25".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                    ],
+                    kind: FieldsKind::Fields,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![ActionsChild::Button(button(
+                        "track",
+                        "Track Package",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    ))],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        };
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds.len(), 1);
+        assert_eq!(payload.embeds[0].title.as_deref(), Some("Order #1234"));
+        let description = payload.embeds[0].description.as_deref().unwrap_or("");
+        assert!(description.contains("Status update"), "got: {description}");
+        assert!(
+            description.contains("Your order has been shipped!"),
+            "got: {description}"
+        );
+        assert!(description.contains("───────────"), "got: {description}");
+        assert_eq!(payload.embeds[0].fields.len(), 2);
+        assert_eq!(payload.components.len(), 1);
+        assert_eq!(payload.components[0].components.len(), 1);
+    }
+
+    #[test]
+    fn handles_card_with_no_title_or_subtitle() {
+        let c = card(None, None, vec![text("Just content")]);
+        let payload = card_to_discord_payload(&c);
+        assert!(payload.embeds[0].title.is_none());
+        assert_eq!(payload.embeds[0].description.as_deref(), Some("Just content"));
+    }
+
+    #[test]
+    fn combines_title_subtitle_and_content() {
+        let c = card(Some("Title"), Some("Subtitle"), vec![text("Content")]);
+        let payload = card_to_discord_payload(&c);
+        assert_eq!(payload.embeds[0].title.as_deref(), Some("Title"));
+        let description = payload.embeds[0].description.as_deref().unwrap_or("");
+        assert!(description.contains("Subtitle"), "got: {description}");
+        assert!(description.contains("Content"), "got: {description}");
     }
 
     #[test]
