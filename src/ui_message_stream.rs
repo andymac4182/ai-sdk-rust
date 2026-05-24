@@ -19,21 +19,14 @@ pub const UI_MESSAGE_STREAM_VERSION_HEADER: &str = "x-vercel-ai-ui-message-strea
 pub const UI_MESSAGE_STREAM_VERSION: &str = "v1";
 
 /// A subset of upstream UI-message stream chunks.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-#[serde(
-    tag = "type",
-    rename_all = "kebab-case",
-    rename_all_fields = "camelCase"
-)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UiMessageChunk {
     /// Start of a UI-message stream.
     Start {
         /// Optional message identifier to assign to the response.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
 
         /// Optional metadata to merge into the UI message.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_metadata: Option<JsonValue>,
     },
 
@@ -46,7 +39,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the text part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -59,7 +51,6 @@ pub enum UiMessageChunk {
         delta: String,
 
         /// Provider-specific metadata for the text delta.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -69,7 +60,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the text part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -79,7 +69,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the reasoning part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -92,7 +81,6 @@ pub enum UiMessageChunk {
         delta: String,
 
         /// Provider-specific metadata for the reasoning delta.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -102,7 +90,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the reasoning part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -115,7 +102,6 @@ pub enum UiMessageChunk {
         url: String,
 
         /// Provider-specific metadata for the file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -128,7 +114,6 @@ pub enum UiMessageChunk {
         url: String,
 
         /// Provider-specific metadata for the reasoning file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -141,11 +126,9 @@ pub enum UiMessageChunk {
         url: String,
 
         /// Optional source title.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
 
         /// Provider-specific metadata for the source.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -161,11 +144,9 @@ pub enum UiMessageChunk {
         title: String,
 
         /// Optional source document filename.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
 
         /// Provider-specific metadata for the source.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -178,19 +159,15 @@ pub enum UiMessageChunk {
         tool_name: String,
 
         /// Whether the provider executes the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
 
         /// Optional display title for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
 
@@ -215,23 +192,18 @@ pub enum UiMessageChunk {
         input: JsonValue,
 
         /// Whether the provider executes the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
 
         /// Optional display title for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
 
@@ -250,23 +222,18 @@ pub enum UiMessageChunk {
         error_text: String,
 
         /// Whether the provider executes the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
 
         /// Optional display title for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
 
@@ -279,23 +246,18 @@ pub enum UiMessageChunk {
         output: JsonValue,
 
         /// Whether the provider executed the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool output is preliminary.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         preliminary: Option<bool>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
 
@@ -308,19 +270,15 @@ pub enum UiMessageChunk {
         error_text: String,
 
         /// Whether the provider executed the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
 
@@ -333,11 +291,9 @@ pub enum UiMessageChunk {
         tool_call_id: String,
 
         /// Whether the approval status was decided automatically.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         is_automatic: Option<bool>,
 
         /// Provider-specific metadata for the approval request.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -350,11 +306,9 @@ pub enum UiMessageChunk {
         approved: bool,
 
         /// Optional approval or denial reason.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
 
         /// Whether the approval is for a provider-executed tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
     },
 
@@ -364,15 +318,12 @@ pub enum UiMessageChunk {
         tool_call_id: String,
 
         /// Optional tool name.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
 
         /// Whether the provider would execute the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
 
@@ -382,7 +333,6 @@ pub enum UiMessageChunk {
         kind: String,
 
         /// Provider-specific metadata for the custom chunk.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -396,7 +346,6 @@ pub enum UiMessageChunk {
         data_type: String,
 
         /// Optional data part identifier used for replacement updates.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
 
         /// Data payload.
@@ -404,7 +353,6 @@ pub enum UiMessageChunk {
 
         /// Transient data parts are delivered to callbacks but not persisted in
         /// the final UI message.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         transient: Option<bool>,
     },
 
@@ -417,7 +365,6 @@ pub enum UiMessageChunk {
     /// Abort notification for a UI-message stream.
     Abort {
         /// Optional abort reason supplied by the caller/runtime.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<JsonValue>,
     },
 
@@ -427,11 +374,9 @@ pub enum UiMessageChunk {
     /// End of a UI-message stream.
     Finish {
         /// Optional finish reason reported by the model.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
 
         /// Optional metadata to merge into the UI message.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_metadata: Option<JsonValue>,
     },
 
@@ -442,7 +387,7 @@ pub enum UiMessageChunk {
     },
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
@@ -450,83 +395,83 @@ pub enum UiMessageChunk {
 )]
 enum UiMessageChunkTagged {
     Start {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_metadata: Option<JsonValue>,
     },
     StartStep,
     TextStart {
         id: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     TextDelta {
         id: String,
         delta: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     TextEnd {
         id: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     ReasoningStart {
         id: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     ReasoningDelta {
         id: String,
         delta: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     ReasoningEnd {
         id: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     File {
         media_type: String,
         url: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     ReasoningFile {
         media_type: String,
         url: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     SourceUrl {
         source_id: String,
         url: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     SourceDocument {
         source_id: String,
         media_type: String,
         title: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     ToolInputStart {
         tool_call_id: String,
         tool_name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
     ToolInputDelta {
@@ -537,15 +482,15 @@ enum UiMessageChunkTagged {
         tool_call_id: String,
         tool_name: String,
         input: JsonValue,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
     ToolInputError {
@@ -553,93 +498,93 @@ enum UiMessageChunkTagged {
         tool_name: String,
         input: JsonValue,
         error_text: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
     ToolOutputAvailable {
         tool_call_id: String,
         output: JsonValue,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         preliminary: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
     ToolOutputError {
         tool_call_id: String,
         error_text: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
     ToolApprovalRequest {
         approval_id: String,
         tool_call_id: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         is_automatic: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     ToolApprovalResponse {
         approval_id: String,
         approved: bool,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
     },
     ToolOutputDenied {
         tool_call_id: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
     Custom {
         kind: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
     Data {
         data_type: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         data: JsonValue,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         transient: Option<bool>,
     },
     Error {
         error_text: String,
     },
     Abort {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<JsonValue>,
     },
     FinishStep,
     Finish {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_metadata: Option<JsonValue>,
     },
     MessageMetadata {
@@ -905,6 +850,295 @@ impl From<UiMessageChunkTagged> for UiMessageChunk {
                 Self::MessageMetadata { message_metadata }
             }
         }
+    }
+}
+
+impl From<UiMessageChunk> for UiMessageChunkTagged {
+    fn from(chunk: UiMessageChunk) -> Self {
+        match chunk {
+            UiMessageChunk::Start {
+                message_id,
+                message_metadata,
+            } => Self::Start {
+                message_id,
+                message_metadata,
+            },
+            UiMessageChunk::StartStep => Self::StartStep,
+            UiMessageChunk::TextStart {
+                id,
+                provider_metadata,
+            } => Self::TextStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunk::TextEnd {
+                id,
+                provider_metadata,
+            } => Self::TextEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningStart {
+                id,
+                provider_metadata,
+            } => Self::ReasoningStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningEnd {
+                id,
+                provider_metadata,
+            } => Self::ReasoningEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::File {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::File {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunk::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            } => Self::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            },
+            UiMessageChunk::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            } => Self::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            },
+            UiMessageChunk::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunk::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            } => Self::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            },
+            UiMessageChunk::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunk::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunk::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            } => Self::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            },
+            UiMessageChunk::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            } => Self::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            },
+            UiMessageChunk::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            } => Self::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            },
+            UiMessageChunk::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            } => Self::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            },
+            UiMessageChunk::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            } => Self::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            },
+            UiMessageChunk::Custom {
+                kind,
+                provider_metadata,
+            } => Self::Custom {
+                kind,
+                provider_metadata,
+            },
+            UiMessageChunk::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            } => Self::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            },
+            UiMessageChunk::Error { error_text } => Self::Error { error_text },
+            UiMessageChunk::Abort { reason } => Self::Abort { reason },
+            UiMessageChunk::FinishStep => Self::FinishStep,
+            UiMessageChunk::Finish {
+                finish_reason,
+                message_metadata,
+            } => Self::Finish {
+                finish_reason,
+                message_metadata,
+            },
+            UiMessageChunk::MessageMetadata { message_metadata } => {
+                Self::MessageMetadata { message_metadata }
+            }
+        }
+    }
+}
+
+impl serde::Serialize for UiMessageChunk {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if let Self::Data {
+            data_type,
+            id,
+            data,
+            transient,
+        } = self
+        {
+            let mut object = JsonObject::new();
+            object.insert("type".to_string(), JsonValue::String(data_type.clone()));
+            if let Some(id) = id {
+                object.insert("id".to_string(), JsonValue::String(id.clone()));
+            }
+            object.insert("data".to_string(), data.clone());
+            if let Some(transient) = transient {
+                object.insert("transient".to_string(), JsonValue::Bool(*transient));
+            }
+            return JsonValue::Object(object).serialize(serializer);
+        }
+
+        UiMessageChunkTagged::from(self.clone()).serialize(serializer)
     }
 }
 
@@ -4585,6 +4819,23 @@ mod tests {
                 data: json!({ "temperature": 22 }),
                 transient: Some(true)
             }
+        );
+    }
+
+    #[test]
+    fn ui_message_chunk_serializes_dynamic_data_wire_chunk() {
+        let chunk = UiMessageChunk::data("data-weather", json!({ "temperature": 22 }))
+            .with_data_id("weather-1")
+            .with_transient(true);
+
+        assert_eq!(
+            serde_json::to_value(chunk).expect("data chunk serializes"),
+            json!({
+                "type": "data-weather",
+                "id": "weather-1",
+                "data": { "temperature": 22 },
+                "transient": true
+            })
         );
     }
 
