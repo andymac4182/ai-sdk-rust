@@ -1031,3 +1031,63 @@ Remaining work to verify any adapter:
 5. **Slack Socket Mode + signature verification**.
 6. **State-backend client wire-up** (state-redis, state-ioredis,
    state-pg currently at 10% NotConnected placeholder).
+
+## Env-var-resolution port pattern (added slice 305)
+
+Upstream adapter constructors fall through to `process.env.<PREFIX>_*`
+when config fields are omitted (Discord, Telegram, WhatsApp,
+Messenger, Linear, GitHub, GChat all share this shape). Do **not**
+port this by calling `std::env::var` inside the constructor:
+
+- `std::env::set_var` is `unsafe` in Rust 2024 edition.
+- Cargo's test runner shares one process; parallel tests racing
+  on `process.env` are unreliable.
+- A constructor that reads global state can't be exercised
+  deterministically.
+
+Instead, port the env-var-resolution path as a factory function
+that takes an explicit env-reader closure:
+
+```rust
+pub struct XxxCreateOptions {
+    pub field_a: Option<String>,
+    pub field_b: Option<String>,
+    // ...
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XxxCreateError {
+    FieldARequired,
+    FieldBRequired,
+}
+
+pub fn try_create_xxx_adapter(
+    opts: XxxCreateOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<XxxAdapter, XxxCreateError> {
+    let field_a = opts
+        .field_a
+        .or_else(|| env("XXX_FIELD_A"))
+        .ok_or(XxxCreateError::FieldARequired)?;
+    // ...
+}
+```
+
+Tests pass bespoke per-case closures:
+
+```rust
+let env = |key: &str| match key {
+    "XXX_FIELD_A" => Some("env-value".to_string()),
+    _ => None,
+};
+let adapter = try_create_xxx_adapter(opts, env)?;
+```
+
+The prod entry point (if any) can wrap
+`|k| std::env::var(k).ok()` at the top of a binary's `main`.
+Reference port: Discord slice 304 (`try_create_discord_adapter`
+in `crates/chat-sdk-adapter-discord/src/lib.rs`).
+
+This pattern unblocks the env-var-resolution describe blocks for
+Telegram, Messenger, WhatsApp, Linear, GitHub, GChat (and any
+future adapters with `process.env.PREFIX_*` resolution).

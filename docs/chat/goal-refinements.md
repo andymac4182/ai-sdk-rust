@@ -3354,3 +3354,94 @@ module-aliasing test).
 - **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** Streaming /
   handleIncomingMessage / dedup describe blocks — multi-slice,
   gated on `Adapter::stream` trait extension.
+
+---
+
+## Slices 300..304 refinement cycle (adapter constructor pattern complete + env-var-resolution factory pattern)
+
+**What was learned**
+
+- The constructor `create-instance` + `userName` / channel-secret
+  describe-block pattern is now complete across all 9 chat-sdk
+  adapters (Discord 297, Slack 298, Teams 299, GChat 300,
+  Messenger 301, Telegram 302, WhatsApp 303, plus GitHub 295 and
+  Linear 296 from the prior cycle). Pattern: add
+  `DEFAULT_USER_NAME = "bot"` const + `effective_user_name()`
+  getter + optional `webhook_secret` / `secret_token` /
+  `public_key` / `app_secret` fields as upstream-relevant. Cost:
+  ~30-60 LOC per adapter for 2-5 ported cases. This cleared the
+  obvious "easy" constructor surface across the workspace before
+  diving into harder describe blocks (env-var, webhook, HTTP).
+- Env-var-resolution constructor tests need a different shape
+  from the basic `XxxAdapterOptions` constructor: upstream's
+  `new Adapter({})` reads from `process.env.<PREFIX>_*` with
+  fall-throughs. The right Rust port is **not** to call
+  `std::env::var` directly: (a) `set_var` is `unsafe` in Rust
+  2024 edition, (b) parallel tests racing on process-global
+  state are unreliable, (c) Cargo's test runner shares one
+  process. Instead: a factory function
+  `try_create_xxx_adapter(opts, env: impl Fn(&str) -> Option<String>) -> Result<X, E>`
+  that takes an explicit env-reader closure. Tests pass a
+  bespoke `|key| match key { ... }` closure per case; the prod
+  entry point can wrap `std::env::var(k).ok()`. Pattern applied
+  this cycle to Discord (slice 304, 9 cases). This is now the
+  reference pattern for the remaining adapters that need
+  env-var resolution coverage (Telegram, Messenger, WhatsApp,
+  Linear, GitHub, GChat).
+- Adapter-options struct evolution (adding `mention_role_ids:
+  Vec<String>` to `DiscordAdapterOptions`) had only one
+  cross-crate call site to update — the local `lib.rs` test
+  block — because each adapter is a leaf in the workspace dep
+  graph. Confirmed by a workspace grep before the field add.
+  Lesson: leaf-crate option-struct extensions are cheap; reach
+  for `#[non_exhaustive]` only if upstream signals a stable
+  config contract (none of these adapters do).
+
+**What is now true that wasn't before**
+
+- All 9 chat-sdk adapter crates now have the constructor
+  describe block at least partially ported (1-9 cases each):
+  GitHub 5 + Linear 3 + Discord 12 (3 + 9 env-var) + Slack 4 +
+  Teams 1 + GChat 1 + Messenger 2 + Telegram 2 + WhatsApp 2 =
+  32 upstream constructor cases ported.
+- Discord adapter is the first to have full env-var-resolution
+  describe-block coverage (9/9 upstream cases). Mention-role-id
+  list ingestion is exposed via `mention_role_ids()` accessor.
+- `try_create_discord_adapter` + `DiscordCreateOptions` +
+  `DiscordCreateError` establish the typed-error +
+  injected-env-reader pattern that other adapters can follow.
+
+**Stale or misleading guidance**
+
+- The brief still implies upstream's `process.env.X` flows can
+  be ported by reading actual env vars. Update
+  `scripts/codex-goal-chat/port-chat-sdk.md` to call out the
+  injected-`Fn(&str) -> Option<String>` pattern as the
+  preferred Rust port shape — direct `std::env::var` usage in
+  ported adapter constructors is now explicitly discouraged.
+- The refinement cadence has re-stabilized at "every 5 commits"
+  (slices 300..304 = 5 commits with merge-backs). The earlier
+  drift to ~13 slices per refinement was driven by inconsistent
+  slice sizing; the current cadence is sustainable.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: add env-var
+  resolution port pattern (companion edit).
+
+**Open refinements deferred**
+
+- **6 remaining adapter env-var resolution describe blocks**
+  (Telegram, Messenger, WhatsApp, Linear, GitHub, GChat) —
+  follow the Discord slice-304 pattern. Each is ~50-80 LOC
+  for 3-9 ported cases.
+- **State backend client wire-up** — still blocked on workspace
+  runtime decision.
+- **Adapter `index.test.ts` integration suites** — most need
+  per-adapter HTTP-mock infrastructure.
+- **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** Streaming /
+  handleIncomingMessage / dedup describe blocks — gated on
+  `Adapter::stream` trait extension.
+- **serialization.test.ts** (49 cases) — needs Thread/Message
+  JSON revival.
