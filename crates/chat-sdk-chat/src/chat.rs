@@ -4786,7 +4786,19 @@ mod tests {
     //
     // Skips actions from self (event.user.is_me); fires every
     // registered handler whose filter matches; constructs the
-    // Thread from event.thread_id bound to the dispatching adapter.
+    // Thread (or None for empty threadId) bound to the dispatching
+    // adapter.
+    //
+    // ---------- js-only-documented Actions cases (1) ----------
+    //
+    // 1. "should convert JSX Modal to ModalElement in openModal"
+    //    (chat.test.ts:1246) — asserts the upstream JSX `<Modal>`
+    //    element factory is rewritten to a plain `ModalElement`
+    //    object before being passed to `ActionEvent.openModal`. The
+    //    Rust port has no JSX runtime; `modal(ModalOptions { ... })`
+    //    is already a builder that returns `ModalElement` directly,
+    //    so the "convert JSX -> ModalElement" branch is a no-op by
+    //    construction. See [`crate::modals::modal`].
 
     fn make_action_event(action_id: &str, value: Option<&str>, is_me: bool) -> ActionEventInput {
         ActionEventInput {
@@ -5380,6 +5392,15 @@ mod tests {
     // slash-command events. Filter normalization adds a leading `/`
     // to filter strings without one (matches upstream's "should
     // normalize command names without leading slash" rule).
+    //
+    // ---------- js-only-documented Slash Commands cases (1) ----------
+    //
+    // 1. "should convert JSX Modal to ModalElement in openModal"
+    //    (chat.test.ts:2253) — same shape as the Actions JSX-modal
+    //    case enumerated above. The Rust port's `modal(ModalOptions
+    //    { ... })` builder returns `ModalElement` directly; there
+    //    is no JSX runtime to convert from. See
+    //    [`crate::modals::modal`].
 
     fn make_slash_event(command: &str, text: &str, is_me: bool) -> SlashCommandEventInput {
         SlashCommandEventInput {
