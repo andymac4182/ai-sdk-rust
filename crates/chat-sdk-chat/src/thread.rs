@@ -64,6 +64,13 @@ pub struct Thread {
     /// from `adapter.is_dm(thread_id) ?? false`. The handle field
     /// is the cached value so accessors don't need an async hop.
     is_dm: bool,
+    /// 1:1 with upstream `channelVisibility?: ChannelVisibility`.
+    /// Defaults to `Unknown` matching upstream's default; set via
+    /// [`Thread::with_channel_visibility`] when the adapter or
+    /// caller knows the channel's privacy posture. Round-trips
+    /// through `to_json` / `from_json` as the `channelVisibility`
+    /// field.
+    channel_visibility: crate::types::ChannelVisibility,
 }
 
 impl std::fmt::Debug for Thread {
@@ -90,6 +97,7 @@ impl Thread {
             channel_id: None,
             current_message: None,
             is_dm: false,
+            channel_visibility: crate::types::ChannelVisibility::Unknown,
         }
     }
 
@@ -111,6 +119,7 @@ impl Thread {
             channel_id: None,
             current_message: None,
             is_dm: false,
+            channel_visibility: crate::types::ChannelVisibility::Unknown,
         }
     }
 
@@ -163,6 +172,22 @@ impl Thread {
         self
     }
 
+    /// Builder: set the channel-visibility posture for this thread.
+    /// 1:1 with upstream `new ThreadImpl({ channelVisibility })`
+    /// constructor option. Defaults to `Unknown` when not set.
+    pub fn with_channel_visibility(
+        mut self,
+        channel_visibility: crate::types::ChannelVisibility,
+    ) -> Self {
+        self.channel_visibility = channel_visibility;
+        self
+    }
+
+    /// 1:1 with upstream `get channelVisibility(): ChannelVisibility`.
+    pub fn channel_visibility(&self) -> crate::types::ChannelVisibility {
+        self.channel_visibility
+    }
+
     /// 1:1 with upstream `get isDM(): boolean`. Returns the cached
     /// DM flag set at construction.
     pub fn is_dm(&self) -> bool {
@@ -188,7 +213,8 @@ impl Thread {
             "_type": "chat:Thread",
             "id": self.thread_id,
             "channelId": self.channel_id,
-            "channelVisibility": "unknown",
+            "channelVisibility": serde_json::to_value(self.channel_visibility)
+                .unwrap_or(serde_json::Value::String("unknown".to_string())),
             "currentMessage": serde_json::Value::Null,
             "isDM": self.is_dm,
             "adapterName": self.adapter.name(),
@@ -215,6 +241,13 @@ impl Thread {
         }
         if let Some(is_dm) = json.get("isDM").and_then(serde_json::Value::as_bool) {
             thread.is_dm = is_dm;
+        }
+        if let Some(visibility_value) = json.get("channelVisibility") {
+            if let Ok(parsed) =
+                serde_json::from_value::<crate::types::ChannelVisibility>(visibility_value.clone())
+            {
+                thread.channel_visibility = parsed;
+            }
         }
         if let Some(serialized) = json.get("currentMessage") {
             if !serialized.is_null() {
@@ -1472,6 +1505,68 @@ mod tests {
         assert_eq!(json["id"], "slack:DU123:");
         assert_eq!(json["channelId"], "DU123");
         assert_eq!(json["isDM"], true);
+    }
+
+    #[test]
+    fn thread_serialization_should_serialize_external_channel_thread_correctly() {
+        // 1:1 with upstream `describe("ThreadImpl.toJSON()") >
+        // it("should serialize external channel thread correctly")`
+        // — `channelVisibility: "external"` round-trips through the
+        // JSON shape.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_channel_visibility(ChannelVisibility::External);
+        let json = thread.to_json();
+        assert_eq!(json["_type"], "chat:Thread");
+        assert_eq!(json["channelVisibility"], "external");
+    }
+
+    #[test]
+    fn thread_serialization_should_serialize_private_channel_thread_correctly() {
+        // 1:1 with upstream `describe("ThreadImpl.toJSON()") >
+        // it("should serialize private channel thread correctly")`
+        // — `channelVisibility: "private"` round-trips through the
+        // JSON shape.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_channel_visibility(ChannelVisibility::Private);
+        let json = thread.to_json();
+        assert_eq!(json["_type"], "chat:Thread");
+        assert_eq!(json["channelVisibility"], "private");
+    }
+
+    #[test]
+    fn thread_serialization_should_serialize_workspace_channel_thread_correctly() {
+        // 1:1 with upstream `describe("ThreadImpl.toJSON()") >
+        // it("should serialize workspace channel thread correctly")`
+        // — `channelVisibility: "workspace"` round-trips through the
+        // JSON shape.
+        use crate::types::ChannelVisibility;
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let state = Arc::new(MockState::default());
+        let thread = Thread::with_state_adapter(
+            adapter,
+            "slack:C123:1234.5678",
+            state as Arc<dyn StateAdapter>,
+        )
+        .with_channel_id("C123")
+        .with_channel_visibility(ChannelVisibility::Workspace);
+        let json = thread.to_json();
+        assert_eq!(json["channelVisibility"], "workspace");
     }
 
     #[test]
