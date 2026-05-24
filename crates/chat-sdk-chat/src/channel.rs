@@ -538,12 +538,18 @@ mod tests {
 
     #[test]
     fn channel_basic_properties_should_have_correct_id_and_adapter() {
+        // 1:1 with upstream "should have correct id and adapter" —
+        // asserts id, adapter, isDM=false, name=null on a freshly
+        // constructed channel.
         let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
-        let channel = Channel::new(adapter, "C123");
-        assert_eq!(channel.channel_id(), "C123");
+        let channel = Channel::new(adapter, "slack:C123");
+        assert_eq!(channel.channel_id(), "slack:C123");
         assert_eq!(channel.adapter_name(), "recording");
         // Default: isDM is false (upstream `isDM ?? false`).
         assert!(!channel.is_dm());
+        // Default: name is None until fetch_metadata populates it
+        // (upstream `channel.name` returns null initially).
+        assert!(channel.name().is_none());
     }
 
     #[test]
