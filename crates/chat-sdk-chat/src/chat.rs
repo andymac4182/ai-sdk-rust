@@ -748,6 +748,15 @@ pub struct Chat {
     /// `adapter.lock_scope()` > `Chat.lock_scope` > Thread.
     /// (slice 434).
     lock_scope: LockScope,
+    /// Optional HTTP poster used by [`Self::process_action`] to
+    /// fire callback-URL POSTs when an action's `value` decodes to
+    /// a stored `__cb:<token>`. 1:1 with upstream's
+    /// `globalThis.fetch` dependency at the same seam — adopters
+    /// inject any client (reqwest/ureq/mock) implementing
+    /// [`crate::callback_url::HttpPoster`]. When `None`, the
+    /// callback-URL POST is skipped (handlers still fire with the
+    /// rewritten value). (slice 480).
+    http_poster: Option<Arc<dyn crate::callback_url::HttpPoster>>,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -833,6 +842,13 @@ pub struct ChatOptions {
     /// `adapter.lock_scope()` first, then this field, then default
     /// [`LockScope::Thread`]. (slice 434)
     pub lock_scope: LockScope,
+    /// Optional HTTP poster used by [`Chat::process_action`] to
+    /// fire callback-URL POSTs when an action's `value` decodes to
+    /// a stored `__cb:<token>`. 1:1 with upstream's
+    /// `globalThis.fetch` dependency at the same seam — adopters
+    /// inject any client (reqwest/ureq/mock) implementing
+    /// [`crate::callback_url::HttpPoster`]. (slice 480).
+    pub http_poster: Option<Arc<dyn crate::callback_url::HttpPoster>>,
 }
 
 impl Default for ChatOptions {
@@ -850,6 +866,7 @@ impl Default for ChatOptions {
             message_history: None,
             on_lock_conflict: OnLockConflict::default(),
             lock_scope: LockScope::default(),
+            http_poster: None,
         }
     }
 }
@@ -953,6 +970,7 @@ impl Chat {
             thread_history: options.thread_history.or(options.message_history),
             on_lock_conflict: options.on_lock_conflict,
             lock_scope: options.lock_scope,
+            http_poster: options.http_poster,
         })
     }
 
@@ -1269,7 +1287,18 @@ impl Chat {
     /// `event.user.is_me` (upstream's "skip actions from self"
     /// gate). The dispatcher constructs the [`Thread`] from
     /// `event.thread_id` and the dispatching adapter.
-    pub async fn process_action(&self, adapter: &dyn Adapter, event: ActionEventInput) {
+    ///
+    /// Callback-URL handling (slice 480, 1:1 with upstream): if
+    /// `event.value` starts with the callback-token prefix
+    /// (`__cb:<token>`), the dispatcher looks up the stored
+    /// `{url, originalValue}` envelope under `chat:callback:<token>`:
+    /// - **token present in state** → rewrite `event.value` to the
+    ///   stored `originalValue` (which may itself be `None`),
+    ///   dispatch handlers, then POST the action payload to the
+    ///   stored URL via [`ChatOptions::http_poster`].
+    /// - **token absent from state** → preserve the original
+    ///   `__cb:<token>` value, dispatch handlers, no POST.
+    pub async fn process_action(&self, adapter: &dyn Adapter, mut event: ActionEventInput) {
         // 1:1 with upstream "Skip actions from self".
         if event.user.is_me {
             return;
@@ -1279,6 +1308,24 @@ impl Chat {
             Some(a) => a,
             None => return,
         };
+
+        // Callback-URL decode + state lookup. When the value carries
+        // the `__cb:<token>` marker AND the token resolves to a
+        // stored URL, rewrite event.value to the original value
+        // (which may be None) and remember the URL for the post-
+        // dispatch POST. Tokens without a stored URL are preserved
+        // as-is (upstream "preserve callback-like values when no
+        // callbackUrl is stored").
+        let decoded = crate::callback_url::decode_callback_value(event.value.as_deref());
+        let mut callback_url: Option<String> = None;
+        if let Some(token) = decoded.callback_token {
+            if let Ok(Some(stored)) =
+                crate::callback_url::resolve_callback_url(&token, &*self.state).await
+            {
+                event.value = stored.original_value;
+                callback_url = Some(stored.url);
+            }
+        }
 
         let handlers_snapshot: Vec<(Option<Vec<String>>, ActionHandler)> = self
             .handlers
@@ -1312,6 +1359,23 @@ impl Chat {
                 state: self.state.clone(),
             };
             handler(action).await;
+        }
+
+        // Post-dispatch callback-URL POST. 1:1 with upstream:
+        // payload is `{type:"action", actionId, value, threadId}`
+        // serialized as JSON; `value` is the rewritten (original)
+        // value, possibly omitted when None.
+        if let (Some(url), Some(poster)) = (callback_url, self.http_poster.as_ref()) {
+            let mut payload = serde_json::json!({
+                "type": "action",
+                "actionId": event.action_id,
+                "threadId": event.thread_id,
+            });
+            if let Some(v) = event.value.as_ref() {
+                payload["value"] = serde_json::Value::String(v.clone());
+            }
+            let _ =
+                crate::callback_url::post_to_callback_url(poster.as_ref(), &url, &payload).await;
         }
     }
 
@@ -2839,6 +2903,7 @@ mod tests {
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
+            http_poster: None,
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2857,6 +2922,7 @@ mod tests {
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
+            http_poster: None,
         });
         assert!(result.is_ok());
     }
@@ -2874,6 +2940,7 @@ mod tests {
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
+            http_poster: None,
         });
         assert!(result.is_ok());
     }
@@ -2892,6 +2959,7 @@ mod tests {
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
+            http_poster: None,
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -2911,6 +2979,7 @@ mod tests {
             message_history: None,
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
+            http_poster: None,
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -5024,6 +5093,180 @@ mod tests {
         let event = make_action_event("open_form", None, false);
         futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
         assert_eq!(*captured.lock().unwrap(), Some(None));
+    }
+
+    // ---------- describe("Actions") callbackUrl tests — slice 480 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > Actions` cases 12-15 covering
+    // the callback-URL decode-and-POST flow on `process_action`:
+    // (12) decode token + POST, (13) decode token with no original
+    // value, (14) preserve callback-like values when not stored,
+    // (15) fire handlers alongside POST.
+
+    /// Recording [`crate::callback_url::HttpPoster`] that captures
+    /// every POST. Mirrors upstream's `vi.stubGlobal("fetch", ...)`
+    /// pattern at the HttpPoster seam.
+    #[derive(Debug, Default)]
+    struct RecordingHttpPoster {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::callback_url::HttpPoster for RecordingHttpPoster {
+        async fn post_json(
+            &self,
+            url: &str,
+            body: &str,
+        ) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.to_string()));
+            Ok(200)
+        }
+    }
+
+    fn chat_with_callback_poster() -> (Chat, Arc<dyn Adapter>, Arc<RecordingHttpPoster>) {
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let poster = Arc::new(RecordingHttpPoster::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            http_poster: Some(poster.clone() as Arc<dyn crate::callback_url::HttpPoster>),
+            ..Default::default()
+        });
+        (chat, adapter, poster)
+    }
+
+    fn store_callback_url(chat: &Chat, token: &str, url: &str, original_value: Option<&str>) {
+        let key = crate::callback_url::callback_cache_key(token);
+        let stored = match original_value {
+            Some(v) => serde_json::json!({"url": url, "originalValue": v}),
+            None => serde_json::json!({"url": url}),
+        };
+        futures_executor::block_on(chat.state.set(&key, stored, None)).unwrap();
+    }
+
+    #[test]
+    fn process_action_decodes_callback_token_and_posts_to_stored_url() {
+        // 1:1 with upstream "should decode callbackUrl token and POST
+        // to it". Stored token resolves to {url, originalValue};
+        // event.value is rewritten to originalValue before handlers
+        // fire; POST body carries the rewritten value.
+        let (chat, adapter, poster) = chat_with_callback_poster();
+        store_callback_url(
+            &chat,
+            "testtoken123",
+            "https://example.com/webhook/hook1",
+            Some("order-789"),
+        );
+        let received: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let r = received.clone();
+        chat.on_action_filtered(["approve"], move |event| {
+            let r = r.clone();
+            let v = event.value.clone();
+            Box::pin(async move {
+                *r.lock().unwrap() = v;
+            })
+        });
+        let mut event = make_action_event("approve", Some("__cb:testtoken123"), false);
+        event.thread_id = "slack:C123:1234.5678".to_string();
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(received.lock().unwrap().as_deref(), Some("order-789"));
+        let calls = poster.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "https://example.com/webhook/hook1");
+        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(body["type"], "action");
+        assert_eq!(body["actionId"], "approve");
+        assert_eq!(body["value"], "order-789");
+        assert_eq!(body["threadId"], "slack:C123:1234.5678");
+    }
+
+    #[test]
+    fn process_action_decodes_callback_token_with_no_original_value() {
+        // 1:1 with upstream "should decode callbackUrl token with no
+        // original value". Stored token resolves to {url} (no
+        // originalValue); event.value becomes None before handlers
+        // fire; POST body omits the value key.
+        let (chat, adapter, poster) = chat_with_callback_poster();
+        store_callback_url(&chat, "tok999", "https://example.com/webhook/hook2", None);
+        let received: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+        let r = received.clone();
+        chat.on_action(move |event| {
+            let r = r.clone();
+            let v = event.value.clone();
+            Box::pin(async move {
+                *r.lock().unwrap() = Some(v);
+            })
+        });
+        let event = make_action_event("deny", Some("__cb:tok999"), false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(*received.lock().unwrap(), Some(None));
+        let calls = poster.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert!(
+            body.get("value").is_none(),
+            "value should be omitted; got {body:?}"
+        );
+    }
+
+    #[test]
+    fn process_action_preserves_callback_like_value_when_no_callback_url_stored() {
+        // 1:1 with upstream "should preserve callback-like values when
+        // no callbackUrl is stored". Token decoded but no stored
+        // envelope → original __cb:<token> value preserved; no POST.
+        let (chat, adapter, poster) = chat_with_callback_poster();
+        let received: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let r = received.clone();
+        chat.on_action_filtered(["approve"], move |event| {
+            let r = r.clone();
+            let v = event.value.clone();
+            Box::pin(async move {
+                *r.lock().unwrap() = v;
+            })
+        });
+        let event = make_action_event("approve", Some("__cb:not-a-stored-token"), false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(
+            received.lock().unwrap().as_deref(),
+            Some("__cb:not-a-stored-token")
+        );
+        assert!(poster.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn process_action_fires_handlers_alongside_callback_url_post() {
+        // 1:1 with upstream "should fire onAction handlers alongside
+        // callbackUrl POST". Both a catch-all and a specific handler
+        // fire; POST also lands.
+        let (chat, adapter, poster) = chat_with_callback_poster();
+        store_callback_url(&chat, "tok555", "https://example.com/webhook/hook3", None);
+        let catch_all = Arc::new(AtomicUsize::new(0));
+        let specific = Arc::new(AtomicUsize::new(0));
+        let c = catch_all.clone();
+        chat.on_action(move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let s = specific.clone();
+        chat.on_action_filtered(["approve"], move |_event| {
+            let s = s.clone();
+            Box::pin(async move {
+                s.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_action_event("approve", Some("__cb:tok555"), false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(catch_all.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(specific.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(poster.calls.lock().unwrap().len(), 1);
     }
 
     // ---------- describe("Slash Commands") — slice 422 ----------
