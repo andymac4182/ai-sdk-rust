@@ -125,7 +125,9 @@ mod tests {
     #[test]
     fn should_parse_links() {
         let converter = GitHubFormatConverter::new();
-        let ast = converter.to_ast("[link text](https://example.com)").unwrap();
+        let ast = converter
+            .to_ast("[link text](https://example.com)")
+            .unwrap();
         assert!(matches!(ast, Node::Root(_)));
     }
 
@@ -160,9 +162,9 @@ mod tests {
     fn should_render_italic_text() {
         use chat_sdk_chat::markdown::emphasis;
         let converter = GitHubFormatConverter::new();
-        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![Node::Emphasis(
-            emphasis(vec![Node::Text(text("italic"))]),
-        )]))]));
+        let ast = Node::Root(root(vec![Node::Paragraph(paragraph(vec![
+            Node::Emphasis(emphasis(vec![Node::Text(text("italic"))])),
+        ]))]));
         assert_eq!(converter.from_ast(&ast), "*italic*");
     }
 

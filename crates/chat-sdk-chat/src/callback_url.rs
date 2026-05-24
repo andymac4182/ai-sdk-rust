@@ -969,7 +969,13 @@ mod tests {
             "https://example.com/hook",
             &serde_json::json!({}),
         ));
-        assert!(result.error.is_some(), "expected error for transport failure");
-        assert!(result.status.is_none(), "status should be unset on transport error");
+        assert!(
+            result.error.is_some(),
+            "expected error for transport failure"
+        );
+        assert!(
+            result.status.is_none(),
+            "status should be unset on transport error"
+        );
     }
 }

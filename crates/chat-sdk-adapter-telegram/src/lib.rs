@@ -1094,10 +1094,7 @@ mod tests {
     #[test]
     fn apply_telegram_entities_converts_code_entities_to_inline_code() {
         assert_eq!(
-            apply_telegram_entities(
-                "use the console.log function",
-                &[entity("code", 8, 11)]
-            ),
+            apply_telegram_entities("use the console.log function", &[entity("code", 8, 11)]),
             "use the `console.log` function"
         );
     }
@@ -1136,10 +1133,7 @@ mod tests {
     #[test]
     fn apply_telegram_entities_leaves_url_entities_unchanged() {
         assert_eq!(
-            apply_telegram_entities(
-                "check https://example.com out",
-                &[entity("url", 6, 19)]
-            ),
+            apply_telegram_entities("check https://example.com out", &[entity("url", 6, 19)]),
             "check https://example.com out"
         );
     }
@@ -1195,10 +1189,7 @@ mod tests {
         // encode without message_thread_id → "telegram:-100123"
         assert_eq!(encode_thread_id(-100_123, None), "telegram:-100123");
         // encode with message_thread_id 42 → "telegram:-100123:42"
-        assert_eq!(
-            encode_thread_id(-100_123, Some(42)),
-            "telegram:-100123:42"
-        );
+        assert_eq!(encode_thread_id(-100_123, Some(42)), "telegram:-100123:42");
         // decode "telegram:-100123:42" → { chat_id: -100123, message_thread_id: 42 }
         let decoded = decode_thread_id("telegram:-100123:42").unwrap();
         assert_eq!(decoded.chat_id, -100_123);
@@ -1306,8 +1297,7 @@ mod tests {
         // method for remove_reaction (upstream sends to the same
         // setMessageReaction endpoint as add_reaction, with reaction: []).
         let adapter = TelegramAdapter::new(
-            TelegramAdapterOptions::new("abc:xyz")
-                .with_base_url("https://api.example.test"),
+            TelegramAdapterOptions::new("abc:xyz").with_base_url("https://api.example.test"),
         );
         assert_eq!(
             adapter.method_url("setMessageReaction"),
@@ -1493,8 +1483,8 @@ mod tests {
             "TELEGRAM_BOT_TOKEN" => Some("env-bot-token".to_string()),
             _ => None,
         };
-        let adapter = try_create_telegram_adapter(TelegramCreateOptions::default(), env)
-            .expect("env token");
+        let adapter =
+            try_create_telegram_adapter(TelegramCreateOptions::default(), env).expect("env token");
         assert_eq!(adapter.token(), "env-bot-token");
     }
 

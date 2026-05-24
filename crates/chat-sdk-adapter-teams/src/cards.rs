@@ -592,9 +592,7 @@ mod tests {
     // Divider. Actions / Section / Fields / Table / Select /
     // RadioSelect / CardLink branches land in follow-up slices.
 
-    use chat_sdk_chat::cards::{
-        DividerElement, DividerKind, ImageElement, ImageKind, TextStyle,
-    };
+    use chat_sdk_chat::cards::{DividerElement, DividerKind, ImageElement, ImageKind, TextStyle};
 
     #[test]
     fn adaptive_card_creates_a_valid_adaptive_card_structure() {
@@ -624,7 +622,11 @@ mod tests {
 
     #[test]
     fn adaptive_card_converts_a_card_with_title_and_subtitle() {
-        let c = card(Some("Order Update"), Some("Your package is on its way"), vec![]);
+        let c = card(
+            Some("Order Update"),
+            Some("Your package is on its way"),
+            vec![],
+        );
         let adaptive = card_to_adaptive_card(&c);
         let body = adaptive["body"].as_array().unwrap();
         assert_eq!(body.len(), 2);
@@ -735,7 +737,12 @@ mod tests {
         RadioSelectElement, RadioSelectKind, SelectElement, SelectKind, SelectOptionElement,
     };
 
-    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+    fn button(
+        id: &str,
+        label: &str,
+        style: Option<ButtonStyle>,
+        value: Option<&str>,
+    ) -> ButtonElement {
         ButtonElement {
             action_type: None,
             callback_url: None,
@@ -755,8 +762,18 @@ mod tests {
             None,
             vec![CardChild::Actions(ActionsElement {
                 children: vec![
-                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
-                    ActionsChild::Button(button("reject", "Reject", Some(ButtonStyle::Danger), Some("data-123"))),
+                    ActionsChild::Button(button(
+                        "approve",
+                        "Approve",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    )),
+                    ActionsChild::Button(button(
+                        "reject",
+                        "Reject",
+                        Some(ButtonStyle::Danger),
+                        Some("data-123"),
+                    )),
                     ActionsChild::Button(button("skip", "Skip", None, None)),
                 ],
                 kind: ActionsKind::Actions,

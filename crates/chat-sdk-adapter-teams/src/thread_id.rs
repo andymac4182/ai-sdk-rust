@@ -56,8 +56,9 @@ pub fn decode_thread_id(thread_id: &str) -> Result<TeamsThreadId, AdapterError> 
             format!("Invalid Teams thread ID: {thread_id}"),
         ));
     }
-    let conv = decode_b64_utf8(parts[1])
-        .ok_or_else(|| AdapterError::validation("teams", "Invalid Teams thread ID: conversation"))?;
+    let conv = decode_b64_utf8(parts[1]).ok_or_else(|| {
+        AdapterError::validation("teams", "Invalid Teams thread ID: conversation")
+    })?;
     let svc = decode_b64_utf8(parts[2])
         .ok_or_else(|| AdapterError::validation("teams", "Invalid Teams thread ID: serviceUrl"))?;
     Ok(TeamsThreadId {
@@ -148,16 +149,19 @@ mod tests {
     fn throws_validation_error_for_invalid_thread_ids() {
         for bad in ["invalid", "slack:abc:def", "teams"] {
             let err = decode_thread_id(bad).unwrap_err();
-            assert!(err.is_validation(), "expected validation error for {bad:?}, got {err}");
+            assert!(
+                err.is_validation(),
+                "expected validation error for {bad:?}, got {err}"
+            );
         }
     }
 
     #[test]
     fn handles_special_characters_in_conversation_id_and_service_url() {
         let original = TeamsThreadId {
-            conversation_id: "19:meeting_MDE4OWI4N2UtNzEzNC00ZGE2LTkxMGEtNDM3@thread.v2".to_string(),
-            service_url: "https://smba.trafficmanager.net/amer/?special=chars&foo=bar"
+            conversation_id: "19:meeting_MDE4OWI4N2UtNzEzNC00ZGE2LTkxMGEtNDM3@thread.v2"
                 .to_string(),
+            service_url: "https://smba.trafficmanager.net/amer/?special=chars&foo=bar".to_string(),
         };
         let encoded = encode_thread_id(&original);
         let decoded = decode_thread_id(&encoded).unwrap();

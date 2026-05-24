@@ -345,18 +345,12 @@ impl Adapter for GchatAdapter {
             AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GChat-encoded"))
         })?;
         let bearer = self.bearer_token.as_deref().ok_or_else(|| {
-            AdapterError::InvalidPayload(
-                "GchatAdapter has no bearer_token configured".to_string(),
-            )
+            AdapterError::InvalidPayload("GchatAdapter has no bearer_token configured".to_string())
         })?;
 
         let url = self.messages_create_url(&decoded.space_id);
-        let body = gchat_post_ephemeral_payload(
-            &decoded.space_id,
-            &decoded.thread_id,
-            user_id,
-            text,
-        );
+        let body =
+            gchat_post_ephemeral_payload(&decoded.space_id, &decoded.thread_id, user_id, text);
 
         let response = self
             .http
@@ -604,7 +598,9 @@ pub fn try_create_gchat_adapter(
         .subject_email
         .or_else(|| env("GOOGLE_CHAT_IMPERSONATE_USER"))
         .unwrap_or_default();
-    let pubsub_topic = opts.pubsub_topic.or_else(|| env("GOOGLE_CHAT_PUBSUB_TOPIC"));
+    let pubsub_topic = opts
+        .pubsub_topic
+        .or_else(|| env("GOOGLE_CHAT_PUBSUB_TOPIC"));
     let api_url = opts.api_url.or_else(|| env("GOOGLE_CHAT_API_URL"));
 
     Ok(GchatAdapter::new(GchatAdapterOptions {
@@ -1014,10 +1010,7 @@ mod tests {
 
     #[test]
     fn google_chat_adapter_creates_an_instance() {
-        let opts = GchatAdapterOptions::new(
-            "{\"type\":\"service_account\"}",
-            "bot@example.com",
-        );
+        let opts = GchatAdapterOptions::new("{\"type\":\"service_account\"}", "bot@example.com");
         let adapter = GchatAdapter::new(opts);
         assert_eq!(adapter.name(), "gchat");
     }
@@ -1101,8 +1094,8 @@ mod tests {
             "GOOGLE_CHAT_CREDENTIALS" => Some(TEST_CREDS.to_string()),
             _ => None,
         };
-        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
-            .expect("env credentials");
+        let adapter =
+            try_create_gchat_adapter(GchatCreateOptions::default(), env).expect("env credentials");
         assert_eq!(adapter.service_account_json(), TEST_CREDS);
         assert!(!adapter.use_application_default_credentials());
     }
@@ -1113,8 +1106,8 @@ mod tests {
             "GOOGLE_CHAT_USE_ADC" => Some("true".to_string()),
             _ => None,
         };
-        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
-            .expect("env ADC");
+        let adapter =
+            try_create_gchat_adapter(GchatCreateOptions::default(), env).expect("env ADC");
         assert!(adapter.use_application_default_credentials());
     }
 
@@ -1125,8 +1118,8 @@ mod tests {
             "GOOGLE_CHAT_PUBSUB_TOPIC" => Some("projects/test/topics/test".to_string()),
             _ => None,
         };
-        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
-            .expect("env pubsub topic");
+        let adapter =
+            try_create_gchat_adapter(GchatCreateOptions::default(), env).expect("env pubsub topic");
         assert_eq!(adapter.pubsub_topic(), Some("projects/test/topics/test"));
     }
 
@@ -1168,8 +1161,8 @@ mod tests {
             "GOOGLE_CHAT_API_URL" => Some("https://custom-chat.googleapis.com".to_string()),
             _ => None,
         };
-        let adapter = try_create_gchat_adapter(GchatCreateOptions::default(), env)
-            .expect("env api url");
+        let adapter =
+            try_create_gchat_adapter(GchatCreateOptions::default(), env).expect("env api url");
         assert_eq!(adapter.api_base(), "https://custom-chat.googleapis.com");
     }
 
@@ -1207,12 +1200,8 @@ mod tests {
         // returns full paths, but the Rust port stores bare IDs and
         // reassembles the resource path at the API boundary, matching
         // the existing post_message helper convention).
-        let body = gchat_post_ephemeral_payload(
-            "ABC123",
-            "T1",
-            "users/TARGET",
-            "Only you can see this",
-        );
+        let body =
+            gchat_post_ephemeral_payload("ABC123", "T1", "users/TARGET", "Only you can see this");
         assert_eq!(
             body["privateMessageViewer"],
             serde_json::json!({ "name": "users/TARGET" })
@@ -1223,12 +1212,8 @@ mod tests {
             serde_json::json!({ "name": "spaces/ABC123/threads/T1" })
         );
 
-        let response =
-            serde_json::json!({ "name": "spaces/ABC123/messages/eph1" });
-        let parsed = parse_gchat_post_ephemeral_response(
-            &response,
-            "gchat:ABC123:T1",
-        );
+        let response = serde_json::json!({ "name": "spaces/ABC123/messages/eph1" });
+        let parsed = parse_gchat_post_ephemeral_response(&response, "gchat:ABC123:T1");
         assert_eq!(parsed.id, "spaces/ABC123/messages/eph1");
         assert_eq!(parsed.thread_id, "gchat:ABC123:T1");
         assert!(!parsed.used_fallback);

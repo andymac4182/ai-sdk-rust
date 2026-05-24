@@ -507,9 +507,7 @@ pub fn split_message(text: &str) -> Vec<String> {
         let half = WHATSAPP_MESSAGE_LIMIT / 2;
 
         // Try paragraph boundary first.
-        let mut break_index: Option<usize> = slice
-            .rfind("\n\n")
-            .filter(|&idx| idx >= half);
+        let mut break_index: Option<usize> = slice.rfind("\n\n").filter(|&idx| idx >= half);
 
         // Then line boundary.
         if break_index.is_none() {
@@ -797,7 +795,6 @@ mod tests {
     // ---------- splitMessage (8 upstream cases) ----------
     // 1:1 with upstream `packages/adapter-whatsapp/src/index.test.ts`
     // `describe("splitMessage")` describe block.
-
     #[test]
     fn split_message_returns_a_single_chunk_for_short_messages() {
         assert_eq!(split_message("Hello world"), vec!["Hello world"]);
@@ -1016,12 +1013,13 @@ mod tests {
 
     #[test]
     fn adapter_remove_reaction_rejects_thread_id_with_mismatched_phone_number_id() {
-        let adapter =
-            WhatsappAdapter::new(WhatsappAdapterOptions::new("MY_PNID", "a", "v"));
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("MY_PNID", "a", "v"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(
-            adapter.remove_reaction("whatsapp:OTHER_PNID:15551234567", "wamid.msg1", "👍"),
-        );
+        let err = block_on(adapter.remove_reaction(
+            "whatsapp:OTHER_PNID:15551234567",
+            "wamid.msg1",
+            "👍",
+        ));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("does not match adapter's"));

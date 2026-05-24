@@ -679,9 +679,7 @@ pub fn try_create_linear_adapter(
             client_id: cid,
             client_secret: csec,
         })
-    } else if let (Some(cid), Some(csec)) =
-        (env("LINEAR_CLIENT_ID"), env("LINEAR_CLIENT_SECRET"))
-    {
+    } else if let (Some(cid), Some(csec)) = (env("LINEAR_CLIENT_ID"), env("LINEAR_CLIENT_SECRET")) {
         LinearAuth::OAuth(LinearOAuthCredentials {
             client_id: cid,
             client_secret: csec,
@@ -807,7 +805,6 @@ mod tests {
     // `thread_id::decode_thread_id` so all 4 wire formats decode.
 
     // ---------- renderFormatted (1 upstream case) ----------
-
     #[test]
     fn linear_installation_constants_match_upstream() {
         // 1:1 with upstream's private `INSTALLATION_KEY_PREFIX` and
@@ -895,7 +892,11 @@ mod tests {
     #[test]
     fn channel_id_from_thread_id_returns_none_for_non_linear_ids() {
         let adapter = LinearAdapter::new(LinearAdapterOptions::new("api-key"));
-        assert!(adapter.channel_id_from_thread_id("github:vercel/chat:42").is_none());
+        assert!(
+            adapter
+                .channel_id_from_thread_id("github:vercel/chat:42")
+                .is_none()
+        );
         assert!(adapter.channel_id_from_thread_id("").is_none());
     }
 
@@ -1340,8 +1341,8 @@ mod tests {
             "LINEAR_API_URL" => Some("https://custom-linear.example.com".to_string()),
             _ => None,
         };
-        let adapter = try_create_linear_adapter(LinearCreateOptions::default(), env)
-            .expect("env api url");
+        let adapter =
+            try_create_linear_adapter(LinearCreateOptions::default(), env).expect("env api url");
         assert_eq!(adapter.api_url(), Some("https://custom-linear.example.com"));
     }
 

@@ -1576,11 +1576,7 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     /// `Err(Unsupported("post_channel_message"))` so
     /// [`crate::channel::Channel::post`] can fall through to
     /// `post_message`.
-    async fn post_channel_message(
-        &self,
-        _channel_id: &str,
-        _text: &str,
-    ) -> AdapterResult<String> {
+    async fn post_channel_message(&self, _channel_id: &str, _text: &str) -> AdapterResult<String> {
         Err(AdapterError::Unsupported("post_channel_message"))
     }
 

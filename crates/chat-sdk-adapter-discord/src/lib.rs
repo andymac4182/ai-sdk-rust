@@ -184,12 +184,7 @@ impl DiscordAdapter {
     /// the sub-thread id when the thread id encodes one,
     /// otherwise the channel id. Returns `None` when `thread_id`
     /// isn't Discord-encoded.
-    pub fn reaction_url(
-        &self,
-        thread_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Option<String> {
+    pub fn reaction_url(&self, thread_id: &str, message_id: &str, emoji: &str) -> Option<String> {
         let decoded = decode_thread_id(thread_id)?;
         let target = decoded.thread_id.as_deref().unwrap_or(&decoded.channel_id);
         Some(format!(
@@ -207,7 +202,11 @@ impl DiscordAdapter {
     /// If `thread_id` has fewer than 3 parts, returns the input
     /// unchanged (upstream's `slice(0,3).join(":")` behavior).
     pub fn channel_id_from_thread_id(&self, thread_id: &str) -> String {
-        thread_id.splitn(4, ':').take(3).collect::<Vec<_>>().join(":")
+        thread_id
+            .splitn(4, ':')
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(":")
     }
 
     /// Predicate: is the conversation a 1:1 DM? 1:1 with upstream's
@@ -668,7 +667,9 @@ pub fn truncate_content(content: &str) -> String {
 /// (`👍 → "thumbs_up"`, `🔥 → "fire"`, etc.); unknown inputs pass
 /// through to `get_emoji` with the input string verbatim (matching
 /// upstream's `unicodeToName[emojiName] || emojiName` fallback).
-pub fn normalize_discord_emoji(emoji_name: &str) -> std::sync::Arc<chat_sdk_chat::types::EmojiValue> {
+pub fn normalize_discord_emoji(
+    emoji_name: &str,
+) -> std::sync::Arc<chat_sdk_chat::types::EmojiValue> {
     // 1:1 with upstream's inline `unicodeToName` Record<string, string>.
     let normalized = match emoji_name {
         "👍" => "thumbs_up",
@@ -916,7 +917,10 @@ mod tests {
         // the upstream comment notes additional types
         // (`ChannelMessageWithSource: 4`, `UpdateMessage: 7`) that
         // aren't currently used by the adapter.
-        assert_eq!(InteractionResponseType::DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, 5);
+        assert_eq!(
+            InteractionResponseType::DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+            5
+        );
         assert_eq!(InteractionResponseType::DEFERRED_UPDATE_MESSAGE, 6);
     }
 
@@ -1081,25 +1085,25 @@ mod tests {
     #[test]
     fn discord_normalize_discord_emoji_normalizes_unicode_thumbs_up() {
         let result = normalize_discord_emoji("\u{1F44D}");
-        assert_eq!(result.name,"thumbs_up");
+        assert_eq!(result.name, "thumbs_up");
     }
 
     #[test]
     fn discord_normalize_discord_emoji_normalizes_unicode_heart() {
         let result = normalize_discord_emoji("\u{2764}\u{FE0F}");
-        assert_eq!(result.name,"heart");
+        assert_eq!(result.name, "heart");
     }
 
     #[test]
     fn discord_normalize_discord_emoji_normalizes_heart_without_variation_selector() {
         let result = normalize_discord_emoji("\u{2764}");
-        assert_eq!(result.name,"heart");
+        assert_eq!(result.name, "heart");
     }
 
     #[test]
     fn discord_normalize_discord_emoji_normalizes_unicode_fire() {
         let result = normalize_discord_emoji("\u{1F525}");
-        assert_eq!(result.name,"fire");
+        assert_eq!(result.name, "fire");
     }
 
     #[test]
@@ -1108,19 +1112,19 @@ mod tests {
         // the unicode-to-name map. The Rust `get_emoji` registers a
         // fresh EmojiValue with the input name.
         let result = normalize_discord_emoji("custom_emoji");
-        assert_eq!(result.name,"custom_emoji");
+        assert_eq!(result.name, "custom_emoji");
     }
 
     #[test]
     fn discord_normalize_discord_emoji_normalizes_unicode_rocket() {
         let result = normalize_discord_emoji("\u{1F680}");
-        assert_eq!(result.name,"rocket");
+        assert_eq!(result.name, "rocket");
     }
 
     #[test]
     fn discord_normalize_discord_emoji_normalizes_eyes() {
         let result = normalize_discord_emoji("\u{1F440}");
-        assert_eq!(result.name,"eyes");
+        assert_eq!(result.name, "eyes");
     }
 
     // ---------- describe("encodeEmoji") (2 upstream cases) ----------
@@ -1353,10 +1357,7 @@ mod tests {
             env,
         )
         .expect("config api url wins");
-        assert_eq!(
-            adapter.api_base(),
-            "https://config-url.example.com/api/v10"
-        );
+        assert_eq!(adapter.api_base(), "https://config-url.example.com/api/v10");
     }
 
     // ---------- describe("removeReaction") (2 upstream cases) ----------
@@ -1422,7 +1423,9 @@ mod tests {
             user_name: None,
             mention_role_ids: Vec::new(),
         });
-        let url = adapter.post_message_url("discord:guild1:channel456").unwrap();
+        let url = adapter
+            .post_message_url("discord:guild1:channel456")
+            .unwrap();
         assert_eq!(
             url,
             "https://discord.test/api/v10/channels/channel456/messages"
@@ -1708,6 +1711,10 @@ mod tests {
             user_name: None,
             mention_role_ids: Vec::new(),
         });
-        assert!(adapter.reaction_url("slack:C123:1.0", "msg001", "fire").is_none());
+        assert!(
+            adapter
+                .reaction_url("slack:C123:1.0", "msg001", "fire")
+                .is_none()
+        );
     }
 }

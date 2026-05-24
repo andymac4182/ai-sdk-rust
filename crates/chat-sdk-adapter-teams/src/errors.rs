@@ -62,9 +62,7 @@ pub fn handle_teams_error(error: &serde_json::Value, operation: &str) -> Adapter
         }
 
         if status == Some(429) {
-            let retry_after = error
-                .get("retryAfter")
-                .and_then(|v| v.as_u64());
+            let retry_after = error.get("retryAfter").and_then(|v| v.as_u64());
             return match retry_after {
                 Some(s) => AdapterError::rate_limit_after("teams", s),
                 None => AdapterError::rate_limit("teams"),

@@ -185,7 +185,6 @@ mod tests {
     // ---------- generate_token (additive) ----------
     // No standalone upstream tests; the helper is exercised through
     // `acquireLock` and friends. The Rust suite locks in the shape.
-
     #[test]
     fn generate_token_has_ioredis_prefix_and_two_underscores() {
         let t = generate_token();
@@ -199,7 +198,9 @@ mod tests {
         let suffix = t.rsplit('_').next().expect("suffix");
         assert_eq!(suffix.len(), 13, "got: {t}");
         assert!(
-            suffix.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
             "non-base36 char in suffix: {suffix}"
         );
     }

@@ -701,7 +701,6 @@ mod tests {
     // No standalone upstream tests; the helper is exercised through
     // `postMessage` HTTP send. The Rust suite locks in the
     // MESSENGER_MESSAGE_LIMIT-based truncation semantics.
-
     #[test]
     fn truncate_message_returns_short_text_unchanged() {
         assert_eq!(truncate_message("hello"), "hello");

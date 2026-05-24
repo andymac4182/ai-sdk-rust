@@ -215,10 +215,7 @@ fn convert_link_to_widget(element: &LinkElement) -> Value {
 /// Select / RadioSelect children flush the pending button list, then
 /// emit their own dedicated `selectionInput` widget — preserving
 /// mixed-order ordering from upstream.
-fn convert_actions_to_widgets(
-    element: &ActionsElement,
-    endpoint: Option<&str>,
-) -> Vec<Value> {
+fn convert_actions_to_widgets(element: &ActionsElement, endpoint: Option<&str>) -> Vec<Value> {
     let mut widgets: Vec<Value> = Vec::new();
     let mut buttons: Vec<Value> = Vec::new();
 
@@ -554,7 +551,11 @@ mod tests {
 
     #[test]
     fn google_card_converts_a_card_with_title_and_subtitle() {
-        let c = card(Some("Order Update"), Some("Your package is on its way"), vec![]);
+        let c = card(
+            Some("Order Update"),
+            Some("Your package is on its way"),
+            vec![],
+        );
         let g = card_to_google_card(&c, CardConversionOptions::default());
         assert_eq!(
             g["card"]["header"],
@@ -604,8 +605,14 @@ mod tests {
         assert_eq!(sections.len(), 1);
         let widgets = sections[0]["widgets"].as_array().unwrap();
         assert_eq!(widgets.len(), 2);
-        assert_eq!(widgets[0], json!({ "textParagraph": { "text": "Regular text" } }));
-        assert_eq!(widgets[1], json!({ "textParagraph": { "text": "*Bold text*" } }));
+        assert_eq!(
+            widgets[0],
+            json!({ "textParagraph": { "text": "Regular text" } })
+        );
+        assert_eq!(
+            widgets[1],
+            json!({ "textParagraph": { "text": "*Bold text*" } })
+        );
     }
 
     #[test]
@@ -660,7 +667,12 @@ mod tests {
         RadioSelectElement, RadioSelectKind, SelectElement, SelectKind, SelectOptionElement,
     };
 
-    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+    fn button(
+        id: &str,
+        label: &str,
+        style: Option<ButtonStyle>,
+        value: Option<&str>,
+    ) -> ButtonElement {
         ButtonElement {
             action_type: None,
             callback_url: None,
@@ -688,8 +700,18 @@ mod tests {
             None,
             vec![CardChild::Actions(ActionsElement {
                 children: vec![
-                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
-                    ActionsChild::Button(button("reject", "Reject", Some(ButtonStyle::Danger), Some("data-123"))),
+                    ActionsChild::Button(button(
+                        "approve",
+                        "Approve",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    )),
+                    ActionsChild::Button(button(
+                        "reject",
+                        "Reject",
+                        Some(ButtonStyle::Danger),
+                        Some("data-123"),
+                    )),
                     ActionsChild::Button(button("skip", "Skip", None, None)),
                 ],
                 kind: ActionsKind::Actions,
@@ -1121,7 +1143,11 @@ mod tests {
 
     #[test]
     fn google_card_converts_multiple_bold_segments() {
-        let c = card(None, None, vec![text("**Project**: my-app, **Status**: active")]);
+        let c = card(
+            None,
+            None,
+            vec![text("**Project**: my-app, **Status**: active")],
+        );
         let g = card_to_google_card(&c, CardConversionOptions::default());
         assert_eq!(
             g["card"]["sections"][0]["widgets"][0]["textParagraph"]["text"],

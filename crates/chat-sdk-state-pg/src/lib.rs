@@ -154,7 +154,6 @@ mod tests {
     // ---------- generate_token (additive) ----------
     // No standalone upstream tests; the helper is exercised through
     // `acquireLock`. The Rust suite locks in the shape.
-
     #[test]
     fn generate_token_has_pg_prefix_and_v4_uuid_suffix() {
         let t = generate_token();

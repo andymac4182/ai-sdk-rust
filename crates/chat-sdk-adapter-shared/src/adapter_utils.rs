@@ -443,7 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn extract_postable_attachments_returns_empty_slice_for_postable_markdown_without_attachments() {
+    fn extract_postable_attachments_returns_empty_slice_for_postable_markdown_without_attachments()
+    {
         // 1:1 with upstream `describe("extractPostableAttachments")
         // > it("returns empty array for PostableMarkdown without
         // attachments")` — the `attachments` field is None.
