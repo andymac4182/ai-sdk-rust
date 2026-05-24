@@ -369,6 +369,66 @@ impl Adapter for WhatsappAdapter {
         Ok(())
     }
 
+    /// Remove an emoji reaction by sending a `reaction` message with
+    /// an **empty** emoji string. 1:1 with upstream's
+    /// `adapter.removeReaction`: WhatsApp Cloud API removes the bot's
+    /// reaction from `message_id` when the reaction payload's emoji
+    /// is the empty string. Same POST endpoint and envelope as
+    /// `add_reaction`; the `emoji` argument is intentionally ignored.
+    async fn remove_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not WhatsApp-encoded"))
+        })?;
+
+        if decoded.phone_number_id != self.options.phone_number_id {
+            return Err(AdapterError::InvalidPayload(format!(
+                "thread_id phone_number_id {:?} does not match adapter's {:?}",
+                decoded.phone_number_id, self.options.phone_number_id
+            )));
+        }
+
+        let url = self.send_url();
+        let body = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": decoded.customer_phone,
+            "type": "reaction",
+            "reaction": {
+                "message_id": message_id,
+                "emoji": "",
+            },
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.access_token())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            let error_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("WhatsApp Cloud API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {error_msg}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// WhatsApp Cloud API does not support typing indicators. 1:1
     /// with upstream's no-op `adapter.startTyping`.
     async fn start_typing(
@@ -903,6 +963,35 @@ mod tests {
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("not WhatsApp-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_rejects_non_whatsapp_thread_ids() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("P", "a", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.remove_reaction("slack:C1:1.0", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not WhatsApp-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_remove_reaction_rejects_thread_id_with_mismatched_phone_number_id() {
+        let adapter =
+            WhatsappAdapter::new(WhatsappAdapterOptions::new("MY_PNID", "a", "v"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(
+            adapter.remove_reaction("whatsapp:OTHER_PNID:15551234567", "wamid.msg1", "👍"),
+        );
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not match adapter's"));
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
