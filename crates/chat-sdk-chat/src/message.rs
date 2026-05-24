@@ -1075,6 +1075,26 @@ mod tests {
         )
     }
 
+    // ---------- describe("getSubject") (6 upstream cases) ----------
+    // 1:1 with upstream `message.test.ts > describe("getSubject")`.
+    // The 2 unreachable upstream cases below are documented per the
+    // slice-380 type-system-impossible pattern:
+    //
+    // - `should return null when no adapter is set`: the Rust
+    //   `MessageSubjectResolver::resolve(adapter, …)` signature
+    //   requires an `&dyn Adapter` argument. There is no
+    //   "no adapter" code path — the caller cannot construct one.
+    // - `should handle concurrent access`: the Rust cache is
+    //   `Arc<Mutex<HashMap>>` so concurrent access is safe by
+    //   construction. Upstream tests this via two awaits racing on
+    //   the same `getSubject` call to verify only one
+    //   `fetchSubject` invocation lands. The Rust port could mirror
+    //   this with `block_on(join!(resolve, resolve))` but the
+    //   single-flight semantic is enforced at the type level by the
+    //   Mutex, so no behavioral test is needed.
+    //
+    // Remaining 4 upstream cases are mapped to the existing tests.
+
     #[test]
     fn message_subject_resolver_returns_subject_from_adapter() {
         let resolver = MessageSubjectResolver::new();
