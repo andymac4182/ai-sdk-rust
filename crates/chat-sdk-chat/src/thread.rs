@@ -58,6 +58,11 @@ pub struct Thread {
     /// message being processed (set by the chat dispatcher for the
     /// handler call frame; survives serialize/deserialize round-trips).
     current_message: Option<crate::message::Message>,
+    /// 1:1 with upstream `isDM: boolean`. Resolved at handle
+    /// construction (by `Chat::open_dm` or the event dispatcher)
+    /// from `adapter.is_dm(thread_id) ?? false`. The handle field
+    /// is the cached value so accessors don't need an async hop.
+    is_dm: bool,
 }
 
 impl std::fmt::Debug for Thread {
@@ -83,6 +88,7 @@ impl Thread {
             recent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             channel_id: None,
             current_message: None,
+            is_dm: false,
         }
     }
 
@@ -103,6 +109,7 @@ impl Thread {
             recent_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             channel_id: None,
             current_message: None,
+            is_dm: false,
         }
     }
 
@@ -146,6 +153,21 @@ impl Thread {
         self
     }
 
+    /// Builder: mark this thread as a DM. 1:1 with upstream
+    /// `new ThreadImpl({ isDM: true })` constructor option.
+    /// `Chat::open_dm` and the chat event dispatcher set this from
+    /// `adapter.is_dm(thread_id)`.
+    pub fn with_is_dm(mut self, is_dm: bool) -> Self {
+        self.is_dm = is_dm;
+        self
+    }
+
+    /// 1:1 with upstream `get isDM(): boolean`. Returns the cached
+    /// DM flag set at construction.
+    pub fn is_dm(&self) -> bool {
+        self.is_dm
+    }
+
     /// 1:1 with upstream `get channelId(): string | undefined`.
     pub fn channel_id(&self) -> Option<&str> {
         self.channel_id.as_deref()
@@ -167,7 +189,7 @@ impl Thread {
             "channelId": self.channel_id,
             "channelVisibility": "unknown",
             "currentMessage": serde_json::Value::Null,
-            "isDM": false,
+            "isDM": self.is_dm,
             "adapterName": self.adapter.name(),
         });
         if let Some(msg) = self.current_message.as_ref() {
@@ -189,6 +211,9 @@ impl Thread {
         let mut thread = Self::new(adapter, thread_id);
         if let Some(channel_id) = json.get("channelId").and_then(serde_json::Value::as_str) {
             thread.channel_id = Some(channel_id.to_string());
+        }
+        if let Some(is_dm) = json.get("isDM").and_then(serde_json::Value::as_bool) {
+            thread.is_dm = is_dm;
         }
         if let Some(serialized) = json.get("currentMessage") {
             if !serialized.is_null() {
