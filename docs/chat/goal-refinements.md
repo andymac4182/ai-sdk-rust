@@ -3814,3 +3814,92 @@ module-aliasing test).
   multi-slice; needs lock + dedupe layer.
 - **State-backend client wire-up** — still blocked on runtime
   decision.
+
+---
+
+## Slices 337..345 refinement cycle (Discord URL-helper extraction sweep + per-adapter parametric URL coverage)
+
+**What was learned**
+
+- The Discord adapter accumulated 4 distinct routing methods
+  (post_message, edit_message, delete_message, add_reaction,
+  remove_reaction, start_typing) that all needed
+  `target = decoded.thread_id ?? channel_id` sub-thread routing,
+  matching upstream's `targetChannelId = discordThreadId ||
+  channelId`. This cycle extracted **3 pure URL helpers**
+  (`message_url`, `post_message_url`, `typing_url`, plus the
+  slice-330 `reaction_url`) and rewired every call site —
+  removing the legacy `channel_messages_url` helper that
+  silently dropped sub-thread routing across the runtime.
+  **18 ported test cases** across slices 337..341 + 344 cover
+  these helpers via channel-only / sub-thread / non-Discord
+  URL-shape assertions.
+- The "no HTTP mock" constraint stays well-managed by the
+  pure-helper pattern. Each upstream `it("...uses correct URL...")`
+  assertion maps to an inexpensive `assert_eq!(helper(...),
+  "expected url")`. No tokio runtime needed.
+- The parametric URL-coverage pattern (slices 342 Telegram +
+  343 Slack) bundles per-method URL assertions into one Rust
+  test per adapter — each upstream `it("calls slack <method>")`
+  per-method describe ports as one entry in a list. Cuts test
+  bloat ~5-9x without losing assertion coverage.
+- A `truncate_content` helper (slice 340) extracted upstream's
+  private `truncateContent(content)` 1:1 with char-aware
+  multibyte handling. Wired into both `post_message` and
+  `edit_message`, exercises the upstream "truncates content
+  exceeding 2000 characters" case directly via the pure helper.
+- Slice 344's "missing-case audit" pattern (find the 3rd
+  upstream sub-case for isDM that the existing 2-assertion
+  Rust test didn't cover) is worth repeating — Rust tests that
+  bundled multiple upstream assertions sometimes missed a
+  subcase. Cheap to find and port.
+
+**What is now true that wasn't before**
+
+- DiscordAdapter has 4 pure URL helpers
+  (`post_message_url`, `message_url`, `reaction_url`,
+  `typing_url`) all using the same `decoded.thread_id ??
+  channel_id` sub-thread routing. Discord at 151 tests
+  (up from 134 at slice 304, +17 this trail).
+- Telegram + Slack have parametric `method_url`-coverage tests
+  exercising the runtime endpoint set as a single test each.
+- 30+ tests added across this 9-slice window: Discord +17,
+  Slack +1, Telegram +2, WhatsApp +0 (already covered),
+  Messenger +0 (already covered), Teams +1.
+- The `truncate_content` pattern lands as a workspace-wide
+  template — other adapters with content-length limits can
+  port the same helper shape.
+
+**Stale or misleading guidance**
+
+- The Done condition's "all rows verified or js-only-documented"
+  remains unsatisfied because the 13 in-progress packages each
+  need substantial real-implementation work (post_object,
+  parse_message, handleIncomingMessage, state-backend clients).
+  Each slice this cycle adds 1-3 cases but doesn't push a row
+  to verified. **The fastest single lever for terminal-condition
+  satisfaction** would be a focused chat-sdk-chat
+  handleIncomingMessage + dispatcher port — that unblocks ~80
+  in-progress thread.test.ts + chat.test.ts cases. Flag this
+  as the next sweep candidate.
+- The "refinement at every 5 merges" cadence drifted to 9
+  again this cycle as individual slices became smaller. Cap
+  refinements at every 10 commits going forward.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat handleIncomingMessage + dispatcher** —
+  highest-leverage remaining work; unblocks ~80 chat.test.ts +
+  thread.test.ts cases.
+- **GitHub remove_reaction** — multi-step list/match/delete.
+- **GChat remove_reaction** — multi-step list/match/delete via
+  chatApi client.
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting work.
+- **parse_message across 9 adapters**.
+- **State-backend client wire-up** — still blocked on workspace
+  runtime decision.
