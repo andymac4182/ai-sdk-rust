@@ -1476,6 +1476,24 @@ mod tests {
     }
 
     #[test]
+    fn adapter_start_typing_skips_when_no_thread_ts_present() {
+        // 1:1 with upstream `index.test.ts > describe("startTyping") >
+        // it("skips when no threadTs present")` — when the thread id
+        // encodes no parent message (`slack:C123` or `slack:C123:`),
+        // start_typing returns Ok(()) without hitting the network.
+        // The slice-454 permissive-decoder change made this case
+        // representable; the slice-454 early-return implements the
+        // upstream `if (!threadTs) { return; }` short-circuit.
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        // Channel-only id: no thread_ts.
+        let result = block_on(adapter.start_typing("slack:C123", None));
+        assert!(result.is_ok(), "got: {result:?}");
+        // Empty-thread_ts id: also no thread context.
+        let result = block_on(adapter.start_typing("slack:C123:", None));
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[test]
     fn adapter_fetch_subject_rejects_non_slack_thread_ids() {
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
         use chat_sdk_chat::types::AdapterError;
