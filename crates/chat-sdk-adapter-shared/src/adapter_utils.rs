@@ -481,6 +481,24 @@ mod tests {
     }
 
     #[test]
+    fn extract_postable_attachments_returns_empty_slice_when_attachments_field_is_undefined() {
+        // 1:1 with upstream `describe("extractPostableAttachments") >
+        // it("returns empty array when attachments property is
+        // undefined")` — upstream constructs `{raw: "Text",
+        // attachments: undefined}`. The Rust port uses None for the
+        // missing-attachments signal; same observable behavior.
+        // Distinct from `_for_postable_raw_without_attachments` in
+        // upstream (the "without" case constructs the message
+        // without specifying attachments at all).
+        let msg = AdapterPostableMessage::from(PostableRaw {
+            attachments: None,
+            files: None,
+            raw: "Text".to_string(),
+        });
+        assert!(extract_postable_attachments(&msg).is_empty());
+    }
+
+    #[test]
     fn extract_postable_attachments_returns_empty_slice_when_empty() {
         let msg = AdapterPostableMessage::from(PostableRaw {
             attachments: Some(vec![]),
