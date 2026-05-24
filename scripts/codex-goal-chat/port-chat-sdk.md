@@ -1552,3 +1552,83 @@ self.user_name.clone())` to fall back to a Chat-level config.
 Avoids the "every adapter must implement this even if it has
 nothing to return" tax. Reference: slice 425's
 `Adapter::user_name()` / `Adapter::bot_user_id()`.
+
+## Inner-async-fn extraction for lock-release semantics (added slice 433)
+
+When the dispatcher needs to acquire a resource (lock, mutex,
+context) before a multi-branch dispatch with early-returns, and
+release after, the canonical Rust shape is to extract the dispatch
+cascade into a separate async fn:
+
+```rust
+pub async fn handle_incoming_message(&self, ...) -> StateResult<bool> {
+    // Acquire resource
+    let resource = self.acquire().await?;
+
+    // Delegate cascade to inner fn — early-returns inside don't
+    // skip the release path
+    self.dispatch_handlers(...).await;
+
+    // Release resource (always runs)
+    self.release(&resource).await;
+
+    Ok(true)
+}
+
+async fn dispatch_handlers(&self, ...) {
+    if condition_a { /* ... */; return; }
+    if condition_b { /* ... */; return; }
+    // ...
+}
+```
+
+This avoids RAII guard structs (no `Drop` for async cleanup) and
+scopeguard-style crates. The cost is one extra function call;
+the win is clear lock-lifetime locality.
+
+Reference: slice 431 split handle_incoming_message into outer
+(lock acquire/conflict/release) + inner dispatch_handlers
+(routing cascade).
+
+## Deprecated alias OR-pattern (added slice 433)
+
+When porting upstream's "preferred-with-deprecated-alias" feature
+(e.g. `persistThreadHistory` vs deprecated `persistMessageHistory`,
+`threadHistory` vs deprecated `messageHistory`), expose BOTH
+accessors / config fields with the same default and OR them at
+the dispatch site:
+
+```rust
+// Adapter trait
+fn persist_thread_history(&self) -> bool { false }
+fn persist_message_history(&self) -> bool { false }
+
+// Dispatcher
+if adapter.persist_thread_history() || adapter.persist_message_history() {
+    // apply behavior
+}
+
+// Config struct fields with `or` precedence at construction
+let resolved = options.thread_history.or(options.message_history);
+```
+
+Matches upstream's backward-compat semantics: either flag (or
+both) opts in; the preferred one wins when both are set on the
+config side. Reference: slice 430 (persistThreadHistory cases).
+
+## Dispatcher Thread construction with state adapter (added slice 433)
+
+When a handler-trait dispatcher hands Thread handles to handlers,
+construct them with `Thread::with_state_adapter(adapter, thread_id,
+state.clone())` rather than `Thread::new(adapter, thread_id)`.
+Handlers commonly call `thread.is_subscribed()`, `thread.subscribe()`,
+`thread.set_state(...)` — all of which route through StateAdapter.
+Without binding state at construction, those methods become no-ops
+(or panic, depending on the impl).
+
+For dispatchers with a "subscribed context" branch (e.g.
+onSubscribedMessage), also chain `.with_subscribed_context()` so
+`thread.is_subscribed()` short-circuits to true without
+round-tripping state.
+
+Reference: slice 432 wired this into chat::dispatch_handlers.

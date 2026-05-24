@@ -4651,3 +4651,124 @@ trait method + ModalContext storage), callbackUrl POSTs
   — for the 2 deferred "should allow posting from <reaction|
   action> thread" cases. RecordingAdapter pattern is in scope
   but a Phase-K-style coordinated update.
+
+## Slices 428..432 refinement cycle (openModal end-to-end + persistThreadHistory + onLockConflict + dispatcher Thread wiring)
+
+5-slice cycle covering slices 428..432. Closes 4 major chat.test.ts
+describe blocks (openModal, persistThreadHistory, onLockConflict,
+thread.isSubscribed) via the deferred-adapter-method 3-slice
+cadence + the dispatcher-extension pattern.
+
+**Slices summary**
+
+- 428: **Phase A openModal** — Adapter::open_modal trait method
+  + OpenModalResult type (`{view_id: String}` with serde rename
+  "viewId"). 3 additive tests in types.rs.
+- 429: **Phase B openModal** — Chat::open_modal orchestration
+  helper that adopters call from inside an action / slash-command
+  handler. Generates UUID context_id, persists modal-context:<id>
+  with `{thread, adapterName, callbackId}` envelope, dispatches
+  through Adapter::open_modal. uuid 1.10 dep added. 4 portable
+  + 1 additive.
+- 430: **persistThreadHistory** — Adapter::persist_thread_history
+  / persist_message_history (deprecated) optional accessors +
+  ChatOptions.thread_history / message_history (slice 117's
+  ThreadHistoryConfig) + dispatcher branch using
+  `state.append_to_list(msg-history:<thread_id>, ...)`. 6/6
+  portable.
+- 431: **onLockConflict** — OnLockConflict enum (Drop / Force /
+  Callback(async fn)) + LockConflictResolution + DEFAULT_LOCK_TTL_MS
+  + dispatcher acquire/conflict-resolve/release lock-dance.
+  dispatch_handlers extracted to inner async fn so lock-release
+  runs on every path. LockTrackingState mock with preset_held +
+  acquire/release/force_release call recording. 5/5 portable.
+- 432: **thread.isSubscribed** — dispatcher constructs Threads
+  via Thread::with_state_adapter(...) so handlers can call
+  thread.is_subscribed/subscribe/set_state directly; subscribed-
+  branch adds .with_subscribed_context() for upstream's
+  `_isSubscribedContext` short-circuit. 2/2 portable.
+
+Total: 22 portable + 4 additive upstream cases mapped this cycle.
+chat-sdk-chat 881 → 899 tests (+18).
+
+Combined with cycles 412..420 (40 portable + 23 additive) and
+422..426 (17 portable + 9 additive), slices 415..432 have mapped
+**79 portable + 36 additive upstream chat.test.ts cases**. The
+remaining ~55 cases gate on: callbackUrl POSTs (~6), concurrency
+strategies (queue/debounce/burst/concurrent ~70 but heavily
+overlapping), persistance attachment rehydration (~3), lockScope
+resolver (~5).
+
+**Lessons**
+
+1. **Inner-async-fn extraction beats RAII guards for lock-release
+   semantics.** Slice 431 split the dispatcher: outer
+   handle_incoming_message owns the lock lifecycle (acquire,
+   resolve conflict, release on the end); inner dispatch_handlers
+   owns the routing cascade with early returns. The split lets
+   the outer function always release the lock via a single
+   post-call site, with no RAII guard struct or scopeguard
+   needed. Reference: handle_incoming_message at line ~1500.
+
+2. **Dispatcher Thread construction needs the state adapter, not
+   just the platform adapter.** Slice 432: handlers need to call
+   thread.is_subscribed / subscribe / set_state — those go
+   through StateAdapter. Construction must use
+   `Thread::with_state_adapter(adapter, thread_id, state.clone())`
+   so the state-backed methods work. Earlier slices used
+   `Thread::new(adapter, thread_id)` which created a thread
+   without state, making those methods no-op.
+
+3. **State-stored context envelopes shouldn't require closures
+   on the event struct.** Slice 429's Chat::open_modal helper
+   takes `(adapter, trigger_id, thread_id, modal)` directly
+   rather than wiring an async closure onto ActionEvent. Adopters
+   call `chat.open_modal(...)` from inside their handler with
+   `event.trigger_id.as_deref()` + `Some(event.thread_id.as_str())`.
+   This achieves the same observable behavior as upstream's
+   `event.openModal(modal)` closure form without requiring
+   per-event async-closure storage (Rust closures aren't
+   Serialize+Eq, so they don't compose with the typed event
+   struct).
+
+4. **Reusing existing types from earlier slices.** Slice 430
+   reused slice 117's ThreadHistoryConfig instead of inventing
+   a new type. Lesson: when porting a feature, search the
+   codebase for existing types that match the upstream shape
+   first; only invent new ones when the shape genuinely differs.
+
+5. **Optional accessor pairs for deprecated aliases.** Slice 430
+   added BOTH `Adapter::persist_thread_history()` (preferred)
+   and `Adapter::persist_message_history()` (deprecated alias).
+   The dispatcher checks `persist_thread_history() ||
+   persist_message_history()` so either or both opts in.
+   Matches upstream's "honor both for backward compat" pattern.
+   Pattern: when porting upstream's "preferred-with-deprecated-
+   alias" feature, expose BOTH accessors with the same default
+   (None / false) and OR them at the dispatch site.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- (no brief edits — the patterns from slices 411 + 427 still
+  apply. The 4 new lessons here are codification-worthy but
+  fit into existing pattern sections.)
+
+**Open refinements deferred**
+
+- **action / modal callbackUrl POSTs** — ~6 cases. Wires the
+  existing slice-278 HttpPoster trait into process_action /
+  process_modal_submit dispatch paths.
+- **concurrency strategies** — queue (15 cases), debounce (5),
+  burst (6), concurrent (4), queue edge cases (5), queue
+  attachment rehydration (4), queue subject rehydration (1),
+  queue with onSubscribedMessage (2). Heavily intertwined —
+  needs a `concurrency` field on ChatOptions + 4-variant
+  ConcurrencyStrategy enum + a queue-drain orchestrator.
+- **lockScope resolver** — 5 cases. Per-message lock-key
+  derivation (thread vs. channel scope via adapter or callback).
+- **persistance attachment rehydration in queue dispatch** —
+  3 cases. Re-binds adapter state to dequeued messages so
+  fetchSubject works after JSON roundtrip.
+- **action callbackUrl error logging** — 1 case + logger
+  plumbing (logger errors need to be surfaced for observation).
