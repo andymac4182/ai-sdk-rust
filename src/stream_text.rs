@@ -17,17 +17,18 @@ use crate::generate_text::{
     GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
     GenerateTextStepStartEvent, GenerateTextTool, GenerateTextToolCall,
     GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
-    LanguageModelCallEndEvent, LanguageModelCallStartEvent, StepToolApprovalResponse,
-    StopCondition, ToolApprovalConfiguration, ToolApprovalResponseOutput, ToolCallRepair,
-    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
-    apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
-    generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
+    LanguageModelCallEndEvent, LanguageModelCallStartEvent, PrepareStep, PrepareStepOptions,
+    PrepareStepResult, StepToolApprovalResponse, StopCondition, ToolApprovalConfiguration,
+    ToolApprovalResponseOutput, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
+    ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
+    filter_active_language_model_tools, generate_text_call_id,
+    generate_text_tool_result_from_language_model_tool_result,
     invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
     invoke_tool_input_start_callback, is_stop_condition_met, mark_runtime_dynamic_tool_calls,
     mark_tool_call_metadata, mark_tool_call_titles, mark_tool_result_metadata,
-    mark_unavailable_tool_calls, refine_tool_inputs, refresh_generate_text_content,
-    refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
-    resolve_tool_approvals_for_step, response_messages_for_step,
+    mark_unavailable_tool_calls, merge_provider_options, refine_tool_inputs,
+    refresh_generate_text_content, refresh_tool_call_views, refresh_tool_result_views,
+    repair_tool_calls, resolve_tool_approvals_for_step, response_messages_for_step,
     should_continue_after_tool_results, sync_tool_result_inputs,
     update_pending_deferred_provider_tool_calls,
 };
@@ -962,6 +963,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked before each streamed model step begins.
     pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
 
+    /// Optional per-step preparation callback.
+    pub prepare_step: Option<PrepareStep<'a, M>>,
+
     /// Optional callback invoked immediately before each provider stream call begins.
     pub on_language_model_call_start: Option<GenerateTextOnLanguageModelCallStart<'a>>,
 
@@ -1030,6 +1034,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_call_repair: None,
             on_start: None,
             on_step_start: None,
+            prepare_step: None,
             on_language_model_call_start: None,
             on_language_model_call_end: None,
             on_tool_execution_start: None,
@@ -1072,6 +1077,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_call_repair: None,
             on_start: None,
             on_step_start: None,
+            prepare_step: None,
             on_language_model_call_start: None,
             on_language_model_call_end: None,
             on_tool_execution_start: None,
@@ -1254,6 +1260,16 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Sets a callback that can override settings for each streamed model step.
+    pub fn with_prepare_step<F, Fut>(mut self, prepare: F) -> Self
+    where
+        F: Fn(PrepareStepOptions<'a, M>) -> Fut + 'a,
+        Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
+    {
+        self.prepare_step = Some(PrepareStep::new(prepare));
         self
     }
 
@@ -2331,8 +2347,8 @@ where
         model,
         mut call_options,
         tools,
-        runtime_context,
-        tools_context,
+        mut runtime_context,
+        mut tools_context,
         experimental_sandbox,
         active_tools,
         tool_approval,
@@ -2340,6 +2356,7 @@ where
         tool_call_repair,
         on_start,
         on_step_start,
+        prepare_step,
         on_language_model_call_start,
         on_language_model_call_end,
         on_tool_execution_start,
@@ -2362,10 +2379,11 @@ where
     let include_raw_chunks = call_options.include_raw_chunks.unwrap_or(false);
     let mut parts = vec![TextStreamPart::Start(TextStreamStartPart::new())];
     let base_language_model_tools = call_options.tools.take();
+    let base_provider_options = call_options.provider_options.clone();
     let mut current_prompt = call_options.prompt.clone();
     let initial_messages = current_prompt.clone();
     let active_tools_for_start = active_tools.clone();
-    let active_tools = active_tools.as_deref();
+    let base_active_tools = active_tools;
     let call_id = generate_text_call_id();
     let max_steps = max_steps.max(1);
     let mut stream_steps = Vec::new();
@@ -2425,17 +2443,68 @@ where
             break;
         }
 
+        let accumulated_response_messages =
+            crate::generate_text::accumulated_response_messages(&[], &generate_steps);
+        let prepare_step_result = if let Some(prepare_step) = &prepare_step {
+            prepare_step
+                .prepare(PrepareStepOptions {
+                    steps: generate_steps.clone(),
+                    step_number,
+                    model,
+                    messages: current_prompt.clone(),
+                    initial_messages: initial_messages.clone(),
+                    response_messages: accumulated_response_messages,
+                    runtime_context: runtime_context.clone(),
+                    tools_context: tools_context.clone(),
+                    experimental_sandbox: experimental_sandbox.clone(),
+                })
+                .await
+        } else {
+            PrepareStepResult::default()
+        };
+
+        let PrepareStepResult {
+            model: step_model,
+            tool_choice: step_tool_choice,
+            active_tools: step_active_tools,
+            messages: step_messages,
+            runtime_context: step_runtime_context,
+            tools_context: step_tools_context,
+            provider_options: step_provider_options,
+            experimental_sandbox: step_experimental_sandbox,
+        } = prepare_step_result;
+
+        if let Some(runtime_context_override) = step_runtime_context {
+            runtime_context = runtime_context_override;
+        }
+
+        if let Some(tools_context_override) = step_tools_context {
+            tools_context = tools_context_override;
+        }
+
+        if let Some(messages_override) = step_messages {
+            current_prompt = messages_override;
+        }
+
+        let step_model = step_model.unwrap_or(model);
+        let step_experimental_sandbox =
+            step_experimental_sandbox.or_else(|| experimental_sandbox.clone());
+        let step_active_tools = step_active_tools
+            .as_deref()
+            .or(base_active_tools.as_deref());
         let step_prompt = current_prompt.clone();
         let step_tools =
-            crate::generate_text::filter_active_tools(Some(tools.clone()), active_tools)
+            crate::generate_text::filter_active_tools(Some(tools.clone()), step_active_tools)
                 .unwrap_or_default();
-        let mut step_language_model_tools =
-            filter_active_language_model_tools(base_language_model_tools.clone(), active_tools);
+        let mut step_language_model_tools = filter_active_language_model_tools(
+            base_language_model_tools.clone(),
+            step_active_tools,
+        );
 
         if let Some(mut prepared_tools) = prepare_tools_with_context(
             &step_tools,
             Some(&tools_context),
-            experimental_sandbox.as_ref(),
+            step_experimental_sandbox.as_ref(),
         ) {
             step_language_model_tools
                 .get_or_insert_with(Vec::new)
@@ -2445,21 +2514,26 @@ where
         let mut step_call_options = call_options.clone();
         step_call_options.prompt = step_prompt.clone();
         step_call_options.tools = step_language_model_tools;
+        if let Some(tool_choice) = step_tool_choice {
+            step_call_options.tool_choice = Some(tool_choice);
+        }
+        step_call_options.provider_options =
+            merge_provider_options(base_provider_options.as_ref(), step_provider_options);
         append_stream_text_user_agent(&mut step_call_options);
         if prompt_has_url_files(&step_call_options.prompt) {
-            let _ = model.supported_urls().await;
+            let _ = step_model.supported_urls().await;
         }
 
         if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
             let step_start_event = GenerateTextStepStartEvent {
                 call_id: call_id.clone(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
+                provider: step_model.provider().to_string(),
+                model_id: step_model.model_id().to_string(),
                 step_number,
                 messages: step_prompt.clone(),
                 tools: step_call_options.tools.clone().unwrap_or_default(),
                 tool_choice: step_call_options.tool_choice.clone(),
-                active_tools: active_tools.map(|tools| tools.to_vec()),
+                active_tools: step_active_tools.map(|tools| tools.to_vec()),
                 steps: generate_steps.clone(),
                 provider_options: step_call_options.provider_options.clone(),
                 runtime_context: runtime_context.clone(),
@@ -2474,8 +2548,8 @@ where
         if on_language_model_call_start.is_some() || telemetry_dispatcher.is_enabled() {
             let language_model_call_start_event = LanguageModelCallStartEvent::from_call_options(
                 &call_id,
-                model.provider(),
-                model.model_id(),
+                step_model.provider(),
+                step_model.model_id(),
                 &step_call_options,
             );
             if let Some(on_language_model_call_start) = &on_language_model_call_start {
@@ -2488,7 +2562,7 @@ where
 
         let model_call_started_at = Instant::now();
         let mut collected_step = collect_stream_text_step_with_retries(
-            model,
+            step_model,
             step_call_options.clone(),
             include_raw_chunks,
             &mut parts,
@@ -2502,7 +2576,7 @@ where
                 tools: &step_tools,
                 messages: &step_prompt,
                 runtime_context: &runtime_context,
-                experimental_sandbox: experimental_sandbox.as_ref(),
+                experimental_sandbox: step_experimental_sandbox.as_ref(),
             },
         )
         .await;
@@ -2547,7 +2621,7 @@ where
         let mut generate_step = collected_step.to_generate_text_step(
             call_id.clone(),
             step_number,
-            GenerateTextModelInfo::new(model.provider(), model.model_id()),
+            GenerateTextModelInfo::new(step_model.provider(), step_model.model_id()),
             runtime_context.clone(),
             tools_context.clone(),
         );
@@ -2615,7 +2689,7 @@ where
             &tools_context,
             &tool_approvals.blocked_tool_call_ids,
             (
-                experimental_sandbox.as_ref(),
+                step_experimental_sandbox.as_ref(),
                 step_call_options.abort_signal.as_ref(),
                 timeout.as_ref(),
                 None,
@@ -5700,6 +5774,151 @@ mod tests {
                 .and_then(|headers| headers.get("user-agent"))
                 .is_some_and(|user_agent| user_agent.contains("ai/"))
         );
+    }
+
+    #[test]
+    fn stream_text_prepare_step_overrides_step_settings_and_carries_contexts() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let seen_prepare_options = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let seen_prepare_options_for_callback = Arc::clone(&seen_prepare_options);
+        let step_start_events = Arc::new(Mutex::new(Vec::<GenerateTextStepStartEvent>::new()));
+        let step_start_events_for_callback = Arc::clone(&step_start_events);
+        let mut base_provider_options = ProviderOptions::new();
+        base_provider_options.insert(
+            "base".to_string(),
+            json!({ "mode": "outer" })
+                .as_object()
+                .expect("provider options are objects")
+                .clone(),
+        );
+        let mut step_provider_options = ProviderOptions::new();
+        step_provider_options.insert(
+            "test".to_string(),
+            json!({ "mode": "step" })
+                .as_object()
+                .expect("provider options are objects")
+                .clone(),
+        );
+        let runtime_context = json!({ "tenant": "outer" })
+            .as_object()
+            .expect("runtime context is object")
+            .clone();
+        let tools_context = json!({ "weather": { "apiKey": "outer" } })
+            .as_object()
+            .expect("tools context is object")
+            .clone();
+        let step_runtime_context = json!({ "tenant": "step" })
+            .as_object()
+            .expect("runtime context is object")
+            .clone();
+        let step_tools_context = json!({ "weather": { "apiKey": "step" } })
+            .as_object()
+            .expect("tools context is object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Outer prompt")])
+                .with_provider_options(base_provider_options.clone())
+                .with_runtime_context(runtime_context.clone())
+                .with_tools_context(tools_context.clone())
+                .with_prepare_step({
+                    let step_provider_options = step_provider_options.clone();
+                    let step_runtime_context = step_runtime_context.clone();
+                    let step_tools_context = step_tools_context.clone();
+                    move |options| {
+                        seen_prepare_options_for_callback
+                            .lock()
+                            .expect("prepare options lock")
+                            .push(json!({
+                                "stepNumber": options.step_number,
+                                "messages": options.messages,
+                                "initialMessages": options.initial_messages,
+                                "responseMessages": options.response_messages,
+                                "runtimeContext": options.runtime_context,
+                                "toolsContext": options.tools_context
+                            }));
+                        let step_provider_options = step_provider_options.clone();
+                        let step_runtime_context = step_runtime_context.clone();
+                        let step_tools_context = step_tools_context.clone();
+                        async move {
+                            PrepareStepResult::new()
+                                .with_messages(vec![user_message("Prepared prompt")])
+                                .with_runtime_context(step_runtime_context)
+                                .with_tools_context(step_tools_context)
+                                .with_tool_choice(LanguageModelToolChoice::Required)
+                                .with_provider_options(step_provider_options)
+                        }
+                    }
+                })
+                .with_on_step_start(move |event| {
+                    let step_start_events = Arc::clone(&step_start_events_for_callback);
+                    async move {
+                        step_start_events
+                            .lock()
+                            .expect("step-start events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.steps.len(), 1);
+
+        let prepare_options = seen_prepare_options.lock().expect("prepare options lock");
+        assert_eq!(prepare_options.len(), 1);
+        assert_eq!(prepare_options[0]["stepNumber"], json!(0));
+        assert_eq!(
+            prepare_options[0]["messages"],
+            json!([user_message("Outer prompt")])
+        );
+        assert_eq!(
+            prepare_options[0]["initialMessages"],
+            json!([user_message("Outer prompt")])
+        );
+        assert_eq!(prepare_options[0]["responseMessages"], json!([]));
+        assert_eq!(prepare_options[0]["runtimeContext"], json!(runtime_context));
+        assert_eq!(prepare_options[0]["toolsContext"], json!(tools_context));
+        drop(prepare_options);
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt, vec![user_message("Prepared prompt")]);
+        assert_eq!(
+            calls[0].tool_choice,
+            Some(LanguageModelToolChoice::Required)
+        );
+        assert_eq!(
+            calls[0]
+                .provider_options
+                .as_ref()
+                .and_then(|options| options.get("base")),
+            base_provider_options.get("base")
+        );
+        assert_eq!(
+            calls[0]
+                .provider_options
+                .as_ref()
+                .and_then(|options| options.get("test")),
+            step_provider_options.get("test")
+        );
+
+        let step_start_events = step_start_events.lock().expect("step-start events lock");
+        assert_eq!(step_start_events.len(), 1);
+        assert_eq!(
+            step_start_events[0].messages,
+            vec![user_message("Prepared prompt")]
+        );
+        assert_eq!(
+            step_start_events[0].tool_choice,
+            Some(LanguageModelToolChoice::Required)
+        );
+        assert_eq!(step_start_events[0].runtime_context, step_runtime_context);
+        assert_eq!(step_start_events[0].tools_context, step_tools_context);
     }
 
     #[test]

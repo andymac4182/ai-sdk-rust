@@ -5697,7 +5697,7 @@ fn provider_metadata_is_retryable(metadata: &JsonObject) -> bool {
         })
 }
 
-fn accumulated_response_messages(
+pub(crate) fn accumulated_response_messages(
     initial_response_messages: &[LanguageModelMessage],
     steps: &[GenerateTextStep],
 ) -> Vec<LanguageModelMessage> {
@@ -5708,7 +5708,7 @@ fn accumulated_response_messages(
         .collect()
 }
 
-fn merge_provider_options(
+pub(crate) fn merge_provider_options(
     base_provider_options: Option<&ProviderOptions>,
     step_provider_options: Option<ProviderOptions>,
 ) -> Option<ProviderOptions> {

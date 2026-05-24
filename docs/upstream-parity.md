@@ -4816,6 +4816,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    counterparts in `stream_text_type_counterpart_should_infer_*`, covering
    default text, explicit text, object, array, choice, JSON, partial-output,
    array element output, and empty element streams for non-array outputs.
+   The upstream `streamText` `prepareStep` type-level shape now has a runtime
+   Rust counterpart in
+   `stream_text_prepare_step_overrides_step_settings_and_carries_contexts`,
+   covering prepare-step access to messages, initial messages, accumulated
+   response messages, runtime/tool contexts, and per-step overrides for prompt,
+   runtime/tool contexts, tool choice, and provider options.
    The upstream `generate-object.test-d.ts` and `stream-object.test-d.ts`
    unsupported timeout-option assertions now have named Rust counterparts in
    `generate_object_type_counterpart_does_not_accept_timeout_option` and
