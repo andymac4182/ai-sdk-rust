@@ -2677,12 +2677,20 @@ where
             if let Some(is_automatic) = request.is_automatic {
                 approval_request = approval_request.with_automatic(is_automatic);
             }
-            parts.push(TextStreamPart::ToolApprovalRequest(approval_request));
+            insert_part_after_tool_call(
+                &mut parts,
+                &request.tool_call_id,
+                TextStreamPart::ToolApprovalRequest(approval_request),
+            );
         }
         for response in &tool_approvals.responses {
-            parts.push(TextStreamPart::ToolApprovalResponse(
-                text_stream_tool_approval_response_output(response),
-            ));
+            let approval_response = text_stream_tool_approval_response_output(response);
+            let approval_id = approval_response.approval_id.clone();
+            insert_part_after_tool_approval_request(
+                &mut parts,
+                &approval_id,
+                TextStreamPart::ToolApprovalResponse(approval_response),
+            );
         }
 
         let provider_result_tool_call_ids = collected_step
@@ -4043,6 +4051,40 @@ fn text_stream_tool_approval_response_output(
     output
 }
 
+fn insert_part_after_tool_call(
+    parts: &mut Vec<TextStreamPart>,
+    tool_call_id: &str,
+    part: TextStreamPart,
+) {
+    if let Some(index) = parts.iter().position(|candidate| {
+        matches!(
+            candidate,
+            TextStreamPart::ToolCall(tool_call) if tool_call.tool_call_id == tool_call_id
+        )
+    }) {
+        parts.insert(index + 1, part);
+    } else {
+        parts.push(part);
+    }
+}
+
+fn insert_part_after_tool_approval_request(
+    parts: &mut Vec<TextStreamPart>,
+    approval_id: &str,
+    part: TextStreamPart,
+) {
+    if let Some(index) = parts.iter().position(|candidate| {
+        matches!(
+            candidate,
+            TextStreamPart::ToolApprovalRequest(request) if request.approval_id == approval_id
+        )
+    }) {
+        parts.insert(index + 1, part);
+    } else {
+        parts.push(part);
+    }
+}
+
 fn language_model_tool_result_from_stream_text_tool_result(
     tool_result: &GenerateTextToolResult,
 ) -> Option<LanguageModelToolResult> {
@@ -4623,8 +4665,8 @@ mod tests {
     use super::*;
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{
-        GenerateTextContentPart, NormalizedToolApprovalStatus, ToolCallRepairOptions,
-        ToolCallRepairOriginalError, has_tool_call,
+        GenerateTextContentPart, NormalizedToolApprovalStatus, ToolApprovalStatusKind,
+        ToolCallRepairOptions, ToolCallRepairOriginalError, has_tool_call,
     };
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
@@ -12679,6 +12721,129 @@ mod tests {
             "approvalId": approval_request.approval_id.clone(),
             "toolCallId": "call-1"
         })));
+    }
+
+    #[test]
+    fn stream_text_user_approval_function_can_block_one_call_and_execute_another() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane","mode":"needs-approval"}"#,
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "weather",
+                    r#"{"city":"Sydney","mode":"auto"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let approval_calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let approval_calls_for_callback = Arc::clone(&approval_calls);
+        let execute_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let execute_calls_for_tool = Arc::clone(&execute_calls);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |input, _options| {
+                        let execute_calls = Arc::clone(&execute_calls_for_tool);
+                        async move {
+                            execute_calls
+                                .lock()
+                                .expect("execute calls lock")
+                                .push(input["city"].as_str().expect("city is a string").to_owned());
+                            Ok(json!(format!(
+                                "forecast for {}",
+                                input["city"].as_str().expect("city is a string")
+                            )))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new().with_tool_approval_function(
+                        "weather",
+                        move |input, options| {
+                            let approval_calls = Arc::clone(&approval_calls_for_callback);
+                            async move {
+                                approval_calls.lock().expect("approval calls lock").push((
+                                    options.tool_call_id,
+                                    input["mode"].as_str().expect("mode is a string").to_owned(),
+                                ));
+                                if input["mode"] == json!("needs-approval") {
+                                    Some(ToolApprovalStatusKind::UserApproval.into())
+                                } else {
+                                    Some(ToolApprovalStatusKind::NotApplicable.into())
+                                }
+                            }
+                        },
+                    ),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(
+            approval_calls
+                .lock()
+                .expect("approval calls lock")
+                .as_slice(),
+            [
+                ("call-1".to_string(), "needs-approval".to_string()),
+                ("call-2".to_string(), "auto".to_string())
+            ]
+        );
+        assert_eq!(
+            execute_calls.lock().expect("execute calls lock").as_slice(),
+            ["Sydney"]
+        );
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-2");
+        assert_eq!(result.tool_results[0].output, json!("forecast for Sydney"));
+
+        let part_order = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(format!("call:{}", part.tool_call_id)),
+                TextStreamPart::ToolApprovalRequest(part) => {
+                    Some(format!("approval:{}", part.tool_call_id))
+                }
+                TextStreamPart::ToolResult(part) => Some(format!("result:{}", part.tool_call_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_order,
+            [
+                "call:call-1",
+                "approval:call-1",
+                "call:call-2",
+                "result:call-2"
+            ]
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.iter().any(|chunk| {
+            chunk["type"] == "tool-approval-request" && chunk["toolCallId"] == "call-1"
+        }));
+        assert!(chunks.iter().any(|chunk| {
+            chunk["type"] == "tool-output-available"
+                && chunk["toolCallId"] == "call-2"
+                && chunk["output"] == json!("forecast for Sydney")
+        }));
     }
 
     #[test]

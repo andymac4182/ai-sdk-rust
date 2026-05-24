@@ -4998,13 +4998,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    The upstream user-approval, automatic approval, and automatic denial
    tool-approval stream cases now have Rust coverage in
    `stream_text_streams_user_tool_approval_request_without_executing_tool`,
+   `stream_text_user_approval_function_can_block_one_call_and_execute_another`,
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`,
    and the hardened
    `stream_text_applies_denied_tool_approval_to_continuation_messages`,
    proving `tool-approval-request` parts are emitted into both `fullStream`
-   and `toUIMessageStream`, user approval waits without local execution, and
-   automatic `tool-approval-response` chunks are emitted before approved local
-   tool results or denied continuation prompts.
+   and `toUIMessageStream`, user approval waits without local execution,
+   callback-based approval can block one tool call while another local call
+   executes, and automatic `tool-approval-response` chunks are emitted before
+   approved local tool results or denied continuation prompts.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
