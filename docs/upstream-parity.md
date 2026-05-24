@@ -2280,6 +2280,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   portable upstream `ui/chat.test.ts` finish payload shape by recording the
   final assistant message, full message list, finish reason, and
   abort/disconnect/error flags after a successful send.
+- 2026-05-25: `packages/ai` `Chat` disconnected-response parity added
+  `chat_should_handle_a_disconnected_response_stream`, covering the portable
+  upstream `ui/chat.test.ts` disconnected response flow by folding partial
+  stream chunks, preserving the streaming assistant part, and recording the
+  finish payload's `isDisconnect` and `isError` flags.
 - 2026-05-25: `packages/ai` `Chat` aborted-response parity added
   `chat_should_handle_a_stop_and_an_aborted_response_stream`, covering the
   portable upstream `ui/chat.test.ts` stopped/aborted response behavior by

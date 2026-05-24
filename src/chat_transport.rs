@@ -184,10 +184,17 @@ impl ChatTransportReconnectOptions {
 }
 
 /// Error returned by Rust chat transport implementations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ChatTransportError {
     Fetch(String),
-    ResponseStatus { status: u16, body: String },
+    StreamDisconnect {
+        message: String,
+        chunks: Vec<UiMessageChunk>,
+    },
+    ResponseStatus {
+        status: u16,
+        body: String,
+    },
     EmptyBody,
     InvalidMessage(String),
     Agent(String),
@@ -197,6 +204,7 @@ impl fmt::Display for ChatTransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fetch(message) => formatter.write_str(message),
+            Self::StreamDisconnect { message, .. } => formatter.write_str(message),
             Self::ResponseStatus { status, body } => {
                 write!(formatter, "chat transport returned status {status}: {body}")
             }
@@ -232,7 +240,7 @@ pub enum ChatStatus {
 }
 
 /// Error returned by the portable Rust [`Chat`] state manager.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ChatError {
     Transport(ChatTransportError),
     Stream(String),
@@ -311,6 +319,12 @@ pub struct ChatFinishEvent {
     pub is_error: bool,
     pub message: Option<UiMessage>,
     pub messages: Vec<UiMessage>,
+}
+
+struct FoldedChatResponse {
+    states: Vec<UiMessage>,
+    assistant_message: Option<UiMessage>,
+    finish_reason: Option<FinishReason>,
 }
 
 /// Portable Rust state manager for upstream `Chat` submit-message flows.
@@ -419,6 +433,9 @@ impl<T: ChatTransport> Chat<T> {
         self.status = ChatStatus::Streaming;
         match self.transport.send_messages(send_options) {
             Ok(chunks) => self.apply_response_chunks(chunks),
+            Err(ChatTransportError::StreamDisconnect { message, chunks }) => {
+                self.apply_disconnected_response_chunks(chunks, message)
+            }
             Err(error) => {
                 self.status = ChatStatus::Error;
                 let message = error.to_string();
@@ -451,9 +468,58 @@ impl<T: ChatTransport> Chat<T> {
             return Err(ChatError::Stream(error_text));
         }
 
+        let folded = self.fold_response_chunks(chunks, false).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        self.status = ChatStatus::Ready;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: folded.finish_reason,
+            is_abort: self.is_aborted,
+            is_disconnect: false,
+            is_error: false,
+            message: folded.assistant_message,
+            messages: self.messages.clone(),
+        });
+        Ok(folded.states)
+    }
+
+    fn apply_disconnected_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+        message: String,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let original_chunks = chunks.clone();
+        let folded = self.fold_response_chunks(chunks, true).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        self.status = ChatStatus::Error;
+        self.error = Some(message.clone());
+        self.is_aborted = false;
+        self.abort_reason = None;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: folded.finish_reason,
+            is_abort: false,
+            is_disconnect: true,
+            is_error: true,
+            message: folded.assistant_message,
+            messages: self.messages.clone(),
+        });
+        Err(ChatError::Transport(ChatTransportError::StreamDisconnect {
+            message,
+            chunks: original_chunks,
+        }))
+    }
+
+    fn fold_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+        keep_active_parts_streaming: bool,
+    ) -> Result<FoldedChatResponse, ChatTransportError> {
         let mut state = StreamingUiMessageState::new("", None);
-        let states = process_ui_message_stream(&mut state, chunks, false)
-            .map_err(|error| ChatError::Stream(error.to_string()))?;
+        let states = process_ui_message_stream(&mut state, chunks, keep_active_parts_streaming)
+            .map_err(|error| ChatTransportError::InvalidMessage(error.to_string()))?;
 
         let has_assistant_message = !state.message.id.is_empty()
             || !state.message.parts.is_empty()
@@ -468,16 +534,11 @@ impl<T: ChatTransport> Chat<T> {
         }
         self.is_aborted = state.aborted;
         self.abort_reason = state.abort_reason;
-        self.last_finish_event = Some(ChatFinishEvent {
+        Ok(FoldedChatResponse {
+            states,
+            assistant_message,
             finish_reason: state.finish_reason,
-            is_abort: self.is_aborted,
-            is_disconnect: false,
-            is_error: false,
-            message: assistant_message,
-            messages: self.messages.clone(),
-        });
-        self.status = ChatStatus::Ready;
-        Ok(states)
+        })
     }
 }
 
@@ -2605,6 +2666,76 @@ mod tests {
                     "parts": [{ "type": "text", "text": "Hello, world!" }]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn chat_should_handle_a_disconnected_response_stream() {
+        let partial_chunks = vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+        ];
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: partial_chunks.clone(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        let error = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        assert_eq!(
+            error,
+            ChatError::Transport(ChatTransportError::StreamDisconnect {
+                message: "fetch failed".to_string(),
+                chunks: partial_chunks
+            })
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(chat.error(), Some("fetch failed"));
+        assert!(!chat.is_aborted());
+        assert_eq!(chat.abort_reason(), None);
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.is_abort);
+        assert!(event.is_disconnect);
+        assert!(event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "streaming" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            serde_json::to_value(chat.messages()).expect("history serializes")
         );
     }
 
