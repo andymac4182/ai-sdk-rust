@@ -237,6 +237,20 @@ pub type DirectMessageHandler = Arc<
         + 'static,
 >;
 
+/// 1:1 with upstream `MessageHandler<TState>` — invoked for messages
+/// in unsubscribed threads whose text matches a registered regex
+/// pattern. Pattern handlers fire only when no higher-priority
+/// branch (DM / subscribed / mention) handled the message.
+pub type MessageHandler = Arc<
+    dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
+>;
+
+/// Stored regex+handler pair for [`Chat::on_new_message`].
+struct MessagePattern {
+    pattern: regex::Regex,
+    handler: MessageHandler,
+}
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -246,6 +260,7 @@ struct ChatHandlers {
     mention: Arc<std::sync::Mutex<Vec<MentionHandler>>>,
     subscribed: Arc<std::sync::Mutex<Vec<SubscribedMessageHandler>>>,
     direct_message: Arc<std::sync::Mutex<Vec<DirectMessageHandler>>>,
+    message_patterns: Arc<std::sync::Mutex<Vec<MessagePattern>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -496,6 +511,25 @@ impl Chat {
             .push(Arc::new(handler));
     }
 
+    /// 1:1 port of upstream `chat.onNewMessage(pattern, handler)`.
+    /// Registers a handler that fires for messages in unsubscribed
+    /// threads whose text matches the regex pattern. Pattern handlers
+    /// run only when no higher-priority branch (DM / subscribed /
+    /// mention) handles the message — they're the fallback for
+    /// unmatched messages.
+    ///
+    /// All registered patterns are tested against the message text;
+    /// every matching pattern's handler fires in registration order.
+    pub fn on_new_message<F>(&self, pattern: regex::Regex, handler: F)
+    where
+        F: Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static,
+    {
+        self.handlers.message_patterns.lock().unwrap().push(MessagePattern {
+            pattern,
+            handler: Arc::new(handler),
+        });
+    }
+
     /// 1:1 port of upstream `chat.transcripts` getter. Panics when
     /// transcripts were not configured at construction (matches
     /// upstream's `throw new Error("chat.transcripts is not
@@ -651,32 +685,31 @@ impl Chat {
             }
         }
 
-        // Handler dispatch (slices 415, 416, 417). Snapshot each
-        // handler list under a short lock then drop the guard before
-        // awaiting so handler invocations don't hold the registration
-        // mutex. Multi-handler dispatch is sequential to match
-        // upstream's `await` loop semantics.
+        // Handler dispatch (slices 415, 416, 417, 418). Snapshot
+        // each handler list under a short lock then drop the guard
+        // before awaiting so handler invocations don't hold the
+        // registration mutex. Multi-handler dispatch is sequential to
+        // match upstream's `await` loop semantics.
         //
-        // Routing priority (Phase A+B+C scope):
+        // Routing priority (Phase A+B+C+D scope), 1:1 with upstream
+        // `Chat.handleIncomingMessage`:
         // 1. If `adapter.is_dm(thread_id)` AND at least one DM
-        //    handler is registered → dispatch to `onDirectMessage`
-        //    handlers; SKIP subscribed/mention dispatch (DM handlers
-        //    absorb subscribed + mention per upstream's "subscribed
-        //    DM threads route to onDirectMessage" rule).
-        // 2. Else if the thread is subscribed → dispatch to
-        //    `onSubscribedMessage` handlers and SKIP mention dispatch
-        //    (subscribed handlers absorb mentions per upstream).
-        // 3. Else if `message.is_mention == Some(true)` → dispatch
-        //    to `onNewMention` handlers.
+        //    handler is registered → dispatch to `onDirectMessage`,
+        //    return.
+        // 2. If `adapter.is_dm(thread_id)` AND no DM handlers
+        //    registered → set `message.is_mention = Some(true)`
+        //    (backward-compat: treat DMs as mentions) and fall
+        //    through.
+        // 3. If the thread is subscribed → dispatch to
+        //    `onSubscribedMessage`, return.
+        // 4. Else if `message.is_mention == Some(true)` → dispatch
+        //    to `onNewMention`, return.
+        // 5. Walk message_patterns; fire each matching pattern
+        //    handler (every matching pattern handler runs, in
+        //    registration order, matching upstream's for-of loop).
         //
-        // Falls through to next priority level when no handlers are
-        // registered for the matched class. This matches upstream's
-        // "fall through to onNewMention when no DM handlers
-        // registered" semantics.
-        //
-        // Full routing (pattern → onNewMessage; detectMention walker
-        // computing is_mention; lock/concurrency dispatch) lands in
-        // Phases D-E.
+        // Full routing (detectMention walker computing is_mention;
+        // lock/concurrency dispatch) lands in Phases E+.
         //
         // Skip dispatch entirely if the dispatching adapter isn't in
         // the registered map (upstream tests sometimes pass a
@@ -687,39 +720,64 @@ impl Chat {
             let is_dm = adapter.is_dm(_thread_id).unwrap_or(false);
             let dm_handlers: Vec<DirectMessageHandler> =
                 self.handlers.direct_message.lock().unwrap().clone();
-            let dm_dispatched = if is_dm && !dm_handlers.is_empty() {
+            if is_dm && !dm_handlers.is_empty() {
                 let channel_id = crate::channel::derive_channel_id(&*adapter_arc, _thread_id);
                 for handler in dm_handlers {
                     let thread = Thread::new(adapter_arc.clone(), _thread_id);
                     let channel = crate::channel::Channel::new(adapter_arc.clone(), &channel_id);
                     handler(thread, message.clone(), channel).await;
                 }
-                true
-            } else {
-                false
-            };
+                return Ok(true);
+            }
+            // 1:1 with upstream "Backward compat: treat DMs as
+            // mentions when no DM handlers registered".
+            if is_dm {
+                message.is_mention = Some(true);
+            }
 
-            if !dm_dispatched {
-                let is_subscribed = self
-                    .state
-                    .is_subscribed(_thread_id)
-                    .await
-                    .unwrap_or(false);
+            let is_subscribed = self
+                .state
+                .is_subscribed(_thread_id)
+                .await
+                .unwrap_or(false);
 
-                if is_subscribed {
-                    let handlers_snapshot: Vec<SubscribedMessageHandler> =
-                        self.handlers.subscribed.lock().unwrap().clone();
-                    for handler in handlers_snapshot {
-                        let thread = Thread::new(adapter_arc.clone(), _thread_id);
-                        handler(thread, message.clone()).await;
-                    }
-                } else if message.is_mention == Some(true) {
-                    let handlers_snapshot: Vec<MentionHandler> =
-                        self.handlers.mention.lock().unwrap().clone();
-                    for handler in handlers_snapshot {
-                        let thread = Thread::new(adapter_arc.clone(), _thread_id);
-                        handler(thread, message.clone()).await;
-                    }
+            if is_subscribed {
+                let handlers_snapshot: Vec<SubscribedMessageHandler> =
+                    self.handlers.subscribed.lock().unwrap().clone();
+                for handler in handlers_snapshot {
+                    let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                    handler(thread, message.clone()).await;
+                }
+                return Ok(true);
+            }
+
+            if message.is_mention == Some(true) {
+                let handlers_snapshot: Vec<MentionHandler> =
+                    self.handlers.mention.lock().unwrap().clone();
+                for handler in handlers_snapshot {
+                    let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                    handler(thread, message.clone()).await;
+                }
+                return Ok(true);
+            }
+
+            // Pattern handlers fire as the fallback for unmatched
+            // messages. Snapshot the regex+handler pairs (clone the
+            // Arc handlers but the Regex needs reconstruction; we
+            // store a Vec of (Regex, MessageHandler) clones via the
+            // intermediate `MessagePattern` struct).
+            let patterns_snapshot: Vec<(regex::Regex, MessageHandler)> = self
+                .handlers
+                .message_patterns
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|mp| (mp.pattern.clone(), mp.handler.clone()))
+                .collect();
+            for (pattern, handler) in patterns_snapshot {
+                if pattern.is_match(&message.text) {
+                    let thread = Thread::new(adapter_arc.clone(), _thread_id);
+                    handler(thread, message.clone()).await;
                 }
             }
         }
@@ -2729,6 +2787,195 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    // ---------- describe("message patterns") + DM backward-compat — slice 418 ----------
+    //
+    // 1:1 with upstream `chat.test.ts` pattern-handler cases and the
+    // `Backward compat: treat DMs as mentions when no DM handlers
+    // registered` branch.
+    //
+    // Phase D (slice 418) adds the regex pattern handler registration
+    // surface + dispatcher fallback branch. Pattern handlers fire as
+    // the lowest-priority class — only when DM (with handlers),
+    // subscribed, and mention have all not handled the message.
+
+    #[test]
+    fn on_new_message_should_match_message_patterns() {
+        // 1:1 with upstream "should match message patterns". Registers
+        // a single pattern handler; sends a matching message; handler
+        // fires.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let re = regex::Regex::new("help").unwrap();
+        chat.on_new_message(re, move |_thread, _msg| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "Can someone help me?".to_string();
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_new_message_pattern_does_not_fire_when_text_does_not_match() {
+        // Additive: regex non-match → no handler invocation.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let re = regex::Regex::new("^!help").unwrap();
+        chat.on_new_message(re, move |_thread, _msg| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "hello everyone".to_string();
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_new_message_pattern_fires_when_mention_handler_does_not_match() {
+        // 1:1 with upstream "should not trigger onNewMention when
+        // message event has no bot mention" — verifies mention
+        // handler doesn't fire AND pattern handler does, when text
+        // has no mention but matches the pattern.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let pattern_calls = Arc::new(AtomicUsize::new(0));
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let p = pattern_calls.clone();
+        let re = regex::Regex::new("hello").unwrap();
+        chat.on_new_message(re, move |_thread, _msg| {
+            let c = p.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "hello everyone".to_string();
+        msg.is_mention = Some(false);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(pattern_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_new_message_pattern_does_not_fire_when_mention_handler_handles_message() {
+        // Additive: when is_mention=true, mention handler fires and
+        // returns; pattern never reached (upstream's early return).
+        let (chat, adapter) = chat_with_in_memory_state();
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let pattern_calls = Arc::new(AtomicUsize::new(0));
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let p = pattern_calls.clone();
+        let re = regex::Regex::new("hello").unwrap();
+        chat.on_new_message(re, move |_thread, _msg| {
+            let c = p.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "hello bot".to_string();
+        msg.is_mention = Some(true);
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(pattern_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_new_message_invokes_every_matching_pattern_in_order() {
+        // Additive: every pattern whose regex matches the message
+        // text fires its handler. Sequential ordering.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_new_message(regex::Regex::new("hello").unwrap(), move |_thread, _msg| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_new_message(regex::Regex::new("world").unwrap(), move |_thread, _msg| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        let o3 = order.clone();
+        chat.on_new_message(regex::Regex::new("foo").unwrap(), move |_thread, _msg| {
+            let o = o3.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(3);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "hello world".to_string();
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        // patterns 1 + 2 match; 3 ("foo") does not.
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn on_direct_message_backward_compat_treats_dm_as_mention_when_no_dm_handlers() {
+        // 1:1 with upstream's "Backward compat: treat DMs as
+        // mentions when no DM handlers registered" branch. DM-shape
+        // thread; no DM handlers registered; mention handler should
+        // fire (with is_mention=true set by dispatcher even though
+        // caller passed is_mention=false).
+        let (chat, adapter) = chat_with_dm_adapter();
+        let mention_calls = Arc::new(AtomicUsize::new(0));
+        let m = mention_calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = m.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.is_mention = Some(false); // dispatcher overrides to true
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:DU123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(mention_calls.load(AtomicOrdering::SeqCst), 1);
+        // The dispatcher mutated message.is_mention to true.
+        assert_eq!(msg.is_mention, Some(true));
     }
 
     #[test]
