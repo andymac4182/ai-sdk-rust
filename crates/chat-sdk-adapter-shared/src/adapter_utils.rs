@@ -337,6 +337,57 @@ mod tests {
     }
 
     #[test]
+    fn extract_postable_attachments_returns_attachments_from_postable_ast() {
+        // 1:1 with upstream `describe("extractPostableAttachments")
+        // > it("extracts attachments array from PostableAst")` —
+        // PostableAst can carry an attachments array, and the helper
+        // returns it unchanged.
+        let attachments = vec![chat_sdk_chat::types::Attachment {
+            data: Some(FileBytes::from(b"doc".to_vec())),
+            fetch_metadata: None,
+            height: None,
+            mime_type: None,
+            name: Some("doc.pdf".to_string()),
+            size: None,
+            kind: AttachmentKind::File,
+            url: None,
+            width: None,
+        }];
+        let msg = AdapterPostableMessage::from(PostableAst {
+            ast: markdown::root(vec![]),
+            attachments: Some(attachments.clone()),
+            files: None,
+        });
+        assert_eq!(extract_postable_attachments(&msg), attachments.as_slice());
+    }
+
+    #[test]
+    fn extract_postable_attachments_returns_empty_slice_for_postable_raw_without_attachments() {
+        // 1:1 with upstream `describe("extractPostableAttachments")
+        // > it("returns empty array for PostableRaw without
+        // attachments")` — the `attachments` field is None.
+        let msg = AdapterPostableMessage::from(PostableRaw {
+            attachments: None,
+            files: None,
+            raw: "Text".to_string(),
+        });
+        assert!(extract_postable_attachments(&msg).is_empty());
+    }
+
+    #[test]
+    fn extract_postable_attachments_returns_empty_slice_for_postable_markdown_without_attachments() {
+        // 1:1 with upstream `describe("extractPostableAttachments")
+        // > it("returns empty array for PostableMarkdown without
+        // attachments")` — the `attachments` field is None.
+        let msg = AdapterPostableMessage::from(PostableMarkdown {
+            attachments: None,
+            files: None,
+            markdown: "**Text**".to_string(),
+        });
+        assert!(extract_postable_attachments(&msg).is_empty());
+    }
+
+    #[test]
     fn extract_postable_attachments_returns_attachments_from_postable_markdown() {
         let attachments = vec![chat_sdk_chat::types::Attachment {
             data: Some(FileBytes::from(b"image".to_vec())),
