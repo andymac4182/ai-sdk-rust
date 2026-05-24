@@ -4906,6 +4906,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_result_full_stream_passes_provider_metadata_on_tool_input_start`,
    `stream_text_result_full_stream_sends_tool_results`, and
    `stream_text_result_full_stream_sends_delayed_asynchronous_tool_results`.
+   The upstream raw-chunk forwarding cases now have named Rust counterparts in
+   `stream_text_preserves_raw_chunks_when_requested`,
+   `stream_text_omits_raw_chunks_by_default`,
+   `stream_text_passes_explicit_false_include_raw_chunks_to_model`, and
+   `stream_text_invokes_chunk_callback_for_portable_chunks`, proving requested
+   raw chunks reach `result.fullStream`/`onChunk`, disabled raw chunks are
+   filtered, and explicit `false` is forwarded to the provider call boundary.
+   The deprecated JavaScript `includeRawChunks` and `experimental_include`
+   aliases are documented as JavaScript option-surface compatibility because
+   Rust exposes only the typed `with_include_raw_chunks` builder.
    The portable upstream error callback cases for mid-stream provider error
    chunks and second-step continuation stream errors now have named Rust
    counterparts in

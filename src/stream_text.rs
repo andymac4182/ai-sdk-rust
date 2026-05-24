@@ -9635,6 +9635,33 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_passes_explicit_false_include_raw_chunks_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Raw(LanguageModelRawStreamPart::new(
+                    json!({"type": "raw-data", "content": "hidden"}),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_include_raw_chunks(false),
+        ));
+
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Raw(_)))
+        );
+        assert_eq!(model.stream_calls()[0].include_raw_chunks, Some(false));
+    }
+
+    #[test]
     fn text_stream_parts_use_upstream_high_level_shapes() {
         let text_delta = TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("text-1", "Hello"));
         assert_eq!(
