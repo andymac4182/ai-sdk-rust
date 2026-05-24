@@ -5004,6 +5004,35 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
+    #[test]
+    fn on_slash_command_runs_both_specific_and_catch_all_handlers() {
+        // 1:1 with upstream `chat.test.ts > describe("Slash Commands")
+        // > "should run both specific and catch-all handlers"`. A
+        // `/help`-filtered handler AND a no-filter catch-all handler
+        // both fire on a `/help` event.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let specific_calls = Arc::new(AtomicUsize::new(0));
+        let catch_all_calls = Arc::new(AtomicUsize::new(0));
+        let s = specific_calls.clone();
+        chat.on_slash_command_filtered(["/help"], move |_event| {
+            let s = s.clone();
+            Box::pin(async move {
+                s.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let c = catch_all_calls.clone();
+        chat.on_slash_command(move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        assert_eq!(specific_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(catch_all_calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
     /// Recording adapter that captures `post_channel_message` calls
     /// for the slash-command `event.channel.post(...)` test.
     #[derive(Debug, Default)]
