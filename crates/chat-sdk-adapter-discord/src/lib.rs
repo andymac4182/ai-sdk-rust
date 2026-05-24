@@ -822,13 +822,11 @@ mod tests {
         assert!(decode_thread_id("discord:123:").is_none());
     }
 
-    #[test]
     // ---------- channel_id_from_thread_id + is_dm ----------
     // 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`
     // (first 3 colon-segments of any string) and `adapter.isDM(threadId)`
     // (true iff guild_id == "@me").
 
-    #[test]
     // ---------- renderFormatted (1 upstream case) ----------
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {
@@ -841,7 +839,6 @@ mod tests {
         assert!(result.contains("Hello world"), "got: {result}");
     }
 
-    #[test]
     #[test]
     fn discord_max_content_length_matches_upstream() {
         // 1:1 with upstream's private `DISCORD_MAX_CONTENT_LENGTH = 2000`.
@@ -859,23 +856,37 @@ mod tests {
         assert_eq!(InteractionResponseType::DEFERRED_UPDATE_MESSAGE, 6);
     }
 
+    // ---------- describe("channelIdFromThreadId") (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("channelIdFromThreadId")`.
+    // Split from the prior bundled `channel_id_from_thread_id_takes_first_three_colon_segments`
+    // single-test coverage into one Rust test per upstream case to
+    // preserve the "every portable upstream case has a matching
+    // Rust test" rule.
+
     #[test]
-    fn channel_id_from_thread_id_takes_first_three_colon_segments() {
+    fn channel_id_from_thread_id_returns_channel_level_id_from_thread_id() {
         let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
-        // Channel-only thread id passes through unchanged.
         assert_eq!(
-            adapter.channel_id_from_thread_id("discord:G1:C1"),
-            "discord:G1:C1"
+            adapter.channel_id_from_thread_id("discord:guild1:channel456:thread789"),
+            "discord:guild1:channel456"
         );
-        // Channel-with-sub-thread strips the 4th segment.
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_as_is_when_already_a_channel_id_3_parts() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
         assert_eq!(
-            adapter.channel_id_from_thread_id("discord:G1:C1:T9"),
-            "discord:G1:C1"
+            adapter.channel_id_from_thread_id("discord:guild1:channel456"),
+            "discord:guild1:channel456"
         );
-        // DM channel preserves the @me guild marker.
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_handles_dm_channel_ids() {
+        let adapter = DiscordAdapter::new(DiscordAdapterOptions::new("APP", "BOT_TOKEN"));
         assert_eq!(
-            adapter.channel_id_from_thread_id("discord:@me:DM1"),
-            "discord:@me:DM1"
+            adapter.channel_id_from_thread_id("discord:@me:dm123"),
+            "discord:@me:dm123"
         );
     }
 
