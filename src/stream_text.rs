@@ -10849,7 +10849,98 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_resolves_deferred_provider_tool_errors() {
+    fn stream_text_resolves_deferred_provider_tool_error_in_same_step() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "provider-call-1",
+                        "providerTool",
+                        r#"{"city":"Brisbane"}"#,
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "provider-call-1",
+                        "providerTool",
+                        NonNullJsonValue::new(json!("ERROR")).expect("provider error is non-null"),
+                    )
+                    .with_is_error(true),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Handled provider error.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let provider_args = json!({ "mode": "deferred" })
+            .as_object()
+            .expect("provider args are an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::provider_executed(
+                        "providerTool",
+                        "test.providerTool",
+                        provider_args,
+                        schema.clone(),
+                        schema,
+                    )
+                    .with_supports_deferred_results(true),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.text, "Handled provider error.");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "provider-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "providerTool");
+        assert_eq!(result.tool_results[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_results[0].output, json!("ERROR"));
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(result.steps[0].tool_calls.len(), 1);
+        assert_eq!(
+            result.steps[0].tool_calls[0].input,
+            json!({ "city": "Brisbane" })
+        );
+        assert_eq!(result.steps[0].tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.steps[0].tool_results.len(), 1);
+        assert_eq!(
+            result.steps[0].tool_results[0].input,
+            json!({ "city": "Brisbane" })
+        );
+        assert_eq!(result.steps[0].tool_results[0].output, json!("ERROR"));
+        assert_eq!(result.steps[0].tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.steps[0].tool_results[0].provider_executed,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn stream_text_resolves_deferred_provider_tool_error_in_later_step() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::ToolCall(

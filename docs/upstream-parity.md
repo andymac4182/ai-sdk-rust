@@ -4988,6 +4988,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving provider-executed dynamic flags and provider metadata survive
    streamed tool-input start/delta/end, tool-call, tool-result, UI-message
    chunks, and final step tool state.
+   The upstream `streamText` deferred provider `tool-error` cases now have
+   named Rust counterparts in
+   `stream_text_resolves_deferred_provider_tool_error_in_same_step` and
+   `stream_text_resolves_deferred_provider_tool_error_in_later_step`, proving
+   same-step provider errors close without another model call while later-step
+   deferred provider errors continue once and resolve as provider-executed tool
+   errors.
    The upstream automatic approval and automatic denial tool-approval stream
    cases now have Rust coverage in
    `stream_text_automatic_tool_approval_response_streams_before_tool_result`
