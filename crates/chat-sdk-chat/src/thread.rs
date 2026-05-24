@@ -695,6 +695,35 @@ mod tests {
     //! `thread.test.ts` exercises every Adapter method via Thread —
     //! those will land as each method gets ported into the Adapter
     //! trait + Thread wrapper.
+    //!
+    //! ---------- upstream js-only-documented cases (2) ----------
+    //!
+    //! Per the slice-380 type-system-impossible pattern, the
+    //! following upstream `thread.test.ts > describe("schedule()")`
+    //! cases are enumerated as js-only-documented here because they
+    //! exercise a JS-only authoring surface unrepresentable in the
+    //! Rust port by construction (slice 449):
+    //!
+    //! 1. `should convert JSX Card elements to CardElement before
+    //!    passing to adapter` (thread.test.ts:2809) — asserts the
+    //!    upstream `Card(...)` JSX-element factory is rewritten to
+    //!    a plain `CardElement` object before being passed to
+    //!    `adapter.scheduleMessage`. The Rust port has no JSX
+    //!    runtime; `card(CardOptions { ... })` is already a builder
+    //!    that returns the `CardElement` struct directly, so the
+    //!    "convert JSX -> CardElement" branch is a no-op by
+    //!    construction. See [`crate::cards::card`].
+    //!
+    //! 2. `should convert Card JSX with children to CardElement`
+    //!    (thread.test.ts:2826) — same JSX-element factory, this
+    //!    time with nested children. Same Rust-equivalent: the
+    //!    builder takes children as a typed `Vec<CardChild>` and
+    //!    produces a `CardElement` directly.
+    //!
+    //! These 2 cases are part of the 24-case upstream schedule()
+    //! describe block; 18 are already 1:1 ported (slices 385,
+    //! 403..405) and the other 4 are deferred behind PostableMessage
+    //! input shapes that require the `from_full_stream` integration.
     use super::*;
     use crate::postable_object::postable_envelope;
     use crate::types::{AdapterError, AdapterResult};
