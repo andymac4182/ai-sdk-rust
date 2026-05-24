@@ -1380,6 +1380,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream single-step, per-step multi-step, and empty-warning
   `logWarnings` spy cases. `generate_text` and `stream_text` now invoke the
   shared warning logger with provider/model scope for each completed step.
+- 2026-05-24: `packages/ai` `streamText` telemetry integration array parity
+  added
+  `stream_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+  mapping upstream `telemetry integrations > should support multiple per-call
+  integrations as an array` by proving both per-call integrations receive
+  `onStart` in configured order.
 - 2026-05-23: `packages/ai` `streamText` UI-message response helper
   parity added named Rust counterparts
   `stream_text_result_to_ui_message_stream_masks_error_messages_by_default`,
@@ -2013,6 +2019,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   logger invocation from each API. These map upstream `logWarnings` single-step,
   per-step multi-step, and empty-warning spy cases by proving the logger
   receives each step's warnings, empty-warning calls, provider id, and model id.
+- 2026-05-24: `streamText` telemetry integration array parity added
+  `stream_text_supports_multiple_per_call_telemetry_integrations_as_array` in
+  `src/stream_text.rs`, mapping upstream
+  `telemetry integrations > should support multiple per-call integrations as an
+  array` by proving both integrations receive `onStart` in configured order.
 - 2026-05-22: `streamObject` object-stream schema metadata parity added
   `stream_object_object_stream_uses_schema_name_and_description` in
   `src/stream_object.rs`, mapping upstream `output = "object" >

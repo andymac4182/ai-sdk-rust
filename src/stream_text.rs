@@ -10027,6 +10027,51 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_supports_multiple_per_call_telemetry_integrations_as_array() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_events = Arc::clone(&events);
+        let second_events = Arc::clone(&events);
+        let first =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                first_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("first".to_string());
+            });
+        let second =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                second_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("second".to_string());
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_telemetry(TelemetryOptions::new().with_integrations([first, second])),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
     fn stream_text_accepts_experimental_telemetry_alias() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
