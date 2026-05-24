@@ -5007,6 +5007,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    callback-based approval can block one tool call while another local call
    executes, and automatic `tool-approval-response` chunks are emitted before
    approved local tool results or denied continuation prompts.
+   The upstream `streamText` approved prior tool-approval response path now
+   has the named Rust counterpart
+   `stream_text_executes_initial_approved_tool_approval_before_first_model_call`,
+   proving approved initial tool approval responses execute before the first
+   provider stream call, are visible to `prepareStep.responseMessages`, and
+   emit full-stream/UI tool-result chunks before the first `start-step`.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,

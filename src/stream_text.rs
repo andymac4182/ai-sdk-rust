@@ -23,13 +23,14 @@ use crate::generate_text::{
     ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
     apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
     generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
-    invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
-    invoke_tool_input_start_callback, is_stop_condition_met, mark_invalid_tool_inputs,
-    mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
-    mark_tool_result_metadata, mark_unavailable_tool_calls, merge_provider_options,
-    refine_tool_inputs, refresh_generate_text_content, refresh_tool_call_views,
-    refresh_tool_result_views, repair_tool_calls, resolve_tool_approvals_for_step,
-    response_messages_for_step, should_continue_after_tool_results, sync_tool_result_inputs,
+    initial_tool_approval_response_message, invoke_tool_input_available_callback,
+    invoke_tool_input_delta_callback, invoke_tool_input_start_callback, is_stop_condition_met,
+    mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
+    mark_tool_call_titles, mark_tool_result_metadata, mark_unavailable_tool_calls,
+    merge_provider_options, refine_tool_inputs, refresh_generate_text_content,
+    refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
+    resolve_tool_approvals_for_step, response_messages_for_step,
+    should_continue_after_tool_results, sync_tool_result_inputs,
     update_pending_deferred_provider_tool_calls,
 };
 use crate::headers::Headers;
@@ -2393,6 +2394,7 @@ where
     let max_steps = max_steps.max(1);
     let mut stream_steps = Vec::new();
     let mut generate_steps = Vec::new();
+    let mut initial_response_messages = Vec::new();
     let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
     let mut aborted = false;
     let mut abort_reason = None;
@@ -2435,6 +2437,36 @@ where
         telemetry_dispatcher.on_start(&start_event);
     }
 
+    if let Some(initial_response) = initial_tool_approval_response_message(
+        &call_id,
+        &current_prompt,
+        &tools,
+        &tools_context,
+        (
+            experimental_sandbox.as_ref(),
+            call_options.abort_signal.as_ref(),
+            timeout.as_ref(),
+            None,
+            None,
+            on_tool_execution_start.as_ref(),
+            on_tool_execution_end.as_ref(),
+            Some(&telemetry_dispatcher),
+        ),
+    )
+    .await
+    {
+        current_prompt.push(initial_response.message.clone());
+        initial_response_messages.push(initial_response.message);
+        for tool_result in initial_response.tool_results {
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolResult(tool_result),
+                on_chunk.as_ref(),
+            )
+            .await;
+        }
+    }
+
     for step_number in 0..max_steps {
         if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal.as_ref()) {
             abort_reason = abort_part.reason.clone();
@@ -2448,8 +2480,10 @@ where
             break;
         }
 
-        let accumulated_response_messages =
-            crate::generate_text::accumulated_response_messages(&[], &generate_steps);
+        let accumulated_response_messages = crate::generate_text::accumulated_response_messages(
+            &initial_response_messages,
+            &generate_steps,
+        );
         let prepare_step_result = if let Some(prepare_step) = &prepare_step {
             prepare_step
                 .prepare(PrepareStepOptions {
@@ -4677,7 +4711,8 @@ mod tests {
         LanguageModelReasoningFile, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
         LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
         LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
         LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
         LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
         LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
@@ -4727,6 +4762,31 @@ mod tests {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
         ]))
+    }
+
+    fn approval_response_prompt(
+        response: LanguageModelToolApprovalResponsePart,
+        provider_executed: bool,
+    ) -> Vec<LanguageModelMessage> {
+        let mut tool_call =
+            LanguageModelToolCallPart::new("call-1", "weather", json!({ "city": "Brisbane" }));
+
+        if provider_executed {
+            tool_call = tool_call.with_provider_executed(true);
+        }
+
+        vec![
+            user_message("Weather?"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(tool_call),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(response),
+            ])),
+        ]
     }
 
     #[derive(Debug)]
@@ -12844,6 +12904,134 @@ mod tests {
                 && chunk["toolCallId"] == "call-2"
                 && chunk["output"] == json!("forecast for Sydney")
         }));
+    }
+
+    #[test]
+    fn stream_text_executes_initial_approved_tool_approval_before_first_model_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prepare_step_response_messages =
+            Arc::new(Mutex::new(Vec::<Vec<LanguageModelMessage>>::new()));
+        let prepare_step_response_messages_for_callback =
+            Arc::clone(&prepare_step_response_messages);
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", true),
+            false,
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id
+                        }))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_prepare_step(move |options| {
+                    let messages = Arc::clone(&prepare_step_response_messages_for_callback);
+                    async move {
+                        messages
+                            .lock()
+                            .expect("prepare-step messages lock")
+                            .push(options.response_messages);
+                        PrepareStepResult::new()
+                    }
+                })
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(&calls[0].prompt[..3], prompt.as_slice());
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "weather"
+                                && part.output == LanguageModelToolResultOutput::json(json!({
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }))
+                    )
+        ));
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(result.steps.len(), 1);
+
+        let prepare_step_response_messages = prepare_step_response_messages
+            .lock()
+            .expect("prepare-step messages lock");
+        assert_eq!(prepare_step_response_messages.len(), 1);
+        assert_eq!(prepare_step_response_messages[0].len(), 1);
+        assert!(matches!(
+            &prepare_step_response_messages[0][0],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.output == LanguageModelToolResultOutput::json(json!({
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }))
+                    )
+        ));
+
+        let first_tool_result_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolResult(result) if result.tool_call_id == "call-1"))
+            .expect("initial tool result is streamed");
+        let start_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::StartStep(_)))
+            .expect("start-step is streamed");
+        assert!(first_tool_result_index < start_step_index);
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        let tool_output_index = chunks
+            .iter()
+            .position(|chunk| {
+                chunk["type"] == "tool-output-available"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["output"]["forecast"] == "sunny"
+            })
+            .expect("initial tool output is in UI stream");
+        let ui_start_step_index = chunks
+            .iter()
+            .position(|chunk| chunk["type"] == "start-step")
+            .expect("UI start-step exists");
+        assert!(tool_output_index < ui_start_step_index);
     }
 
     #[test]

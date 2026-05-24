@@ -5414,7 +5414,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     let mut initial_response_messages = Vec::new();
-    if let Some(message) = initial_tool_approval_response_message(
+    if let Some(initial_response) = initial_tool_approval_response_message(
         &call_id,
         &current_prompt,
         &tools,
@@ -5432,8 +5432,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     )
     .await
     {
-        current_prompt.push(message.clone());
-        initial_response_messages.push(message);
+        current_prompt.push(initial_response.message.clone());
+        initial_response_messages.push(initial_response.message);
     }
 
     let mut steps = Vec::new();
@@ -6231,13 +6231,18 @@ pub(crate) fn update_pending_deferred_provider_tool_calls(
     }
 }
 
-async fn initial_tool_approval_response_message(
+pub(crate) struct InitialToolApprovalResponse {
+    pub(crate) message: LanguageModelMessage,
+    pub(crate) tool_results: Vec<GenerateTextToolResult>,
+}
+
+pub(crate) async fn initial_tool_approval_response_message(
     call_id: &str,
     prompt: &LanguageModelPrompt,
     tools: &[Tool],
     tools_context: &JsonObject,
     tool_execution_callbacks: GenerateTextToolExecutionContext<'_, '_>,
-) -> Option<LanguageModelMessage> {
+) -> Option<InitialToolApprovalResponse> {
     let approvals = collect_tool_approvals(prompt).ok()?;
     let mut approved_tool_calls = approvals
         .approved_tool_approvals
@@ -6288,9 +6293,10 @@ async fn initial_tool_approval_response_message(
     if content.is_empty() {
         None
     } else {
-        Some(LanguageModelMessage::Tool(LanguageModelToolMessage::new(
-            content,
-        )))
+        Some(InitialToolApprovalResponse {
+            message: LanguageModelMessage::Tool(LanguageModelToolMessage::new(content)),
+            tool_results,
+        })
     }
 }
 
