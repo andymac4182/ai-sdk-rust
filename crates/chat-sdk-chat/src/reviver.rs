@@ -643,6 +643,77 @@ mod tests {
     }
 
     #[test]
+    fn standalone_reviver_should_allow_re_serialization_of_a_revived_thread_without_singleton() {
+        // 1:1 with upstream "should allow re-serialization of a
+        // revived Thread without singleton" (serialization.test.ts:917).
+        // With no singleton registered, the chat:Thread envelope
+        // passes through verbatim; re-serializing the PassThrough
+        // value via `serde_json` reproduces the original wire shape
+        // (1:1 with upstream's `JSON.stringify` round-trip observable).
+        // Upstream constructs `ThreadImpl.fromJSON` in the
+        // no-singleton path; Rust's `Thread::from_json` requires an
+        // explicit adapter argument by construction, so the upstream
+        // "construct without adapter" shape is unrepresentable — the
+        // observable wire-shape preservation lives on the
+        // PassThrough branch instead.
+        clear_chat_singleton();
+        let json = json!({
+            "_type": "chat:Thread",
+            "id": "slack:C123:1234.5678",
+            "channelId": "C123",
+            "isDM": false,
+            "adapterName": "slack",
+        });
+        match revive_value(json.clone()) {
+            Revived::PassThrough(v) => {
+                let reserialized = serde_json::to_value(&v).unwrap();
+                assert_eq!(
+                    reserialized.get("_type").and_then(Value::as_str),
+                    Some("chat:Thread")
+                );
+                assert_eq!(
+                    reserialized.get("adapterName").and_then(Value::as_str),
+                    Some("slack")
+                );
+                assert_eq!(
+                    reserialized.get("id").and_then(Value::as_str),
+                    Some("slack:C123:1234.5678")
+                );
+            }
+            other => panic!("expected PassThrough (no singleton), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn standalone_reviver_should_allow_re_serialization_of_a_revived_channel_without_singleton() {
+        // 1:1 with upstream "should allow re-serialization of a
+        // revived Channel without singleton" (serialization.test.ts:936).
+        // Same shape as the Thread re-serialization case above.
+        clear_chat_singleton();
+        let json = json!({
+            "_type": "chat:Channel",
+            "id": "C123",
+            "isDM": false,
+            "adapterName": "slack",
+        });
+        match revive_value(json.clone()) {
+            Revived::PassThrough(v) => {
+                let reserialized = serde_json::to_value(&v).unwrap();
+                assert_eq!(
+                    reserialized.get("_type").and_then(Value::as_str),
+                    Some("chat:Channel")
+                );
+                assert_eq!(
+                    reserialized.get("adapterName").and_then(Value::as_str),
+                    Some("slack")
+                );
+                assert_eq!(reserialized.get("id").and_then(Value::as_str), Some("C123"));
+            }
+            other => panic!("expected PassThrough (no singleton), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn revive_value_falls_through_when_no_singleton_or_no_matching_adapter() {
         // 1:1 (subset) with upstream's "no singleton registered" /
         // "adapter not found" lazy-resolution-failure behavior: the
