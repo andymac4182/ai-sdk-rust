@@ -4515,6 +4515,61 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
+    /// Recording adapter that captures `post_message` calls for the
+    /// reaction `event.thread.post(...)` test (slice 475).
+    #[derive(Debug, Default)]
+    struct ReactionThreadPostAdapter {
+        post_message_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for ReactionThreadPostAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_message_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            Ok("msg-id".to_string())
+        }
+    }
+
+    #[test]
+    fn on_reaction_event_thread_post_routes_to_adapter_post_message() {
+        // 1:1 with upstream `chat.test.ts > describe("Reactions") > "should
+        // allow posting from reaction thread"`. The reaction handler calls
+        // `event.thread.post(text)` which routes through `Thread::post`
+        // → `Adapter::post_message` with the event's `thread_id`.
+        let recorder: Arc<ReactionThreadPostAdapter> =
+            Arc::new(ReactionThreadPostAdapter::default());
+        let adapter: Arc<dyn Adapter> = recorder.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let i = invoked.clone();
+        chat.on_reaction(move |event| {
+            let i = i.clone();
+            let thread = event.thread.clone();
+            Box::pin(async move {
+                let _ = thread.post("Thanks for the reaction!").await;
+                i.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_reaction_event("thumbs_up", "+1", false);
+        futures_executor::block_on(chat.process_reaction(adapter.as_ref(), event));
+        assert_eq!(invoked.load(AtomicOrdering::SeqCst), 1);
+        let calls = recorder.post_message_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123:1234.5678");
+        assert_eq!(calls[0].1, "Thanks for the reaction!");
+    }
+
     // ---------- describe("Actions") — slice 420 ----------
     //
     // 1:1 with upstream `chat.test.ts > describe("Actions")`. Phase
