@@ -1786,6 +1786,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   mapping upstream `telemetry integrations > should support multiple per-call
   integrations as an array` by proving both per-call integrations receive
   `onStart` in configured order.
+- 2026-05-25: `packages/ai` `streamText` telemetry integration parity added
+  `stream_text_calls_globally_registered_integration_listeners`,
+  `stream_text_prefers_per_call_integrations_over_global_integrations`,
+  `stream_text_calls_integration_listeners_alongside_user_callbacks`, and
+  `stream_text_does_not_break_when_integration_listener_panics`, matching the
+  upstream global-listener, per-call precedence, user-callback ordering, and
+  panic-isolation cases. These sit alongside the existing all-lifecycle,
+  tool-execution, and multiple per-call integration tests.
 - 2026-05-24: `packages/ai` streamed tool execution context-validation parity
   added
   `stream_text_validates_tool_context_before_approval_callback_and_execution`,
@@ -5057,6 +5065,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving URL-file support checks are performed against the model selected by
    `prepareStep` rather than the original model before the provider stream
    call.
+   The upstream `streamText` telemetry integration listener cases now have
+   named Rust counterparts in
+   `stream_text_calls_globally_registered_integration_listeners`,
+   `stream_text_prefers_per_call_integrations_over_global_integrations`,
+   `stream_text_calls_integration_listeners_alongside_user_callbacks`,
+   `stream_text_does_not_break_when_integration_listener_panics`, and
+   `stream_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+   proving global integration fallback, per-call override precedence,
+   user-callback plus integration ordering, panic isolation, and array
+   integration ordering.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
