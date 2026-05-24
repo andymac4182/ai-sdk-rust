@@ -1652,6 +1652,170 @@ mod tests {
         assert_eq!(result.raw, raw);
     }
 
+    // ---------- describe("schedule()") — additional slice 404 cases ----------
+
+    /// SchedulingAdapter variant that rejects with an IO error, so we
+    /// can assert that non-Unsupported adapter errors propagate as
+    /// ChatError::Base rather than NotImplemented.
+    #[derive(Debug, Default)]
+    struct FailingSchedulingAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for FailingSchedulingAdapter {
+        fn name(&self) -> &str {
+            "failing-scheduling"
+        }
+        async fn schedule_message(
+            &self,
+            _thread_id: &str,
+            _text: &str,
+            _post_at_unix_ms: u64,
+        ) -> AdapterResult<crate::types::ScheduledMessage> {
+            Err(AdapterError::Io(
+                std::io::Error::other("Slack API error").into(),
+            ))
+        }
+    }
+
+    /// SchedulingAdapter that also records postMessage so we can
+    /// assert post_message is not invoked during schedule().
+    #[derive(Debug, Default)]
+    struct SchedulingAndPostingAdapter {
+        post_message: Mutex<Vec<(String, String)>>,
+        schedule_calls: Mutex<Vec<(String, String, u64)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for SchedulingAndPostingAdapter {
+        fn name(&self) -> &str {
+            "scheduling-and-posting"
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_message
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            Ok("msg-id".to_string())
+        }
+        async fn schedule_message(
+            &self,
+            thread_id: &str,
+            text: &str,
+            post_at_unix_ms: u64,
+        ) -> AdapterResult<crate::types::ScheduledMessage> {
+            self.schedule_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                text.to_string(),
+                post_at_unix_ms,
+            ));
+            Ok(crate::types::ScheduledMessage {
+                scheduled_message_id: "Q123".to_string(),
+                channel_id: "C123".to_string(),
+                post_at_unix_ms,
+                raw: serde_json::Value::Null,
+            })
+        }
+    }
+
+    #[test]
+    fn thread_schedule_should_propagate_errors_thrown_by_adapter_schedule_message() {
+        // 1:1 with upstream "should propagate errors thrown by
+        // adapter.scheduleMessage". Non-Unsupported adapter errors
+        // surface as ChatError::Base with the upstream message
+        // contained in the formatted string, NOT as NotImplemented.
+        let adapter: Arc<dyn Adapter> = Arc::new(FailingSchedulingAdapter);
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let err =
+            block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).expect_err("expected ChatError");
+        assert!(
+            !err.is_not_implemented(),
+            "Io error must not be coerced into NotImplemented"
+        );
+        assert!(
+            err.message().contains("Slack API error"),
+            "expected adapter message in error; got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn thread_schedule_should_not_call_adapter_post_message_when_scheduling() {
+        // 1:1 with upstream "should not call adapter.postMessage when
+        // scheduling".
+        let adapter = Arc::new(SchedulingAndPostingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        assert!(
+            adapter.post_message.lock().unwrap().is_empty(),
+            "post_message must not be invoked during schedule()"
+        );
+        assert_eq!(adapter.schedule_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn thread_schedule_should_use_the_threads_own_id_for_scheduling() {
+        // 1:1 with upstream "should use the thread's own ID for
+        // scheduling".
+        let adapter = Arc::new(SchedulingAndPostingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C999:9999.0000");
+        block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).unwrap();
+        let calls = adapter.schedule_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C999:9999.0000");
+        assert_eq!(calls[0].1, "Hello");
+        assert_eq!(calls[0].2, FUTURE_UNIX_MS);
+    }
+
+    #[test]
+    fn thread_schedule_should_allow_scheduling_multiple_messages_on_the_same_thread() {
+        // 1:1 with upstream "should allow scheduling multiple
+        // messages on the same thread".
+        let adapter = Arc::new(SchedulingAndPostingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let s1 = block_on(thread.schedule("First", FUTURE_UNIX_MS)).unwrap();
+        let s2 = block_on(thread.schedule("Second", FUTURE_UNIX_MS)).unwrap();
+        let s3 = block_on(thread.schedule("Third", FUTURE_UNIX_MS)).unwrap();
+        // The SchedulingAndPostingAdapter returns the same id every
+        // call (matching the simplest mock — upstream's
+        // mockResolvedValueOnce gives Q1/Q2/Q3 distinct ids; the Rust
+        // mock doesn't need that to verify multi-schedule per-thread
+        // dispatch, which is the upstream invariant).
+        assert_eq!(s1.scheduled_message_id, "Q123");
+        assert_eq!(s2.scheduled_message_id, "Q123");
+        assert_eq!(s3.scheduled_message_id, "Q123");
+        assert_eq!(adapter.schedule_calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn thread_schedule_should_pass_string_messages_through_directly() {
+        // 1:1 with upstream "should pass string messages through
+        // directly". Rust port currently only accepts &str, which
+        // matches this case exactly — the other 3 upstream cases
+        // (raw/markdown/ast message-object passthrough) require a
+        // PostableMessage input enum and are deferred.
+        let adapter = Arc::new(SchedulingAndPostingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        block_on(thread.schedule("Plain text", FUTURE_UNIX_MS)).unwrap();
+        let calls = adapter.schedule_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "Plain text");
+    }
+
+    #[test]
+    fn thread_schedule_should_pass_the_exact_post_at_unix_ms_to_adapter() {
+        // 1:1 with upstream "should pass the exact Date object to
+        // adapter". The Rust port uses u64 epoch millis instead of
+        // a Date object, so the equivalent assertion is exact
+        // unix-ms passthrough.
+        const SPECIFIC_UNIX_MS: u64 = 1_861_488_000_000; // 2028-12-25T08:00:00Z
+        let adapter = Arc::new(SchedulingAndPostingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        block_on(thread.schedule("Merry Christmas!", SPECIFIC_UNIX_MS)).unwrap();
+        let calls = adapter.schedule_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, SPECIFIC_UNIX_MS);
+    }
+
     // ---------- describe("postEphemeral") (5 upstream cases) ----------
     // 1:1 with upstream `thread.test.ts > describe("postEphemeral")`.
     // The Rust port uses a dedicated `EphemeralAdapter` test mock with
