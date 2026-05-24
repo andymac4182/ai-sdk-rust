@@ -173,6 +173,32 @@ mod tests {
     //! reviver behavior is exercised via integration tests with
     //! `JSON.parse(input, reviver)`. The Rust port locks in the
     //! per-branch dispatch on `_type`.
+    //!
+    //! ---------- upstream type-system-impossible cases (1) ----------
+    //!
+    //! Per the slice-380 / slice-472 type-system-impossible pattern,
+    //! the following upstream `serialization.test.ts > describe("standalone
+    //! reviver()")` case is enumerated here because it asserts a
+    //! runtime behavior the Rust port makes structurally
+    //! singleton-required (slice 481):
+    //!
+    //! 1. `should revive chat:Thread objects` — upstream's standalone
+    //!    `reviver(key, value)` returns a typed `ThreadImpl` for any
+    //!    `chat:Thread` envelope by deferring adapter resolution
+    //!    until `thread.adapter` is read (which throws if no matching
+    //!    adapter exists on the chat singleton at access time). The
+    //!    Rust `revive_value` requires the adapter at promotion time
+    //!    via [`crate::chat_singleton::try_get_chat_singleton`] +
+    //!    `singleton.get_adapter(adapter_name)`. Without a registered
+    //!    singleton, the branch falls through to
+    //!    [`Revived::PassThrough`] — see
+    //!    [`revive_value_falls_through_when_no_singleton_or_no_matching_adapter`].
+    //!    Adopters that need typed Thread/Channel promotion via the
+    //!    reviver MUST register their Chat singleton first (see
+    //!    [`crate::chat_singleton::register_chat_singleton`]). The
+    //!    chat.reviver() entry point (singleton-bound) covers the
+    //!    same upstream surface (see
+    //!    [`revive_value_promotes_chat_thread_envelopes_when_singleton_resolves_adapter`]).
     use super::*;
     use crate::markdown::root;
     use crate::message::MessageKind;
