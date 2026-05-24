@@ -1400,6 +1400,23 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     async fn fetch_channel_info(&self, _channel_id: &str) -> AdapterResult<ChannelInfo> {
         Err(AdapterError::Unsupported("fetch_channel_info"))
     }
+
+    /// Optional channel-scoped post. 1:1 with upstream optional
+    /// `postChannelMessage?(channelId, text): Promise<{id: string}>`.
+    /// Some platforms distinguish channel-level posts (no parent
+    /// thread) from in-thread replies — upstream uses
+    /// `postChannelMessage` when present, otherwise falls back to
+    /// `post_message`. Default returns
+    /// `Err(Unsupported("post_channel_message"))` so
+    /// [`crate::channel::Channel::post`] can fall through to
+    /// `post_message`.
+    async fn post_channel_message(
+        &self,
+        _channel_id: &str,
+        _text: &str,
+    ) -> AdapterResult<String> {
+        Err(AdapterError::Unsupported("post_channel_message"))
+    }
 }
 
 /// Errors returned by [`Adapter`] methods. Mirrors upstream's
