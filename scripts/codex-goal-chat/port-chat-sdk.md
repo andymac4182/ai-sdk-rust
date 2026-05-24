@@ -1292,3 +1292,56 @@ Reference ports:
   TS-runtime-only `Buffer` / `ArrayBuffer` / `Blob` cases
   collapse to a single Rust `FileBytes` (`Vec<u8>`) round-trip
   case.
+
+## js-only-documented enumeration pattern (added slice 396)
+
+For upstream test files that contain a mix of portable cases and
+unreachable-by-construction cases (JS module-loader, JS runtime
+types like Blob/ArrayBuffer/EventEmitter, JSX runtime, JS-specific
+callback fields, JS `process.env`, `describe.skip` integration
+tests), document the unreachable cases explicitly in the Rust test
+module header so the parity audit can match them 1:1 without a
+fake tautological test.
+
+Canonical section header (use this exact shape):
+
+```rust
+// ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
+//
+// The following N upstream `<file>.test.ts` cases are js-only or
+// type-system-impossible and have no matching Rust test:
+//
+// - `<case name>`: <reason for being unreachable>
+// - `<case name>`: <reason>
+// ...
+//
+// Remaining upstream cases are mapped (<short summary of where>).
+```
+
+Then in `docs/chat/upstream-parity.md`, the per-package row should
+state the total accounting:
+
+```
+N Rust-mapped + M js-only-documented = (N+M)/(N+M) total upstream cases accounted for
+```
+
+Reference ports:
+- `crates/chat-sdk-chat/src/modals.rs`: 9 `fromReactModalElement`
+  JSX cases (slice 393).
+- `crates/chat-sdk-state-redis/src/lib.rs`: 8 cases (slice 394).
+- `crates/chat-sdk-state-ioredis/src/lib.rs`: 4 cases (slice 395).
+- `crates/chat-sdk-state-pg/src/lib.rs`: 8 cases (slice 395).
+- `crates/chat-sdk-adapter-shared/src/buffer_utils.rs`: 5
+  Blob/ArrayBuffer cases (slice 391).
+- `crates/chat-sdk-adapter-shared/src/adapter_utils.rs`: 4
+  extract_card + 4 extract_files + 2 extract_postable_attachments
+  null/undefined cases (slices 382, 383).
+- `crates/chat-sdk-chat/src/transcripts.rs`: 2 user_key-required
+  cases (slice 384).
+- `crates/chat-sdk-chat/src/chat.rs`: 1 sync IdentityResolver case
+  (slice 387).
+
+A package can flip to **verified** when every upstream case
+(in *all* its test files) is either mapped to a Rust test or
+documented as js-only in this pattern. The state-backends are
+currently in this position pending runtime client wire-up.

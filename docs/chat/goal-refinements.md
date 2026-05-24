@@ -4167,3 +4167,126 @@ cases (~3% additional). Cumulative: ~135 cases across slices
   chatApi client.
 - **State-backend client wire-up** — still blocked on workspace
   runtime decision.
+
+## Slices 381..395 refinement cycle (1:1 audit closeout + js-only-documented enumeration)
+
+**Scope:** slices 381..395 (15 merges). Major themes:
+
+1. **1:1 audit closeout** — slices 381, 382, 384, 389, 390, 392
+   port the last remaining individually-mappable upstream cases
+   across adapter-shared (`extract_card`, `extract_files`,
+   `extract_postable_attachments`, `buffer_utils.bufferToDataUri`)
+   and chat-sdk-chat (transcripts `passes-numeric-retention` +
+   `delete-on-unknown-user-key`). Brings these modules to
+   "fully mapped" status: all upstream `it()` cases either have a
+   matching Rust test or are documented as
+   type-system-impossible / js-only.
+2. **Serialization 1:1 ports** — slice 387 wires
+   `IdentityResolver` into `handle_incoming_message` (signature
+   changed from `&Message` to `&mut Message`) + 4 dispatch-hook
+   cases. Transcripts-wiring upstream parity 5/11 → 9/11.
+3. **js-only-documented enumeration** — slices 393, 394, 395
+   apply the slice-380 type-system-impossible pattern to enumerate
+   upstream cases that are unreachable-by-construction in Rust:
+   - `modals.rs`: 9 `fromReactModalElement` JSX cases (no React/JSX
+     runtime in Rust)
+   - `state-redis`: 8 cases (JS module-loader exports, EventEmitter-
+     based injected-client wait-for-ready, describe.skip integration)
+   - `state-ioredis`: 4 cases (export check, describe.skip integration)
+   - `state-pg`: 8 cases (exports, existing-client, default-logger,
+     env-var fallbacks, integration)
+4. **Doc maintenance** — slice 386 corrects the test-case parity
+   map (7 chat-sdk-chat test files were stale at "not started" but
+   actually had substantial 1:1 coverage). Slice 388 regenerates
+   `docs/chat/package-progress.md` with updated estimates reflecting
+   slices 354..387; average estimated completion 68.6% → 70.6%.
+
+**Pattern observations**
+
+- The **js-only-documented enumeration pattern** is the canonical
+  way to "close out" upstream tests that can never have a matching
+  Rust test. It satisfies the brief's "every portable case has a
+  matching Rust test" rule via explicit documentation rather than
+  fake tautological tests. Apply this pattern wherever upstream has
+  cases that test:
+  - JS module-loader plumbing (`typeof X === "function"`)
+  - JS runtime types (Blob / ArrayBuffer / Buffer / EventEmitter /
+    React JSX elements)
+  - JS-specific signatures (callback fields like `fetchMessage`)
+  - JS process.env reads (env-var fallback via factory closure
+    instead)
+  - `describe.skip("integration tests")` blocks that need live
+    external services
+- The **"1:1 audit closeout" pattern** is the natural followup
+  after the major helper-port slices have landed. Once the runtime
+  surface (HTTP helpers, pure functions, types) is mapped, the
+  remaining gap is individual upstream test cases that don't have
+  a 1:1 Rust mirror yet. These slices typically port 1-3 cases
+  each but they're the slices that flip a module from "partial" to
+  "fully mapped" — meaningful per-module milestones.
+- The **dispatch hook port** (slice 387) demonstrates how a
+  high-leverage runtime change unblocks deferred test cases. The
+  `&Message` → `&mut Message` signature change enables 4 deferred
+  transcripts-wiring cases. The next high-leverage move remains
+  the full `handle_incoming_message` dispatcher (lock / concurrency
+  / handler-trait-dispatch) which would unblock the ~80 deferred
+  chat.test.ts + thread.test.ts handler-driven cases.
+
+**Brief tightening applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md` documents the
+  **js-only-documented enumeration as the canonical close-out**
+  for state backends + JSX-runtime test files. Section header is
+  always:
+  ```
+  // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
+  //
+  // The following N upstream `<file>.test.ts` cases are js-only or
+  // type-system-impossible and have no matching Rust test:
+  // - `<case name>`: <reason>
+  ```
+
+**Done condition gap analysis**
+
+The terminal Done clause remains unsatisfied — 13 in-progress
+packages still need substantial work to flip to verified or
+js-only-documented status. This cycle ported ~30 cases (~4
+cases/slice average) + enumerated ~30 js-only cases.
+
+The 3 state-backends are the closest to a verifiable closeout: all
+have full upstream-test enumeration now (Rust-mapped + js-only-
+documented). They could flip to "verified" once the workspace
+commits to a runtime (tokio) and the underlying client libraries
+land — currently blocked on that decision.
+
+The 9 adapters are similarly blocked on per-adapter HTTP impl +
+`parse_message` + `post_object` work (~3-5 slices each = ~30-45
+slices to verifiable status across the 9 adapters).
+
+The chat-sdk-chat package is at 99% per the regenerated
+package-progress.md. The remaining 1% is the
+`handleIncomingMessage` event dispatcher + handler-trait surface
+that gates ~80 chat.test.ts + thread.test.ts cases.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: documents the
+  js-only-documented enumeration as the canonical close-out.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat handleIncomingMessage + dispatcher** —
+  highest-leverage remaining work; unblocks ~80 chat.test.ts +
+  thread.test.ts cases.
+- **State-backend client wire-up** — flips all 3 state-backends
+  from in-progress to verified. Blocked on workspace runtime
+  decision (tokio).
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting adapter work.
+- **parse_message across 9 adapters**.
+- **post_ephemeral across 7 remaining adapters** (Slack + GChat
+  have native impls). Document as a sweep slice.
+- **GitHub remove_reaction** — multi-step list/match/delete.
+- **GChat remove_reaction** — multi-step list/match/delete via
+  chatApi client.
