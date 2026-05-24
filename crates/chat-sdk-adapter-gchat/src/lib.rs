@@ -852,12 +852,35 @@ mod tests {
         assert!(adapter.channel_id_from_thread_id("").is_none());
     }
 
+    // ---------- describe("isDM") (2 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("isDM")`.
+    // GChat encodes DM-vs-room as a `:dm` suffix on the thread id;
+    // `encodeThreadId({spaceName, isDM: true})` appends it.
+
     #[test]
-    fn is_dm_true_only_for_dm_suffixed_ids() {
+    fn is_dm_should_return_true_for_dm_thread_ids() {
+        // 1:1 with upstream "should return true for DM thread IDs".
         let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
-        assert!(adapter.is_dm("gchat:spaces/ABC123:dm"));
-        assert!(!adapter.is_dm("gchat:spaces/ABC123:dGVzdA"));
-        assert!(!adapter.is_dm("gchat:spaces/ABC123"));
+        assert!(adapter.is_dm("gchat:spaces/DM123:dm"));
+    }
+
+    #[test]
+    fn is_dm_should_return_false_for_non_dm_thread_ids() {
+        // 1:1 with upstream "should return false for non-DM thread
+        // IDs". A room thread id encodes without the `:dm` suffix —
+        // `encodeThreadId({spaceName: "spaces/ROOM456"})` yields
+        // `gchat:spaces/ROOM456` plus an optional thread suffix.
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        assert!(!adapter.is_dm("gchat:spaces/ROOM456"));
+        assert!(!adapter.is_dm("gchat:spaces/ROOM456:dGVzdA"));
+    }
+
+    // Additive: empty thread id is not a DM. Retained from the
+    // bundled test above for defensive coverage outside upstream's
+    // explicit describe block.
+    #[test]
+    fn is_dm_returns_false_for_empty_thread_id() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
         assert!(!adapter.is_dm(""));
     }
 
