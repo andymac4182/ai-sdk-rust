@@ -11,9 +11,12 @@
 use crate::format::markdown_bold_to_slack_mrkdwn;
 use chat_sdk_adapter_shared::card_utils::{
     BoldFormat, FallbackTextOptions, LineBreak, PlatformName, card_to_fallback_text,
+    map_button_style,
 };
 use chat_sdk_chat::cards::{
-    CardChild, CardElement, DividerElement, ImageElement, LinkElement, TextElement, TextStyle,
+    ActionsChild, ActionsElement, ButtonElement, CardChild, CardElement, DividerElement,
+    FieldsElement, ImageElement, LinkButtonElement, LinkElement, SectionElement, TextElement,
+    TextStyle,
 };
 use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use serde_json::{Value, json};
@@ -90,9 +93,12 @@ fn convert_child_to_blocks(child: &CardChild) -> Vec<SlackBlock> {
         CardChild::Text(t) => vec![convert_text_to_block(t)],
         CardChild::Image(i) => vec![convert_image_to_block(i)],
         CardChild::Divider(d) => vec![convert_divider_to_block(d)],
+        CardChild::Actions(a) => vec![convert_actions_to_block(a)],
+        CardChild::Section(s) => convert_section_to_blocks(s),
+        CardChild::Fields(f) => vec![convert_fields_to_block(f)],
         CardChild::Link(l) => vec![convert_link_to_block(l)],
-        // Actions / Section / Fields / Table branches land in
-        // follow-up slices.
+        // Table + Select / RadioSelect branches land in follow-up
+        // slices.
         _ => Vec::new(),
     }
 }
@@ -146,6 +152,113 @@ fn convert_link_to_block(element: &LinkElement) -> SlackBlock {
             "type": "mrkdwn",
             "text": format!("<{}|{}>", element.url, convert_emoji(&element.label)),
         },
+    })
+}
+
+/// 1:1 with upstream `convertActionsToBlock(element)`. Iterates the
+/// children union (Button / LinkButton / Select / RadioSelect) and
+/// dispatches per `child.type`. Select / RadioSelect are deferred to
+/// follow-up slices and omitted here (any non-button child is
+/// silently dropped, matching upstream's plain `if/else if/return
+/// convertButton...` chain).
+fn convert_actions_to_block(element: &ActionsElement) -> SlackBlock {
+    let elements: Vec<Value> = element
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            ActionsChild::Button(b) => Some(convert_button_to_element(b)),
+            ActionsChild::LinkButton(b) => Some(convert_link_button_to_element(b)),
+            // Select / RadioSelect land in a follow-up slice.
+            _ => None,
+        })
+        .collect();
+
+    json!({
+        "type": "actions",
+        "elements": elements,
+    })
+}
+
+/// 1:1 with upstream `convertButtonToElement(button)`. Always emits
+/// `type: "button"`, `text: { type: "plain_text", emoji: true }`,
+/// and `action_id`. `value` and `style` are only present when set.
+fn convert_button_to_element(button: &ButtonElement) -> Value {
+    let mut element = json!({
+        "type": "button",
+        "text": {
+            "type": "plain_text",
+            "text": convert_emoji(&button.label),
+            "emoji": true,
+        },
+        "action_id": button.id,
+    });
+
+    if let Some(value) = button.value.as_deref().filter(|v| !v.is_empty()) {
+        element["value"] = Value::String(value.to_string());
+    }
+
+    if let Some(style) = map_button_style(button.style, PlatformName::Slack) {
+        element["style"] = Value::String(style.to_string());
+    }
+
+    element
+}
+
+/// 1:1 with upstream `convertLinkButtonToElement(button)`. Synthesises
+/// `action_id` as `link-<first 200 chars of url>` (Slack's `action_id`
+/// is capped at 255 chars; upstream uses 200 to leave room for the
+/// `link-` prefix and emoji escaping).
+fn convert_link_button_to_element(button: &LinkButtonElement) -> Value {
+    let url_slice: String = button.url.chars().take(200).collect();
+    let mut element = json!({
+        "type": "button",
+        "text": {
+            "type": "plain_text",
+            "text": convert_emoji(&button.label),
+            "emoji": true,
+        },
+        "action_id": format!("link-{url_slice}"),
+        "url": button.url,
+    });
+
+    if let Some(style) = map_button_style(button.style, PlatformName::Slack) {
+        element["style"] = Value::String(style.to_string());
+    }
+
+    element
+}
+
+/// 1:1 with upstream `convertSectionToBlocks(element, state)`.
+/// Recursively flattens section children into the parent block list.
+fn convert_section_to_blocks(element: &SectionElement) -> Vec<SlackBlock> {
+    let mut blocks: Vec<SlackBlock> = Vec::new();
+    for child in &element.children {
+        blocks.extend(convert_child_to_blocks(child));
+    }
+    blocks
+}
+
+/// 1:1 with upstream `convertFieldsToBlock(element)`. Emits a single
+/// `section` block with a `fields` array; each field is
+/// `*label*\nvalue` (label/value both run through
+/// `markdownToMrkdwn(convertEmoji(...))`).
+pub fn convert_fields_to_block(element: &FieldsElement) -> SlackBlock {
+    let fields: Vec<Value> = element
+        .children
+        .iter()
+        .map(|field| {
+            let label = markdown_to_mrkdwn(&convert_emoji(&field.label));
+            let value = markdown_to_mrkdwn(&convert_emoji(&field.value));
+            json!({
+                "type": "mrkdwn",
+                "text": format!("*{label}*\n{value}"),
+            })
+        })
+        .collect();
+
+    json!({
+        "type": "section",
+        "fields": fields,
     })
 }
 
@@ -412,6 +525,210 @@ mod tests {
         let blocks = card_to_block_kit(&c);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0], json!({ "type": "divider" }));
+    }
+
+    // ---------- cardToBlockKit Actions/Buttons + Fields + Section + complete-card (6 cases) ----------
+
+    use chat_sdk_chat::cards::{ButtonStyle, LinkButtonKind, SectionKind};
+
+    fn button(id: &str, label: &str, style: Option<ButtonStyle>, value: Option<&str>) -> ButtonElement {
+        ButtonElement {
+            action_type: None,
+            callback_url: None,
+            disabled: None,
+            id: id.to_string(),
+            label: label.to_string(),
+            style,
+            kind: ButtonKind::Button,
+            value: value.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn block_kit_converts_actions_with_buttons() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![
+                    ActionsChild::Button(button("approve", "Approve", Some(ButtonStyle::Primary), None)),
+                    ActionsChild::Button(button(
+                        "reject",
+                        "Reject",
+                        Some(ButtonStyle::Danger),
+                        Some("data-123"),
+                    )),
+                    ActionsChild::Button(button("skip", "Skip", None, None)),
+                ],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "actions");
+        let elements = blocks[0]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 3);
+        assert_eq!(
+            elements[0],
+            json!({
+                "type": "button",
+                "text": { "type": "plain_text", "text": "Approve", "emoji": true },
+                "action_id": "approve",
+                "style": "primary",
+            })
+        );
+        assert_eq!(
+            elements[1],
+            json!({
+                "type": "button",
+                "text": { "type": "plain_text", "text": "Reject", "emoji": true },
+                "action_id": "reject",
+                "value": "data-123",
+                "style": "danger",
+            })
+        );
+        assert_eq!(
+            elements[2],
+            json!({
+                "type": "button",
+                "text": { "type": "plain_text", "text": "Skip", "emoji": true },
+                "action_id": "skip",
+            })
+        );
+    }
+
+    #[test]
+    fn block_kit_converts_link_buttons_with_url_property() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Actions(ActionsElement {
+                children: vec![ActionsChild::LinkButton(LinkButtonElement {
+                    label: "View Docs".to_string(),
+                    style: Some(ButtonStyle::Primary),
+                    kind: LinkButtonKind::LinkButton,
+                    url: "https://example.com/docs".to_string(),
+                })],
+                kind: ActionsKind::Actions,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "actions");
+        let elements = blocks[0]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["type"], "button");
+        assert_eq!(
+            elements[0]["text"],
+            json!({ "type": "plain_text", "text": "View Docs", "emoji": true })
+        );
+        assert_eq!(elements[0]["url"], "https://example.com/docs");
+        assert_eq!(elements[0]["style"], "primary");
+        assert_eq!(elements[0]["action_id"], "link-https://example.com/docs");
+    }
+
+    #[test]
+    fn block_kit_converts_fields() {
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Fields(FieldsElement {
+                children: vec![
+                    FieldElement {
+                        label: "Status".to_string(),
+                        value: "Active".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                    FieldElement {
+                        label: "Priority".to_string(),
+                        value: "High".to_string(),
+                        kind: FieldKind::Field,
+                    },
+                ],
+                kind: FieldsKind::Fields,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "section");
+        assert_eq!(
+            blocks[0]["fields"],
+            json!([
+                { "type": "mrkdwn", "text": "*Status*\nActive" },
+                { "type": "mrkdwn", "text": "*Priority*\nHigh" },
+            ])
+        );
+    }
+
+    #[test]
+    fn block_kit_flattens_section_children() {
+        use chat_sdk_chat::cards::SectionElement;
+        let c = card(
+            None,
+            None,
+            vec![CardChild::Section(SectionElement {
+                children: vec![
+                    text("Inside section"),
+                    CardChild::Divider(DividerElement {
+                        kind: DividerKind::Divider,
+                    }),
+                ],
+                kind: SectionKind::Section,
+            })],
+        );
+        let blocks = card_to_block_kit(&c);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "section");
+        assert_eq!(blocks[1]["type"], "divider");
+    }
+
+    #[test]
+    fn block_kit_converts_a_complete_card() {
+        let c = CardElement {
+            title: Some("Order #1234".to_string()),
+            subtitle: Some("Status update".to_string()),
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                text("Your order has been shipped!"),
+                CardChild::Divider(DividerElement {
+                    kind: DividerKind::Divider,
+                }),
+                CardChild::Fields(FieldsElement {
+                    children: vec![
+                        FieldElement {
+                            label: "Tracking".to_string(),
+                            value: "ABC123".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                        FieldElement {
+                            label: "ETA".to_string(),
+                            value: "Dec 25".to_string(),
+                            kind: FieldKind::Field,
+                        },
+                    ],
+                    kind: FieldsKind::Fields,
+                }),
+                CardChild::Actions(ActionsElement {
+                    children: vec![ActionsChild::Button(button(
+                        "track",
+                        "Track Package",
+                        Some(ButtonStyle::Primary),
+                        None,
+                    ))],
+                    kind: ActionsKind::Actions,
+                }),
+            ],
+        };
+        let blocks = card_to_block_kit(&c);
+        // Header + context + section(text) + divider + section(fields) + actions = 6.
+        assert_eq!(blocks.len(), 6);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[1]["type"], "context");
+        assert_eq!(blocks[2]["type"], "section");
+        assert_eq!(blocks[3]["type"], "divider");
+        assert_eq!(blocks[4]["type"], "section");
+        assert_eq!(blocks[5]["type"], "actions");
     }
 
     #[test]
