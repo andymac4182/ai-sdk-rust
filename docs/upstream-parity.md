@@ -1186,6 +1186,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   Rust now emits automatic approval request metadata and approval-response
   chunks into both `fullStream` and `toUIMessageStream`, while preserving the
   continuation prompt ordering for approved and denied local tools.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` provider-emitted
+  approval-request parity added
+  `stream_text_handles_multiple_provider_executed_tool_approval_requests`,
+  proving multiple provider-executed tool calls keep their matching approval
+  requests and stream ordering.
 - 2026-05-23: `packages/ai` `ToolLoopAgent` tool approval parity added
   named Rust counterparts for the upstream generate and stream
   `toolApproval: { testTool: 'user-approval' }` blocking cases. The tests are

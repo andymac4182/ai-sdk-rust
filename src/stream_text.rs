@@ -11385,6 +11385,82 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_handles_multiple_provider_executed_tool_approval_requests() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-1", "mcp_search", r#"{"query":"first"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-2", "mcp_execute", r#"{"command":"ls"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("approval-1", "mcp-call-1"),
+                ),
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("approval-2", "mcp-call-2"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Run MCP tools")],
+        )));
+
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].tool_call_id, "mcp-call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "mcp_search");
+        assert_eq!(result.tool_calls[0].input, json!({ "query": "first" }));
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_calls[1].tool_call_id, "mcp-call-2");
+        assert_eq!(result.tool_calls[1].tool_name, "mcp_execute");
+        assert_eq!(result.tool_calls[1].input, json!({ "command": "ls" }));
+        assert_eq!(result.tool_calls[1].provider_executed, Some(true));
+
+        let approval_requests = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolApprovalRequest(request) => Some(request),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(approval_requests.len(), 2);
+        assert_eq!(approval_requests[0].approval_id, "approval-1");
+        assert_eq!(approval_requests[0].tool_call_id, "mcp-call-1");
+        assert_eq!(approval_requests[1].approval_id, "approval-2");
+        assert_eq!(approval_requests[1].tool_call_id, "mcp-call-2");
+
+        let part_order = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(format!("tool-call:{}", part.tool_call_id)),
+                TextStreamPart::ToolApprovalRequest(part) => {
+                    Some(format!("approval:{}", part.tool_call_id))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_order,
+            [
+                "tool-call:mcp-call-1",
+                "tool-call:mcp-call-2",
+                "approval:mcp-call-1",
+                "approval:mcp-call-2"
+            ]
+        );
+    }
+
+    #[test]
     fn stream_text_automatic_tool_approval_response_streams_before_tool_result() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![
