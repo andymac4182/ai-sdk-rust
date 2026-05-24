@@ -2977,3 +2977,98 @@ module-aliasing test).
 - **state backend client wire-up** still blocked on workspace
   runtime decision.
 - **postToCallbackUrl HTTP** (3 cases) — still blocked.
+
+---
+
+## Slices 252..271 refinement (cards-renderer milestone)
+
+**What was learned**
+
+- The `cardToXxxPayload` renderers across adapters share an
+  identical phase shape: 1) preamble (title/subtitle/imageUrl
+  produce platform-specific header blocks); 2) per-child dispatch
+  driven by a single `CardChild` discriminator; 3) interactive
+  branches (Actions) mapped onto platform-specific component
+  layouts; 4) Table branches gated by per-platform limits with
+  ASCII-codeblock fallback. Porting them in the same one-helper-
+  per-branch + per-branch-test slicing is fast (Discord 24 cases
+  in 3 slices; Slack 36 cases in 4) once the foundation slice
+  lands.
+- Slack `cardToBlockKit` uses a mutable `state = { usedNativeTable
+  }` object that propagates through `convertChildToBlocks` and
+  `convertSectionToBlocks` to enforce Slack's one-native-table-
+  per-message cap. Modeling it as `&mut RenderState` in Rust
+  works cleanly without requiring an explicit `Card => Renderer`
+  builder. Future adapter cards-renderer ports should look for
+  similar mutable per-card state (Discord uses none; Teams,
+  Messenger TBD).
+- `card_to_discord_payload` had to be changed from `-> Payload`
+  to `-> Result<Payload, AdapterError>` mid-port to surface the
+  100-char `custom_id` validation that upstream throws from
+  `encodeDiscordCustomId`. Pattern: when a child-converter can
+  fail with a validation error in upstream, the renderer signature
+  must be `Result<_, AdapterError>` from the start — silently
+  dropping with `.ok()` masks the test expectation.
+- Slack `Select`/`RadioSelect` distinguishes themselves only by
+  the option `text` type (`plain_text` vs `mrkdwn`) and a 10-item
+  cap on radio. Introducing a tiny `OptionTextKind` enum collapses
+  both paths through a single `build_option(opt, kind)` helper —
+  worth doing across other adapters' select-style converters when
+  they land (Teams, Messenger).
+- `serde_json::Value` + `json!({...})` is the right level for
+  Slack Block Kit / Teams Adaptive Cards / Messenger templates
+  outputs: the upstream renderers all return loose dictionaries
+  whose schemas are constrained at runtime by the platform, not
+  the source. Trying to introduce typed structs per block kind
+  would multiply the LOC for negligible compile-time benefit (the
+  tests assert against JSON shape via `.toEqual(json!({...}))`,
+  which works directly on `Value`).
+- Slack's `convertFieldsToBlock` uses the SAME
+  `markdownToMrkdwn(convertEmoji(...))` pipeline for both label
+  and value (so `**Active**` in a field value gets converted).
+  This caught me out — easy to assume only `convertTextToBlock`
+  needs the bold conversion. Future adapter Fields converters
+  should run the platform's bold-converter on both label and
+  value, not just value.
+
+**What is now true that wasn't before**
+
+- Discord cards.test.ts is FULLY PORTED (38/38). Adapter at 70%.
+- Slack cards.test.ts is FULLY PORTED (36/36). Adapter at 84%.
+- The renderer-port pattern (one slice per converter family) is
+  proven and ready to apply to the next 3 adapters with
+  cardToXxxPayload-style code: Teams, Messenger, GChat.
+
+**Stale or misleading guidance**
+
+- The brief's "skeleton then per-branch tests" pacing was tuned
+  for adapter-wide ports (e.g., scaffold an adapter + add 5
+  methods). For pure-rendering ports the right slicing is 1
+  describe-block per slice: e.g., for Slack cards we did 4 slices
+  for 4 describe blocks (foundation / Actions+Fields+Section /
+  Table+CardLink+markdown-bold / Select+RadioSelect). Below 10
+  cases per slice is too small (overhead-bound on the merge-lock
+  + docs regen); above 15 cases the test author starts losing the
+  picture of what each branch needs. **Aim for 8-12 mapped
+  upstream cases per renderer slice.**
+- The brief's "use Vec<TypedBlock>" hint (implied for Slack)
+  should be relaxed. `Vec<serde_json::Value>` is fine when the
+  upstream type itself is a JSON dict — see Slack `SlackBlock =
+  Record<string, unknown>`. Document this in the next brief
+  tightening.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Messenger templates** (~50), **Teams Adaptive Cards** (~26),
+  **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** (~470), all
+  adapter `index.test.ts` integration suites — still blocked.
+- **state backend client wire-up** still blocked on workspace
+  runtime decision.
+- **postToCallbackUrl HTTP** (3 cases) — still blocked.
+- **Slack Block Kit** is no longer blocked (closed in slices
+  268-271). Cross out from the prior refinement entry's "open"
+  list at next cycle.
