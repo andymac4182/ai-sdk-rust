@@ -3445,3 +3445,94 @@ module-aliasing test).
   `Adapter::stream` trait extension.
 - **serialization.test.ts** (49 cases) — needs Thread/Message
   JSON revival.
+
+---
+
+## Slices 306..310 refinement cycle (env-var-resolution sweep — 5 of 7 adapters)
+
+**What was learned**
+
+- The injected-env-reader factory pattern established at slice 304
+  ports cleanly across every adapter shape:
+  - **Linear** (slice 306, 18 cases): 3-tier auth resolution
+    (config-priority > env > error) with a 4-step env auth chain
+    (LINEAR_API_KEY > LINEAR_ACCESS_TOKEN > LINEAR_CLIENT_CREDENTIALS_* >
+    LINEAR_CLIENT_ID + LINEAR_CLIENT_SECRET).
+  - **GitHub** (slice 307, 13 cases): "don't mix auth modes" guard —
+    partial config (e.g. only `app_id`) yields `AuthenticationRequired`
+    rather than falling through to env auth.
+  - **Telegram** (slice 308, 11 cases): `api_url` vs `api_base_url`
+    precedence (1:1 with upstream `apiUrl ?? apiBaseUrl`); empty
+    `TELEGRAM_BOT_TOKEN=""` treated as missing.
+  - **WhatsApp** (slice 309, 6 cases): factory-level user-name
+    default `"whatsapp-bot"` distinct from adapter default `"bot"`;
+    introduces `DEFAULT_FACTORY_USER_NAME` const.
+  - **Messenger** (slice 310, 4 cases): all 3 required tokens treat
+    empty env string as missing; user-name has no env fallback
+    (only config).
+- Total: 52 upstream env-var-resolution cases ported across 5
+  adapters this cycle. Discord (slice 304, 9 cases) was the
+  reference; that brings the env-var-resolution sweep to 61 cases
+  across 6 adapters. Only GChat remains on the env-var sweep.
+- Adapter-options struct extensions remain cheap across the
+  workspace — each new field (api_version on WhatsApp,
+  api_url+mode on Linear, mention_role_ids on Discord) had only
+  the local lib.rs test sites to update. The leaf-crate-extension
+  property holds.
+- A subtle precedence rule emerged with Linear: env-priority
+  among 4 OAuth-credentials env-var pairs is upstream-specific
+  (CLIENT_CREDENTIALS_* before CLIENT_ID/SECRET). Failure to
+  honor priority would silently use the wrong credentials.
+  Mitigation: explicit unit test per priority pair.
+
+**What is now true that wasn't before**
+
+- 6 of 9 chat-sdk adapters have full env-var-resolution
+  describe-block coverage (Discord 9/9, Linear 18/19, GitHub 13/13,
+  Telegram 11/11, WhatsApp 6/6, Messenger 4/4). The 1 Linear
+  deferred case (custom logger) is js-only since logger isn't a
+  first-class adapter dependency yet. Only GChat remains on the
+  env-var sweep.
+- Total adapter constructor-block test coverage across the
+  workspace: 92 upstream cases ported (32 from create-instance
+  pattern + 61 from env-var sweep, minus a handful of overlaps).
+- The injected-env pattern is now battle-tested across
+  WhatsApp's 4-required-field shape, Linear's 4-priority env-auth
+  chain, GitHub's "no-mix-modes" guard, Telegram's
+  api_url-precedence, and Messenger's empty-string handling.
+  This becomes the reference for any future env-var consumers
+  beyond adapters (chat::Chat itself eventually needs this for
+  STATE_REDIS_URL etc.).
+
+**Stale or misleading guidance**
+
+- The brief's row notes for each adapter now say "env-var-driven
+  cases need a factory; deferred" in 6 places where those cases
+  are now ported. Cleanup of these stale "deferred" notes is a
+  parity-doc hygiene task — defer to the next audit pass.
+- The aggregate per-adapter test counts in the upstream-parity.md
+  row footers haven't been updated since slice 299; the prefix
+  ("X colocated tests") undercounts by 60+ now. Same cleanup
+  applies: bundle into a single audit-and-tighten pass once the
+  env-var sweep is fully closed.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **GChat env-var resolution describe block** — the last
+  remaining adapter for the env-var sweep. Estimated 4-8 cases.
+- **upstream-parity.md aggregate-test-count audit** — stale
+  prefixes on adapter rows; perform after the env-var sweep
+  fully closes.
+- **State-backend client wire-up** — still blocked on workspace
+  runtime decision.
+- **Adapter `index.test.ts` integration suites** — need
+  per-adapter HTTP-mock infrastructure.
+- **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** Streaming /
+  handleIncomingMessage / dedup describe blocks — gated on
+  `Adapter::stream` trait extension.
+- **serialization.test.ts** (49 cases) — needs Thread/Message
+  JSON revival.
