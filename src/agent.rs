@@ -1367,6 +1367,7 @@ mod tests {
         SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Tool,
     };
     use crate::stream_text::TextStreamPart;
+    use crate::telemetry::{TelemetryEventKind, TelemetryIntegration};
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1533,6 +1534,28 @@ mod tests {
                 .expect("tool input includes value");
             Ok(json!(format!("{value}-result")))
         })
+    }
+
+    fn agent_lifecycle_integration(events: Arc<Mutex<Vec<&'static str>>>) -> TelemetryIntegration {
+        let mut integration = TelemetryIntegration::new();
+        for (kind, label) in [
+            (TelemetryEventKind::OnStart, "onStart"),
+            (TelemetryEventKind::OnStepStart, "onStepStart"),
+            (
+                TelemetryEventKind::OnToolExecutionStart,
+                "onToolExecutionStart",
+            ),
+            (TelemetryEventKind::OnToolExecutionEnd, "onToolExecutionEnd"),
+            (TelemetryEventKind::OnStepFinish, "onStepFinish"),
+            (TelemetryEventKind::OnEnd, "onEnd"),
+        ] {
+            let events = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |_event| {
+                events.lock().expect("event lock").push(label);
+            });
+        }
+
+        integration
     }
 
     #[derive(Debug)]
@@ -3677,5 +3700,65 @@ mod tests {
 
         assert_eq!(result.text, "hello");
         assert_eq!(&*calls.borrow(), &["settings", "call"]);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_calls_per_call_integration_listeners_for_all_lifecycle_events() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([test_tool_call_result(), text_result("done")]);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let integration = agent_lifecycle_integration(Arc::clone(&events));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_tool(test_value_tool())
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            &*events.lock().expect("event lock"),
+            &[
+                "onStart",
+                "onStepStart",
+                "onToolExecutionStart",
+                "onToolExecutionEnd",
+                "onStepFinish",
+                "onStepStart",
+                "onStepFinish",
+                "onEnd",
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_calls_per_call_integration_listeners_for_all_lifecycle_events() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_test_tool_call_result(), stream_text_result("done")]);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let integration = agent_lifecycle_integration(Arc::clone(&events));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_tool(test_value_tool())
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        );
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            &*events.lock().expect("event lock"),
+            &[
+                "onStart",
+                "onStepStart",
+                "onToolExecutionStart",
+                "onToolExecutionEnd",
+                "onStepFinish",
+                "onStepStart",
+                "onStepFinish",
+                "onEnd",
+            ]
+        );
     }
 }
