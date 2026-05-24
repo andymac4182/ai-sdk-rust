@@ -506,6 +506,17 @@ impl Chat {
     /// GitHub depending on which adapters are registered), then
     /// calls `adapter.open_dm(user_id)` and returns the resulting
     /// `Thread` handle.
+    /// 1:1 port of upstream `chat.openDM(author)` Author-object
+    /// overload — extracts `author.userId` and delegates to
+    /// [`Self::open_dm`]. Mirrors upstream's `typeof user === "string"
+    /// ? user : user.userId` argument-shape dispatch.
+    pub async fn open_dm_for_author(
+        &self,
+        author: &crate::types::Author,
+    ) -> Result<Thread, OpenDmError> {
+        self.open_dm(&author.user_id).await
+    }
+
     pub async fn open_dm(&self, user_id: &str) -> Result<Thread, OpenDmError> {
         let adapter = self
             .infer_adapter_for_user_id(user_id)
@@ -529,6 +540,16 @@ impl Chat {
     /// pattern matches; returns `Err(GetUserError::AdapterError)`
     /// when the inferred adapter rejects `get_user`
     /// (most often `AdapterError::Unsupported("get_user")`).
+    /// 1:1 port of upstream `chat.getUser(author)` Author-object
+    /// overload — extracts `author.userId` and delegates to
+    /// [`Self::get_user`].
+    pub async fn get_user_for_author(
+        &self,
+        author: &crate::types::Author,
+    ) -> Result<Option<crate::types::UserInfo>, GetUserError> {
+        self.get_user(&author.user_id).await
+    }
+
     pub async fn get_user(
         &self,
         user_id: &str,
@@ -1540,6 +1561,51 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "slack:DU123456:");
         assert_eq!(calls[0].1, "Hello via DM!");
+    }
+
+    // ---------- describe("openDM") + describe("getUser") Author overloads (2 cases) ----------
+    // 1:1 with upstream `chat.test.ts > describe("openDM") >
+    // it("should accept Author object and extract userId")` and
+    // the parallel getUser case. The Rust port exposes Author
+    // dispatch via `open_dm_for_author` / `get_user_for_author`
+    // sibling methods (matching upstream's runtime
+    // `typeof user === "string" ? user : user.userId` argument-
+    // shape branch).
+
+    #[test]
+    fn chat_open_dm_should_accept_author_object_and_extract_user_id() {
+        let (chat, adapter) = chat_with_open_dm_adapter("slack");
+        let author = crate::types::Author {
+            user_id: "U789ABC".to_string(),
+            user_name: "testuser".to_string(),
+            full_name: "Test User".to_string(),
+            is_bot: crate::types::BotStatus::Known(false),
+            is_me: false,
+        };
+        let thread = futures_executor::block_on(chat.open_dm_for_author(&author)).unwrap();
+        assert_eq!(thread.thread_id(), "slack:DU789ABC:");
+        assert_eq!(thread.adapter().name(), "slack");
+        // open_dm doesn't post — verify post_message recorder is empty.
+        assert!(adapter.post_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_get_user_should_accept_author_object_and_extract_user_id() {
+        let (chat, adapter) =
+            chat_with_get_user_adapter(GetUserAdapter::new("slack", Some(alice())));
+        let author = crate::types::Author {
+            user_id: "U123456".to_string(),
+            user_name: "alice".to_string(),
+            full_name: "Alice Smith".to_string(),
+            is_bot: crate::types::BotStatus::Known(false),
+            is_me: false,
+        };
+        let user = futures_executor::block_on(chat.get_user_for_author(&author))
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.full_name, "Alice Smith");
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.as_slice(), &["U123456".to_string()]);
     }
 
     // ---------- describe("Chat") > handleIncomingMessage early-exit ----------
