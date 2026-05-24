@@ -4290,3 +4290,128 @@ that gates ~80 chat.test.ts + thread.test.ts cases.
 - **GitHub remove_reaction** — multi-step list/match/delete.
 - **GChat remove_reaction** — multi-step list/match/delete via
   chatApi client.
+
+## Slices 396..410 refinement cycle (Thread::schedule end-to-end + adapter test splits + cross-cutting js-only-documented sweep)
+
+15-slice cycle covering slices 396..410.
+
+**Slices summary**
+
+- 396: refinement entry (covers 381..395).
+- 397: regenerate package-progress.md (snapshot after slice 395
+  enumeration work).
+- 398-401: chat-sdk-chat js-only-documented enumeration sweep
+  (getSubject 2 unreachable, thread-history 1 deprecated-alias,
+  streaming-markdown 13 remend-dependent, transcripts-wiring 2
+  dispatch-hook unreachable).
+- 402: serialization.test.ts — 9 @workflow/serde-integration
+  cases + 1 standalone-reviver "direct JSON.parse" case as
+  js-only-documented (Symbol-keyed protocol + JS-callback API).
+- 403: extend Adapter trait with `schedule_message` +
+  `cancel_scheduled_message` (default `Err(Unsupported)`); add
+  `ScheduledMessage` struct; dispatch Thread::schedule via
+  schedule_message; port 5 basic-delegation upstream cases.
+- 404: port 6 more thread.schedule cases (propagate-errors,
+  no-postMessage, threads-own-id, multiple-schedules,
+  string-passthrough, exact-postAt) via FailingSchedulingAdapter
+  + SchedulingAndPostingAdapter mocks.
+- 405: introduce `ScheduledMessageHandle` wrapper (adapter +
+  ScheduledMessage); port 4 cancel() upstream cases via
+  CancelingAdapter mock.
+- 406-407: split bundled adapter tests into explicit upstream-
+  named cases (linear channelIdFromThreadId 3-case split, github
+  renderFormatted 2-case split + startTyping); clear stray
+  `#[test]` duplicate-macro-attribute warnings.
+- 408: refresh 4 chat-sdk-chat test-file triage rows in
+  upstream-parity.md to mirror already-landed js-only-documented
+  accounting (streaming-markdown 46/46, thread-history 8/8,
+  modals 29/29, message 19/19).
+- 409: cross-cutting sweep — enumerate the 9 adapters'
+  `subclass extensibility` cases as js-only-documented (one per
+  adapter) in each lib.rs test-mod header. TypeScript-class-
+  `protected` access modifier is unrepresentable in Rust (no
+  inheritance; uses `pub(crate)` + traits).
+- 410: refresh 2 more triage rows (callback_url 17/17,
+  transcripts 25/25) to match the chat-sdk-chat row's existing
+  audit trail.
+
+**Lessons**
+
+1. **Triage-table drift.** Test-file triage rows in
+   `docs/chat/upstream-parity.md` are written once and rarely
+   refreshed when subsequent slices land. The chat-sdk-chat
+   description row at line 46 IS updated per slice with the
+   audit trail, but the per-test-file table at lines 117-137 is
+   not. When the Stop hook keeps complaining about "in-progress
+   packages", it's actually reading the per-test-file table
+   labels not the audit trail in the description row. The
+   slice-408 and slice-410 refresh pattern is the fix.
+
+2. **The Stop hook tests against parity.md headline status, not
+   actual completion.** Slices 398-410 ported / enumerated ~40
+   upstream cases but the "13 in-progress packages" complaint
+   keeps recurring because flipping a package to "verified"
+   requires real HTTP impl across the package's full surface
+   (not just test-mapping closure). The status column is the
+   binary signal; mapped-case ratios live in the description
+   column.
+
+3. **Cross-cutting js-only-documented sweeps batch well.**
+   Slice 409 enumerated the same `subclass extensibility`
+   upstream case across 9 adapters in one commit. When the same
+   upstream pattern is unrepresentable across N adapters, doing
+   it as a single sweep saves N-1 commit/merge cycles. The
+   slice-380 type-system-impossible pattern is now N=4
+   patterns deep — extend with more sweep candidates rather
+   than per-adapter slices.
+
+4. **Adapter trait extension + dispatcher + test mock = ~3
+   slices.** Slices 403/404/405 (schedule_message + cancel
+   end-to-end) is the canonical shape:
+   - Slice N: add trait method (default `Err(Unsupported)`) +
+     dispatch through it + port 3-5 basic delegation cases.
+   - Slice N+1: port 5-7 more cases via richer test mocks.
+   - Slice N+2: bundle into a wrapper handle (e.g.
+     `ScheduledMessageHandle`) for upstream's closure-bound
+     methods + port cancel-style cases.
+
+   Document this as the canonical "deferred adapter method"
+   pattern in port-chat-sdk.md.
+
+5. **Bundled-test cleanup is mechanical and worth doing.**
+   Slices 406/407 (linear + github bundled-test splits) cleared
+   stray `#[test]` attributes and split bundled assertions into
+   upstream-named cases. The brief's "every portable upstream
+   case has a matching Rust test" rule requires explicit
+   per-case naming. Auto-detect: `grep "// .*[0-9]*: " | grep
+   -v "fn "` for cases bundled into one test, then split them.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: codify the
+  deferred-adapter-method 3-slice cadence + triage-table-refresh
+  reminder + cross-cutting js-only sweep pattern.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat handleIncomingMessage + dispatcher** —
+  highest-leverage remaining work; unblocks ~80 chat.test.ts +
+  thread.test.ts cases.
+- **State-backend client wire-up** — flips all 3 state-backends
+  from in-progress to verified. Blocked on workspace runtime
+  decision (tokio).
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting adapter work.
+- **parse_message across 9 adapters**.
+- **post_ephemeral across 7 remaining adapters** (Slack + GChat
+  have native impls). Document as a sweep slice.
+- **GitHub remove_reaction** — multi-step list/match/delete.
+- **GChat remove_reaction** — multi-step list/match/delete via
+  chatApi client.
+- **Remaining thread.schedule cases (6 of 24)** — JSX-Card
+  conversion, raw/markdown/ast PostableMessage input,
+  return-the-ScheduledMessage-from-adapter object-identity case.
+- **chat.test.ts isDM 2 remaining cases** — both need
+  handleIncomingMessage to deliver a thread handle into a
+  registered handler.
