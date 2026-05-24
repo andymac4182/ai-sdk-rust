@@ -2916,6 +2916,37 @@ struct CollectedStreamTextStep {
     abort_reason: Option<JsonValue>,
 }
 
+#[derive(Clone, Debug)]
+enum ProviderContentEntry {
+    Content(LanguageModelContent),
+    TextBlock(String),
+    ReasoningBlock(String),
+}
+
+fn materialize_provider_content(
+    entries: &[ProviderContentEntry],
+    text_blocks: &BTreeMap<String, (String, Option<ProviderMetadata>)>,
+    reasoning_blocks: &BTreeMap<String, (String, Option<ProviderMetadata>)>,
+) -> Vec<LanguageModelContent> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProviderContentEntry::Content(content) => Some(content.clone()),
+            ProviderContentEntry::TextBlock(id) => {
+                let (text, provider_metadata) = text_blocks.get(id)?;
+                (!text.is_empty())
+                    .then(|| text_language_model_content(text.clone(), provider_metadata.clone()))
+            }
+            ProviderContentEntry::ReasoningBlock(id) => {
+                let (text, provider_metadata) = reasoning_blocks.get(id)?;
+                (!text.is_empty()).then(|| {
+                    reasoning_language_model_content(text.clone(), provider_metadata.clone())
+                })
+            }
+        })
+        .collect()
+}
+
 impl CollectedStreamTextStep {
     fn aborted(abort_reason: Option<JsonValue>) -> Self {
         Self {
@@ -3015,7 +3046,7 @@ impl CollectedStreamTextStep {
         let mut tool_results = Vec::new();
         let mut custom_parts = Vec::new();
         let mut errors = Vec::new();
-        let mut provider_content = Vec::new();
+        let mut provider_content_entries = Vec::new();
         let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
         let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
 
@@ -3026,6 +3057,7 @@ impl CollectedStreamTextStep {
                         part.id.clone(),
                         (String::new(), part.provider_metadata.clone()),
                     );
+                    provider_content_entries.push(ProviderContentEntry::TextBlock(part.id.clone()));
                 }
                 TextStreamPart::TextDelta(part) if !part.text.is_empty() => {
                     text.push_str(&part.text);
@@ -3036,25 +3068,22 @@ impl CollectedStreamTextStep {
                             *block_metadata = part.provider_metadata.clone();
                         }
                     } else {
-                        provider_content.push(text_language_model_content(
-                            part.text.clone(),
-                            part.provider_metadata.clone(),
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            text_language_model_content(
+                                part.text.clone(),
+                                part.provider_metadata.clone(),
+                            ),
                         ));
                     }
                 }
-                TextStreamPart::TextEnd(part) => {
-                    if let Some((block_text, provider_metadata)) = text_blocks.remove(&part.id)
-                        && !block_text.is_empty()
-                    {
-                        provider_content
-                            .push(text_language_model_content(block_text, provider_metadata));
-                    }
-                }
+                TextStreamPart::TextEnd(_) => {}
                 TextStreamPart::ReasoningStart(part) => {
                     reasoning_blocks.insert(
                         part.id.clone(),
                         (String::new(), part.provider_metadata.clone()),
                     );
+                    provider_content_entries
+                        .push(ProviderContentEntry::ReasoningBlock(part.id.clone()));
                 }
                 TextStreamPart::ReasoningDelta(part) => {
                     has_reasoning_text = true;
@@ -3065,32 +3094,29 @@ impl CollectedStreamTextStep {
                             *block_metadata = part.provider_metadata.clone();
                         }
                     } else {
-                        provider_content.push(reasoning_language_model_content(
-                            part.text.clone(),
-                            part.provider_metadata.clone(),
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            reasoning_language_model_content(
+                                part.text.clone(),
+                                part.provider_metadata.clone(),
+                            ),
                         ));
                     }
                 }
-                TextStreamPart::ReasoningEnd(part) => {
-                    if let Some((block_text, provider_metadata)) = reasoning_blocks.remove(&part.id)
-                        && !block_text.is_empty()
-                    {
-                        provider_content.push(reasoning_language_model_content(
-                            block_text,
-                            provider_metadata,
-                        ));
-                    }
-                }
+                TextStreamPart::ReasoningEnd(_) => {}
                 TextStreamPart::ToolApprovalRequest(part) => {
-                    provider_content.push(LanguageModelContent::ToolApprovalRequest(
-                        part.to_language_model_tool_approval_request(),
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::ToolApprovalRequest(
+                            part.to_language_model_tool_approval_request(),
+                        ),
                     ));
                 }
                 TextStreamPart::ToolApprovalResponse(_) => {}
                 TextStreamPart::ToolCall(part) => {
                     tool_calls.push(part.clone());
-                    provider_content.push(LanguageModelContent::ToolCall(
-                        language_model_tool_call_from_stream_text_tool_call(part),
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::ToolCall(
+                            language_model_tool_call_from_stream_text_tool_call(part),
+                        ),
                     ));
                 }
                 TextStreamPart::ToolResult(part) => {
@@ -3098,24 +3124,34 @@ impl CollectedStreamTextStep {
                     if let Some(tool_result) =
                         language_model_tool_result_from_stream_text_tool_result(part)
                     {
-                        provider_content.push(LanguageModelContent::ToolResult(tool_result));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ToolResult(tool_result),
+                        ));
                     }
                 }
                 TextStreamPart::Custom(part) => {
                     custom_parts.push(part.clone());
-                    provider_content.push(LanguageModelContent::Custom(part.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::Custom(part.clone()),
+                    ));
                 }
                 TextStreamPart::File(part) => {
                     files.push(part.file.clone());
-                    provider_content.push(LanguageModelContent::File(part.file.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::File(part.file.clone()),
+                    ));
                 }
                 TextStreamPart::ReasoningFile(part) => {
                     reasoning_files.push(part.file.clone());
-                    provider_content.push(LanguageModelContent::ReasoningFile(part.file.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::ReasoningFile(part.file.clone()),
+                    ));
                 }
                 TextStreamPart::Source(part) => {
                     sources.push(part.clone());
-                    provider_content.push(LanguageModelContent::Source(part.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::Source(part.clone()),
+                    ));
                 }
                 TextStreamPart::Error(part) => {
                     errors.push(part.error.clone());
@@ -3137,21 +3173,6 @@ impl CollectedStreamTextStep {
             }
         }
 
-        for (_, (block_text, provider_metadata)) in text_blocks {
-            if !block_text.is_empty() {
-                provider_content.push(text_language_model_content(block_text, provider_metadata));
-            }
-        }
-
-        for (_, (block_text, provider_metadata)) in reasoning_blocks {
-            if !block_text.is_empty() {
-                provider_content.push(reasoning_language_model_content(
-                    block_text,
-                    provider_metadata,
-                ));
-            }
-        }
-
         self.text = text;
         self.text_stream = text_stream;
         self.reasoning_text = has_reasoning_text.then_some(reasoning_text);
@@ -3162,7 +3183,11 @@ impl CollectedStreamTextStep {
         self.tool_results = tool_results;
         self.custom_parts = custom_parts;
         self.errors = errors;
-        self.provider_content = provider_content;
+        self.provider_content = materialize_provider_content(
+            &provider_content_entries,
+            &text_blocks,
+            &reasoning_blocks,
+        );
     }
 
     fn apply_smooth_stream_error(&mut self, error: &SmoothStreamError) {
@@ -3396,7 +3421,7 @@ where
     let mut finish_reason = FinishReason::Other;
     let mut raw_finish_reason = None;
     let mut provider_metadata = None;
-    let mut provider_content = Vec::new();
+    let mut provider_content_entries = Vec::new();
     let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
     let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
     let mut ongoing_tool_call_tool_names = BTreeMap::<String, String>::new();
@@ -3431,6 +3456,8 @@ where
                             part.id.clone(),
                             (String::new(), part.provider_metadata.clone()),
                         );
+                        provider_content_entries
+                            .push(ProviderContentEntry::TextBlock(part.id.clone()));
                         parts.push(TextStreamPart::TextStart(part));
                     }
                     LanguageModelStreamPart::TextDelta(part) => {
@@ -3451,9 +3478,11 @@ where
                                     *block_metadata = part.provider_metadata.clone();
                                 }
                             } else {
-                                provider_content.push(text_language_model_content(
-                                    part.delta.clone(),
-                                    part.provider_metadata.clone(),
+                                provider_content_entries.push(ProviderContentEntry::Content(
+                                    text_language_model_content(
+                                        part.delta.clone(),
+                                        part.provider_metadata.clone(),
+                                    ),
                                 ));
                             }
                             let mut stream_part = TextStreamTextDeltaPart::new(part.id, part.delta);
@@ -3469,12 +3498,6 @@ where
                         }
                     }
                     LanguageModelStreamPart::TextEnd(part) => {
-                        if let Some((block_text, provider_metadata)) = text_blocks.remove(&part.id)
-                            && !block_text.is_empty()
-                        {
-                            provider_content
-                                .push(text_language_model_content(block_text, provider_metadata));
-                        }
                         parts.push(TextStreamPart::TextEnd(part));
                     }
                     LanguageModelStreamPart::ReasoningStart(part) => {
@@ -3482,6 +3505,8 @@ where
                             part.id.clone(),
                             (String::new(), part.provider_metadata.clone()),
                         );
+                        provider_content_entries
+                            .push(ProviderContentEntry::ReasoningBlock(part.id.clone()));
                         parts.push(TextStreamPart::ReasoningStart(part));
                     }
                     LanguageModelStreamPart::ReasoningDelta(part) => {
@@ -3500,9 +3525,11 @@ where
                                 *block_metadata = part.provider_metadata.clone();
                             }
                         } else {
-                            provider_content.push(reasoning_language_model_content(
-                                part.delta.clone(),
-                                part.provider_metadata.clone(),
+                            provider_content_entries.push(ProviderContentEntry::Content(
+                                reasoning_language_model_content(
+                                    part.delta.clone(),
+                                    part.provider_metadata.clone(),
+                                ),
                             ));
                         }
                         let mut stream_part =
@@ -3518,15 +3545,6 @@ where
                         .await;
                     }
                     LanguageModelStreamPart::ReasoningEnd(part) => {
-                        if let Some((block_text, provider_metadata)) =
-                            reasoning_blocks.remove(&part.id)
-                            && !block_text.is_empty()
-                        {
-                            provider_content.push(reasoning_language_model_content(
-                                block_text,
-                                provider_metadata,
-                            ));
-                        }
                         parts.push(TextStreamPart::ReasoningEnd(part));
                     }
                     LanguageModelStreamPart::ToolInputStart(part) => {
@@ -3598,8 +3616,9 @@ where
                             .iter()
                             .any(|tool_call| tool_call.tool_call_id == part.tool_call_id)
                         {
-                            provider_content
-                                .push(LanguageModelContent::ToolApprovalRequest(part.clone()));
+                            provider_content_entries.push(ProviderContentEntry::Content(
+                                LanguageModelContent::ToolApprovalRequest(part.clone()),
+                            ));
                             parts.push(TextStreamPart::ToolApprovalRequest(
                                 TextStreamToolApprovalRequestPart::from_language_model_tool_approval_request(part),
                             ));
@@ -3622,7 +3641,9 @@ where
                             .unwrap_or_else(|| tool_call.tool_name.clone());
                         let tool = controls.tools.iter().find(|tool| tool.name == tool_name);
                         tool_calls.push(tool_call.clone());
-                        provider_content.push(LanguageModelContent::ToolCall(part));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ToolCall(part),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ToolCall(tool_call),
@@ -3649,7 +3670,9 @@ where
                             &tool_calls,
                         );
                         tool_results.push(tool_result.clone());
-                        provider_content.push(LanguageModelContent::ToolResult(part));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ToolResult(part),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ToolResult(tool_result),
@@ -3659,7 +3682,9 @@ where
                     }
                     LanguageModelStreamPart::Custom(part) => {
                         custom_parts.push(part.clone());
-                        provider_content.push(LanguageModelContent::Custom(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::Custom(part.clone()),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::Custom(part),
@@ -3669,19 +3694,25 @@ where
                     }
                     LanguageModelStreamPart::File(part) => {
                         files.push(part.clone());
-                        provider_content.push(LanguageModelContent::File(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::File(part.clone()),
+                        ));
                         parts.push(TextStreamPart::File(TextStreamFilePart::new(part)));
                     }
                     LanguageModelStreamPart::ReasoningFile(part) => {
                         reasoning_files.push(part.clone());
-                        provider_content.push(LanguageModelContent::ReasoningFile(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ReasoningFile(part.clone()),
+                        ));
                         parts.push(TextStreamPart::ReasoningFile(
                             TextStreamReasoningFilePart::new(part),
                         ));
                     }
                     LanguageModelStreamPart::Source(part) => {
                         sources.push(part.clone());
-                        provider_content.push(LanguageModelContent::Source(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::Source(part.clone()),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::Source(part),
@@ -3737,21 +3768,6 @@ where
         }
     }
 
-    for (_, (block_text, provider_metadata)) in text_blocks {
-        if !block_text.is_empty() {
-            provider_content.push(text_language_model_content(block_text, provider_metadata));
-        }
-    }
-
-    for (_, (block_text, provider_metadata)) in reasoning_blocks {
-        if !block_text.is_empty() {
-            provider_content.push(reasoning_language_model_content(
-                block_text,
-                provider_metadata,
-            ));
-        }
-    }
-
     ensure_start_step(
         parts,
         &mut start_step_index,
@@ -3783,7 +3799,11 @@ where
         raw_finish_reason,
         provider_metadata,
         performance,
-        provider_content,
+        provider_content: materialize_provider_content(
+            &provider_content_entries,
+            &text_blocks,
+            &reasoning_blocks,
+        ),
         aborted,
         abort_reason,
     }
@@ -7402,6 +7422,136 @@ mod tests {
                 )
                 .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn stream_text_result_preserves_interleaved_text_and_reasoning_content_order() {
+        let step = Arc::new(Mutex::new(None::<GenerateTextStep>));
+        let step_for_callback = Arc::clone(&step);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "Thinking...",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "This ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "is ")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("3")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "I'm thinking...",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "3",
+                    "Separate thoughts",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "a")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", " test.")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("3")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_step_finish(
+                move |event| {
+                    let step = Arc::clone(&step_for_callback);
+                    async move {
+                        *step.lock().expect("step mutex is not poisoned") = Some(event);
+                    }
+                },
+            ),
+        ));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ReasoningStart(_) => "reasoning-start",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::ReasoningDelta(_) => "reasoning-delta",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::ReasoningEnd(_) => "reasoning-end",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "reasoning-start",
+                "text-start",
+                "reasoning-delta",
+                "text-delta",
+                "text-delta",
+                "text-start",
+                "text-delta",
+                "text-delta",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "text-delta",
+                "text-delta",
+                "reasoning-end",
+                "text-delta",
+                "text-end",
+                "reasoning-end",
+                "text-end",
+                "finish-step",
+                "finish",
+            ]
+        );
+        assert_eq!(
+            result.text_stream,
+            vec!["Hello", ", ", "This ", "is ", "a", "world!", " test."]
+        );
+        assert_eq!(result.text, "Hello, This is aworld! test.");
+        assert_eq!(
+            result.reasoning_text,
+            Some("Thinking...I'm thinking...Separate thoughts".to_string())
+        );
+
+        let step = step
+            .lock()
+            .expect("step mutex is not poisoned")
+            .clone()
+            .expect("on_step_finish should receive a step");
+        let content_labels = step
+            .content
+            .iter()
+            .map(|part| match part {
+                GenerateTextContentPart::Reasoning(part) => format!("reasoning:{}", part.text),
+                GenerateTextContentPart::Text(part) => format!("text:{}", part.text),
+                part => format!("other:{part:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            content_labels,
+            vec![
+                "reasoning:Thinking...I'm thinking...",
+                "text:Hello, world!",
+                "text:This is a test.",
+                "reasoning:Separate thoughts",
+            ]
         );
     }
 

@@ -4916,6 +4916,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    The deprecated JavaScript `includeRawChunks` and `experimental_include`
    aliases are documented as JavaScript option-surface compatibility because
    Rust exposes only the typed `with_include_raw_chunks` builder.
+   The upstream mixed multi-content streaming interleaving cases now have the
+   named Rust counterpart
+   `stream_text_result_preserves_interleaved_text_and_reasoning_content_order`,
+   proving `fullStream` part ordering, final text/reasoning accumulation, and
+   step-finish generated content ordering for overlapping text/reasoning block
+   ids.
    The portable upstream error callback cases for mid-stream provider error
    chunks and second-step continuation stream errors now have named Rust
    counterparts in
