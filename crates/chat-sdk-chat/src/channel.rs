@@ -144,6 +144,38 @@ impl Channel {
         self.name.lock().unwrap().clone()
     }
 
+    /// 1:1 port of upstream `Channel.toJSON()`. Returns the wire
+    /// shape `{ _type: "chat:Channel", id, adapterName,
+    /// channelVisibility, isDM }`. `channelVisibility` defaults to
+    /// `"unknown"` (1:1 with upstream's default when no metadata
+    /// has been fetched).
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "_type": "chat:Channel",
+            "id": self.channel_id,
+            "adapterName": self.adapter.name(),
+            "channelVisibility": "unknown",
+            "isDM": self.is_dm,
+        })
+    }
+
+    /// 1:1 port of upstream `static Channel.fromJSON(json, adapter)`.
+    /// Reconstructs the handle from its serialized form. The
+    /// `adapter` argument is supplied externally (1:1 with upstream's
+    /// `adapter` parameter — the adapter isn't serialized).
+    pub fn from_json(json: &serde_json::Value, adapter: Arc<dyn Adapter>) -> Self {
+        let channel_id = json
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let is_dm = json
+            .get("isDM")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        Self::with_options(adapter, channel_id, None, is_dm)
+    }
+
     /// 1:1 port of upstream `async fetchMetadata(): Promise<ChannelInfo>`.
     /// Calls the adapter's `fetch_channel_info(channel_id)`; on
     /// `Unsupported` (1:1 with upstream's missing-method optional-
@@ -547,6 +579,42 @@ mod tests {
         let last = state.set_calls.lock().unwrap().last().unwrap().clone();
         assert_eq!(last.0, "channel-state:C123");
         assert_eq!(last.2, Some(CHANNEL_STATE_TTL_MS));
+    }
+
+    // ---------- describe("serialization") (2 upstream cases) ----------
+    // 1:1 with upstream `channel.test.ts > describe("serialization")`.
+
+    #[test]
+    fn channel_serialization_should_serialize_to_json() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::with_options(adapter, "slack:C123", None, false);
+        let json = channel.to_json();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "_type": "chat:Channel",
+                "id": "slack:C123",
+                "adapterName": "recording",
+                "channelVisibility": "unknown",
+                "isDM": false,
+            })
+        );
+    }
+
+    #[test]
+    fn channel_serialization_should_deserialize_from_json() {
+        let json = serde_json::json!({
+            "_type": "chat:Channel",
+            "id": "slack:C123",
+            "adapterName": "slack",
+            "isDM": false,
+        });
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let channel = Channel::from_json(&json, adapter.clone());
+        assert_eq!(channel.channel_id(), "slack:C123");
+        assert!(!channel.is_dm());
+        // adapter is the same Arc supplied externally.
+        assert!(Arc::ptr_eq(channel.adapter(), &adapter));
     }
 
     // ---------- describe("deriveChannelId") (2 upstream cases) ----------
