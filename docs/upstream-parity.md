@@ -1462,6 +1462,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   The legacy shorthand data shapes remain represented at the
   `@ai-sdk/provider-utils` type boundary by the existing
   `content_part_tool_result_legacy_variants_still_type_checks_*` Rust tests.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` consecutive
+  tool-message parity added the named Rust counterpart
+  `convert_to_language_model_prompt_should_combine_2_consecutive_tool_messages_into_a_single_tool_message`
+  for the upstream `prompt/convert-to-language-model-prompt.test.ts` tool
+  message case. Rust proves assistant approval requests are stripped from
+  provider-facing assistant content, non-provider approval responses satisfy
+  missing-result validation without being sent to providers, and consecutive
+  tool-role messages collapse into one provider-facing tool message containing
+  the actual tool result.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

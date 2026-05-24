@@ -3059,6 +3059,69 @@ mod tests {
     }
 
     #[test]
+    fn convert_to_language_model_prompt_should_combine_2_consecutive_tool_messages_into_a_single_tool_message()
+     {
+        let result =
+            convert_to_language_model_prompt(StandardizedPrompt::new(
+                None,
+                vec![
+                    assistant_message(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new("toolCallId", "toolName", json!({})),
+                        ),
+                        LanguageModelAssistantContentPart::ToolApprovalRequest(
+                            LanguageModelToolApprovalRequestPart::new("approvalId", "toolCallId"),
+                        ),
+                    ]),
+                    tool_message(vec![LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approvalId", true),
+                    )]),
+                    tool_message(vec![LanguageModelToolContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "toolCallId",
+                            "toolName",
+                            LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+                        ),
+                    )]),
+                ],
+            ))
+            .expect("approval response and tool result satisfy validation");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "toolCallId",
+                            "toolName": "toolName",
+                            "input": {}
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "toolCallId",
+                            "toolName": "toolName",
+                            "output": {
+                                "type": "json",
+                                "value": {
+                                    "some": "result"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_to_language_model_prompt_validation_should_pass_for_provider_executed_tools_deferred_results()
      {
         let result = convert_to_language_model_prompt(StandardizedPrompt::new(
