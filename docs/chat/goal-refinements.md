@@ -5034,3 +5034,96 @@ touch the deferred surfaces: action/modal callbackUrl POSTs,
 concurrency strategies, attachment rehydration, action
 callbackUrl error logging, `MemoryStateAdapter::no_op()` test
 helper.)
+
+## Cycle 451..455 (split-and-rename pattern + real bug fixes)
+
+**Date:** 2026-05-25
+
+**Cycles covered:** slice 451 codified the split-and-rename
+describe-blocks pattern in the brief → slice 452 found+fixed a
+real upstream-divergence bug in Slack's
+`channelIdFromThreadId("slack:C456:")` (returned None where
+upstream returns `"slack:C456"`) by parsing the suffix directly
+instead of going through the strict `decode_thread_id`, +2 tests
+under the now-1:1 `describe("channelIdFromThreadId")` → slice 453
+split Slack + Discord `isDM` bundled tests into per-upstream-
+case tests, +2 tests → slice 454 made Slack `decode_thread_id`
+fully permissive matching upstream (accepts `slack:CHANNEL` /
+`slack:CHANNEL:`), added `DecodedSlackThreadId::thread_ts_or_none`
+encoding upstream's `rawThreadTs || undefined` normalization,
+updated `post_message` JSON construction + `start_typing` early-
+return at the API call sites, ports all 4 portable upstream
+`describe("decodeThreadId")` cases, +4 tests → slice 455 split
+WhatsApp `decode_thread_id` rejection bundled test into
+per-upstream-case tests covering empty-after-prefix +
+missing-userWaId + renamed invalid-prefix to match upstream
+naming, +1 test. Cumulative: +9 tests over 4 productive slices.
+
+**What this cycle revealed**
+
+1. **The slice-450 split-and-rename pattern surfaced real
+   upstream-divergence bugs, not just naming hygiene.** Slice 452
+   fixed a behavioral divergence (Slack `channelIdFromThreadId`
+   rejected `slack:C456:`) that the bundled test was masking.
+   Slice 454 found and fixed a deeper one: Slack
+   `decode_thread_id` was strict-by-default where upstream is
+   permissive-by-default, and the entire chain of API call sites
+   (`post_message`, `start_typing`) was missing upstream's
+   `rawThreadTs || undefined` normalization. The pattern's value
+   is **forcing per-case audit of the upstream test bodies**;
+   asserting per-case behavior rather than "passes generically"
+   exposes the divergences. Future ticks should treat
+   split-and-rename as a *bug-discovery* technique, not just a
+   test-naming refactor.
+
+2. **Permissive-decoder + normalize-at-call-site is the right
+   pattern for thread-id helpers.** The upstream JS shape
+   intentionally allows partial-thread-id inputs (`slack:CHANNEL`
+   for whole-channel operations, `slack:CHANNEL:TS` for thread
+   operations) and uses `|| undefined` at call sites to omit
+   empty-string fields. The Rust port should mirror this:
+   permissive decoder with all components as plain fields, then
+   `Option<&str>`-returning accessor methods at the boundary.
+   Going strict in the decoder forces callers (and tests) to
+   downgrade to a less expressive shape than upstream supports.
+   Generalize: when an upstream decoder is permissive and its
+   results feed `|| undefined` normalization, the Rust port
+   should match exactly — don't impose stricter validation
+   "for safety" since it changes observable behavior.
+
+3. **Productive autonomous ticks bunch.** Slices 451..455 found
+   real work to do every tick (no quiet ticks). The trigger was
+   the slice-451 codification, which gave the agent a checklist
+   to apply: scan describe-blocks per adapter, count Rust tests
+   per case, split bundles. Pattern: once a productive technique
+   is codified, the autonomous loop has hours of fall-through
+   work before needing the next quiet tick. The Stop hook keeps
+   firing the same "13 packages in-progress" message regardless,
+   but the underlying parity ledger does improve per tick.
+
+4. **Pattern audit candidates remaining (carry-forward to next
+   cycles).** Found this cycle but not yet acted on: Discord
+   decoder is already 1:1 with upstream's 4 cases (just non-
+   upstream test names — would be a pure rename slice).
+   `describe("encodeThreadId")` across adapters may have 1:1
+   gaps. `describe("isDM")` audit pending for gchat (2 upstream,
+   ?Rust). Many adapters have `describe("renderFormatted")`
+   already 1:1; that vein is mostly worked.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending addition of
+  a *"permissive-decoder + normalize-at-call-site"* note in the
+  brief's adapter-helper section (lesson 2 above) so future
+  tickets recognize the pattern when porting any new helper that
+  takes a thread id.
+
+**Open refinements deferred (unchanged)**
+
+(See cycle 434..438 + 441..445 + 446..450 entries. Slices
+451..455 advance the parity ledger via real divergence fixes +
+split-and-rename slices but don't touch the deferred surfaces:
+action/modal callbackUrl POSTs, concurrency strategies,
+attachment rehydration, action callbackUrl error logging,
+`MemoryStateAdapter::no_op()` test helper.)

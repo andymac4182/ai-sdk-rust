@@ -1438,6 +1438,58 @@ A package can flip to **verified** when every upstream case
 documented as js-only in this pattern. The state-backends are
 currently in this position pending runtime client wire-up.
 
+## Permissive decoder + normalize-at-call-site (added slice 456 from cycle 451..455)
+
+Upstream adapter thread-id decoders are intentionally permissive:
+they accept partial-thread-id inputs (e.g. `slack:CHANNEL` for
+whole-channel operations, `slack:CHANNEL:` with empty thread_ts,
+in addition to the full `slack:CHANNEL:THREAD_TS`) and let API
+call sites do `|| undefined` normalization to omit empty-string
+fields from the Slack API payload.
+
+When porting an adapter's thread-id decoder, follow this pattern:
+
+1. **Decoder accepts partial inputs.** Match upstream's
+   `parts.length` validation exactly — do not reject inputs
+   upstream accepts. For Slack: `split(':')` after stripping the
+   prefix, accept 1 or 2 segments, reject 0 or >2.
+2. **Result struct fields are plain.** Use `String` for components,
+   not `Option<String>`, so the data shape mirrors upstream's
+   `interface ... { threadTs: string }` (where `""` is a valid
+   value, not `undefined`).
+3. **Add `*_or_none()` accessor for `|| undefined` normalization.**
+   Returns `Option<&str>` that maps `""` -> `None` and `non-empty`
+   -> `Some(_)`. Call sites use this to conditionally include the
+   field in API JSON.
+4. **JSON construction: build the base body, then conditionally
+   insert.** Don't include `"thread_ts": decoded.thread_ts` if it
+   could be empty — Slack rejects with `invalid_thread_ts`.
+   ```rust
+   let mut body = serde_json::json!({ "channel": decoded.channel_id, "text": text });
+   if let Some(ts) = decoded.thread_ts_or_none() {
+       body["thread_ts"] = serde_json::Value::String(ts.to_string());
+   }
+   ```
+5. **Early-return at call sites that require a non-empty
+   thread_ts.** Match upstream's `if (!threadTs) { return; }`
+   short-circuit for methods like `start_typing` that operate on
+   a thread context.
+
+**Anti-pattern: strict-by-default decoder + downstream callers
+that assume a non-empty thread_ts.** If the decoder rejects what
+upstream accepts, every downstream caller silently diverges. The
+slice 452 + 454 fixes (Slack `channelIdFromThreadId` + Slack
+`decodeThreadId`) cleaned this up after the slice-450 split-and-
+rename pattern surfaced the divergences.
+
+Reference ports:
+- `crates/chat-sdk-adapter-slack/src/lib.rs::decode_thread_id`
+  (slice 454): permissive + `thread_ts_or_none()` + normalized
+  JSON sites + `start_typing` early-return.
+- `crates/chat-sdk-adapter-slack/src/lib.rs::channel_id_from_thread_id`
+  (slice 452): suffix-parses directly to avoid the strict-decoder
+  trap when the helper only needs the channel segment.
+
 ## Split-and-rename describe blocks (added slice 451 from cycle 446..450)
 
 The autonomous loop frequently finds a Rust crate with one
