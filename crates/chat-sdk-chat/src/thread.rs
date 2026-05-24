@@ -355,6 +355,27 @@ impl Thread {
         format!("<@{user_id}>")
     }
 
+    /// 1:1 port of upstream `Thread.schedule(text, options)`. The
+    /// upstream method dispatches to `adapter.scheduleMessage(threadId,
+    /// text, postAt)` when the adapter implements it, and throws a
+    /// `NotImplementedError("Scheduled messages are not supported by
+    /// this adapter", "scheduling")` otherwise. The Rust port currently
+    /// always returns the `NotImplementedError` variant because no
+    /// adapter ships a `schedule_message` trait method yet. Per the
+    /// slice-380 sentinel pattern, when an adapter adds native
+    /// scheduling support, this body will dispatch through a new
+    /// `Adapter::schedule_message` trait method (default `Err(NotImplemented)`).
+    pub async fn schedule(
+        &self,
+        _text: &str,
+        _post_at_unix_ms: u64,
+    ) -> Result<(), crate::errors::ChatError> {
+        Err(crate::errors::ChatError::not_implemented_feature(
+            "Scheduled messages are not supported by this adapter",
+            "scheduling",
+        ))
+    }
+
     /// 1:1 port of upstream `Thread.createSentMessageFromMessage(msg)`.
     /// Wraps an existing [`crate::message::Message`] as a
     /// [`SentMessage`] with edit/delete/add-reaction/remove-reaction
@@ -1445,6 +1466,51 @@ mod tests {
         assert!(
             !get_calls.iter().any(|k| k == "subscribed:slack:C123:1234.5678"),
             "state.get should NOT be called when subscribed context is set"
+        );
+    }
+
+    // ---------- describe("schedule()") (3 upstream cases) ----------
+    // 1:1 with upstream `thread.test.ts > describe("schedule()")`.
+    // Upstream's 3 NotImplementedError default cases all assert that
+    // calling schedule on an adapter without scheduleMessage support
+    // throws NotImplementedError with the right feature/message
+    // fields. The Rust port currently always returns
+    // ChatError::NotImplemented since no adapter ships
+    // schedule_message yet. The remaining upstream cases
+    // (mockResolvedValue scenarios for native scheduling) need
+    // Adapter::schedule_message trait extension first.
+
+    const FUTURE_UNIX_MS: u64 = 1_893_456_000_000; // 2030-01-01T00:00:00Z
+
+    #[test]
+    fn thread_schedule_should_throw_not_implemented_error_when_adapter_has_no_schedule_message() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let err =
+            block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).expect_err("expected ChatError");
+        assert!(err.is_not_implemented(), "expected NotImplemented variant");
+    }
+
+    #[test]
+    fn thread_schedule_should_include_scheduling_as_the_feature_in_not_implemented_error() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let err =
+            block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).expect_err("expected ChatError");
+        assert_eq!(err.feature(), Some("scheduling"));
+    }
+
+    #[test]
+    fn thread_schedule_should_include_descriptive_message_in_not_implemented_error() {
+        let adapter: Arc<dyn Adapter> = Arc::new(RecordingAdapter::default());
+        let thread = Thread::new(adapter, "slack:C123:1234.5678");
+        let err =
+            block_on(thread.schedule("Hello", FUTURE_UNIX_MS)).expect_err("expected ChatError");
+        assert!(
+            err.message()
+                .contains("Scheduled messages are not supported by this adapter"),
+            "got: {}",
+            err.message()
         );
     }
 
