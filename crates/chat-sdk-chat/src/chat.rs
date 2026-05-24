@@ -535,6 +535,12 @@ pub struct Chat {
     /// `Arc<Mutex<...>>` so registration works through `&self` and
     /// handler dispatch can snapshot the vec under a short lock.
     handlers: ChatHandlers,
+    /// Optional fallback bot user name for mention detection. 1:1
+    /// with upstream `ChatConfig.userName` — `adapter.user_name()`
+    /// takes precedence at dispatch time, falling back to this
+    /// instance-level value when the adapter doesn't supply one
+    /// (slice 425).
+    user_name: Option<String>,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -594,6 +600,11 @@ pub struct ChatOptions {
     /// Optional identity resolver used to populate `message.userKey`
     /// before handlers run. Required if [`Self::transcripts`] is set.
     pub identity: Option<Arc<dyn IdentityResolver>>,
+    /// Optional fallback bot user name for mention detection
+    /// (slice 425). 1:1 with upstream `ChatConfig.userName`. When
+    /// the dispatching adapter doesn't supply `user_name()`,
+    /// `detect_mention` falls back to this value.
+    pub user_name: Option<String>,
 }
 
 impl Default for ChatOptions {
@@ -605,6 +616,7 @@ impl Default for ChatOptions {
             adapters: Vec::new(),
             transcripts: None,
             identity: None,
+            user_name: None,
         }
     }
 }
@@ -699,7 +711,73 @@ impl Chat {
             transcripts,
             identity: options.identity,
             handlers: ChatHandlers::default(),
+            user_name: options.user_name,
         })
+    }
+
+    /// 1:1 port of upstream `Chat.detectMention(adapter, message)`.
+    /// Walks the message text for three mention patterns in order:
+    /// 1. `@<botUserName>\b` (primary; case-insensitive)
+    /// 2. `@<botUserId>\b` (fallback; only when adapter exposes
+    ///    botUserId)
+    /// 3. `<@!?<botUserId>>` (Discord format; only when adapter
+    ///    exposes botUserId)
+    ///
+    /// The bot user name is resolved from `adapter.user_name()`
+    /// first, falling back to `Chat.user_name` if the adapter
+    /// doesn't supply one.
+    pub fn detect_mention(&self, adapter: &dyn Adapter, message: &crate::message::Message) -> bool {
+        // 1:1 with upstream `escapeRegex` — escape regex
+        // metacharacters before interpolation.
+        fn escape_regex(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            for ch in s.chars() {
+                if ".*+?^${}()|[]\\".contains(ch) {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+            out
+        }
+
+        let bot_user_name = adapter
+            .user_name()
+            .map(str::to_string)
+            .or_else(|| self.user_name.clone());
+
+        if let Some(name) = bot_user_name.as_deref() {
+            if !name.is_empty() {
+                // Primary check: `@<name>\b` case-insensitive.
+                let pattern = format!(r"(?i)@{}\b", escape_regex(name));
+                if let Ok(re) = regex::Regex::new(&pattern) {
+                    if re.is_match(&message.text) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if let Some(bot_id) = adapter.bot_user_id() {
+            if !bot_id.is_empty() {
+                let escaped = escape_regex(bot_id);
+                // Fallback: `@<bot-id>\b` case-insensitive.
+                let id_pattern = format!(r"(?i)@{escaped}\b");
+                if let Ok(re) = regex::Regex::new(&id_pattern) {
+                    if re.is_match(&message.text) {
+                        return true;
+                    }
+                }
+                // Discord format: `<@!?<bot-id>>` case-insensitive.
+                let discord_pattern = format!(r"(?i)<@!?{escaped}>");
+                if let Ok(re) = regex::Regex::new(&discord_pattern) {
+                    if re.is_match(&message.text) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// 1:1 port of upstream `chat.onNewMention(handler)`. Registers a
@@ -1303,6 +1381,15 @@ impl Chat {
                 }
             }
         }
+
+        // 1:1 with upstream `message.isMention = message.isMention
+        // || this.detectMention(adapter, message)` — preserve any
+        // pre-set truthy value (gateway-derived) and OR it with the
+        // text-walk result. Slice 425 wires the walker into the
+        // dispatcher; prior slices trusted caller-set value only.
+        let prior = message.is_mention.unwrap_or(false);
+        let computed = self.detect_mention(adapter, message);
+        message.is_mention = Some(prior || computed);
 
         // Handler dispatch (slices 415, 416, 417, 418). Snapshot
         // each handler list under a short lock then drop the guard
@@ -2223,6 +2310,7 @@ mod tests {
             adapters: Vec::new(),
             transcripts: Some(TranscriptsConfig::default()),
             identity: None,
+            user_name: None,
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2235,6 +2323,7 @@ mod tests {
             adapters: Vec::new(),
             transcripts: None,
             identity: None,
+            user_name: None,
         });
         assert!(result.is_ok());
     }
@@ -2246,6 +2335,7 @@ mod tests {
             adapters: Vec::new(),
             transcripts: None,
             identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
+            user_name: None,
         });
         assert!(result.is_ok());
     }
@@ -2258,6 +2348,7 @@ mod tests {
             adapters: Vec::new(),
             transcripts: None,
             identity: None,
+            user_name: None,
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -2271,6 +2362,7 @@ mod tests {
             adapters: Vec::new(),
             transcripts: Some(TranscriptsConfig::default()),
             identity: Some(Arc::new(StubIdentity) as Arc<dyn IdentityResolver>),
+            user_name: None,
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -4416,6 +4508,194 @@ mod tests {
         let result =
             futures_executor::block_on(chat.process_options_load(adapter.as_ref(), event));
         assert!(result.is_none());
+    }
+
+    // ---------- detect_mention (slice 425) ----------
+    //
+    // 1:1 with upstream `Chat.detectMention(adapter, message)`. The
+    // walker runs three regex tests against `message.text` and
+    // returns true on any match.
+
+    /// Test mock that exposes user_name + bot_user_id for
+    /// detect_mention coverage.
+    #[derive(Debug)]
+    struct NamedBotAdapter {
+        name: String,
+        user_name: Option<String>,
+        bot_user_id: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for NamedBotAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn user_name(&self) -> Option<&str> {
+            self.user_name.as_deref()
+        }
+        fn bot_user_id(&self) -> Option<&str> {
+            self.bot_user_id.as_deref()
+        }
+    }
+
+    fn chat_with_named_bot(
+        adapter_user_name: Option<&str>,
+        bot_user_id: Option<&str>,
+    ) -> (Chat, Arc<NamedBotAdapter>) {
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter = Arc::new(NamedBotAdapter {
+            name: "slack".to_string(),
+            user_name: adapter_user_name.map(str::to_string),
+            bot_user_id: bot_user_id.map(str::to_string),
+        });
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            ..Default::default()
+        });
+        (chat, adapter)
+    }
+
+    #[test]
+    fn detect_mention_matches_at_username_pattern() {
+        // 1:1 with upstream's primary `@<botUserName>\b` regex.
+        let (chat, adapter) = chat_with_named_bot(Some("slack-bot"), None);
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "Hey @slack-bot help me".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_is_case_insensitive_on_username() {
+        // Upstream uses `i` regex flag — `@SlAcK-BoT` matches the
+        // same way as `@slack-bot`.
+        let (chat, adapter) = chat_with_named_bot(Some("slack-bot"), None);
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "Hey @SlAcK-BoT help me".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_does_not_match_when_no_at_prefix() {
+        let (chat, adapter) = chat_with_named_bot(Some("slack-bot"), None);
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "hello everyone".to_string();
+        assert!(!chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_falls_back_to_chat_user_name_when_adapter_has_none() {
+        // adapter.user_name() returns None → falls back to
+        // Chat.user_name (set via ChatOptions.user_name).
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let adapter = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone() as Arc<dyn Adapter>],
+            user_name: Some("fallback-bot".to_string()),
+            ..Default::default()
+        });
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "Hey @fallback-bot help".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_matches_at_bot_user_id_pattern() {
+        // Fallback: `@<botUserId>\b`. Only fires when adapter
+        // exposes bot_user_id.
+        let (chat, adapter) = chat_with_named_bot(None, Some("U_BOT_123"));
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "Hey @U_BOT_123 please respond".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_matches_discord_user_id_pattern() {
+        // Discord format: `<@!?<botUserId>>` case-insensitive.
+        let (chat, adapter) = chat_with_named_bot(None, Some("123456789"));
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "ping <@123456789>".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+        // The `!` variant (member mention) also matches.
+        msg.text = "ping <@!123456789>".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_returns_false_when_no_bot_identity_configured() {
+        // Neither adapter nor Chat exposes a user_name / bot_user_id
+        // → no patterns to match. Returns false.
+        let (chat, adapter) = chat_with_named_bot(None, None);
+        let mut msg = dispatched_message("m1", false);
+        msg.text = "Hey @anyone".to_string();
+        assert!(!chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn detect_mention_escapes_regex_metacharacters_in_username() {
+        // `escapeRegex` per upstream — a bot named `bot.+name` is
+        // treated as literal characters, not regex metachars.
+        let (chat, adapter) = chat_with_named_bot(Some("bot.+name"), None);
+        let mut msg = dispatched_message("m1", false);
+        // Literal match works.
+        msg.text = "Hey @bot.+name".to_string();
+        assert!(chat.detect_mention(adapter.as_ref(), &msg));
+        // Regex-interpreted match must NOT work (proves escaping).
+        msg.text = "Hey @botXname".to_string();
+        assert!(!chat.detect_mention(adapter.as_ref(), &msg));
+    }
+
+    #[test]
+    fn handle_incoming_message_sets_is_mention_via_detect_mention_walker() {
+        // 1:1 with upstream "should set isMention=true when bot is
+        // mentioned". The dispatcher now overwrites a None /
+        // Some(false) value with the walker's computed result.
+        let (chat, adapter) = chat_with_named_bot(Some("slack-bot"), None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "Hey @slack-bot help me".to_string();
+        msg.is_mention = None; // walker should compute true
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(msg.is_mention, Some(true));
+    }
+
+    #[test]
+    fn handle_incoming_message_preserves_pre_set_is_mention_via_or() {
+        // 1:1 with upstream `message.isMention = message.isMention
+        // || detectMention(...)`. Pre-set Some(true) survives even
+        // when the walker would compute false.
+        let (chat, adapter) = chat_with_named_bot(Some("other-bot"), None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let mut msg = dispatched_message("msg-1", false);
+        msg.text = "no mention here".to_string();
+        msg.is_mention = Some(true); // gateway already decided
+        futures_executor::block_on(
+            chat.handle_incoming_message(adapter.as_ref(), "slack:C123:1234.5678", &mut msg),
+        )
+        .unwrap();
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(msg.is_mention, Some(true));
     }
 
     #[test]

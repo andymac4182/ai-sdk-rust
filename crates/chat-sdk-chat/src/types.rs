@@ -1315,6 +1315,25 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     /// implement this; there is no sensible default.
     fn name(&self) -> &str;
 
+    /// Bot user name used by [`crate::chat::Chat::handle_incoming_message`]
+    /// to detect `@bot` mentions in incoming messages. 1:1 with
+    /// upstream optional `userName?: string` accessor. Default
+    /// returns `None`; the dispatcher then falls back to
+    /// [`crate::chat::ChatOptions::user_name`] (also optional).
+    /// Adapters that fetch the bot identity at `initialize` time
+    /// override this to return the resolved name.
+    fn user_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Bot user id used by [`crate::chat::Chat::handle_incoming_message`]
+    /// as a fallback signal for `@<bot-id>` and `<@!?<bot-id>>`
+    /// (Discord-style) mentions. 1:1 with upstream optional
+    /// `botUserId?: string` accessor. Default returns `None`.
+    fn bot_user_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Tear down any adapter-side resources (sockets, intervals, in-
     /// flight retries). 1:1 with upstream `disconnect?: () =>
     /// Promise<void>`. The default no-op makes this opt-in for
