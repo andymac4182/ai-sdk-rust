@@ -166,7 +166,8 @@ pub use generate_object::{
     GenerateObjectOutputKind, GenerateObjectRepairText, GenerateObjectRepairTextFunction,
     GenerateObjectRepairTextFuture, GenerateObjectRepairTextOptions, GenerateObjectRequest,
     GenerateObjectResponse, GenerateObjectResult, GenerateObjectStartEvent,
-    GenerateObjectStepEndEvent, GenerateObjectStepStartEvent, RepairTextFunction, generate_object,
+    GenerateObjectStepEndEvent, GenerateObjectStepStartEvent, JSON_RESPONSE_CONTENT_TYPE,
+    JsonObjectResponse, RepairTextFunction, generate_object,
 };
 pub use generate_speech::{
     DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,

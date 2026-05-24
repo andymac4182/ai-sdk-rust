@@ -2642,25 +2642,28 @@ focused tests for each portable behavior before changing rows to `verified`.
   `generate_object_result_contains_request_information`,
   `generate_object_result_contains_response_information`,
   `generate_object_result_contains_provider_metadata`,
+  `generate_object_result_to_json_response_returns_json_response`,
   `generate_object_passes_headers_to_model`, and
   `generate_object_passes_provider_options_to_model` in
   `src/generate_object.rs`, mapping upstream `result.request`,
-  `result.response`, `result.providerMetadata`, `options.headers`, and
-  `options.providerOptions` cases one-to-one while preserving the Rust AI
-  user-agent suffix behavior.
+  `result.response`, `result.providerMetadata`, `result.toJsonResponse`,
+  `options.headers`, and `options.providerOptions` cases one-to-one while
+  preserving the Rust AI user-agent suffix behavior.
 - 2026-05-23: `generateObject` callback panic parity added
   `generate_object_callback_panics_do_not_break_generation` in
   `src/generate_object.rs`, mapping upstream
   `callbacks > error handling in callbacks > should not break the generation
   when a callback throws` for synchronous callback failures.
-- 2026-05-23: `generateObject` warning logger parity added
+- 2026-05-25: `generateObject` warning/result parity added
+  `generate_object_result_returns_warnings`,
   `generate_object_calls_log_warnings_with_the_correct_warnings` and
   `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`
   in `src/generate_object.rs`, plus scoped warning logger invocation from
-  `generate_object`. These map upstream `should call logWarnings with the
-  correct warnings` and `should call logWarnings with empty array when no
-  warnings are present` by proving the logger receives provider warnings,
-  empty-warning calls, provider id, and model id.
+  `generate_object`. These map upstream `should return warnings`,
+  `should call logWarnings with the correct warnings`, and `should call
+  logWarnings with empty array when no warnings are present` by proving
+  provider warnings are returned on the result and the logger receives provider
+  warnings, empty-warning calls, provider id, and model id.
 - 2026-05-23: `generateText` and `streamText` warning logger parity added
   `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
   `generate_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
@@ -5123,9 +5126,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    cases for `generateObject`, `streamObject`, `generateText`, `streamText`,
    `embed`, `embedMany`, and `rerank` now have named Rust counterparts.
    The upstream `generateObject` `result.request`, `result.response`,
-   `result.providerMetadata`, `options.headers`, and `options.providerOptions`
-   cases now have named Rust counterparts. The upstream `generateObject`
-   warning logger spy cases now have named Rust counterparts in
+   `result.providerMetadata`, `result.toJsonResponse`, `options.headers`, and
+   `options.providerOptions` cases now have named Rust counterparts, including
+   `generate_object_result_to_json_response_returns_json_response` for the
+   default status, JSON content type, and compact JSON body. The upstream
+   `generateObject` direct warnings and warning logger spy cases now have
+   named Rust counterparts in `generate_object_result_returns_warnings`,
    `generate_object_calls_log_warnings_with_the_correct_warnings` and
    `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
    The upstream `generateObject` callback cases now have named Rust

@@ -133,11 +133,31 @@ impl GenerateObjectResponse {
     }
 }
 
+pub const JSON_RESPONSE_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+
+/// Collected JSON response returned by [`GenerateObjectResult::to_json_response`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonObjectResponse {
+    /// HTTP status code.
+    pub status: u16,
+
+    /// Response headers.
+    pub headers: Headers,
+
+    /// UTF-8 encoded JSON body chunks.
+    pub body: Vec<Vec<u8>>,
+}
+
+impl JsonObjectResponse {
+    /// Decodes the UTF-8 body chunks back into strings.
+    pub fn decoded_body(&self) -> Result<Vec<String>, std::string::FromUtf8Error> {
+        self.body.iter().cloned().map(String::from_utf8).collect()
+    }
+}
+
 /// Result of a high-level `generate_object` call.
 ///
-/// This ports the upstream `GenerateObjectResult` data boundary. The
-/// JavaScript-only `toJsonResponse` convenience method is intentionally omitted
-/// from this Rust contract until a concrete HTTP response type is introduced.
+/// This ports the upstream `GenerateObjectResult` data boundary.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateObjectResult<T = JsonValue> {
@@ -212,6 +232,25 @@ impl<T> GenerateObjectResult<T> {
     pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
         self.provider_metadata = Some(provider_metadata);
         self
+    }
+
+    /// Creates a collected JSON response for the generated object.
+    ///
+    /// This mirrors upstream `result.toJsonResponse()`: the response status is
+    /// `200`, content type is `application/json; charset=utf-8`, and the body is
+    /// the compact JSON serialization of the generated object.
+    pub fn to_json_response(&self) -> Result<JsonObjectResponse, serde_json::Error>
+    where
+        T: Serialize,
+    {
+        Ok(JsonObjectResponse {
+            status: 200,
+            headers: Headers::from_iter([(
+                "Content-Type".to_string(),
+                JSON_RESPONSE_CONTENT_TYPE.to_string(),
+            )]),
+            body: vec![serde_json::to_vec(&self.object)?],
+        })
     }
 }
 
@@ -1565,7 +1604,7 @@ mod tests {
         GenerateObjectEndEvent, GenerateObjectOptions, GenerateObjectOutputKind,
         GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
         GenerateObjectStartEvent, GenerateObjectStepEndEvent, GenerateObjectStepStartEvent,
-        array_json_schema, enum_json_schema, generate_object,
+        JSON_RESPONSE_CONTENT_TYPE, array_json_schema, enum_json_schema, generate_object,
     };
     use crate::VERSION;
     use crate::file_data::FileData;
@@ -2252,6 +2291,49 @@ mod tests {
                 LogWarningsOptions::new(expected_warnings)
                     .with_scope("mock-provider", "mock-model-id")
             ]
+        );
+    }
+
+    #[test]
+    fn generate_object_result_returns_warnings() {
+        let expected_warnings = vec![Warning::Other {
+            message: "Setting is not supported".to_string(),
+        }];
+        let mut generate_result = content_object_result();
+        for warning in expected_warnings.clone() {
+            generate_result = generate_result.with_warning(warning);
+        }
+        let model = MockLanguageModel::new().with_generate_result(generate_result);
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(content_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(result.object, json!({ "content": "Hello, world!" }));
+        assert_eq!(result.warnings, Some(expected_warnings));
+    }
+
+    #[test]
+    fn generate_object_result_to_json_response_returns_json_response() {
+        let model = MockLanguageModel::new().with_generate_result(content_object_result());
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(content_schema()),
+        ))
+        .expect("object is generated");
+        let response = result
+            .to_json_response()
+            .expect("object serializes as JSON response");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("Content-Type").map(String::as_str),
+            Some(JSON_RESPONSE_CONTENT_TYPE)
+        );
+        assert_eq!(
+            response.decoded_body().expect("response body is utf-8"),
+            vec!["{\"content\":\"Hello, world!\"}".to_string()]
         );
     }
 
