@@ -262,6 +262,29 @@ mod tests {
         }
     }
 
+    // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
+    //
+    // The state-pg upstream `index.test.ts` has cases that are
+    // js-only or require live Postgres:
+    //
+    // - `should export createPostgresState function` / `should
+    //   export PostgresStateAdapter class`: JS module-loader checks
+    //   (`typeof X === "function"` / `instanceof Class`). Rust's
+    //   module system makes these visible at compile time.
+    // - `should create an adapter with an existing client`: upstream
+    //   takes a pre-configured `pg.Client`. Rust placeholder doesn't
+    //   model the node-pg client surface; tokio-postgres/sqlx
+    //   integration deferred.
+    // - `should use default logger when none provided`: JS-only
+    //   logger plumbing.
+    // - 3 env-var-fallback cases (POSTGRES_URL / DATABASE_URL / no
+    //   url): JS-runtime `process.env`. Rust factory would use the
+    //   slice-305 env-reader closure pattern.
+    // - integration tests requiring live Postgres connection.
+    //
+    // Remaining upstream cases are mapped via the ensureConnected
+    // describe-block mappings below.
+
     // ---------- upstream ensureConnected describe-block mappings ----------
     // 1:1 with upstream `index.test.ts > describe("ensureConnected")`
     // cases. Upstream throws `Error("not connected")` for each method
