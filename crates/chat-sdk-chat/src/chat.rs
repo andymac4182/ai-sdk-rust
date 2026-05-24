@@ -384,6 +384,68 @@ struct ActionRegistration {
     handler: ActionHandler,
 }
 
+/// 1:1 with upstream `SlashCommandEvent` minus the `channel` /
+/// `openModal` fields. The dispatcher constructs the
+/// [`crate::channel::Channel`] from `channel_id`; the openModal
+/// callback is deferred behind a follow-up slice.
+#[derive(Clone, Debug)]
+pub struct SlashCommandEventInput {
+    /// Slash-command name as received (e.g. `"/help"`). Always
+    /// includes the leading slash.
+    pub command: String,
+    /// Trailing text passed alongside the command (e.g. `"topic"`).
+    pub text: String,
+    /// Author of the slash-command invocation.
+    pub user: crate::types::Author,
+    /// Platform channel id where the command was issued.
+    pub channel_id: String,
+    /// Optional trigger id (Slack-only; used to open modals).
+    pub trigger_id: Option<String>,
+    /// Platform-specific raw event payload.
+    pub raw: serde_json::Value,
+}
+
+/// 1:1 with upstream `SlashCommandEvent` — the input shape plus a
+/// dispatcher-constructed [`crate::channel::Channel`] handle for
+/// channel-scoped replies.
+#[derive(Clone, Debug)]
+pub struct SlashCommandEvent {
+    pub command: String,
+    pub text: String,
+    pub user: crate::types::Author,
+    pub channel_id: String,
+    pub trigger_id: Option<String>,
+    pub raw: serde_json::Value,
+    pub channel: crate::channel::Channel,
+}
+
+/// 1:1 with upstream `SlashCommandHandler` — invoked per matching
+/// slash-command event.
+pub type SlashCommandHandler =
+    Arc<dyn Fn(SlashCommandEvent) -> HandlerFuture + Send + Sync + 'static>;
+
+/// Stored filter+handler pair for [`Chat::on_slash_command_filtered`].
+struct SlashCommandRegistration {
+    /// `None` means "match all slash commands" (1:1 with upstream's
+    /// no-filter `onSlashCommand(handler)` form). Otherwise matches
+    /// when the event's `command` equals any string in the vec
+    /// after both sides are normalized to include a leading slash.
+    filters: Option<Vec<String>>,
+    handler: SlashCommandHandler,
+}
+
+/// Normalize a slash-command filter string to always include the
+/// leading `/`. Matches upstream's "should normalize command names
+/// without leading slash" behavior (`onSlashCommand("help", ...)`
+/// matches `command: "/help"`).
+fn normalize_slash_command(cmd: &str) -> String {
+    if cmd.starts_with('/') {
+        cmd.to_string()
+    } else {
+        format!("/{cmd}")
+    }
+}
+
 /// Per-Chat handler storage. Each handler vec is wrapped in
 /// `Arc<Mutex<...>>` so registration goes through `&self` (matching
 /// upstream's mutating-but-not-`&mut` shape) while keeping
@@ -396,6 +458,7 @@ struct ChatHandlers {
     message_patterns: Arc<std::sync::Mutex<Vec<MessagePattern>>>,
     reaction: Arc<std::sync::Mutex<Vec<ReactionRegistration>>>,
     action: Arc<std::sync::Mutex<Vec<ActionRegistration>>>,
+    slash_command: Arc<std::sync::Mutex<Vec<SlashCommandRegistration>>>,
 }
 
 /// Top-level chat handle. 1:1 port (in progress) of upstream
@@ -780,6 +843,104 @@ impl Chat {
                 thread,
             };
             handler(action).await;
+        }
+    }
+
+    /// 1:1 port of upstream `chat.onSlashCommand(handler)`
+    /// no-filter overload. Registers a handler that fires for every
+    /// slash-command event (except commands from the bot itself).
+    pub fn on_slash_command<F>(&self, handler: F)
+    where
+        F: Fn(SlashCommandEvent) -> HandlerFuture + Send + Sync + 'static,
+    {
+        self.handlers
+            .slash_command
+            .lock()
+            .unwrap()
+            .push(SlashCommandRegistration {
+                filters: None,
+                handler: Arc::new(handler),
+            });
+    }
+
+    /// 1:1 port of upstream `chat.onSlashCommand(commands, handler)`
+    /// filter overload. Registers a handler that fires only for
+    /// commands whose normalized name (with leading `/`) matches
+    /// any of the supplied filter strings. Accepts both single-
+    /// string and array forms via the `IntoIterator` signature.
+    /// Filters without a leading `/` are normalized to include one
+    /// (matches upstream's "should normalize command names without
+    /// leading slash" behavior).
+    pub fn on_slash_command_filtered<F, I, S>(&self, commands: I, handler: F)
+    where
+        F: Fn(SlashCommandEvent) -> HandlerFuture + Send + Sync + 'static,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let filters: Vec<String> = commands
+            .into_iter()
+            .map(|s| normalize_slash_command(&s.into()))
+            .collect();
+        self.handlers
+            .slash_command
+            .lock()
+            .unwrap()
+            .push(SlashCommandRegistration {
+                filters: Some(filters),
+                handler: Arc::new(handler),
+            });
+    }
+
+    /// 1:1 port of upstream `chat.processSlashCommand(event)`.
+    /// Dispatches the slash-command to every registered
+    /// [`SlashCommandHandler`] whose filter matches (or any handler
+    /// with no filter). Skips dispatch when `event.user.is_me`
+    /// (upstream's "skip slash commands from self" gate). The
+    /// dispatcher constructs the [`crate::channel::Channel`] from
+    /// `event.channel_id` and the dispatching adapter.
+    pub async fn process_slash_command(
+        &self,
+        adapter: &dyn Adapter,
+        event: SlashCommandEventInput,
+    ) {
+        // 1:1 with upstream "Skip slash commands from self".
+        if event.user.is_me {
+            return;
+        }
+
+        let adapter_arc = match self.adapters.get(adapter.name()).cloned() {
+            Some(a) => a,
+            None => return,
+        };
+
+        let handlers_snapshot: Vec<(Option<Vec<String>>, SlashCommandHandler)> = self
+            .handlers
+            .slash_command
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.filters.clone(), r.handler.clone()))
+            .collect();
+
+        for (filters, handler) in handlers_snapshot {
+            let matches = match filters {
+                None => true,
+                Some(filters) => filters.iter().any(|f| f.as_str() == event.command.as_str()),
+            };
+            if !matches {
+                continue;
+            }
+            let channel = crate::channel::Channel::new(adapter_arc.clone(), &event.channel_id);
+            let slash = SlashCommandEvent {
+                command: event.command.clone(),
+                text: event.text.clone(),
+                user: event.user.clone(),
+                channel_id: event.channel_id.clone(),
+                trigger_id: event.trigger_id.clone(),
+                raw: event.raw.clone(),
+                channel,
+            };
+            handler(slash).await;
         }
     }
 
@@ -3709,6 +3870,207 @@ mod tests {
         let event = make_action_event("approve", None, false);
         futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
         // handlers 1 and 2 fire; 3 ("reject") does not match
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    // ---------- describe("Slash Commands") — slice 422 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("Slash Commands")`.
+    // Phase G (slice 422) mirrors the slice-419/420 pattern for
+    // slash-command events. Filter normalization adds a leading `/`
+    // to filter strings without one (matches upstream's "should
+    // normalize command names without leading slash" rule).
+
+    fn make_slash_event(command: &str, text: &str, is_me: bool) -> SlashCommandEventInput {
+        SlashCommandEventInput {
+            command: command.to_string(),
+            text: text.to_string(),
+            user: Author {
+                user_id: "U123".to_string(),
+                user_name: "user".to_string(),
+                full_name: "Test User".to_string(),
+                is_bot: BotStatus::Known(is_me),
+                is_me,
+            },
+            channel_id: "slack:C456".to_string(),
+            trigger_id: Some("trigger-123".to_string()),
+            raw: serde_json::json!({"channel_id": "C456"}),
+        }
+    }
+
+    #[test]
+    fn on_slash_command_calls_handler_for_all_commands() {
+        // 1:1 with upstream "should call onSlashCommand handler for
+        // all commands". No-filter overload fires for every command.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let c = calls.clone();
+        let o = observed.clone();
+        chat.on_slash_command(move |event| {
+            let c = c.clone();
+            let o = o.clone();
+            let cmd = event.command.clone();
+            let text = event.text.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+                *o.lock().unwrap() = Some((cmd, text));
+            })
+        });
+        let event = make_slash_event("/help", "topic", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        let obs = observed.lock().unwrap();
+        assert_eq!(
+            obs.as_ref().map(|(c, t)| (c.as_str(), t.as_str())),
+            Some(("/help", "topic"))
+        );
+    }
+
+    #[test]
+    fn on_slash_command_filtered_calls_handler_for_specific_command() {
+        // 1:1 with upstream "should call onSlashCommand handler for
+        // specific command". Two handlers registered for `/help`
+        // and `/status`; the `/help` event fires only the help
+        // handler.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let help_calls = Arc::new(AtomicUsize::new(0));
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let h = help_calls.clone();
+        chat.on_slash_command_filtered(["/help"], move |_event| {
+            let h = h.clone();
+            Box::pin(async move {
+                h.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let s = status_calls.clone();
+        chat.on_slash_command_filtered(["/status"], move |_event| {
+            let s = s.clone();
+            Box::pin(async move {
+                s.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        assert_eq!(help_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(status_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_slash_command_filtered_matches_multiple_commands() {
+        // 1:1 with upstream "should call onSlashCommand handler for
+        // multiple commands". Filter `["/status", "/health"]` matches
+        // status + health events but not help.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_slash_command_filtered(["/status", "/health"], move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let status = make_slash_event("/status", "", false);
+        let health = make_slash_event("/health", "", false);
+        let help = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), status));
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), health));
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), help));
+        // Fires for /status and /health, not /help.
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn on_slash_command_skips_commands_from_self() {
+        // 1:1 with upstream "should skip slash commands from self".
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_slash_command(move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_slash_event("/help", "", true); // is_me=true
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn on_slash_command_filter_normalizes_command_names_without_leading_slash() {
+        // 1:1 with upstream "should normalize command names without
+        // leading slash". Registering with `"help"` matches `/help`
+        // events.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        chat.on_slash_command_filtered(["help"], move |_event| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn on_slash_command_event_includes_channel_property() {
+        // 1:1 with upstream "should call onSlashCommand handler for
+        // all commands" — receivedEvent.channel is defined. The
+        // dispatcher constructs Channel(adapter, channel_id).
+        let (chat, adapter) = chat_with_in_memory_state();
+        let observed: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let o = observed.clone();
+        chat.on_slash_command(move |event| {
+            let o = o.clone();
+            let cid = event.channel.channel_id().to_string();
+            let name = event.channel.adapter_name().to_string();
+            Box::pin(async move {
+                *o.lock().unwrap() = Some((cid, name));
+            })
+        });
+        let event = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        let obs = observed.lock().unwrap();
+        assert_eq!(
+            obs.as_ref().map(|(c, a)| (c.as_str(), a.as_str())),
+            Some(("slack:C456", "slack"))
+        );
+    }
+
+    #[test]
+    fn on_slash_command_invokes_multiple_handlers_in_order() {
+        // Additive: multi-handler dispatch fires in registration
+        // order; mix of no-filter and filtered handlers.
+        let (chat, adapter) = chat_with_in_memory_state();
+        let order: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        chat.on_slash_command(move |_event| {
+            let o = o1.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(1);
+            })
+        });
+        let o2 = order.clone();
+        chat.on_slash_command_filtered(["/help"], move |_event| {
+            let o = o2.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(2);
+            })
+        });
+        let o3 = order.clone();
+        chat.on_slash_command_filtered(["/status"], move |_event| {
+            let o = o3.clone();
+            Box::pin(async move {
+                o.lock().unwrap().push(3);
+            })
+        });
+        let event = make_slash_event("/help", "", false);
+        futures_executor::block_on(chat.process_slash_command(adapter.as_ref(), event));
+        // handlers 1 and 2 fire; 3 ("/status") does not match
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
