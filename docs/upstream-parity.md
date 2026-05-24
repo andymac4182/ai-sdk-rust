@@ -2281,10 +2281,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   final assistant message, full message list, finish reason, and
   abort/disconnect/error flags after a successful send.
 - 2026-05-25: `packages/ai` `Chat` disconnected-response parity added
-  `chat_should_handle_a_disconnected_response_stream`, covering the portable
-  upstream `ui/chat.test.ts` disconnected response flow by folding partial
-  stream chunks, preserving the streaming assistant part, and recording the
-  finish payload's `isDisconnect` and `isError` flags.
+  `chat_should_handle_a_disconnected_response_stream`,
+  `chat_disconnected_should_call_on_finish_with_message_and_messages`,
+  `chat_disconnected_should_return_the_correct_final_messages`, and
+  `chat_disconnected_should_update_the_messages_during_streaming`, covering the
+  portable upstream `ui/chat.test.ts` disconnected response flow by folding
+  partial stream chunks, preserving the streaming assistant part, recording the
+  finish payload's `isDisconnect` and `isError` flags, and splitting the
+  original finish/final-message/streaming-update assertions into named Rust
+  counterparts.
 - 2026-05-25: `packages/ai` `Chat` aborted-response parity added
   `chat_should_handle_a_stop_and_an_aborted_response_stream`, covering the
   portable upstream `ui/chat.test.ts` stopped/aborted response behavior by

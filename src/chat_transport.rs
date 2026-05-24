@@ -2516,6 +2516,33 @@ mod tests {
         }
     }
 
+    fn chat_disconnected_partial_chunks() -> Vec<UiMessageChunk> {
+        vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+        ]
+    }
+
+    fn chat_disconnected_expected_messages() -> JsonValue {
+        json!([
+            {
+                "id": "user-1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            }
+        ])
+    }
+
     fn text_stream_result(
         deltas: impl IntoIterator<Item = &'static str>,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
@@ -2883,12 +2910,7 @@ mod tests {
 
     #[test]
     fn chat_should_handle_a_disconnected_response_stream() {
-        let partial_chunks = vec![
-            UiMessageChunk::start_with_message_id("assistant-1"),
-            UiMessageChunk::start_step(),
-            UiMessageChunk::text_start("text-1"),
-            UiMessageChunk::text_delta("text-1", "Hello"),
-        ];
+        let partial_chunks = chat_disconnected_partial_chunks();
         let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
             message: "fetch failed".to_string(),
             chunks: partial_chunks.clone(),
@@ -2929,26 +2951,91 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(chat.messages()).expect("history serializes"),
-            json!([
-                {
-                    "id": "user-1",
-                    "role": "user",
-                    "parts": [{ "type": "text", "text": "Hello, world!" }]
-                },
-                {
-                    "id": "assistant-1",
-                    "role": "assistant",
-                    "parts": [
-                        { "type": "step-start" },
-                        { "type": "text", "text": "Hello", "state": "streaming" }
-                    ]
-                }
-            ])
+            chat_disconnected_expected_messages()
         );
         assert_eq!(
             serde_json::to_value(&event.messages).expect("messages serialize"),
             serde_json::to_value(chat.messages()).expect("history serializes")
         );
+    }
+
+    #[test]
+    fn chat_disconnected_should_call_on_finish_with_message_and_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: chat_disconnected_partial_chunks(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.is_abort);
+        assert!(event.is_disconnect);
+        assert!(event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            chat_disconnected_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_disconnected_should_return_the_correct_final_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: chat_disconnected_partial_chunks(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_disconnected_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_disconnected_should_update_the_messages_during_streaming() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: chat_disconnected_partial_chunks(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(chat.error(), Some("fetch failed"));
     }
 
     #[test]
