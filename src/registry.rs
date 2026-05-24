@@ -386,6 +386,65 @@ where
     }
 }
 
+impl<LM, EM, IM, FP> ProviderWithTranscriptionModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithTranscriptionModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type TranscriptionModel = FP::TranscriptionModel;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        self.fallback_provider.transcription_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithSpeechModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithSpeechModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type SpeechModel = FP::SpeechModel;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        self.fallback_provider.speech_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithRerankingModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithRerankingModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type RerankingModel = FP::RerankingModel;
+
+    fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError> {
+        self.fallback_provider.reranking_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithVideoModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithVideoModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type VideoModel = FP::VideoModel;
+
+    fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+        self.fallback_provider.video_model(model_id)
+    }
+}
+
 impl<P, TM> Provider for CustomProviderWithTranscriptionModel<P, TM>
 where
     P: Provider,
@@ -1656,6 +1715,22 @@ mod tests {
     }
 
     #[test]
+    fn custom_provider_transcription_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.transcription_model("test-model"),
+            Ok(StaticTranscriptionModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn custom_provider_speech_model_should_return_the_speech_model_if_it_exists() {
         let model = StaticSpeechModel {
             provider: "mock-provider".to_string(),
@@ -1686,6 +1761,22 @@ mod tests {
 
         assert_eq!(error.model_id(), "test-model");
         assert_eq!(error.model_type(), ModelType::SpeechModel);
+    }
+
+    #[test]
+    fn custom_provider_speech_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.speech_model("test-model"),
+            Ok(StaticSpeechModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1722,6 +1813,22 @@ mod tests {
     }
 
     #[test]
+    fn custom_provider_reranking_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.reranking_model("test-model"),
+            Ok(StaticRerankingModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn custom_provider_video_model_should_return_the_video_model_if_it_exists() {
         let model = StaticVideoModel {
             provider: "mock-provider".to_string(),
@@ -1752,6 +1859,22 @@ mod tests {
 
         assert_eq!(error.model_id(), "test-model");
         assert_eq!(error.model_type(), ModelType::VideoModel);
+    }
+
+    #[test]
+    fn custom_provider_video_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.video_model("test-model"),
+            Ok(StaticVideoModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
     }
 
     #[derive(Clone, Debug)]
