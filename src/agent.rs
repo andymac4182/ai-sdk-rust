@@ -14,7 +14,8 @@ use crate::generate_text::{
     GenerateTextOnToolExecutionEnd, GenerateTextOnToolExecutionStart, GenerateTextOptions,
     GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepStartEvent,
     GenerateTextTool, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
-    StopCondition, ToolApprovalConfiguration, ToolCallRepair, ToolInputRefinement, generate_text,
+    PrepareStep, PrepareStepOptions, PrepareStepResult, StopCondition, ToolApprovalConfiguration,
+    ToolCallRepair, ToolInputRefinement, generate_text,
 };
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -138,6 +139,9 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
             tool_call_repair: options
                 .tool_call_repair
                 .or_else(|| self.settings.tool_call_repair.clone()),
+            prepare_step: options
+                .prepare_step
+                .or_else(|| self.settings.prepare_step.clone()),
             on_start: merge_on_start(self.settings.on_start.clone(), options.on_start),
             on_step_start: merge_on_step_start(
                 self.settings.on_step_start.clone(),
@@ -326,6 +330,9 @@ pub struct ToolLoopAgentSettings<'a, M: LanguageModel + ?Sized> {
     /// Optional tool-call repair callback.
     pub tool_call_repair: Option<ToolCallRepair>,
 
+    /// Optional step preparation callback.
+    pub prepare_step: Option<PrepareStep<'a, M>>,
+
     /// Callback invoked before model work begins.
     pub on_start: Option<GenerateTextOnStart<'a>>,
 
@@ -377,6 +384,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            prepare_step: None,
             on_start: None,
             on_step_start: None,
             on_tool_execution_start: None,
@@ -481,6 +489,16 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
         E: fmt::Display,
     {
         self.tool_call_repair = Some(ToolCallRepair::new(repair));
+        self
+    }
+
+    /// Sets a default step preparation callback.
+    pub fn with_prepare_step<F, Fut>(mut self, prepare_step: F) -> Self
+    where
+        F: Fn(PrepareStepOptions<'a, M>) -> Fut + 'a,
+        Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
+    {
+        self.prepare_step = Some(PrepareStep::new(prepare_step));
         self
     }
 
@@ -785,6 +803,7 @@ pub struct ToolLoopAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub tool_approval: Option<ToolApprovalConfiguration>,
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
     pub tool_call_repair: Option<ToolCallRepair>,
+    pub prepare_step: Option<PrepareStep<'a, M>>,
     pub on_start: Option<GenerateTextOnStart<'a>>,
     pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
     pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
@@ -816,6 +835,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            prepare_step: None,
             on_start: None,
             on_step_start: None,
             on_tool_execution_start: None,
@@ -934,6 +954,16 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
         E: fmt::Display,
     {
         self.tool_call_repair = Some(ToolCallRepair::new(repair));
+        self
+    }
+
+    /// Sets a per-call step preparation callback.
+    pub fn with_prepare_step<F, Fut>(mut self, prepare_step: F) -> Self
+    where
+        F: Fn(PrepareStepOptions<'a, M>) -> Fut + 'a,
+        Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
+    {
+        self.prepare_step = Some(PrepareStep::new(prepare_step));
         self
     }
 
@@ -1070,6 +1100,7 @@ pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub tool_approval: Option<ToolApprovalConfiguration>,
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
     pub tool_call_repair: Option<ToolCallRepair>,
+    pub prepare_step: Option<PrepareStep<'a, M>>,
     pub on_start: Option<GenerateTextOnStart<'a>>,
     pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
     pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
@@ -1100,6 +1131,12 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentPreparedCall<'a, M> {
     /// Adds a prepared tool.
     pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
         self.tools.push(tool.into());
+        self
+    }
+
+    /// Sets the prepared step callback.
+    pub fn with_prepare_step(mut self, prepare_step: PrepareStep<'a, M>) -> Self {
+        self.prepare_step = Some(prepare_step);
         self
     }
 }
@@ -1178,6 +1215,7 @@ fn apply_generate_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.tool_approval = prepared.tool_approval;
     options.tool_input_refinements = prepared.tool_input_refinements;
     options.tool_call_repair = prepared.tool_call_repair;
+    options.prepare_step = prepared.prepare_step;
     options.on_start = prepared.on_start;
     options.on_step_start = prepared.on_step_start;
     options.on_tool_execution_start = prepared.on_tool_execution_start;
@@ -1211,6 +1249,7 @@ fn apply_stream_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.tool_approval = prepared.tool_approval;
     options.tool_input_refinements = prepared.tool_input_refinements;
     options.tool_call_repair = prepared.tool_call_repair;
+    options.prepare_step = prepared.prepare_step;
     options.on_start = prepared.on_start;
     options.on_step_start = prepared.on_step_start;
     options.on_tool_execution_start = prepared.on_tool_execution_start;
@@ -2137,6 +2176,59 @@ mod tests {
                 }))
                 .expect("provider options")
             )
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_prepare_step_to_generate_text() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("prepared"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_step(
+            |options| async move {
+                assert_eq!(options.step_number, 0);
+                assert_eq!(
+                    options.initial_messages,
+                    vec![user_message("Original prompt")]
+                );
+                PrepareStepResult::new().with_messages(vec![user_message("Prepared prompt")])
+            },
+        ));
+
+        let result =
+            poll_ready(agent.generate("Original prompt")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "prepared");
+        assert_eq!(
+            model.generate_calls()[0].prompt,
+            vec![user_message("Prepared prompt")]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_per_call_prepare_step_overrides_default_prepare_step() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("prepared"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_step(
+            |_options| async move {
+                PrepareStepResult::new().with_messages(vec![user_message("Default prepared")])
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Original prompt").with_prepare_step(
+                |options| async move {
+                    assert_eq!(options.step_number, 0);
+                    assert_eq!(
+                        options.initial_messages,
+                        vec![user_message("Original prompt")]
+                    );
+                    PrepareStepResult::new().with_messages(vec![user_message("Call prepared")])
+                },
+            );
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "prepared");
+        assert_eq!(
+            model.stream_calls()[0].prompt,
+            vec![user_message("Call prepared")]
         );
     }
 
