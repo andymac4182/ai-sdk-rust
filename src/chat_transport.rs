@@ -484,6 +484,20 @@ impl<T: ChatTransport> Chat<T> {
         )])
     }
 
+    pub fn add_tool_approval_response(
+        &mut self,
+        approval_id: impl Into<String>,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::ToolApprovalResponse {
+            approval_id: approval_id.into(),
+            approved,
+            reason,
+            provider_executed: None,
+        }])
+    }
+
     pub fn submit_latest_assistant_message(
         &mut self,
         request: ChatRequestOptions,
@@ -3456,6 +3470,174 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn chat_should_add_tool_approval_response_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            user_text_message("user-1", "What is the weather in Tokyo?"),
+            UiMessage::new("assistant-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "toolCallId": "call-1",
+                    "state": "approval-requested",
+                    "input": { "city": "Tokyo" },
+                    "approval": { "id": "approval-1" }
+                })),
+        ]);
+
+        chat.add_tool_approval_response("approval-1", true, None)
+            .expect("approval response is added");
+
+        assert_eq!(chat.transport().captured_sends().len(), 0);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "approval-responded",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": true
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_approval_response_is_added() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::tool_output_available(
+                "call-1",
+                json!({ "temperature": 72, "weather": "sunny" }),
+            ),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "The weather in Tokyo is sunny."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            user_text_message("user-1", "What is the weather in Tokyo?"),
+            UiMessage::new("assistant-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "toolCallId": "call-1",
+                    "state": "approval-requested",
+                    "input": { "city": "Tokyo" },
+                    "approval": { "id": "approval-1" }
+                })),
+        ]);
+
+        chat.add_tool_approval_response("approval-1", true, None)
+            .expect("approval response is added");
+        chat.submit_latest_assistant_message(
+            ChatRequestOptions::new()
+                .with_header("x-custom", "test-value")
+                .with_body_property("extra", json!("data")),
+        )
+        .expect("assistant message submits after approval response");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(captured.chat_id, "chat-1");
+        assert_eq!(captured.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            captured.request.headers.get("x-custom"),
+            Some(&"test-value".to_string())
+        );
+        assert_eq!(
+            captured.request.body,
+            Some(JsonObject::from_iter([(
+                "extra".to_string(),
+                json!("data")
+            )]))
+        );
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "approval-responded",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": true
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "output-available",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": true
+                            },
+                            "output": {
+                                "temperature": 72,
+                                "weather": "sunny"
+                            }
+                        },
+                        { "type": "step-start" },
+                        {
+                            "type": "text",
+                            "text": "The weather in Tokyo is sunny.",
+                            "state": "done"
+                        }
+                    ]
+                }
+            ])
+        );
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, Some(FinishReason::Stop));
     }
 
     #[test]

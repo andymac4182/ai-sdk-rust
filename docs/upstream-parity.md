@@ -2318,6 +2318,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   and addToolOutput options forwarding by proving Rust tool-output mutation
   does not make a second transport call until explicit follow-up submission and
   that the follow-up request forwards both custom headers and body properties.
+- 2026-05-25: `packages/ai` `Chat.addToolApprovalResponse` approved-flow
+  parity added `chat_should_add_tool_approval_response_to_the_latest_assistant_message`
+  and `chat_should_submit_message_when_a_tool_approval_response_is_added`,
+  covering the portable upstream `ui/chat.test.ts` approval response state
+  mutation, approved automatic follow-up body/header option forwarding, and
+  response folding that turns the approved tool part into `output-available`
+  while appending the follow-up assistant text to the same message.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
