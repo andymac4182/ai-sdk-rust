@@ -6108,6 +6108,23 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_rejects_unknown_roles_at_json_boundary() {
+        let error = serde_json::from_value::<UiMessage>(json!({
+            "id": "msg-1",
+            "role": "unknown",
+            "parts": [
+                { "type": "text", "text": "unknown role message" }
+            ]
+        }))
+        .expect_err("unknown UI message roles are rejected before conversion");
+
+        assert!(
+            error.to_string().contains("unknown variant `unknown`"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn direct_chat_transport_reconnect_returns_none() {
         let model = MockLanguageModel::new();
         let agent = ToolLoopAgent::for_model(&model);
