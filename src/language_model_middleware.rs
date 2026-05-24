@@ -2478,6 +2478,56 @@ mod tests {
             .collect::<String>()
     }
 
+    fn extract_reasoning_generate_content(
+        text: impl Into<String>,
+        start_with_reasoning: bool,
+    ) -> Vec<LanguageModelContent> {
+        let model = StaticLanguageModel;
+        let source_text = text.into();
+        let middleware = ExtractReasoningMiddleware::new("think")
+            .with_start_with_reasoning(start_with_reasoning);
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(move || Box::pin(ready(language_result(&source_text)))),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-generate exists");
+
+        poll_boxed(wrapped_generate).content
+    }
+
+    fn extract_reasoning_stream_parts(
+        deltas: &[&str],
+        start_with_reasoning: bool,
+    ) -> Vec<LanguageModelStreamPart> {
+        let model = StaticLanguageModel;
+        let middleware = ExtractReasoningMiddleware::new("think")
+            .with_start_with_reasoning(start_with_reasoning);
+        let stream = text_stream("1", deltas);
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(move || Box::pin(ready(LanguageModelStreamResult::new(stream)))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-stream exists");
+
+        poll_boxed(wrapped_stream).stream
+    }
+
+    fn collect_reasoning_deltas(stream: &[LanguageModelStreamPart]) -> String {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
     #[test]
     fn language_model_middleware_call_type_uses_upstream_literals() {
         assert_eq!(
@@ -3472,6 +3522,91 @@ mod tests {
     }
 
     #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_think_tags() {
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "<think>analyzing the request</think>Here is the response",
+                false,
+            ),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("Here is the response")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_think_tags_when_there_is_no_text()
+     {
+        assert_eq!(
+            extract_reasoning_generate_content("<think>analyzing the request\n</think>", false),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request\n"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_multiple_think_tags()
+     {
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "<think>analyzing the request</think>Here is the response<think>thinking about the response</think>more",
+                false,
+            ),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request\nthinking about the response"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("Here is the response\nmore")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_prepend_think_tag_iff_start_with_reasoning_is_true()
+     {
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "analyzing the request</think>Here is the response",
+                true
+            ),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("Here is the response")),
+            ]
+        );
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "analyzing the request</think>Here is the response",
+                false,
+            ),
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "analyzing the request</think>Here is the response"
+            ))]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_preserve_reasoning_property_even_when_rest_contains_other_properties()
+     {
+        let content = extract_reasoning_generate_content(
+            "<think>analyzing the request</think>Here is the response",
+            false,
+        );
+
+        assert!(matches!(content[0], LanguageModelContent::Reasoning(_)));
+        assert!(matches!(content[1], LanguageModelContent::Text(_)));
+    }
+
+    #[test]
     fn extract_reasoning_middleware_supports_start_with_reasoning_for_generate() {
         let model = StaticLanguageModel;
         let middleware = ExtractReasoningMiddleware::new("think").with_start_with_reasoning(true);
@@ -3521,6 +3656,97 @@ mod tests {
                 "analyzing</think>Here"
             ))]
         );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_split_think_tags() {
+        let result = extract_reasoning_stream_parts(
+            &[
+                "<think>",
+                "ana",
+                "lyzing the request",
+                "</think>",
+                "Here",
+                " is the response",
+            ],
+            false,
+        );
+
+        assert_eq!(collect_reasoning_deltas(&result), "analyzing the request");
+        assert_eq!(collect_text_deltas(&result), "Here is the response");
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_single_chunk_with_multiple_think_tags()
+     {
+        let result = extract_reasoning_stream_parts(
+            &[
+                "<think>analyzing the request</think>Here is the response<think>thinking about the response</think>more",
+            ],
+            false,
+        );
+
+        assert_eq!(
+            collect_reasoning_deltas(&result),
+            "analyzing the request\nthinking about the response"
+        );
+        assert_eq!(collect_text_deltas(&result), "Here is the response\nmore");
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_think_when_there_is_no_text()
+     {
+        let result = extract_reasoning_stream_parts(
+            &["<think>", "ana", "lyzing the request\n", "</think>"],
+            false,
+        );
+
+        assert_eq!(collect_reasoning_deltas(&result), "analyzing the request\n");
+        assert_eq!(collect_text_deltas(&result), "");
+        assert!(
+            result
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::TextStart(_)))
+        );
+        assert!(
+            result
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::TextEnd(_)))
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_prepend_think_tag_if_start_with_reasoning_is_true()
+     {
+        let result_true = extract_reasoning_stream_parts(
+            &[
+                "ana",
+                "lyzing the request\n",
+                "</think>",
+                "this is the response",
+            ],
+            true,
+        );
+        let result_false = extract_reasoning_stream_parts(
+            &[
+                "ana",
+                "lyzing the request\n",
+                "</think>",
+                "this is the response",
+            ],
+            false,
+        );
+
+        assert_eq!(
+            collect_reasoning_deltas(&result_true),
+            "analyzing the request\n"
+        );
+        assert_eq!(collect_text_deltas(&result_true), "this is the response");
+        assert_eq!(
+            collect_text_deltas(&result_false),
+            "analyzing the request\n</think>this is the response"
+        );
+        assert_eq!(collect_reasoning_deltas(&result_false), "");
     }
 
     #[test]
@@ -3574,6 +3800,39 @@ mod tests {
                 LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
             ]
         );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_keep_original_text_when_think_tag_is_not_present()
+     {
+        let result = extract_reasoning_stream_parts(&["this is the response"], false);
+
+        assert_eq!(collect_text_deltas(&result), "this is the response");
+        assert_eq!(collect_reasoning_deltas(&result), "");
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_handle_empty_think_tags_without_crashing() {
+        let result =
+            extract_reasoning_stream_parts(&["<think></think>", " This is the answer."], false);
+
+        let reasoning_start_index = result.iter().position(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ReasoningStart(start) if start.id == "reasoning-0"
+            )
+        });
+        let reasoning_end_index = result.iter().position(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ReasoningEnd(end) if end.id == "reasoning-0"
+            )
+        });
+
+        assert!(reasoning_start_index.is_some());
+        assert!(reasoning_end_index.is_some());
+        assert!(reasoning_end_index > reasoning_start_index);
+        assert_eq!(collect_text_deltas(&result), " This is the answer.");
     }
 
     #[test]
