@@ -1645,6 +1645,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   `workflow_agent_upstream_should_use_constructor_active_tools_when_not_specified_in_stream`,
   mirroring upstream `workflow-agent.test.ts` `should use constructor
   activeTools when not specified in stream()`.
+- 2026-05-24: WorkflowAgent tool-execution callback event parity added
+  `step_number` to Rust start/end events and named Rust counterparts
+  `workflow_agent_upstream_should_pass_step_number_to_tool_execution_start_and_use_success_union_on_end`
+  and
+  `workflow_agent_upstream_should_pass_success_false_in_tool_execution_end_when_tool_errors`,
+  mirroring upstream `workflow-agent.test.ts` callback event `stepNumber` and
+  `success: false` error-union cases.
 - 2026-05-22: WorkflowAgent ToolLoop compatibility finish-callback parity
   fixed constructor/stream callback merging so constructor callbacks run before
   per-stream callbacks, with named Rust counterparts for upstream

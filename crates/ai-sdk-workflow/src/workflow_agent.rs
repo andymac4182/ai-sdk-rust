@@ -443,6 +443,7 @@ impl WorkflowAgent {
                 tool_call: tool_call.clone(),
                 messages: event_messages.clone(),
                 tool_context: context.clone(),
+                step_number: yield_value.step.step_number,
             };
             call_tool_execution_start_callbacks(
                 constructor_on_tool_execution_start,
@@ -463,6 +464,7 @@ impl WorkflowAgent {
                 tool_call: tool_call.clone(),
                 messages: event_messages,
                 tool_context: context,
+                step_number: yield_value.step.step_number,
                 duration_ms,
                 success: tool_result.success,
                 output: tool_result.output.clone(),
@@ -836,6 +838,9 @@ pub struct WorkflowAgentToolExecutionStartInfo {
     /// Tool call about to be executed.
     pub tool_call: ParsedToolCall,
 
+    /// Zero-based workflow step number.
+    pub step_number: usize,
+
     /// Prompt messages that produced the tool call.
     pub messages: WorkflowPrompt,
 
@@ -850,6 +855,9 @@ pub struct WorkflowAgentToolExecutionStartInfo {
 pub struct WorkflowAgentToolExecutionEndInfo {
     /// Tool call that was executed.
     pub tool_call: ParsedToolCall,
+
+    /// Zero-based workflow step number.
+    pub step_number: usize,
 
     /// Prompt messages that produced the tool call.
     pub messages: WorkflowPrompt,
@@ -2640,6 +2648,7 @@ mod tests {
         assert_eq!(event.tool_call.tool_name, "testTool");
         assert_eq!(event.tool_call.tool_call_id, "call-1");
         assert_eq!(event.tool_call.input, json!({ "value": "hello" }));
+        assert_eq!(event.step_number, 0);
         assert!(event.success);
         assert_eq!(
             event.output,
@@ -2649,6 +2658,102 @@ mod tests {
         assert_eq!(event.messages.len(), 1);
         assert_eq!(event.tool_context, None);
         assert!(event.duration_ms < 60_000);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_step_number_to_tool_execution_start_and_use_success_union_on_end()
+     {
+        let start_event = Arc::new(Mutex::new(None));
+        let end_event = Arc::new(Mutex::new(None));
+        let start_event_for_callback = Arc::clone(&start_event);
+        let end_event_for_callback = Arc::clone(&end_event);
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!({ "result": "ok" })) });
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(tool)
+                .with_on_tool_execution_start(WorkflowAgentOnToolExecutionStartCallback::new(
+                    move |info| {
+                        *start_event_for_callback
+                            .lock()
+                            .expect("start event lock succeeds") = Some(info);
+                    },
+                ))
+                .with_on_tool_execution_end(WorkflowAgentOnToolExecutionEndCallback::new(
+                    move |info| {
+                        *end_event_for_callback
+                            .lock()
+                            .expect("end event lock succeeds") = Some(info);
+                    },
+                )),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"hello"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        let start = start_event
+            .lock()
+            .expect("start event lock succeeds")
+            .clone()
+            .expect("start event was captured");
+        assert_eq!(start.step_number, 0);
+        assert_eq!(start.tool_call.tool_call_id, "call-1");
+        assert_eq!(start.tool_call.tool_name, "testTool");
+
+        let end = end_event
+            .lock()
+            .expect("end event lock succeeds")
+            .clone()
+            .expect("end event was captured");
+        assert_eq!(end.step_number, 0);
+        assert_eq!(end.tool_call.tool_call_id, "call-1");
+        assert_eq!(end.tool_call.tool_name, "testTool");
+        assert!(end.success);
+        assert_eq!(end.output, Some(json!({ "result": "ok" })));
+        assert_eq!(end.error, None);
+        assert!(end.duration_ms < 60_000);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_success_false_in_tool_execution_end_when_tool_errors() {
+        let end_event = Arc::new(Mutex::new(None));
+        let end_event_for_callback = Arc::clone(&end_event);
+        let tool = Tool::new("failTool", object_schema())
+            .with_execute(|_, _| async { Err(ToolExecutionError::new("tool failed")) });
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(tool)
+                .with_on_tool_execution_end(WorkflowAgentOnToolExecutionEndCallback::new(
+                    move |info| {
+                        *end_event_for_callback
+                            .lock()
+                            .expect("end event lock succeeds") = Some(info);
+                    },
+                )),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new("call-1", "failTool", "{}")),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        let end = end_event
+            .lock()
+            .expect("end event lock succeeds")
+            .clone()
+            .expect("end event was captured");
+        assert_eq!(end.step_number, 0);
+        assert_eq!(end.tool_call.tool_name, "failTool");
+        assert!(!end.success);
+        assert_eq!(end.output, None);
+        assert_eq!(end.error.as_deref(), Some("tool failed"));
+        assert!(end.duration_ms < 60_000);
     }
 
     #[test]
