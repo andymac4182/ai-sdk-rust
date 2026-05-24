@@ -1385,6 +1385,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `convert_to_language_model_prompt_should_pass_through_provider_reference_for_file_parts_without_conversion`.
   These prove provider references stay tagged reference file data for image and
   file parts, and user-supplied filenames are preserved.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` message-level
+  provider-options parity added the named Rust counterpart
+  `convert_to_language_model_prompt_should_add_provider_options_to_messages`
+  for the upstream `prompt/convert-to-language-model-prompt.test.ts` provider
+  options case, proving provider options stay on the converted user message
+  without moving them into individual content parts.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,

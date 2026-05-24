@@ -2060,6 +2060,50 @@ mod tests {
     }
 
     #[test]
+    fn convert_to_language_model_prompt_should_add_provider_options_to_messages() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("hello, world!"),
+                )])
+                .with_provider_options(provider_options),
+            )],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "hello, world!"
+                        }
+                    ],
+                    "providerOptions": {
+                        "test-provider": {
+                            "key-a": "test-value-1",
+                            "key-b": "test-value-2"
+                        }
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_to_language_model_prompt_validation_should_pass_for_provider_executed_tools_deferred_results()
      {
         let result = convert_to_language_model_prompt(StandardizedPrompt::new(
