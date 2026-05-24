@@ -446,9 +446,38 @@ impl<T: ChatTransport> Chat<T> {
         }
     }
 
+    pub fn add_tool_output(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        output: impl Into<JsonValue>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::tool_output_available(
+            tool_call_id,
+            output,
+        )])
+    }
+
     fn generate_message_id(&mut self) -> String {
         self.next_message_index += 1;
         format!("msg-{}", self.next_message_index)
+    }
+
+    fn update_last_assistant_with_chunks(
+        &mut self,
+        chunks: impl IntoIterator<Item = UiMessageChunk>,
+    ) -> Result<(), ChatError> {
+        let assistant_index = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == UiMessageRole::Assistant)
+            .ok_or_else(|| ChatError::Stream("No assistant message exists.".to_string()))?;
+
+        let last_message = self.messages[assistant_index].clone();
+        let mut state = StreamingUiMessageState::new(last_message.id.clone(), Some(last_message));
+        process_ui_message_stream(&mut state, chunks, false)
+            .map_err(|error| ChatError::Stream(error.to_string()))?;
+        self.messages[assistant_index] = state.message;
+        Ok(())
     }
 
     fn apply_response_chunks(
@@ -2793,6 +2822,53 @@ mod tests {
                     "parts": [
                         { "type": "step-start" },
                         { "type": "text", "text": "Hello", "state": "done" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_add_tool_output_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "tool-call-0",
+                "test-tool",
+                json!({ "testArg": "test-value" }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        chat.add_tool_output("tool-call-0", json!("test-output"))
+            .expect("tool output is added");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
                     ]
                 }
             ])
