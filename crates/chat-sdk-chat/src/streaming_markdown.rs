@@ -515,4 +515,225 @@ mod tests {
         let fences: usize = out.matches("```").count();
         assert_eq!(fences, 2);
     }
+
+    // ---------- additional StreamingMarkdownRenderer cases (16 upstream) ----------
+
+    #[test]
+    fn streaming_renderer_should_not_buffer_lines_that_dont_match_table_pattern() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Just normal text\n");
+        assert!(r.render().contains("Just normal text"));
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_code_fence_with_tilde_syntax() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("~~~\n| A |\n");
+        let result = r.render();
+        assert!(result.contains("| A |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_resume_buffering_after_code_fence_closes() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("```\n| inside |\n```\n| A | B |\n");
+        let result = r.render();
+        assert!(result.contains("| inside |"), "got: {result}");
+        assert!(!result.contains("| A | B |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_empty_input() {
+        let mut r = StreamingMarkdownRenderer::default();
+        assert_eq!(r.render(), "");
+        assert_eq!(r.get_text(), "");
+        assert_eq!(r.finish(), "");
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_text_with_no_trailing_newline() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Hello world");
+        assert_eq!(r.render(), "Hello world");
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_table_header_without_trailing_newline() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Text\n\n| A | B |");
+        // Incomplete line (no trailing newline) — not yet a full line,
+        // should not buffer.
+        let result = r.render();
+        assert!(result.contains("Text"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_still_work_after_push_following_finish() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Hello");
+        r.finish();
+        // push after finish — finished flag stays true, new content
+        // is flushed fully.
+        r.push(" World");
+        let result = r.render();
+        assert!(result.contains("Hello World"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_be_idempotent_for_render_after_finish() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Text\n\n| A | B |\n");
+        r.finish();
+        let first = r.render();
+        let second = r.render();
+        assert_eq!(first, second);
+        assert!(first.contains("| A | B |"));
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_finish_with_no_held_lines() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Just plain text\n");
+        let rendered = r.render();
+        let finished = r.finish();
+        assert!(rendered.contains("Just plain text"));
+        assert!(finished.contains("Just plain text"));
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_table_header_split_across_chunks() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("Text\n\n| A");
+        // Partial pipe line — no trailing newline, treated as
+        // incomplete.
+        assert!(r.render().contains("Text"));
+
+        r.push(" | B |\n");
+        // Now it's a complete table row — should be held.
+        assert!(!r.render().contains("| A | B |"));
+
+        r.push("|---|---|\n");
+        // Separator confirms — everything released.
+        assert!(r.render().contains("| A | B |"));
+    }
+
+    #[test]
+    fn streaming_renderer_should_break_held_block_at_empty_line() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("| A | B |\n\n| C | D |\n");
+        let result = r.render();
+        // First pipe row is before the empty line, not held.
+        assert!(result.contains("| A | B |"), "got: {result}");
+        // Second pipe row is after empty line and is the trailing
+        // held block.
+        assert!(!result.contains("| C | D |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_hold_table_at_very_start_of_text() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("| A | B |\n");
+        assert!(!r.render().contains("| A | B |"));
+    }
+
+    #[test]
+    fn streaming_renderer_should_hold_second_table_after_confirmed_first_table() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("| A | B |\n|---|---|\n| 1 | 2 |\n");
+        assert!(r.render().contains("|---|---|"));
+
+        r.push("\n| X | Y |\n");
+        let result = r.render();
+        assert!(result.contains("| A | B |"), "got: {result}");
+        assert!(result.contains("| 1 | 2 |"), "got: {result}");
+        assert!(!result.contains("| X | Y |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_held_released_new_hold_sequence() {
+        let mut r = StreamingMarkdownRenderer::default();
+        // Phase 1: hold
+        r.push("| A | B |\n");
+        assert!(!r.render().contains("| A | B |"));
+
+        // Phase 2: released (non-table line denies)
+        r.push("Normal text\n");
+        assert!(r.render().contains("| A | B |"));
+        assert!(r.render().contains("Normal text"));
+
+        // Phase 3: new hold
+        r.push("| X | Y |\n");
+        let result = r.render();
+        assert!(result.contains("| A | B |"), "got: {result}");
+        assert!(result.contains("Normal text"), "got: {result}");
+        assert!(!result.contains("| X | Y |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_confirm_table_with_alignment_markers_in_separator() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("| Left | Center | Right |\n");
+        assert!(!r.render().contains("| Left |"));
+
+        r.push("|:---|:---:|---:|\n");
+        let result = r.render();
+        assert!(result.contains("| Left | Center | Right |"), "got: {result}");
+        assert!(result.contains("|:---|:---:|---:|"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_not_hold_data_rows_after_confirmed_separator() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("| A | B |\n|---|---|\n");
+        assert!(r.render().contains("|---|---|"));
+
+        r.push("| 1 | 2 |\n");
+        let result = r.render();
+        assert!(result.contains("| 1 | 2 |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_handle_multiple_push_calls_before_single_render() {
+        let mut r = StreamingMarkdownRenderer::default();
+        r.push("| A ");
+        r.push("| B |\n");
+        r.push("|---|---|\n");
+        r.push("| 1 | 2 |\n");
+        let result = r.render();
+        assert!(result.contains("| A | B |"), "got: {result}");
+        assert!(result.contains("|---|---|"), "got: {result}");
+        assert!(result.contains("| 1 | 2 |"), "got: {result}");
+    }
+
+    #[test]
+    fn streaming_renderer_should_render_real_world_table_with_single_dash_separators_progressively() {
+        let mut r = StreamingMarkdownRenderer::default();
+
+        r.push("Here's a table with 20 rows of sample data:\n\n");
+        assert!(r.render().contains("Here's a table"));
+
+        r.push("| ID | Name | Department | Age | Salary | City | Join Date | Status |\n");
+        let result = r.render();
+        assert!(!result.contains("| ID |"), "got: {result}");
+        assert!(result.contains("Here's a table"));
+
+        r.push("| - | - | - | - | - | - | - | - |\n");
+        let result = r.render();
+        assert!(result.contains("| ID |"), "got: {result}");
+        assert!(result.contains("| - |"), "got: {result}");
+
+        r.push("| 1 | Sarah Johnson | Engineering | 32 | $95,000 | Seattle | 2019-03-15 | Active |\n");
+        let result = r.render();
+        assert!(result.contains("Sarah Johnson"), "got: {result}");
+
+        r.push("| 2 | Michael");
+        let result = r.render();
+        // Complete rows still visible, partial line excluded from
+        // table detection.
+        assert!(result.contains("Sarah Johnson"), "got: {result}");
+
+        r.push(" Chen | Marketing | 28 | $72,000 | Austin | 2020-07-22 | Active |\n");
+        let result = r.render();
+        assert!(result.contains("Michael Chen"), "got: {result}");
+    }
 }
