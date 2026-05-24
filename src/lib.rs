@@ -77,13 +77,14 @@ pub use cerebras::{
     create_cerebras,
 };
 pub use chat_transport::{
-    ChatRequestOptions, ChatTransport, ChatTransportError, ChatTransportReconnectOptions,
-    ChatTransportSendOptions, ChatTransportTrigger, DefaultChatTransport, DirectChatTransport,
-    DirectChatTransportOptions, HttpChatTransport, HttpChatTransportMethod,
-    HttpChatTransportOptions, HttpChatTransportRequest, PrepareReconnectToStreamRequestOptions,
-    PrepareSendMessagesRequestOptions, PreparedReconnectToStreamRequest,
-    PreparedSendMessagesRequest, RequestCredentials, TextStreamChatTransport,
-    convert_ui_messages_to_model_messages, convert_ui_messages_to_model_messages_with_tools,
+    Chat, ChatError, ChatMessageInput, ChatRequestOptions, ChatStatus, ChatTransport,
+    ChatTransportError, ChatTransportReconnectOptions, ChatTransportSendOptions,
+    ChatTransportTrigger, DefaultChatTransport, DirectChatTransport, DirectChatTransportOptions,
+    HttpChatTransport, HttpChatTransportMethod, HttpChatTransportOptions, HttpChatTransportRequest,
+    PrepareReconnectToStreamRequestOptions, PrepareSendMessagesRequestOptions,
+    PreparedReconnectToStreamRequest, PreparedSendMessagesRequest, RequestCredentials,
+    TextStreamChatTransport, convert_ui_messages_to_model_messages,
+    convert_ui_messages_to_model_messages_with_tools,
 };
 pub use completion_transport::{
     CompletionRequestOptions, CompletionStreamProtocol, CompletionTransport,
@@ -165,7 +166,8 @@ pub use generate_object::{
     GenerateObjectOutputKind, GenerateObjectRepairText, GenerateObjectRepairTextFunction,
     GenerateObjectRepairTextFuture, GenerateObjectRepairTextOptions, GenerateObjectRequest,
     GenerateObjectResponse, GenerateObjectResult, GenerateObjectStartEvent,
-    GenerateObjectStepEndEvent, GenerateObjectStepStartEvent, RepairTextFunction, generate_object,
+    GenerateObjectStepEndEvent, GenerateObjectStepStartEvent, JSON_RESPONSE_CONTENT_TYPE,
+    JsonObjectResponse, RepairTextFunction, generate_object,
 };
 pub use generate_speech::{
     DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,
@@ -304,6 +306,7 @@ pub use open_responses::{
 };
 pub use openai::{
     DEFAULT_OPENAI_BASE_URL, OpenAIProvider, OpenAIProviderSettings, create_openai, openai,
+    openai_local_shell_tool, openai_web_search_tool, openai_web_search_tool_with_args,
 };
 pub use openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
@@ -330,8 +333,8 @@ pub use provider::{
     UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_middleware::{
-    WrappedProvider, WrappedProviderWithImageMiddleware, wrap_provider,
-    wrap_provider_with_image_middleware,
+    WrappedProvider, WrappedProviderWithImageMiddleware, WrappedProviderWithImageModelMiddleware,
+    wrap_provider, wrap_provider_with_image_middleware, wrap_provider_with_image_model_middleware,
 };
 pub use provider_utils::{
     Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
@@ -384,8 +387,14 @@ pub use provider_utils::{
     with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
 };
 pub use registry::{
-    NoSuchProviderError, ProviderRegistry, ProviderRegistryError, ProviderRegistryOptions,
-    create_provider_registry, create_provider_registry_with_options, split_registry_model_id,
+    CustomProvider, CustomProviderWithFiles, CustomProviderWithRerankingModel,
+    CustomProviderWithSkills, CustomProviderWithSpeechModel, CustomProviderWithTranscriptionModel,
+    CustomProviderWithVideoModel, NoSuchProviderError, ProviderRegistry, ProviderRegistryError,
+    ProviderRegistryOptions, create_provider_registry,
+    create_provider_registry_with_image_model_middleware,
+    create_provider_registry_with_language_model_middleware, create_provider_registry_with_options,
+    custom_provider, experimental_create_provider_registry,
+    experimental_create_provider_registry_with_options, split_registry_model_id,
 };
 pub use rerank::{
     RerankDocument, RerankDocuments, RerankEndEvent, RerankOnEnd, RerankOnEndCallback,
@@ -459,25 +468,31 @@ pub use transcription_model::{
 };
 pub use ui_message_stream::{
     CreateUiMessageStreamOptions, HandleUiMessageStreamFinishOptions, ReadUiMessageStreamOptions,
-    ResponseUiMessageId, StreamingUiMessageState, UI_MESSAGE_STREAM_CONTENT_TYPE,
-    UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER, UiMessage, UiMessageChunk,
-    UiMessageRole, UiMessageStreamCreateErrorFunction, UiMessageStreamCreateErrorHandler,
-    UiMessageStreamFinishCallback, UiMessageStreamFinishCallbackEvent,
-    UiMessageStreamFinishCallbackFunction, UiMessageStreamFinishEvent, UiMessageStreamOnFinish,
-    UiMessageStreamOnFinishFunction, UiMessageStreamProcessError, UiMessageStreamResponse,
-    UiMessageStreamResponseInit, UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
+    ResponseUiMessageId, SafeValidateUiMessagesResult, StreamingUiMessageState,
+    UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER,
+    UiMessage, UiMessageChunk, UiMessageRole, UiMessageStreamCreateErrorFunction,
+    UiMessageStreamCreateErrorHandler, UiMessageStreamFinishCallback,
+    UiMessageStreamFinishCallbackEvent, UiMessageStreamFinishCallbackFunction,
+    UiMessageStreamFinishEvent, UiMessageStreamOnFinish, UiMessageStreamOnFinishFunction,
+    UiMessageStreamProcessError, UiMessageStreamResponse, UiMessageStreamResponseInit,
+    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
     UiMessageStreamStepFinishCallback, UiMessageStreamStepFinishCallbackEvent,
-    UiMessageStreamStepFinishCallbackFunction, UiMessageStreamWriter, create_ui_message_stream,
+    UiMessageStreamStepFinishCallbackFunction, UiMessageStreamWriter, UiMessageValidationError,
+    UiMessageValidationOptions, UiMessageValidationTool, create_ui_message_stream,
     create_ui_message_stream_response, create_ui_message_stream_with_result,
-    get_response_ui_message_id, handle_ui_message_stream_finish, is_dynamic_tool_ui_part,
-    is_static_tool_ui_part, is_tool_ui_part,
-    last_assistant_message_is_complete_with_approval_responses,
+    get_response_ui_message_id, get_static_tool_name, handle_ui_message_stream_finish,
+    is_custom_content_ui_part, is_data_ui_part, is_dynamic_tool_ui_part, is_static_tool_ui_part,
+    is_tool_ui_part, last_assistant_message_is_complete_with_approval_responses,
     last_assistant_message_is_complete_with_tool_calls, pipe_ui_message_stream_to_response,
-    process_ui_message_stream, read_ui_message_stream, transform_text_to_ui_message_stream,
+    process_text_stream, process_ui_message_stream, read_ui_message_stream,
+    safe_validate_ui_messages, transform_text_to_ui_message_stream, validate_ui_messages,
 };
-pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
+pub use upload_file::{
+    UploadFileData, UploadFileOptions, UploadFileResult, upload_file, upload_file_with_provider,
+};
 pub use upload_skill::{
     UploadSkillFile, UploadSkillFileData, UploadSkillOptions, UploadSkillResult, upload_skill,
+    upload_skill_with_provider,
 };
 pub use util::{
     AbortSignalSource, AbortTimeoutHandle, AbortTimeoutOptions, AsyncIterableStream,
@@ -521,10 +536,58 @@ pub use warning::Warning;
 
 #[cfg(test)]
 mod tests {
-    use super::VERSION;
+    use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn exposes_crate_version() {
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn root_facade_reexports_upstream_index_surface() {
+        fn assert_type<T>() {}
+
+        let _gateway_model: GatewayLanguageModel = gateway("openai/gpt-4o-mini");
+        let _gateway_provider: GatewayProvider = create_gateway(GatewayProviderSettings::new());
+        let object_schema = json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" }
+            },
+            "required": ["location"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let _schema: Schema = json_schema(object_schema.clone());
+        let _tool: Tool = tool("weather", object_schema.clone());
+        let _dynamic_tool: Tool = dynamic_tool("dynamic-weather", object_schema);
+        let _generated_id = generate_id();
+        let id_generator =
+            create_id_generator(IdGeneratorOptions::new()).expect("id generator builds");
+        let _generated_custom_id = id_generator();
+
+        assert_type::<ToolApprovalRequest>();
+        assert_type::<ToolApprovalResponse>();
+        assert_type::<GenerateTextResult>();
+        assert_type::<StreamTextResult>();
+        assert_type::<GenerateObjectResult>();
+        assert_type::<StreamObjectResult>();
+        assert_type::<EmbedResult>();
+        assert_type::<GenerateImageResult>();
+        assert_type::<GenerateSpeechOptions<'static, MockSpeechModel>>();
+        assert_type::<GenerateVideoOptions<'static, MockVideoModel>>();
+        assert_type::<RerankResult>();
+        assert_type::<TranscriptionResult>();
+        assert_type::<Prompt>();
+        assert_type::<ProviderRegistry<MockProvider>>();
+        assert_type::<TelemetryOptions>();
+        assert_type::<TextStreamPart>();
+        assert_type::<UiMessage>();
+        assert_type::<UploadFileOptions>();
+        assert_type::<UploadSkillOptions>();
+        assert_type::<AsyncIterableStream<JsonValue, VecAsyncIterableStreamSource<JsonValue>>>();
     }
 }

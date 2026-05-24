@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::FileDataContent;
-use crate::provider::ProviderOptions;
+use crate::provider::{ProviderOptions, ProviderWithSkills};
 use crate::skills::{
     Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
@@ -173,6 +173,18 @@ where
     api.upload_skill(options.into_call_options()).await
 }
 
+/// Uploads a skill by resolving the skills interface from a provider-v4 provider.
+pub async fn upload_skill_with_provider<P>(
+    provider: &P,
+    options: UploadSkillOptions,
+) -> UploadSkillResult
+where
+    P: ProviderWithSkills + ?Sized,
+{
+    let skills = provider.skills();
+    upload_skill(&skills, options).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -185,12 +197,18 @@ mod tests {
 
     use super::{
         UploadSkillFile, UploadSkillFileData, UploadSkillOptions, UploadSkillResult, upload_skill,
+        upload_skill_with_provider,
     };
     use crate::file_data::{FileDataContent, ProviderReference};
-    use crate::provider::ProviderOptions;
+    use crate::mock_models::{MockEmbeddingModel, MockImageModel, MockLanguageModel};
+    use crate::provider::{
+        ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
+        ProviderWithSkills, SpecificationVersion,
+    };
     use crate::skills::{
         Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
     };
+    use crate::warning::Warning;
 
     #[derive(Clone, Default)]
     struct RecordingSkills {
@@ -204,6 +222,14 @@ mod tests {
                 .expect("recorded skills calls mutex is not poisoned")
                 .clone()
         }
+    }
+
+    fn provider_reference(id: &str) -> ProviderReference {
+        ProviderReference::try_from(BTreeMap::from([(
+            "test-provider".to_string(),
+            id.to_string(),
+        )]))
+        .expect("provider reference is valid")
     }
 
     impl Skills for RecordingSkills {
@@ -236,6 +262,79 @@ mod tests {
                     options.display_title.unwrap_or_else(|| "Skill".to_string()),
                 ),
             )
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingSkillsProvider {
+        skills: RecordingSkills,
+    }
+
+    impl RecordingSkillsProvider {
+        fn new(skills: RecordingSkills) -> Self {
+            Self { skills }
+        }
+    }
+
+    impl Provider for RecordingSkillsProvider {
+        type LanguageModel = MockLanguageModel;
+        type EmbeddingModel = MockEmbeddingModel;
+        type ImageModel = MockImageModel;
+
+        fn specification_version(&self) -> SpecificationVersion {
+            SpecificationVersion::V4
+        }
+
+        fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::LanguageModel))
+        }
+
+        fn embedding_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+        }
+
+        fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+        }
+    }
+
+    impl ProviderWithSkills for RecordingSkillsProvider {
+        type Skills = RecordingSkills;
+
+        fn skills(&self) -> Self::Skills {
+            self.skills.clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticResultSkills {
+        result: SkillsUploadSkillResult,
+    }
+
+    impl StaticResultSkills {
+        fn new(result: SkillsUploadSkillResult) -> Self {
+            Self { result }
+        }
+    }
+
+    impl Skills for StaticResultSkills {
+        type UploadSkillFuture<'a>
+            = Ready<SkillsUploadSkillResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn upload_skill(
+            &self,
+            _options: SkillsUploadSkillCallOptions,
+        ) -> Self::UploadSkillFuture<'_> {
+            ready(self.result.clone())
         }
     }
 
@@ -393,5 +492,94 @@ mod tests {
             result,
             UploadSkillResult::new(expected_reference).with_display_title("My Skill")
         );
+    }
+
+    #[test]
+    fn upload_skill_returns_provider_reference_warnings_and_provider_metadata_from_skills() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "test-provider": {
+                "foo": "bar"
+            }
+        }))
+        .expect("provider metadata deserialize");
+        let skills = StaticResultSkills::new(
+            SkillsUploadSkillResult::new(provider_reference("skill_123"))
+                .with_provider_metadata(provider_metadata.clone())
+                .with_warning(Warning::Unsupported {
+                    feature: "displayTitle".to_string(),
+                    details: None,
+                }),
+        );
+
+        let result = poll_ready(upload_skill(
+            &skills,
+            UploadSkillOptions::new(vec![UploadSkillFile::new(
+                "test.ts",
+                UploadSkillFileData::data("aGVsbG8="),
+            )]),
+        ));
+
+        assert_eq!(result.provider_reference, provider_reference("skill_123"));
+        assert_eq!(result.provider_metadata, Some(provider_metadata));
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "displayTitle".to_string(),
+                details: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn upload_skill_passes_provider_options_to_the_skills() {
+        let skills = RecordingSkills::default();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "custom": "value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _ = poll_ready(upload_skill(
+            &skills,
+            UploadSkillOptions::new(vec![UploadSkillFile::new(
+                "test.ts",
+                UploadSkillFileData::data("aGVsbG8="),
+            )])
+            .with_provider_options(provider_options.clone()),
+        ));
+
+        let calls = skills.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].display_title, None);
+        assert_eq!(calls[0].provider_options, Some(provider_options));
+    }
+
+    #[test]
+    fn upload_skill_resolves_skills_v4_from_provider_v4_with_skills_method() {
+        let skills = RecordingSkills::default();
+        let provider = RecordingSkillsProvider::new(skills.clone());
+
+        let result = poll_ready(upload_skill_with_provider(
+            &provider,
+            UploadSkillOptions::new(vec![UploadSkillFile::new(
+                "test.ts",
+                UploadSkillFileData::data("aGVsbG8="),
+            )])
+            .with_display_title("My Skill"),
+        ));
+
+        let calls = skills.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            SkillsUploadSkillCallOptions::new(vec![SkillsFile::new(
+                "test.ts",
+                SkillsFileData::data(FileDataContent::Base64("aGVsbG8=".to_string())),
+            )])
+            .with_display_title("My Skill")
+        );
+
+        assert_eq!(result.display_title.as_deref(), Some("My Skill"));
     }
 }

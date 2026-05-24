@@ -15,17 +15,20 @@ use crate::generate_text::{
     GenerateTextOnLanguageModelCallEnd, GenerateTextOnLanguageModelCallStart, GenerateTextOnStart,
     GenerateTextOnStepFinish, GenerateTextOnStepStart, GenerateTextOnToolExecutionEnd,
     GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
-    GenerateTextStepStartEvent, GenerateTextTool, GenerateTextToolCall,
-    GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
-    LanguageModelCallEndEvent, LanguageModelCallStartEvent, StepToolApprovalResponse,
-    StopCondition, ToolApprovalConfiguration, ToolApprovalResponseOutput, ToolCallRepair,
-    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
-    apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
-    generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
-    invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
-    invoke_tool_input_start_callback, is_stop_condition_met, mark_runtime_dynamic_tool_calls,
-    mark_tool_call_metadata, mark_tool_call_titles, mark_tool_result_metadata,
-    mark_unavailable_tool_calls, refine_tool_inputs, refresh_generate_text_content,
+    GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextTool,
+    GenerateTextToolCall, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
+    GenerateTextToolOutputDenied, GenerateTextToolResult, LanguageModelCallEndEvent,
+    LanguageModelCallStartEvent, PrepareStep, PrepareStepOptions, PrepareStepResult,
+    StepToolApprovalResponse, StopCondition, ToolApprovalConfiguration, ToolApprovalResponseOutput,
+    ToolCallNotFoundForApprovalError, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
+    ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
+    filter_active_language_model_tools, generate_text_call_id,
+    generate_text_tool_result_from_language_model_tool_result,
+    initial_tool_approval_response_message, invoke_tool_input_available_callback,
+    invoke_tool_input_delta_callback, invoke_tool_input_start_callback, is_stop_condition_met,
+    mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
+    mark_tool_call_titles, mark_tool_result_metadata, mark_unavailable_tool_calls,
+    merge_provider_options, refine_tool_inputs, refresh_generate_text_content,
     refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
     resolve_tool_approvals_for_step, response_messages_for_step,
     should_continue_after_tool_results, sync_tool_result_inputs,
@@ -73,6 +76,7 @@ use crate::ui_message_stream::{
     create_ui_message_stream_response, get_response_ui_message_id, handle_ui_message_stream_finish,
     pipe_ui_message_stream_to_response,
 };
+use crate::util::Callback;
 use crate::warning::Warning;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -333,6 +337,10 @@ impl StreamTextResponseMetadata {
 pub struct StreamTextStepPerformance {
     /// Elapsed wall-clock time for the collected step in milliseconds.
     pub step_time_ms: u64,
+
+    /// Time until the first text, reasoning, or tool input delta was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_output_token_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -602,6 +610,9 @@ pub enum TextStreamPart {
 
     /// Provider-executed tool result.
     ToolResult(GenerateTextToolResult),
+
+    /// Denied tool output.
+    ToolOutputDenied(GenerateTextToolOutputDenied),
 
     /// Provider-specific generated content.
     Custom(LanguageModelCustomContent),
@@ -962,6 +973,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked before each streamed model step begins.
     pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
 
+    /// Optional per-step preparation callback.
+    pub prepare_step: Option<PrepareStep<'a, M>>,
+
     /// Optional callback invoked immediately before each provider stream call begins.
     pub on_language_model_call_start: Option<GenerateTextOnLanguageModelCallStart<'a>>,
 
@@ -1030,6 +1044,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_call_repair: None,
             on_start: None,
             on_step_start: None,
+            prepare_step: None,
             on_language_model_call_start: None,
             on_language_model_call_end: None,
             on_tool_execution_start: None,
@@ -1072,6 +1087,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_call_repair: None,
             on_start: None,
             on_step_start: None,
+            prepare_step: None,
             on_language_model_call_start: None,
             on_language_model_call_end: None,
             on_tool_execution_start: None,
@@ -1254,6 +1270,16 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Sets a callback that can override settings for each streamed model step.
+    pub fn with_prepare_step<F, Fut>(mut self, prepare: F) -> Self
+    where
+        F: Fn(PrepareStepOptions<'a, M>) -> Fut + 'a,
+        Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
+    {
+        self.prepare_step = Some(PrepareStep::new(prepare));
         self
     }
 
@@ -1846,6 +1872,74 @@ impl StreamTextResult {
         self.steps.last()
     }
 
+    /// Deserializes the final streamed output into a caller-provided Rust type.
+    pub fn output_as<T>(&self) -> Result<T, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(stream_text_output_value(&self.text))
+    }
+
+    /// Deserializes a materialized partial-output entry into a Rust type.
+    pub fn partial_output_as<T>(partial_output: &JsonValue) -> Result<T, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(partial_output.clone())
+    }
+
+    /// Deserializes each materialized partial-output entry into Rust values.
+    pub fn partial_outputs_as<T>(&self) -> Result<Vec<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.partial_output_values()
+            .iter()
+            .map(Self::partial_output_as)
+            .collect()
+    }
+
+    /// Deserializes array-output elements from partial-output stream entries.
+    pub fn element_stream_as<T>(&self) -> Result<Vec<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let mut elements = Vec::new();
+        for partial_output in self.partial_output_values() {
+            if let JsonValue::Array(items) = partial_output {
+                for item in items {
+                    elements.push(serde_json::from_value(item.clone())?);
+                }
+            }
+        }
+        Ok(elements)
+    }
+
+    /// Returns partial-output values represented by text deltas in this result.
+    pub fn partial_output_values(&self) -> Vec<JsonValue> {
+        if self.text_stream.is_empty() {
+            return Vec::new();
+        }
+        vec![stream_text_output_value(&self.text)]
+    }
+
+    /// Consumes the materialized stream result, ignoring provider error parts.
+    pub fn consume_stream(&self) {
+        self.consume_stream_with_on_error(|_| {});
+    }
+
+    /// Consumes the materialized stream result and reports provider error parts.
+    pub fn consume_stream_with_on_error<F>(&self, mut on_error: F)
+    where
+        F: FnMut(&JsonValue),
+    {
+        for part in &self.parts {
+            if let TextStreamPart::Error(error_part) = part {
+                on_error(&error_part.error);
+            }
+        }
+    }
+
     /// Converts collected stream parts into UI-message stream chunks.
     pub fn to_ui_message_stream(&self) -> Vec<UiMessageChunk> {
         self.to_ui_message_stream_with_options(StreamTextUiMessageStreamOptions::default())
@@ -2054,6 +2148,15 @@ impl StreamTextResult {
                     }
                     push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
+                TextStreamPart::ToolOutputDenied(part) => {
+                    chunks.push(UiMessageChunk::ToolOutputDenied {
+                        tool_call_id: part.tool_call_id.clone(),
+                        tool_name: None,
+                        provider_executed: part.provider_executed,
+                        dynamic: part.dynamic,
+                    });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
+                }
                 TextStreamPart::Custom(part) => {
                     chunks.push(UiMessageChunk::Custom {
                         kind: part.kind.clone(),
@@ -2206,6 +2309,10 @@ impl StreamTextResult {
     }
 }
 
+fn stream_text_output_value(text: &str) -> JsonValue {
+    serde_json::from_str(text).unwrap_or_else(|_| JsonValue::String(text.to_string()))
+}
+
 fn stream_text_ui_message_metadata(
     options: &StreamTextUiMessageStreamOptions,
     part: &TextStreamPart,
@@ -2259,8 +2366,8 @@ where
         model,
         mut call_options,
         tools,
-        runtime_context,
-        tools_context,
+        mut runtime_context,
+        mut tools_context,
         experimental_sandbox,
         active_tools,
         tool_approval,
@@ -2268,6 +2375,7 @@ where
         tool_call_repair,
         on_start,
         on_step_start,
+        prepare_step,
         on_language_model_call_start,
         on_language_model_call_end,
         on_tool_execution_start,
@@ -2290,14 +2398,16 @@ where
     let include_raw_chunks = call_options.include_raw_chunks.unwrap_or(false);
     let mut parts = vec![TextStreamPart::Start(TextStreamStartPart::new())];
     let base_language_model_tools = call_options.tools.take();
+    let base_provider_options = call_options.provider_options.clone();
     let mut current_prompt = call_options.prompt.clone();
     let initial_messages = current_prompt.clone();
     let active_tools_for_start = active_tools.clone();
-    let active_tools = active_tools.as_deref();
+    let base_active_tools = active_tools;
     let call_id = generate_text_call_id();
     let max_steps = max_steps.max(1);
     let mut stream_steps = Vec::new();
     let mut generate_steps = Vec::new();
+    let mut initial_response_messages = Vec::new();
     let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
     let mut aborted = false;
     let mut abort_reason = None;
@@ -2340,6 +2450,44 @@ where
         telemetry_dispatcher.on_start(&start_event);
     }
 
+    if let Some(initial_response) = initial_tool_approval_response_message(
+        &call_id,
+        &current_prompt,
+        &tools,
+        &tools_context,
+        (
+            experimental_sandbox.as_ref(),
+            call_options.abort_signal.as_ref(),
+            timeout.as_ref(),
+            None,
+            None,
+            on_tool_execution_start.as_ref(),
+            on_tool_execution_end.as_ref(),
+            Some(&telemetry_dispatcher),
+        ),
+    )
+    .await
+    {
+        current_prompt.push(initial_response.message.clone());
+        initial_response_messages.push(initial_response.message);
+        for tool_result in initial_response.tool_results {
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolResult(tool_result),
+                on_chunk.as_ref(),
+            )
+            .await;
+        }
+        for denied_tool_output in initial_response.denied_tool_outputs {
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolOutputDenied(denied_tool_output),
+                on_chunk.as_ref(),
+            )
+            .await;
+        }
+    }
+
     for step_number in 0..max_steps {
         if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal.as_ref()) {
             abort_reason = abort_part.reason.clone();
@@ -2353,17 +2501,70 @@ where
             break;
         }
 
+        let accumulated_response_messages = crate::generate_text::accumulated_response_messages(
+            &initial_response_messages,
+            &generate_steps,
+        );
+        let prepare_step_result = if let Some(prepare_step) = &prepare_step {
+            prepare_step
+                .prepare(PrepareStepOptions {
+                    steps: generate_steps.clone(),
+                    step_number,
+                    model,
+                    messages: current_prompt.clone(),
+                    initial_messages: initial_messages.clone(),
+                    response_messages: accumulated_response_messages,
+                    runtime_context: runtime_context.clone(),
+                    tools_context: tools_context.clone(),
+                    experimental_sandbox: experimental_sandbox.clone(),
+                })
+                .await
+        } else {
+            PrepareStepResult::default()
+        };
+
+        let PrepareStepResult {
+            model: step_model,
+            tool_choice: step_tool_choice,
+            active_tools: step_active_tools,
+            messages: step_messages,
+            runtime_context: step_runtime_context,
+            tools_context: step_tools_context,
+            provider_options: step_provider_options,
+            experimental_sandbox: step_experimental_sandbox,
+        } = prepare_step_result;
+
+        if let Some(runtime_context_override) = step_runtime_context {
+            runtime_context = runtime_context_override;
+        }
+
+        if let Some(tools_context_override) = step_tools_context {
+            tools_context = tools_context_override;
+        }
+
+        if let Some(messages_override) = step_messages {
+            current_prompt = messages_override;
+        }
+
+        let step_model = step_model.unwrap_or(model);
+        let step_experimental_sandbox =
+            step_experimental_sandbox.or_else(|| experimental_sandbox.clone());
+        let step_active_tools = step_active_tools
+            .as_deref()
+            .or(base_active_tools.as_deref());
         let step_prompt = current_prompt.clone();
         let step_tools =
-            crate::generate_text::filter_active_tools(Some(tools.clone()), active_tools)
+            crate::generate_text::filter_active_tools(Some(tools.clone()), step_active_tools)
                 .unwrap_or_default();
-        let mut step_language_model_tools =
-            filter_active_language_model_tools(base_language_model_tools.clone(), active_tools);
+        let mut step_language_model_tools = filter_active_language_model_tools(
+            base_language_model_tools.clone(),
+            step_active_tools,
+        );
 
         if let Some(mut prepared_tools) = prepare_tools_with_context(
             &step_tools,
             Some(&tools_context),
-            experimental_sandbox.as_ref(),
+            step_experimental_sandbox.as_ref(),
         ) {
             step_language_model_tools
                 .get_or_insert_with(Vec::new)
@@ -2373,21 +2574,26 @@ where
         let mut step_call_options = call_options.clone();
         step_call_options.prompt = step_prompt.clone();
         step_call_options.tools = step_language_model_tools;
+        if let Some(tool_choice) = step_tool_choice {
+            step_call_options.tool_choice = Some(tool_choice);
+        }
+        step_call_options.provider_options =
+            merge_provider_options(base_provider_options.as_ref(), step_provider_options);
         append_stream_text_user_agent(&mut step_call_options);
         if prompt_has_url_files(&step_call_options.prompt) {
-            let _ = model.supported_urls().await;
+            let _ = step_model.supported_urls().await;
         }
 
         if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
             let step_start_event = GenerateTextStepStartEvent {
                 call_id: call_id.clone(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
+                provider: step_model.provider().to_string(),
+                model_id: step_model.model_id().to_string(),
                 step_number,
                 messages: step_prompt.clone(),
                 tools: step_call_options.tools.clone().unwrap_or_default(),
                 tool_choice: step_call_options.tool_choice.clone(),
-                active_tools: active_tools.map(|tools| tools.to_vec()),
+                active_tools: step_active_tools.map(|tools| tools.to_vec()),
                 steps: generate_steps.clone(),
                 provider_options: step_call_options.provider_options.clone(),
                 runtime_context: runtime_context.clone(),
@@ -2402,8 +2608,8 @@ where
         if on_language_model_call_start.is_some() || telemetry_dispatcher.is_enabled() {
             let language_model_call_start_event = LanguageModelCallStartEvent::from_call_options(
                 &call_id,
-                model.provider(),
-                model.model_id(),
+                step_model.provider(),
+                step_model.model_id(),
                 &step_call_options,
             );
             if let Some(on_language_model_call_start) = &on_language_model_call_start {
@@ -2416,7 +2622,7 @@ where
 
         let model_call_started_at = Instant::now();
         let mut collected_step = collect_stream_text_step_with_retries(
-            model,
+            step_model,
             step_call_options.clone(),
             include_raw_chunks,
             &mut parts,
@@ -2430,7 +2636,7 @@ where
                 tools: &step_tools,
                 messages: &step_prompt,
                 runtime_context: &runtime_context,
-                experimental_sandbox: experimental_sandbox.as_ref(),
+                experimental_sandbox: step_experimental_sandbox.as_ref(),
             },
         )
         .await;
@@ -2449,6 +2655,10 @@ where
         );
 
         mark_unavailable_tool_calls(
+            &mut collected_step.tool_calls,
+            step_call_options.tools.as_deref(),
+        );
+        mark_invalid_tool_inputs(
             &mut collected_step.tool_calls,
             step_call_options.tools.as_deref(),
         );
@@ -2475,9 +2685,16 @@ where
         let mut generate_step = collected_step.to_generate_text_step(
             call_id.clone(),
             step_number,
-            GenerateTextModelInfo::new(model.provider(), model.model_id()),
+            GenerateTextModelInfo::new(step_model.provider(), step_model.model_id()),
             runtime_context.clone(),
             tools_context.clone(),
+        );
+        generate_step.performance = GenerateTextStepPerformance::from_stream_usage(
+            &generate_step.usage,
+            response_time_ms,
+            collected_step.performance.step_time_ms,
+            BTreeMap::new(),
+            collected_step.performance.time_to_first_output_token_ms,
         );
         refresh_generate_text_content(
             &mut generate_step,
@@ -2515,12 +2732,20 @@ where
             if let Some(is_automatic) = request.is_automatic {
                 approval_request = approval_request.with_automatic(is_automatic);
             }
-            parts.push(TextStreamPart::ToolApprovalRequest(approval_request));
+            insert_part_after_tool_call(
+                &mut parts,
+                &request.tool_call_id,
+                TextStreamPart::ToolApprovalRequest(approval_request),
+            );
         }
         for response in &tool_approvals.responses {
-            parts.push(TextStreamPart::ToolApprovalResponse(
-                text_stream_tool_approval_response_output(response),
-            ));
+            let approval_response = text_stream_tool_approval_response_output(response);
+            let approval_id = approval_response.approval_id.clone();
+            insert_part_after_tool_approval_request(
+                &mut parts,
+                &approval_id,
+                TextStreamPart::ToolApprovalResponse(approval_response),
+            );
         }
 
         let provider_result_tool_call_ids = collected_step
@@ -2535,6 +2760,19 @@ where
             .filter(|tool_call| !provider_result_tool_call_ids.contains(&tool_call.tool_call_id))
             .cloned()
             .collect::<Vec<_>>();
+        let preliminary_tool_results =
+            Arc::new(std::sync::Mutex::new(Vec::<GenerateTextToolResult>::new()));
+        let preliminary_tool_results_for_callback = Arc::clone(&preliminary_tool_results);
+        let on_preliminary_tool_result =
+            Callback::infallible(move |result: GenerateTextToolResult| {
+                let preliminary_tool_results = Arc::clone(&preliminary_tool_results_for_callback);
+                async move {
+                    preliminary_tool_results
+                        .lock()
+                        .expect("preliminary tool results lock")
+                        .push(result);
+                }
+            });
         let (local_tool_results, tool_execution_ms) = execute_tool_calls(
             &call_id,
             &step_tools,
@@ -2543,19 +2781,45 @@ where
             &tools_context,
             &tool_approvals.blocked_tool_call_ids,
             (
-                experimental_sandbox.as_ref(),
+                step_experimental_sandbox.as_ref(),
                 step_call_options.abort_signal.as_ref(),
                 timeout.as_ref(),
                 None,
-                None,
+                Some(&on_preliminary_tool_result),
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
                 Some(&telemetry_dispatcher),
             ),
         )
         .await;
+        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal.as_ref()) {
+            abort_reason = abort_part.reason.clone();
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::Abort(abort_part),
+                on_chunk.as_ref(),
+            )
+            .await;
+            aborted = true;
+            break;
+        }
         let local_tool_results =
             apply_stream_text_transforms_to_tool_results(local_tool_results, &transforms);
+        let preliminary_tool_results = apply_stream_text_transforms_to_tool_results(
+            preliminary_tool_results
+                .lock()
+                .expect("preliminary tool results lock")
+                .clone(),
+            &transforms,
+        );
+        for tool_result in &preliminary_tool_results {
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolResult(tool_result.clone()),
+                on_chunk.as_ref(),
+            )
+            .await;
+        }
         for tool_result in &local_tool_results {
             push_text_stream_part(
                 &mut parts,
@@ -2759,6 +3023,37 @@ struct CollectedStreamTextStep {
     abort_reason: Option<JsonValue>,
 }
 
+#[derive(Clone, Debug)]
+enum ProviderContentEntry {
+    Content(LanguageModelContent),
+    TextBlock(String),
+    ReasoningBlock(String),
+}
+
+fn materialize_provider_content(
+    entries: &[ProviderContentEntry],
+    text_blocks: &BTreeMap<String, (String, Option<ProviderMetadata>)>,
+    reasoning_blocks: &BTreeMap<String, (String, Option<ProviderMetadata>)>,
+) -> Vec<LanguageModelContent> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProviderContentEntry::Content(content) => Some(content.clone()),
+            ProviderContentEntry::TextBlock(id) => {
+                let (text, provider_metadata) = text_blocks.get(id)?;
+                (!text.is_empty())
+                    .then(|| text_language_model_content(text.clone(), provider_metadata.clone()))
+            }
+            ProviderContentEntry::ReasoningBlock(id) => {
+                let (text, provider_metadata) = reasoning_blocks.get(id)?;
+                (!text.is_empty()).then(|| {
+                    reasoning_language_model_content(text.clone(), provider_metadata.clone())
+                })
+            }
+        })
+        .collect()
+}
+
 impl CollectedStreamTextStep {
     fn aborted(abort_reason: Option<JsonValue>) -> Self {
         Self {
@@ -2858,7 +3153,7 @@ impl CollectedStreamTextStep {
         let mut tool_results = Vec::new();
         let mut custom_parts = Vec::new();
         let mut errors = Vec::new();
-        let mut provider_content = Vec::new();
+        let mut provider_content_entries = Vec::new();
         let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
         let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
 
@@ -2869,6 +3164,7 @@ impl CollectedStreamTextStep {
                         part.id.clone(),
                         (String::new(), part.provider_metadata.clone()),
                     );
+                    provider_content_entries.push(ProviderContentEntry::TextBlock(part.id.clone()));
                 }
                 TextStreamPart::TextDelta(part) if !part.text.is_empty() => {
                     text.push_str(&part.text);
@@ -2879,25 +3175,22 @@ impl CollectedStreamTextStep {
                             *block_metadata = part.provider_metadata.clone();
                         }
                     } else {
-                        provider_content.push(text_language_model_content(
-                            part.text.clone(),
-                            part.provider_metadata.clone(),
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            text_language_model_content(
+                                part.text.clone(),
+                                part.provider_metadata.clone(),
+                            ),
                         ));
                     }
                 }
-                TextStreamPart::TextEnd(part) => {
-                    if let Some((block_text, provider_metadata)) = text_blocks.remove(&part.id)
-                        && !block_text.is_empty()
-                    {
-                        provider_content
-                            .push(text_language_model_content(block_text, provider_metadata));
-                    }
-                }
+                TextStreamPart::TextEnd(_) => {}
                 TextStreamPart::ReasoningStart(part) => {
                     reasoning_blocks.insert(
                         part.id.clone(),
                         (String::new(), part.provider_metadata.clone()),
                     );
+                    provider_content_entries
+                        .push(ProviderContentEntry::ReasoningBlock(part.id.clone()));
                 }
                 TextStreamPart::ReasoningDelta(part) => {
                     has_reasoning_text = true;
@@ -2908,32 +3201,29 @@ impl CollectedStreamTextStep {
                             *block_metadata = part.provider_metadata.clone();
                         }
                     } else {
-                        provider_content.push(reasoning_language_model_content(
-                            part.text.clone(),
-                            part.provider_metadata.clone(),
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            reasoning_language_model_content(
+                                part.text.clone(),
+                                part.provider_metadata.clone(),
+                            ),
                         ));
                     }
                 }
-                TextStreamPart::ReasoningEnd(part) => {
-                    if let Some((block_text, provider_metadata)) = reasoning_blocks.remove(&part.id)
-                        && !block_text.is_empty()
-                    {
-                        provider_content.push(reasoning_language_model_content(
-                            block_text,
-                            provider_metadata,
-                        ));
-                    }
-                }
+                TextStreamPart::ReasoningEnd(_) => {}
                 TextStreamPart::ToolApprovalRequest(part) => {
-                    provider_content.push(LanguageModelContent::ToolApprovalRequest(
-                        part.to_language_model_tool_approval_request(),
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::ToolApprovalRequest(
+                            part.to_language_model_tool_approval_request(),
+                        ),
                     ));
                 }
                 TextStreamPart::ToolApprovalResponse(_) => {}
                 TextStreamPart::ToolCall(part) => {
                     tool_calls.push(part.clone());
-                    provider_content.push(LanguageModelContent::ToolCall(
-                        language_model_tool_call_from_stream_text_tool_call(part),
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::ToolCall(
+                            language_model_tool_call_from_stream_text_tool_call(part),
+                        ),
                     ));
                 }
                 TextStreamPart::ToolResult(part) => {
@@ -2941,24 +3231,34 @@ impl CollectedStreamTextStep {
                     if let Some(tool_result) =
                         language_model_tool_result_from_stream_text_tool_result(part)
                     {
-                        provider_content.push(LanguageModelContent::ToolResult(tool_result));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ToolResult(tool_result),
+                        ));
                     }
                 }
                 TextStreamPart::Custom(part) => {
                     custom_parts.push(part.clone());
-                    provider_content.push(LanguageModelContent::Custom(part.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::Custom(part.clone()),
+                    ));
                 }
                 TextStreamPart::File(part) => {
                     files.push(part.file.clone());
-                    provider_content.push(LanguageModelContent::File(part.file.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::File(part.file.clone()),
+                    ));
                 }
                 TextStreamPart::ReasoningFile(part) => {
                     reasoning_files.push(part.file.clone());
-                    provider_content.push(LanguageModelContent::ReasoningFile(part.file.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::ReasoningFile(part.file.clone()),
+                    ));
                 }
                 TextStreamPart::Source(part) => {
                     sources.push(part.clone());
-                    provider_content.push(LanguageModelContent::Source(part.clone()));
+                    provider_content_entries.push(ProviderContentEntry::Content(
+                        LanguageModelContent::Source(part.clone()),
+                    ));
                 }
                 TextStreamPart::Error(part) => {
                     errors.push(part.error.clone());
@@ -2980,21 +3280,6 @@ impl CollectedStreamTextStep {
             }
         }
 
-        for (_, (block_text, provider_metadata)) in text_blocks {
-            if !block_text.is_empty() {
-                provider_content.push(text_language_model_content(block_text, provider_metadata));
-            }
-        }
-
-        for (_, (block_text, provider_metadata)) in reasoning_blocks {
-            if !block_text.is_empty() {
-                provider_content.push(reasoning_language_model_content(
-                    block_text,
-                    provider_metadata,
-                ));
-            }
-        }
-
         self.text = text;
         self.text_stream = text_stream;
         self.reasoning_text = has_reasoning_text.then_some(reasoning_text);
@@ -3005,7 +3290,11 @@ impl CollectedStreamTextStep {
         self.tool_results = tool_results;
         self.custom_parts = custom_parts;
         self.errors = errors;
-        self.provider_content = provider_content;
+        self.provider_content = materialize_provider_content(
+            &provider_content_entries,
+            &text_blocks,
+            &reasoning_blocks,
+        );
     }
 
     fn apply_smooth_stream_error(&mut self, error: &SmoothStreamError) {
@@ -3231,7 +3520,7 @@ where
     let mut sources = Vec::new();
     let mut files = Vec::new();
     let mut reasoning_files = Vec::new();
-    let mut tool_calls = Vec::new();
+    let mut tool_calls = Vec::<GenerateTextToolCall>::new();
     let mut tool_results = Vec::new();
     let mut custom_parts = Vec::new();
     let mut errors = Vec::new();
@@ -3239,12 +3528,13 @@ where
     let mut finish_reason = FinishReason::Other;
     let mut raw_finish_reason = None;
     let mut provider_metadata = None;
-    let mut provider_content = Vec::new();
+    let mut provider_content_entries = Vec::new();
     let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
     let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
     let mut ongoing_tool_call_tool_names = BTreeMap::<String, String>::new();
     let mut aborted = false;
     let mut abort_reason = None;
+    let mut time_to_first_output_token_ms = None;
 
     for part in stream_result.stream {
         if let Some(abort_part) = stream_text_abort_part_from_signal(controls.abort_signal) {
@@ -3273,10 +3563,18 @@ where
                             part.id.clone(),
                             (String::new(), part.provider_metadata.clone()),
                         );
+                        provider_content_entries
+                            .push(ProviderContentEntry::TextBlock(part.id.clone()));
                         parts.push(TextStreamPart::TextStart(part));
                     }
                     LanguageModelStreamPart::TextDelta(part) => {
                         if !part.delta.is_empty() {
+                            if time_to_first_output_token_ms.is_none() {
+                                time_to_first_output_token_ms = Some(
+                                    u64::try_from(step_start.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                );
+                            }
                             text.push_str(&part.delta);
                             text_stream.push(part.delta.clone());
                             if let Some((block_text, block_metadata)) =
@@ -3287,9 +3585,11 @@ where
                                     *block_metadata = part.provider_metadata.clone();
                                 }
                             } else {
-                                provider_content.push(text_language_model_content(
-                                    part.delta.clone(),
-                                    part.provider_metadata.clone(),
+                                provider_content_entries.push(ProviderContentEntry::Content(
+                                    text_language_model_content(
+                                        part.delta.clone(),
+                                        part.provider_metadata.clone(),
+                                    ),
                                 ));
                             }
                             let mut stream_part = TextStreamTextDeltaPart::new(part.id, part.delta);
@@ -3305,12 +3605,6 @@ where
                         }
                     }
                     LanguageModelStreamPart::TextEnd(part) => {
-                        if let Some((block_text, provider_metadata)) = text_blocks.remove(&part.id)
-                            && !block_text.is_empty()
-                        {
-                            provider_content
-                                .push(text_language_model_content(block_text, provider_metadata));
-                        }
                         parts.push(TextStreamPart::TextEnd(part));
                     }
                     LanguageModelStreamPart::ReasoningStart(part) => {
@@ -3318,9 +3612,16 @@ where
                             part.id.clone(),
                             (String::new(), part.provider_metadata.clone()),
                         );
+                        provider_content_entries
+                            .push(ProviderContentEntry::ReasoningBlock(part.id.clone()));
                         parts.push(TextStreamPart::ReasoningStart(part));
                     }
                     LanguageModelStreamPart::ReasoningDelta(part) => {
+                        if time_to_first_output_token_ms.is_none() {
+                            time_to_first_output_token_ms = Some(
+                                u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            );
+                        }
                         has_reasoning_text = true;
                         reasoning_text.push_str(&part.delta);
                         if let Some((block_text, block_metadata)) =
@@ -3331,9 +3632,11 @@ where
                                 *block_metadata = part.provider_metadata.clone();
                             }
                         } else {
-                            provider_content.push(reasoning_language_model_content(
-                                part.delta.clone(),
-                                part.provider_metadata.clone(),
+                            provider_content_entries.push(ProviderContentEntry::Content(
+                                reasoning_language_model_content(
+                                    part.delta.clone(),
+                                    part.provider_metadata.clone(),
+                                ),
                             ));
                         }
                         let mut stream_part =
@@ -3349,15 +3652,6 @@ where
                         .await;
                     }
                     LanguageModelStreamPart::ReasoningEnd(part) => {
-                        if let Some((block_text, provider_metadata)) =
-                            reasoning_blocks.remove(&part.id)
-                            && !block_text.is_empty()
-                        {
-                            provider_content.push(reasoning_language_model_content(
-                                block_text,
-                                provider_metadata,
-                            ));
-                        }
                         parts.push(TextStreamPart::ReasoningEnd(part));
                     }
                     LanguageModelStreamPart::ToolInputStart(part) => {
@@ -3395,6 +3689,11 @@ where
                         .await;
                     }
                     LanguageModelStreamPart::ToolInputDelta(part) => {
+                        if time_to_first_output_token_ms.is_none() {
+                            time_to_first_output_token_ms = Some(
+                                u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            );
+                        }
                         let tool_name = ongoing_tool_call_tool_names.get(&part.id);
                         let tool = tool_name.and_then(|tool_name| {
                             controls.tools.iter().find(|tool| &tool.name == tool_name)
@@ -3420,11 +3719,27 @@ where
                         parts.push(TextStreamPart::ToolInputEnd(part));
                     }
                     LanguageModelStreamPart::ToolApprovalRequest(part) => {
-                        provider_content
-                            .push(LanguageModelContent::ToolApprovalRequest(part.clone()));
-                        parts.push(TextStreamPart::ToolApprovalRequest(
-                            TextStreamToolApprovalRequestPart::from_language_model_tool_approval_request(part),
-                        ));
+                        if tool_calls
+                            .iter()
+                            .any(|tool_call| tool_call.tool_call_id == part.tool_call_id)
+                        {
+                            provider_content_entries.push(ProviderContentEntry::Content(
+                                LanguageModelContent::ToolApprovalRequest(part.clone()),
+                            ));
+                            parts.push(TextStreamPart::ToolApprovalRequest(
+                                TextStreamToolApprovalRequestPart::from_language_model_tool_approval_request(part),
+                            ));
+                        } else {
+                            let error = ToolCallNotFoundForApprovalError::new(
+                                &part.tool_call_id,
+                                &part.approval_id,
+                            );
+                            let error_value = JsonValue::String(error.to_string());
+                            errors.push(error_value.clone());
+                            parts.push(TextStreamPart::Error(LanguageModelErrorStreamPart::new(
+                                error_value,
+                            )));
+                        }
                     }
                     LanguageModelStreamPart::ToolCall(part) => {
                         let tool_call = GenerateTextToolCall::from_language_model_tool_call(&part);
@@ -3433,7 +3748,9 @@ where
                             .unwrap_or_else(|| tool_call.tool_name.clone());
                         let tool = controls.tools.iter().find(|tool| tool.name == tool_name);
                         tool_calls.push(tool_call.clone());
-                        provider_content.push(LanguageModelContent::ToolCall(part));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ToolCall(part),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ToolCall(tool_call),
@@ -3460,7 +3777,9 @@ where
                             &tool_calls,
                         );
                         tool_results.push(tool_result.clone());
-                        provider_content.push(LanguageModelContent::ToolResult(part));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ToolResult(part),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ToolResult(tool_result),
@@ -3470,7 +3789,9 @@ where
                     }
                     LanguageModelStreamPart::Custom(part) => {
                         custom_parts.push(part.clone());
-                        provider_content.push(LanguageModelContent::Custom(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::Custom(part.clone()),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::Custom(part),
@@ -3480,19 +3801,25 @@ where
                     }
                     LanguageModelStreamPart::File(part) => {
                         files.push(part.clone());
-                        provider_content.push(LanguageModelContent::File(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::File(part.clone()),
+                        ));
                         parts.push(TextStreamPart::File(TextStreamFilePart::new(part)));
                     }
                     LanguageModelStreamPart::ReasoningFile(part) => {
                         reasoning_files.push(part.clone());
-                        provider_content.push(LanguageModelContent::ReasoningFile(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::ReasoningFile(part.clone()),
+                        ));
                         parts.push(TextStreamPart::ReasoningFile(
                             TextStreamReasoningFilePart::new(part),
                         ));
                     }
                     LanguageModelStreamPart::Source(part) => {
                         sources.push(part.clone());
-                        provider_content.push(LanguageModelContent::Source(part.clone()));
+                        provider_content_entries.push(ProviderContentEntry::Content(
+                            LanguageModelContent::Source(part.clone()),
+                        ));
                         push_text_stream_part(
                             parts,
                             TextStreamPart::Source(part),
@@ -3548,21 +3875,6 @@ where
         }
     }
 
-    for (_, (block_text, provider_metadata)) in text_blocks {
-        if !block_text.is_empty() {
-            provider_content.push(text_language_model_content(block_text, provider_metadata));
-        }
-    }
-
-    for (_, (block_text, provider_metadata)) in reasoning_blocks {
-        if !block_text.is_empty() {
-            provider_content.push(reasoning_language_model_content(
-                block_text,
-                provider_metadata,
-            ));
-        }
-    }
-
     ensure_start_step(
         parts,
         &mut start_step_index,
@@ -3572,6 +3884,7 @@ where
 
     let performance = StreamTextStepPerformance {
         step_time_ms: u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        time_to_first_output_token_ms,
     };
 
     CollectedStreamTextStep {
@@ -3593,7 +3906,11 @@ where
         raw_finish_reason,
         provider_metadata,
         performance,
-        provider_content,
+        provider_content: materialize_provider_content(
+            &provider_content_entries,
+            &text_blocks,
+            &reasoning_blocks,
+        ),
         aborted,
         abort_reason,
     }
@@ -3787,6 +4104,40 @@ fn text_stream_tool_approval_response_output(
     }
 
     output
+}
+
+fn insert_part_after_tool_call(
+    parts: &mut Vec<TextStreamPart>,
+    tool_call_id: &str,
+    part: TextStreamPart,
+) {
+    if let Some(index) = parts.iter().position(|candidate| {
+        matches!(
+            candidate,
+            TextStreamPart::ToolCall(tool_call) if tool_call.tool_call_id == tool_call_id
+        )
+    }) {
+        parts.insert(index + 1, part);
+    } else {
+        parts.push(part);
+    }
+}
+
+fn insert_part_after_tool_approval_request(
+    parts: &mut Vec<TextStreamPart>,
+    approval_id: &str,
+    part: TextStreamPart,
+) {
+    if let Some(index) = parts.iter().position(|candidate| {
+        matches!(
+            candidate,
+            TextStreamPart::ToolApprovalRequest(request) if request.approval_id == approval_id
+        )
+    }) {
+        parts.insert(index + 1, part);
+    } else {
+        parts.push(part);
+    }
 }
 
 fn language_model_tool_result_from_stream_text_tool_result(
@@ -4131,6 +4482,7 @@ fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
             | TextStreamPart::ToolInputDelta(_)
             | TextStreamPart::ToolCall(_)
             | TextStreamPart::ToolResult(_)
+            | TextStreamPart::ToolOutputDenied(_)
             | TextStreamPart::Custom(_)
             | TextStreamPart::Source(_)
             | TextStreamPart::Raw(_)
@@ -4154,6 +4506,12 @@ fn tool_call_error_text(error: Option<&str>, options: &StreamTextUiMessageStream
     let error = error
         .map(|error| JsonValue::String(error.to_string()))
         .unwrap_or_else(|| JsonValue::String("An error occurred.".to_string()));
+    if options.on_error.is_none() {
+        return error
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| error.to_string());
+    }
     ui_message_error_text(&error, options)
 }
 
@@ -4161,6 +4519,14 @@ fn tool_result_error_text(
     tool_result: &GenerateTextToolResult,
     options: &StreamTextUiMessageStreamOptions,
 ) -> String {
+    if options.on_error.is_none() {
+        return tool_result
+            .output
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| tool_result.output.to_string());
+    }
+
     if tool_result.provider_executed != Some(true) {
         return ui_message_error_text(&tool_result.output, options);
     }
@@ -4252,12 +4618,16 @@ fn sync_stream_text_tool_parts(
         match part {
             TextStreamPart::ToolCall(part) => {
                 if let Some(tool_call) = tool_calls.iter().find(|tool_call| {
-                    tool_call.tool_call_id == part.tool_call_id && tool_call.invalid != Some(true)
+                    tool_call.tool_call_id == part.tool_call_id
+                        && (tool_call.invalid != Some(true)
+                            || !tool_call.error.as_deref().is_some_and(|error| {
+                                error.starts_with("Model tried to call unavailable tool")
+                            }))
                 }) {
                     *part = tool_call.clone();
                 }
             }
-            TextStreamPart::ToolResult(part) => {
+            TextStreamPart::ToolResult(part) if part.preliminary != Some(true) => {
                 if let Some(tool_result) = tool_results
                     .iter()
                     .find(|tool_result| tool_result.tool_call_id == part.tool_call_id)
@@ -4340,9 +4710,9 @@ fn append_stream_text_user_agent(call_options: &mut LanguageModelCallOptions) {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
+    use std::future::{Future, ready};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
@@ -4351,31 +4721,41 @@ mod tests {
     use super::*;
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{
-        GenerateTextContentPart, NormalizedToolApprovalStatus, has_tool_call,
+        GenerateTextContentPart, NormalizedToolApprovalStatus, ToolApprovalStatusKind,
+        ToolCallRepairOptions, ToolCallRepairOriginalError, has_tool_call,
     };
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
-        LanguageModelDocumentSource, LanguageModelErrorStreamPart, LanguageModelFile,
-        LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelAssistantMessage, LanguageModelDocumentSource, LanguageModelErrorStreamPart,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
         LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoningDelta,
         LanguageModelReasoningFile, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
         LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
         LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolContentPart,
-        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
-        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelUrlSource,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
-    use crate::provider_utils::{Tool, ToolExecutionError};
+    use crate::provider_utils::{
+        ExecuteToolOutput, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
+        Schema, Tool, ToolExecutionError, ValidationResult,
+    };
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+        register_telemetry_integration, reset_telemetry_state_for_tests,
+        telemetry_test_guard_for_tests,
     };
     use crate::ui_message_stream::UiMessageRole;
     use crate::warning::Warning;
+    use serde::Deserialize;
     use url::Url;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -4406,6 +4786,80 @@ mod tests {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
         ]))
+    }
+
+    fn approval_response_prompt(
+        response: LanguageModelToolApprovalResponsePart,
+        provider_executed: bool,
+    ) -> Vec<LanguageModelMessage> {
+        let mut tool_call =
+            LanguageModelToolCallPart::new("call-1", "weather", json!({ "city": "Brisbane" }));
+
+        if provider_executed {
+            tool_call = tool_call.with_provider_executed(true);
+        }
+
+        vec![
+            user_message("Weather?"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(tool_call),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(response),
+            ])),
+        ]
+    }
+
+    fn provider_executed_approval_response_prompt(
+        response: LanguageModelToolApprovalResponsePart,
+    ) -> Vec<LanguageModelMessage> {
+        vec![
+            user_message("Shorten this URL: https://example.com"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "mcp-call-1",
+                        "mcp_tool",
+                        json!({ "query": "test" }),
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("mcp-approval-1", "mcp-call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(response),
+            ])),
+        ]
+    }
+
+    #[derive(Debug)]
+    struct TestSandbox {
+        description: String,
+    }
+
+    impl TestSandbox {
+        fn new(description: impl Into<String>) -> Self {
+            Self {
+                description: description.into(),
+            }
+        }
+    }
+
+    impl ExperimentalSandbox for TestSandbox {
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn run_command(&self, options: SandboxCommandOptions) -> SandboxRunCommandFuture {
+            Box::pin(ready(
+                SandboxCommandResult::new(0).with_stdout(options.command),
+            ))
+        }
     }
 
     fn usage() -> LanguageModelUsage {
@@ -4439,6 +4893,200 @@ mod tests {
             &model,
             vec![user_message("test-input")],
         )))
+    }
+
+    fn stream_text_result_from_text(text: &str) -> StreamTextResult {
+        stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", text)),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ])
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_output_type_default() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_output_type() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    struct StreamTypedObjectOutput {
+        value: String,
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_object_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":"typed"}"#);
+        let output: StreamTypedObjectOutput = result.output_as().expect("object output is typed");
+
+        assert_eq!(
+            output,
+            StreamTypedObjectOutput {
+                value: "typed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_array_output_type() {
+        let result = stream_text_result_from_text(r#"["a","b"]"#);
+        let output: Vec<String> = result.output_as().expect("array output is typed");
+
+        assert_eq!(output, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    enum StreamChoiceOutput {
+        #[serde(rename = "a")]
+        A,
+        #[serde(rename = "b")]
+        B,
+        #[serde(rename = "c")]
+        C,
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_choice_output_type() {
+        let result = stream_text_result_from_text(r#""b""#);
+        let output: StreamChoiceOutput = result.output_as().expect("choice output is typed");
+
+        assert_eq!(output, StreamChoiceOutput::B);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_json_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":["anything",1,true]}"#);
+        let output: JsonValue = result.output_as().expect("JSON output is typed");
+
+        assert_eq!(output, json!({ "value": ["anything", 1, true] }));
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_partial_output_type_default() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<String> = result
+            .partial_outputs_as()
+            .expect("partial text output is typed");
+
+        assert_eq!(output, vec!["Hello world".to_string()]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_text_partial_output_type() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<String> = result
+            .partial_outputs_as()
+            .expect("partial text output is typed");
+
+        assert_eq!(output, vec!["Hello world".to_string()]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_object_partial_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":"partial"}"#);
+        let output: Vec<StreamTypedObjectOutput> = result
+            .partial_outputs_as()
+            .expect("partial object output is typed");
+
+        assert_eq!(
+            output,
+            vec![StreamTypedObjectOutput {
+                value: "partial".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_array_partial_output_type() {
+        let result = stream_text_result_from_text(r#"["a","b"]"#);
+        let output: Vec<Vec<String>> = result
+            .partial_outputs_as()
+            .expect("partial array output is typed");
+
+        assert_eq!(output, vec![vec!["a".to_string(), "b".to_string()]]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_choice_partial_output_type() {
+        let result = stream_text_result_from_text(r#""c""#);
+        let output: Vec<StreamChoiceOutput> = result
+            .partial_outputs_as()
+            .expect("partial choice output is typed");
+
+        assert_eq!(output, vec![StreamChoiceOutput::C]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_json_partial_output_type() {
+        let result = stream_text_result_from_text(r#"{"value":["anything",1,true]}"#);
+        let output: Vec<JsonValue> = result
+            .partial_outputs_as()
+            .expect("partial JSON output is typed");
+
+        assert_eq!(output, vec![json!({ "value": ["anything", 1, true] })]);
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_element_type_for_array_output() {
+        let result = stream_text_result_from_text(r#"[{"value":"one"},{"value":"two"}]"#);
+        let output: Vec<StreamTypedObjectOutput> =
+            result.element_stream_as().expect("element output is typed");
+
+        assert_eq!(
+            output,
+            vec![
+                StreamTypedObjectOutput {
+                    value: "one".to_string()
+                },
+                StreamTypedObjectOutput {
+                    value: "two".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_empty_element_stream_for_text_output() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<JsonValue> = result
+            .element_stream_as()
+            .expect("text output has no element stream");
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_empty_element_stream_for_object_output() {
+        let result = stream_text_result_from_text(r#"{"value":"typed"}"#);
+        let output: Vec<JsonValue> = result
+            .element_stream_as()
+            .expect("object output has no element stream");
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stream_text_type_counterpart_should_infer_empty_element_stream_for_default_output() {
+        let result = stream_text_result_from_text("Hello world");
+        let output: Vec<JsonValue> = result
+            .element_stream_as()
+            .expect("default text output has no element stream");
+
+        assert!(output.is_empty());
     }
 
     #[derive(Default)]
@@ -4506,6 +5154,514 @@ mod tests {
                 TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, ")),
                 TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world!")),
                 TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_split_larger_text_chunks() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Hello, World! This is an example text.",
+                )),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should split larger text chunks");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "World! ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "This ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "is ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "an ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "example ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "text.")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_keep_longer_whitespace_sequences_together() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First line")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " \n\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "  ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "  Multiple spaces")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "\n    Indented")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should preserve whitespace sequences");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "line \n\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "    Multiple ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "spaces\n    ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Indented")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_text_buffer_before_tool_call_starts() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "don.")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush before tool call");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "London.")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_text_buffer_before_streaming_tool_input_starts() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "don.")),
+                TextStreamPart::ToolInputStart(LanguageModelToolInputStart::new("2", "weather")),
+                TextStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "2",
+                    "{ city: \"London\" }",
+                )),
+                TextStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("2")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush before streaming tool input");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "London.")),
+                TextStreamPart::ToolInputStart(LanguageModelToolInputStart::new("2", "weather")),
+                TextStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "2",
+                    "{ city: \"London\" }",
+                )),
+                TextStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("2")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_not_return_chunks_with_just_spaces() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "foo")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should buffer leading spaces");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "   foo")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_split_text_by_lines_when_using_line_chunking_mode() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "First line\nSecond line\nThird line with more text\n",
+                )),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Partial line")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    " continues\nFinal line\n",
+                )),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("line smoothing should split completed lines");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First line\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Second line\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Third line with more text\n"
+                )),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Partial line continues\n"
+                )),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Final line\n")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_handle_text_without_line_endings_in_line_chunking_mode() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Text without")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " any line")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " breaks")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("line smoothing should flush incomplete final line");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Text without any line breaks"
+                )),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_support_custom_chunking_regexps_character_level() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Pattern(
+                Regex::new(".").expect("character regex compiles"),
+            )),
+        )
+        .expect("pattern smoothing should split by character");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "H")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "e")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "l")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "l")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "o")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", ",")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "w")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "o")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "r")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "l")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "d")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_change_the_id_when_the_text_part_id_changes() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "don.")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "don.")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush before switching text ids");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "London.")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "London.")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_split_larger_reasoning_chunks() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "First I need to analyze the problem. Then I will solve it.",
+                )),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should split larger reasoning chunks");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "First ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "need ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "to ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "analyze ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "the ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "problem. ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Then ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "will ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "solve ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "it.")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_reasoning_buffer_before_tool_call() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "I should check the",
+                )),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", " weather")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush reasoning before tool call");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "should ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "check ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "the ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "weather")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_use_line_chunking_for_reasoning() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "Step 1: Analyze\nStep 2: Solve\n",
+                )),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("smooth stream should line chunk reasoning");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "Step 1: Analyze\n"
+                )),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "Step 2: Solve\n"
+                )),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_text_buffer_when_switching_to_reasoning() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "Let me")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", " think")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush text before reasoning");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "Let ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "me ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "think")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_reasoning_buffer_when_switching_to_text() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Thinking ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "hard")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "The answer")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", " is 42")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush reasoning before text");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Thinking ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "hard")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "The ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "answer ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "is ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "42")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_handle_multiple_switches_between_text_and_reasoning() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "Think ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "more ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "world ")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush each text/reasoning switch");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "Think ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "more ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "world ")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
             ]
         );
     }
@@ -4698,6 +5854,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn smooth_stream_preserves_provider_metadata_on_reasoning_start_for_redacted_thinking() {
+        let provider_metadata = ProviderMetadata::from([(
+            "anthropic".to_string(),
+            Map::from_iter([("redactedData".to_string(), json!("redacted-thinking-data"))]),
+        )]);
+        let reasoning_start =
+            LanguageModelReasoningStart::new("1").with_provider_metadata(provider_metadata.clone());
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(reasoning_start.clone()),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("reasoning start metadata should pass through");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(reasoning_start),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    fn smooth_stream_weather_tool_call() -> GenerateTextToolCall {
+        GenerateTextToolCall {
+            tool_call_id: "1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "London" }),
+            title: None,
+            provider_executed: None,
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        }
+    }
+
     fn tool_calls_finish_reason() -> LanguageModelFinishReason {
         LanguageModelFinishReason {
             unified: FinishReason::ToolCalls,
@@ -4887,6 +6084,227 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_prepare_step_overrides_step_settings_and_carries_contexts() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let seen_prepare_options = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let seen_prepare_options_for_callback = Arc::clone(&seen_prepare_options);
+        let step_start_events = Arc::new(Mutex::new(Vec::<GenerateTextStepStartEvent>::new()));
+        let step_start_events_for_callback = Arc::clone(&step_start_events);
+        let mut base_provider_options = ProviderOptions::new();
+        base_provider_options.insert(
+            "base".to_string(),
+            json!({ "mode": "outer" })
+                .as_object()
+                .expect("provider options are objects")
+                .clone(),
+        );
+        let mut step_provider_options = ProviderOptions::new();
+        step_provider_options.insert(
+            "test".to_string(),
+            json!({ "mode": "step" })
+                .as_object()
+                .expect("provider options are objects")
+                .clone(),
+        );
+        let runtime_context = json!({ "tenant": "outer" })
+            .as_object()
+            .expect("runtime context is object")
+            .clone();
+        let tools_context = json!({ "weather": { "apiKey": "outer" } })
+            .as_object()
+            .expect("tools context is object")
+            .clone();
+        let step_runtime_context = json!({ "tenant": "step" })
+            .as_object()
+            .expect("runtime context is object")
+            .clone();
+        let step_tools_context = json!({ "weather": { "apiKey": "step" } })
+            .as_object()
+            .expect("tools context is object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Outer prompt")])
+                .with_provider_options(base_provider_options.clone())
+                .with_runtime_context(runtime_context.clone())
+                .with_tools_context(tools_context.clone())
+                .with_prepare_step({
+                    let step_provider_options = step_provider_options.clone();
+                    let step_runtime_context = step_runtime_context.clone();
+                    let step_tools_context = step_tools_context.clone();
+                    move |options| {
+                        seen_prepare_options_for_callback
+                            .lock()
+                            .expect("prepare options lock")
+                            .push(json!({
+                                "stepNumber": options.step_number,
+                                "messages": options.messages,
+                                "initialMessages": options.initial_messages,
+                                "responseMessages": options.response_messages,
+                                "runtimeContext": options.runtime_context,
+                                "toolsContext": options.tools_context
+                            }));
+                        let step_provider_options = step_provider_options.clone();
+                        let step_runtime_context = step_runtime_context.clone();
+                        let step_tools_context = step_tools_context.clone();
+                        async move {
+                            PrepareStepResult::new()
+                                .with_messages(vec![user_message("Prepared prompt")])
+                                .with_runtime_context(step_runtime_context)
+                                .with_tools_context(step_tools_context)
+                                .with_tool_choice(LanguageModelToolChoice::Required)
+                                .with_provider_options(step_provider_options)
+                        }
+                    }
+                })
+                .with_on_step_start(move |event| {
+                    let step_start_events = Arc::clone(&step_start_events_for_callback);
+                    async move {
+                        step_start_events
+                            .lock()
+                            .expect("step-start events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.steps.len(), 1);
+
+        let prepare_options = seen_prepare_options.lock().expect("prepare options lock");
+        assert_eq!(prepare_options.len(), 1);
+        assert_eq!(prepare_options[0]["stepNumber"], json!(0));
+        assert_eq!(
+            prepare_options[0]["messages"],
+            json!([user_message("Outer prompt")])
+        );
+        assert_eq!(
+            prepare_options[0]["initialMessages"],
+            json!([user_message("Outer prompt")])
+        );
+        assert_eq!(prepare_options[0]["responseMessages"], json!([]));
+        assert_eq!(prepare_options[0]["runtimeContext"], json!(runtime_context));
+        assert_eq!(prepare_options[0]["toolsContext"], json!(tools_context));
+        drop(prepare_options);
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt, vec![user_message("Prepared prompt")]);
+        assert_eq!(
+            calls[0].tool_choice,
+            Some(LanguageModelToolChoice::Required)
+        );
+        assert_eq!(
+            calls[0]
+                .provider_options
+                .as_ref()
+                .and_then(|options| options.get("base")),
+            base_provider_options.get("base")
+        );
+        assert_eq!(
+            calls[0]
+                .provider_options
+                .as_ref()
+                .and_then(|options| options.get("test")),
+            step_provider_options.get("test")
+        );
+
+        let step_start_events = step_start_events.lock().expect("step-start events lock");
+        assert_eq!(step_start_events.len(), 1);
+        assert_eq!(
+            step_start_events[0].messages,
+            vec![user_message("Prepared prompt")]
+        );
+        assert_eq!(
+            step_start_events[0].tool_choice,
+            Some(LanguageModelToolChoice::Required)
+        );
+        assert_eq!(step_start_events[0].runtime_context, step_runtime_context);
+        assert_eq!(step_start_events[0].tools_context, step_tools_context);
+    }
+
+    #[test]
+    fn stream_text_prepare_step_sandbox_override_reaches_tool_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{ "city": "Brisbane" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let default_sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(TestSandbox::new("default sandbox"));
+        let step_sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("step sandbox"));
+        let prepare_sandbox_descriptions = Arc::new(Mutex::new(Vec::new()));
+        let prepare_sandbox_descriptions_for_callback = Arc::clone(&prepare_sandbox_descriptions);
+        let step_sandbox_for_callback = Arc::clone(&step_sandbox);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_experimental_sandbox(Arc::clone(&default_sandbox))
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, options| async move {
+                        let sandbox = options
+                            .experimental_sandbox
+                            .expect("sandbox is passed to tool execution");
+                        let command_result =
+                            sandbox.run_command(SandboxCommandOptions::new("pwd")).await;
+
+                        Ok(json!({
+                            "description": sandbox.description(),
+                            "stdout": command_result.stdout
+                        }))
+                    },
+                ))
+                .with_prepare_step(move |options| {
+                    let descriptions = Arc::clone(&prepare_sandbox_descriptions_for_callback);
+                    let step_sandbox = Arc::clone(&step_sandbox_for_callback);
+
+                    async move {
+                        descriptions.lock().expect("descriptions lock").push(
+                            options
+                                .experimental_sandbox
+                                .as_ref()
+                                .map(|sandbox| sandbox.description().to_string()),
+                        );
+
+                        PrepareStepResult::new().with_experimental_sandbox(step_sandbox)
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            *prepare_sandbox_descriptions
+                .lock()
+                .expect("descriptions lock"),
+            vec![Some("default sandbox".to_string())]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["description"], "step sandbox");
+        assert_eq!(result.tool_results[0].output["stdout"], "pwd");
+    }
+
+    #[test]
     fn stream_text_messages_with_url_file_calls_model_supported_urls() {
         let model = MockLanguageModel::new()
             .with_model_id("mock-model-id")
@@ -4919,6 +6337,130 @@ mod tests {
         let result = poll_ready(stream_text(StreamTextOptions::new(&model, prompt)));
 
         assert_eq!(result.text, "Hello, world!");
+        assert_eq!(model.supported_urls_calls(), 1);
+    }
+
+    #[test]
+    fn stream_text_prepare_step_model_switch_uses_step_model_supported_urls() {
+        let primary = MockLanguageModel::new()
+            .with_model_id("with-image-url-support")
+            .with_supported_urls(BTreeMap::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "should not run",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let secondary = MockLanguageModel::new()
+            .with_provider("without-image-url-support")
+            .with_model_id("without-image-url-support")
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "response from without-image-url-support",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let secondary_model = &secondary;
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "Describe this image",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&primary, prompt).with_prepare_step(
+                move |_options| async move { PrepareStepResult::new().with_model(secondary_model) },
+            ),
+        ));
+
+        assert_eq!(result.text, "response from without-image-url-support");
+        assert_eq!(primary.supported_urls_calls(), 0);
+        assert_eq!(secondary.supported_urls_calls(), 1);
+        assert_eq!(primary.stream_calls().len(), 0);
+        let secondary_calls = secondary.stream_calls();
+        assert_eq!(secondary_calls.len(), 1);
+        assert!(matches!(
+            &secondary_calls[0].prompt[0],
+            LanguageModelMessage::User(message)
+                if message.content.len() == 2
+                    && matches!(
+                        &message.content[1],
+                        LanguageModelUserContentPart::File(file)
+                            if file.media_type == "image/jpeg"
+                                && matches!(file.data, FileData::Url { .. })
+                    )
+        ));
+    }
+
+    #[test]
+    fn stream_text_tool_result_url_file_calls_model_supported_urls() {
+        let model = MockLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_supported_urls(BTreeMap::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Tool history handled.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let prompt = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({}),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "tool1",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/tool-image.png")
+                                    .expect("url parses"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                )),
+            ])),
+        ];
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(&model, prompt)));
+
+        assert_eq!(result.text, "Tool history handled.");
         assert_eq!(model.supported_urls_calls(), 1);
     }
 
@@ -6165,6 +7707,136 @@ mod tests {
                 )
                 .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn stream_text_result_preserves_interleaved_text_and_reasoning_content_order() {
+        let step = Arc::new(Mutex::new(None::<GenerateTextStep>));
+        let step_for_callback = Arc::clone(&step);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "Thinking...",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "This ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "is ")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("3")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "I'm thinking...",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "3",
+                    "Separate thoughts",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "a")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", " test.")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("3")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_step_finish(
+                move |event| {
+                    let step = Arc::clone(&step_for_callback);
+                    async move {
+                        *step.lock().expect("step mutex is not poisoned") = Some(event);
+                    }
+                },
+            ),
+        ));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ReasoningStart(_) => "reasoning-start",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::ReasoningDelta(_) => "reasoning-delta",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::ReasoningEnd(_) => "reasoning-end",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "reasoning-start",
+                "text-start",
+                "reasoning-delta",
+                "text-delta",
+                "text-delta",
+                "text-start",
+                "text-delta",
+                "text-delta",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "text-delta",
+                "text-delta",
+                "reasoning-end",
+                "text-delta",
+                "text-end",
+                "reasoning-end",
+                "text-end",
+                "finish-step",
+                "finish",
+            ]
+        );
+        assert_eq!(
+            result.text_stream,
+            vec!["Hello", ", ", "This ", "is ", "a", "world!", " test."]
+        );
+        assert_eq!(result.text, "Hello, This is aworld! test.");
+        assert_eq!(
+            result.reasoning_text,
+            Some("Thinking...I'm thinking...Separate thoughts".to_string())
+        );
+
+        let step = step
+            .lock()
+            .expect("step mutex is not poisoned")
+            .clone()
+            .expect("on_step_finish should receive a step");
+        let content_labels = step
+            .content
+            .iter()
+            .map(|part| match part {
+                GenerateTextContentPart::Reasoning(part) => format!("reasoning:{}", part.text),
+                GenerateTextContentPart::Text(part) => format!("text:{}", part.text),
+                part => format!("other:{part:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            content_labels,
+            vec![
+                "reasoning:Thinking...I'm thinking...",
+                "text:Hello, world!",
+                "text:This is a test.",
+                "reasoning:Separate thoughts",
+            ]
         );
     }
 
@@ -7437,7 +9109,10 @@ mod tests {
             TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
                 StreamTextResponseMetadata::new(),
                 usage(),
-                StreamTextStepPerformance { step_time_ms: 0 },
+                StreamTextStepPerformance {
+                    step_time_ms: 0,
+                    time_to_first_output_token_ms: None,
+                },
                 FinishReason::Error,
                 Some("error".to_string()),
                 None,
@@ -7548,6 +9223,92 @@ mod tests {
                 "errorText": "custom error message: error"
             }))
         );
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_ignores_abort_error_during_stream_consumption() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "name": "AbortError",
+                "message": "Stream aborted"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        result.consume_stream();
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_ignores_response_aborted_error_during_stream_consumption()
+    {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "name": "ResponseAborted",
+                "message": "Response aborted"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        result.consume_stream();
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_ignores_any_errors_during_stream_consumption() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "Some error"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+
+        result.consume_stream();
+    }
+
+    #[test]
+    fn stream_text_result_consume_stream_calls_on_error_callback_with_the_error() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "Some error"
+            }))),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("error".to_string()),
+                },
+            )),
+        ]);
+        let mut captured_errors = Vec::new();
+
+        result.consume_stream_with_on_error(|error| captured_errors.push(error.clone()));
+
+        assert_eq!(captured_errors, vec![json!({ "message": "Some error" })]);
     }
 
     #[test]
@@ -8309,6 +10070,33 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_passes_explicit_false_include_raw_chunks_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Raw(LanguageModelRawStreamPart::new(
+                    json!({"type": "raw-data", "content": "hidden"}),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_include_raw_chunks(false),
+        ));
+
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Raw(_)))
+        );
+        assert_eq!(model.stream_calls()[0].include_raw_chunks, Some(false));
+    }
+
+    #[test]
     fn text_stream_parts_use_upstream_high_level_shapes() {
         let text_delta = TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("text-1", "Hello"));
         assert_eq!(
@@ -8559,6 +10347,96 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_aborts_during_tool_execution_before_tool_result() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let abort_events = Arc::new(Mutex::new(Vec::<StreamTextOnAbortEvent>::new()));
+        let events = Arc::clone(&abort_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Use the tool")])
+                .with_abort_signal(abort_signal)
+                .with_tool(Tool::new("tool1", input_schema).with_execute(
+                    move |_input, _options| {
+                        let abort_controller = abort_controller.clone();
+                        async move {
+                            abort_controller.abort_with_reason("tool-aborted");
+                            Ok(json!("result1"))
+                        }
+                    },
+                ))
+                .with_on_abort(move |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().expect("abort events lock").push(event);
+                    }
+                }),
+        ));
+
+        assert!(result.steps.is_empty());
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolResult(_)))
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::FinishStep(_)))
+        );
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            json!([
+                { "type": "start" },
+                {
+                    "type": "start-step",
+                    "request": {},
+                    "warnings": []
+                },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call-1",
+                    "toolName": "tool1",
+                    "input": { "value": "value" }
+                },
+                { "type": "abort", "reason": "tool-aborted" }
+            ])
+        );
+
+        let events = abort_events.lock().expect("abort events lock");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].steps.is_empty());
+        assert_eq!(events[0].reason, Some(json!("tool-aborted")));
+    }
+
+    #[test]
     fn stream_text_maps_reasoning_sources_and_custom_parts() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -8714,8 +10592,13 @@ mod tests {
         let start_recorded = Arc::clone(&recorded);
         let delta_recorded = Arc::clone(&recorded);
         let available_recorded = Arc::clone(&recorded);
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
                 LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
                     "call-1", "tool1",
                 )),
@@ -8742,6 +10625,7 @@ mod tests {
         let result = poll_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Call the tool")])
                 .with_runtime_context(runtime_context.clone())
+                .with_abort_signal(abort_signal)
                 .with_tool(
                     Tool::new("tool1", input_schema)
                         .with_on_input_start(move |options| {
@@ -8790,6 +10674,37 @@ mod tests {
             result.tool_calls[0].input,
             json!({ "value": "Sparkle Day" })
         );
+        assert_eq!(result.text, "hello");
+        assert_eq!(
+            result
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    TextStreamPart::TextDelta(part) => Some(format!("text:{}", part.text)),
+                    TextStreamPart::ToolInputStart(part) => {
+                        Some(format!("tool-input-start:{}", part.tool_name))
+                    }
+                    TextStreamPart::ToolInputDelta(part) => {
+                        Some(format!("tool-input-delta:{}", part.delta))
+                    }
+                    TextStreamPart::ToolInputEnd(part) => {
+                        Some(format!("tool-input-end:{}", part.id))
+                    }
+                    TextStreamPart::ToolCall(part) => {
+                        Some(format!("tool-call:{}", part.tool_name))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                "text:hello",
+                "tool-input-start:tool1",
+                r#"tool-input-delta:{"value":""#,
+                r#"tool-input-delta:Sparkle Day"}"#,
+                "tool-input-end:call-1",
+                "tool-call:tool1",
+            ]
+        );
         assert_eq!(
             recorded.lock().expect("recorded lock").as_slice(),
             [
@@ -8808,7 +10723,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 }),
                 json!({
                     "type": "onInputDelta",
@@ -8826,7 +10741,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 }),
                 json!({
                     "type": "onInputDelta",
@@ -8844,7 +10759,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 }),
                 json!({
                     "type": "onInputAvailable",
@@ -8862,7 +10777,7 @@ mod tests {
                             ]
                         }
                     ],
-                    "abortSignalSet": false
+                    "abortSignalSet": true
                 })
             ]
         );
@@ -9157,7 +11072,98 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_resolves_deferred_provider_tool_errors() {
+    fn stream_text_resolves_deferred_provider_tool_error_in_same_step() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "provider-call-1",
+                        "providerTool",
+                        r#"{"city":"Brisbane"}"#,
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "provider-call-1",
+                        "providerTool",
+                        NonNullJsonValue::new(json!("ERROR")).expect("provider error is non-null"),
+                    )
+                    .with_is_error(true),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Handled provider error.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let provider_args = json!({ "mode": "deferred" })
+            .as_object()
+            .expect("provider args are an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::provider_executed(
+                        "providerTool",
+                        "test.providerTool",
+                        provider_args,
+                        schema.clone(),
+                        schema,
+                    )
+                    .with_supports_deferred_results(true),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.text, "Handled provider error.");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "provider-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "providerTool");
+        assert_eq!(result.tool_results[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_results[0].output, json!("ERROR"));
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(result.steps[0].tool_calls.len(), 1);
+        assert_eq!(
+            result.steps[0].tool_calls[0].input,
+            json!({ "city": "Brisbane" })
+        );
+        assert_eq!(result.steps[0].tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.steps[0].tool_results.len(), 1);
+        assert_eq!(
+            result.steps[0].tool_results[0].input,
+            json!({ "city": "Brisbane" })
+        );
+        assert_eq!(result.steps[0].tool_results[0].output, json!("ERROR"));
+        assert_eq!(result.steps[0].tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.steps[0].tool_results[0].provider_executed,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn stream_text_resolves_deferred_provider_tool_error_in_later_step() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::ToolCall(
@@ -9348,6 +11354,131 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_generates_consistent_call_id_for_language_model_callbacks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let start_call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let end_call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let end_response_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let start_call_ids_for_callback = Arc::clone(&start_call_ids);
+        let end_call_ids_for_callback = Arc::clone(&end_call_ids);
+        let end_response_ids_for_callback = Arc::clone(&end_response_ids);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test prompt")])
+                .with_experimental_on_language_model_call_start(move |event| {
+                    let start_call_ids = Arc::clone(&start_call_ids_for_callback);
+                    async move {
+                        assert_eq!(event.provider, "mock-provider");
+                        assert_eq!(event.model_id, "mock-model-id");
+                        assert_eq!(event.messages.len(), 1);
+                        start_call_ids
+                            .lock()
+                            .expect("start call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let end_call_ids = Arc::clone(&end_call_ids_for_callback);
+                    let end_response_ids = Arc::clone(&end_response_ids_for_callback);
+                    async move {
+                        assert_eq!(event.provider, "mock-provider");
+                        assert_eq!(event.model_id, "mock-model-id");
+                        assert_eq!(event.finish_reason, FinishReason::Stop);
+                        assert_eq!(event.usage, usage());
+                        assert!(event.content.is_empty());
+                        end_call_ids
+                            .lock()
+                            .expect("end call ids lock")
+                            .push(event.call_id);
+                        end_response_ids
+                            .lock()
+                            .expect("end response ids lock")
+                            .push(event.response_id);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.steps.len(), 1);
+        let step = &result.steps[0];
+        let start_call_ids = start_call_ids.lock().expect("start call ids lock");
+        let end_call_ids = end_call_ids.lock().expect("end call ids lock");
+        assert_eq!(start_call_ids.len(), 1);
+        assert_eq!(end_call_ids.len(), 1);
+        assert!(start_call_ids[0].starts_with("call-"));
+        assert_eq!(start_call_ids[0].len(), "call-".len() + 24);
+        assert_eq!(end_call_ids[0], start_call_ids[0]);
+
+        assert_eq!(end_call_ids.as_slice(), [start_call_ids[0].clone()]);
+        assert_eq!(
+            end_response_ids
+                .lock()
+                .expect("end response ids lock")
+                .as_slice(),
+            [step
+                .response
+                .id
+                .clone()
+                .expect("stream_text generated a response id")]
+        );
+    }
+
+    #[test]
+    fn stream_text_measures_time_to_first_output_token_from_text_deltas() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let model_call_end_events = Arc::new(Mutex::new(Vec::new()));
+        let model_call_end_events_for_callback = Arc::clone(&model_call_end_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let model_call_end_events = Arc::clone(&model_call_end_events_for_callback);
+                    async move {
+                        model_call_end_events
+                            .lock()
+                            .expect("model call end events lock")
+                            .push(event.performance);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        assert_eq!(result.steps.len(), 1);
+        let step_performance = &result.steps[0].performance;
+        assert!(
+            step_performance.time_to_first_output_token_ms.is_some(),
+            "first output token duration is captured"
+        );
+
+        let end_events = model_call_end_events
+            .lock()
+            .expect("model call end events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(
+            end_events[0].time_to_first_output_token_ms,
+            step_performance.time_to_first_output_token_ms
+        );
+        assert!(end_events[0].output_tokens_per_second.is_some());
+        assert!(end_events[0].input_tokens_per_second.is_some());
+        assert!(end_events[0].effective_output_tokens_per_second.is_finite());
+        assert!(end_events[0].effective_total_tokens_per_second.is_finite());
+    }
+
+    #[test]
     fn stream_text_invokes_finish_callback_with_completed_records() {
         let provider_metadata = ProviderMetadata::from([(
             "mock".to_string(),
@@ -9403,6 +11534,480 @@ mod tests {
                 .as_ref()
                 .is_some_and(|messages| !messages.is_empty())
         );
+    }
+
+    #[test]
+    fn stream_text_passes_runtime_context_to_finish_callback() {
+        let runtime_context = JsonObject::from_iter([("context".to_string(), json!("test"))]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1", "Hello, ",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let finish_contexts = Arc::new(Mutex::new(Vec::<JsonObject>::new()));
+        let finish_contexts_for_callback = Arc::clone(&finish_contexts);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_runtime_context(runtime_context.clone())
+                .with_on_finish(move |event| {
+                    let finish_contexts = Arc::clone(&finish_contexts_for_callback);
+                    async move {
+                        finish_contexts
+                            .lock()
+                            .expect("finish contexts lock")
+                            .push(event.runtime_context);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            finish_contexts
+                .lock()
+                .expect("finish contexts lock")
+                .as_slice(),
+            [runtime_context]
+        );
+    }
+
+    #[test]
+    fn stream_text_marks_schema_invalid_tool_call_in_result_full_and_ui_stream() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
+                    "call-1",
+                    "cityAttractions",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{ "cities": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "cityAttractions",
+                    r#"{ "cities": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("cityAttractions", input_schema)),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "cityAttractions");
+        assert_eq!(
+            result.tool_calls[0].input,
+            json!({ "cities": "San Francisco" })
+        );
+        assert_eq!(result.tool_calls[0].invalid, Some(true));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        let error_text = result.tool_calls[0]
+            .error
+            .as_deref()
+            .expect("invalid tool call includes an error");
+        assert!(error_text.contains("Invalid input for tool cityAttractions"));
+        assert!(error_text.contains("$.city is required"));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(result.tool_results[0].dynamic, Some(true));
+        assert_eq!(
+            result.tool_results[0]
+                .output
+                .as_str()
+                .expect("tool error output is text"),
+            error_text
+        );
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_calls, result.tool_calls);
+        assert_eq!(result.steps[0].tool_results, result.tool_results);
+
+        let full_stream_tool_call = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes invalid tool call");
+        assert_eq!(full_stream_tool_call.invalid, Some(true));
+        assert_eq!(full_stream_tool_call.error.as_deref(), Some(error_text));
+
+        let full_stream_tool_result = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool error result");
+        assert_eq!(full_stream_tool_result.is_error, Some(true));
+        assert_eq!(full_stream_tool_result.output.as_str(), Some(error_text));
+
+        let ui_chunks = serde_json::to_value(result.to_ui_message_stream())
+            .expect("ui message stream serializes");
+        let ui_chunks = ui_chunks.as_array().expect("ui chunks are an array");
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-input-start"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["toolName"] == "cityAttractions")
+        );
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-input-delta"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["inputTextDelta"] == r#"{ "cities": "San Francisco" }"#)
+        );
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-input-error"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["toolName"] == "cityAttractions"
+                    && chunk["input"] == json!({ "cities": "San Francisco" })
+                    && chunk["errorText"] == error_text)
+        );
+        assert!(
+            ui_chunks
+                .iter()
+                .any(|chunk| chunk["type"] == "tool-output-error"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["errorText"] == error_text)
+        );
+    }
+
+    #[test]
+    fn stream_text_streams_preliminary_tool_results_before_final_result() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "cityAttractions",
+                    r#"{ "city": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("cityAttractions", input_schema).with_execute_outputs(
+                    |input, _options| {
+                        ready(Ok(vec![
+                            ExecuteToolOutput::preliminary(json!({
+                                "status": "loading",
+                                "text": format!(
+                                    "Getting weather for {}",
+                                    input["city"].as_str().unwrap_or_default()
+                                )
+                            })),
+                            ExecuteToolOutput::preliminary(json!({
+                                "status": "success",
+                                "text": format!(
+                                    "The weather in {} is 72°F",
+                                    input["city"].as_str().unwrap_or_default()
+                                ),
+                                "temperature": 72
+                            })),
+                        ]))
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].preliminary, None);
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({
+                "status": "success",
+                "text": "The weather in San Francisco is 72°F",
+                "temperature": 72
+            })
+        );
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_results, result.tool_results);
+
+        let streamed_tool_results = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some((part.preliminary, part.output.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            streamed_tool_results,
+            vec![
+                (
+                    Some(true),
+                    json!({
+                        "status": "loading",
+                        "text": "Getting weather for San Francisco"
+                    })
+                ),
+                (
+                    Some(true),
+                    json!({
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    })
+                ),
+                (
+                    None,
+                    json!({
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    })
+                ),
+            ]
+        );
+
+        let ui_chunks = serde_json::to_value(result.to_ui_message_stream())
+            .expect("ui message stream serializes");
+        let tool_output_chunks = ui_chunks
+            .as_array()
+            .expect("ui chunks are an array")
+            .iter()
+            .filter(|chunk| chunk["type"] == "tool-output-available")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_output_chunks,
+            vec![
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": {
+                        "status": "loading",
+                        "text": "Getting weather for San Francisco"
+                    },
+                    "preliminary": true
+                }),
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": {
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    },
+                    "preliminary": true
+                }),
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": {
+                        "status": "success",
+                        "text": "The weather in San Francisco is 72°F",
+                        "temperature": 72
+                    }
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_preserves_provider_executed_dynamic_tool_input_streaming() {
+        let provider_metadata = ProviderMetadata::from([(
+            "anthropic".to_string(),
+            Map::from_iter([("serverName".to_string(), json!("echo"))]),
+        )]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-1", "cityAttractions")
+                        .with_provider_executed(true)
+                        .with_dynamic(true)
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{ "city": "San Francisco" }"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "call-1",
+                        "cityAttractions",
+                        r#"{ "city": "San Francisco" }"#,
+                    )
+                    .with_provider_executed(true)
+                    .with_dynamic(true)
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "call-1",
+                        "cityAttractions",
+                        NonNullJsonValue::new(json!({
+                            "status": "success",
+                            "text": "The weather in San Francisco is 72°F"
+                        }))
+                        .expect("tool result is non-null"),
+                    )
+                    .with_dynamic(true)
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(
+            result.tool_calls[0].provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results[0].dynamic, Some(true));
+        assert_eq!(
+            result.tool_results[0].provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(result.steps[0].tool_calls, result.tool_calls);
+        assert_eq!(result.steps[0].tool_results, result.tool_results);
+
+        let full_stream = serde_json::to_value(&result.parts).expect("parts serialize");
+        for expected in [
+            json!({
+                "type": "tool-input-start",
+                "id": "call-1",
+                "toolName": "cityAttractions",
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-call",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "input": { "city": "San Francisco" },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-result",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "input": { "city": "San Francisco" },
+                "output": {
+                    "status": "success",
+                    "text": "The weather in San Francisco is 72°F"
+                },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+        ] {
+            assert!(
+                full_stream
+                    .as_array()
+                    .expect("full stream parts are an array")
+                    .contains(&expected),
+                "missing expected full-stream part: {expected}"
+            );
+        }
+
+        let ui_chunks = serde_json::to_value(result.to_ui_message_stream())
+            .expect("ui message stream serializes");
+        for expected in [
+            json!({
+                "type": "tool-input-start",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-input-available",
+                "toolCallId": "call-1",
+                "toolName": "cityAttractions",
+                "input": { "city": "San Francisco" },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+            json!({
+                "type": "tool-output-available",
+                "toolCallId": "call-1",
+                "output": {
+                    "status": "success",
+                    "text": "The weather in San Francisco is 72°F"
+                },
+                "providerExecuted": true,
+                "dynamic": true,
+                "providerMetadata": { "anthropic": { "serverName": "echo" } }
+            }),
+        ] {
+            assert!(
+                ui_chunks
+                    .as_array()
+                    .expect("ui message chunks are an array")
+                    .contains(&expected),
+                "missing expected UI-message chunk: {expected}"
+            );
+        }
     }
 
     #[test]
@@ -9475,6 +12080,300 @@ mod tests {
         assert_eq!(events[0].event["provider"], json!("mock-provider"));
         assert_eq!(events[0].event["maxRetries"], json!(DEFAULT_MAX_RETRIES));
         assert_eq!(events[5].event["text"], json!("Hello"));
+    }
+
+    #[test]
+    fn stream_text_calls_globally_registered_integration_listeners() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_start_events = Arc::clone(&events);
+        let global_step_finish_events = Arc::clone(&events);
+        let global_end_events = Arc::clone(&events);
+        let global_start_seen = Arc::new(AtomicBool::new(false));
+        let global_step_finish_seen = Arc::new(AtomicBool::new(false));
+        let global_end_seen = Arc::new(AtomicBool::new(false));
+        let global_start_seen_for_callback = Arc::clone(&global_start_seen);
+        let global_step_finish_seen_for_callback = Arc::clone(&global_step_finish_seen);
+        let global_end_seen_for_callback = Arc::clone(&global_end_seen);
+        register_telemetry_integration(
+            TelemetryIntegration::new()
+                .with_callback(TelemetryEventKind::OnStart, move |_| {
+                    if !global_start_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_start_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onStart".to_string());
+                    }
+                })
+                .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                    if !global_step_finish_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_step_finish_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onStepFinish".to_string());
+                    }
+                })
+                .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                    if !global_end_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_end_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onEnd".to_string());
+                    }
+                }),
+        );
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            [
+                "global-onStart".to_string(),
+                "global-onStepFinish".to_string(),
+                "global-onEnd".to_string()
+            ]
+        );
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn stream_text_prefers_per_call_integrations_over_global_integrations() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_events = Arc::clone(&events);
+        register_telemetry_integration(TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnStart,
+            move |event| {
+                if event.function_id.as_deref() == Some("stream-text-per-call-precedence") {
+                    global_events
+                        .lock()
+                        .expect("telemetry event lock")
+                        .push("global".to_string());
+                }
+            },
+        ));
+        let per_call_events = Arc::clone(&events);
+        let per_call =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                per_call_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("per-call".to_string());
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("stream-text-per-call-precedence")
+                    .with_integration(per_call),
+            ),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["per-call".to_string()]
+        );
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn stream_text_calls_integration_listeners_alongside_user_callbacks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let user_start_events = Arc::clone(&events);
+        let user_step_finish_events = Arc::clone(&events);
+        let user_finish_events = Arc::clone(&events);
+        let integration_start_events = Arc::clone(&events);
+        let integration_step_finish_events = Arc::clone(&events);
+        let integration_end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnStart, move |_| {
+                integration_start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onStart".to_string());
+            })
+            .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                integration_step_finish_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onStepFinish".to_string());
+            })
+            .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                integration_end_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onEnd".to_string());
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_on_start(move |_| {
+                    let events = Arc::clone(&user_start_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("user-onStart".to_string());
+                    }
+                })
+                .with_on_step_finish(move |_| {
+                    let events = Arc::clone(&user_step_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("user-onStepFinish".to_string());
+                    }
+                })
+                .with_on_finish(move |_| {
+                    let events = Arc::clone(&user_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("user-onFinish".to_string());
+                    }
+                })
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            [
+                "user-onStart".to_string(),
+                "integration-onStart".to_string(),
+                "user-onStepFinish".to_string(),
+                "integration-onStepFinish".to_string(),
+                "user-onFinish".to_string(),
+                "integration-onEnd".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_does_not_break_when_integration_listener_panics() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnStart, |_| {
+                panic!("integration error");
+            })
+            .with_callback(TelemetryEventKind::OnStepFinish, |_| {
+                panic!("integration error");
+            })
+            .with_callback(TelemetryEventKind::OnEnd, |_| {
+                panic!("integration error");
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+    }
+
+    #[test]
+    fn stream_text_supports_multiple_per_call_telemetry_integrations_as_array() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_events = Arc::clone(&events);
+        let second_events = Arc::clone(&events);
+        let first =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                first_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("first".to_string());
+            });
+        let second =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                second_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("second".to_string());
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_telemetry(TelemetryOptions::new().with_integrations([first, second])),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["first".to_string(), "second".to_string()]
+        );
     }
 
     #[test]
@@ -10040,6 +12939,825 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_emits_error_when_tool_call_missing_for_provider_approval_request() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("mcp-approval-1", "non-existent-call"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: None,
+                    },
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Approve MCP tool")],
+        )));
+
+        assert!(result.tool_calls.is_empty());
+        assert!(
+            result
+                .parts
+                .iter()
+                .all(|part| !matches!(part, TextStreamPart::ToolApprovalRequest(_)))
+        );
+        let error = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::Error(part) => Some(part.error.clone()),
+                _ => None,
+            })
+            .expect("missing approval tool call emits an error part");
+        assert_eq!(
+            error,
+            json!(
+                "Tool call \"non-existent-call\" not found for approval request \"mcp-approval-1\"."
+            )
+        );
+        assert_eq!(result.errors, vec![error]);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.raw_finish_reason, None);
+    }
+
+    #[test]
+    fn stream_text_handles_multiple_provider_executed_tool_approval_requests() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-1", "mcp_search", r#"{"query":"first"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-2", "mcp_execute", r#"{"command":"ls"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("approval-1", "mcp-call-1"),
+                ),
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("approval-2", "mcp-call-2"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Run MCP tools")],
+        )));
+
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].tool_call_id, "mcp-call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "mcp_search");
+        assert_eq!(result.tool_calls[0].input, json!({ "query": "first" }));
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_calls[1].tool_call_id, "mcp-call-2");
+        assert_eq!(result.tool_calls[1].tool_name, "mcp_execute");
+        assert_eq!(result.tool_calls[1].input, json!({ "command": "ls" }));
+        assert_eq!(result.tool_calls[1].provider_executed, Some(true));
+
+        let approval_requests = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolApprovalRequest(request) => Some(request),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(approval_requests.len(), 2);
+        assert_eq!(approval_requests[0].approval_id, "approval-1");
+        assert_eq!(approval_requests[0].tool_call_id, "mcp-call-1");
+        assert_eq!(approval_requests[1].approval_id, "approval-2");
+        assert_eq!(approval_requests[1].tool_call_id, "mcp-call-2");
+
+        let part_order = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(format!("tool-call:{}", part.tool_call_id)),
+                TextStreamPart::ToolApprovalRequest(part) => {
+                    Some(format!("approval:{}", part.tool_call_id))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_order,
+            [
+                "tool-call:mcp-call-1",
+                "tool-call:mcp-call-2",
+                "approval:mcp-call-1",
+                "approval:mcp-call-2"
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_sends_approved_provider_executed_tool_approval_response_once() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-1", "mcp_tool", r#"{"query":"test"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "mcp-call-1",
+                    "mcp_tool",
+                    NonNullJsonValue::new(json!({ "shortened_url": "https://short.url/abc" }))
+                        .expect("tool result is non-null"),
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Here is your shortened URL: https://short.url/abc",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = provider_executed_approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("mcp-approval-1", true)
+                .with_provider_executed(true),
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_messages(prompt))
+                .expect("prompt converts")
+                .with_tool(Tool::provider_executed(
+                    "mcp_tool",
+                    "test.mcp_tool",
+                    JsonObject::new(),
+                    schema.clone(),
+                    schema,
+                ))
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt.len(), 3);
+        assert!(matches!(
+            &calls[0].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "mcp-call-1"
+                                && part.tool_name == "mcp_tool"
+                                && part.provider_executed == Some(true)
+                    )
+        ));
+        assert!(matches!(
+            &calls[0].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolApprovalResponse(response)
+                            if response.approval_id == "mcp-approval-1"
+                                && response.approved
+                                && response.reason.is_none()
+                    )
+        ));
+        assert_eq!(
+            result.text,
+            "Here is your shortened URL: https://short.url/abc"
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "mcp-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "mcp_tool");
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "shortened_url": "https://short.url/abc" })
+        );
+    }
+
+    #[test]
+    fn stream_text_sends_denied_provider_executed_tool_approval_response_once() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "I understand. The tool execution was not approved.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = provider_executed_approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("mcp-approval-1", false)
+                .with_reason("User denied the request")
+                .with_provider_executed(true),
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_messages(prompt))
+                .expect("prompt converts")
+                .with_tool(Tool::provider_executed(
+                    "mcp_tool",
+                    "test.mcp_tool",
+                    JsonObject::new(),
+                    schema.clone(),
+                    schema,
+                ))
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt.len(), 3);
+        assert!(matches!(
+            &calls[0].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "mcp-call-1"
+                                && part.tool_name == "mcp_tool"
+                                && part.provider_executed == Some(true)
+                    )
+        ));
+        assert!(matches!(
+            &calls[0].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolApprovalResponse(response)
+                            if response.approval_id == "mcp-approval-1"
+                                && !response.approved
+                                && response.reason.as_deref() == Some("User denied the request")
+                    )
+        ));
+        assert_eq!(
+            result.text,
+            "I understand. The tool execution was not approved."
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert!(result.tool_results.is_empty());
+    }
+
+    #[test]
+    fn stream_text_streams_user_tool_approval_request_without_executing_tool() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({ "forecast": "sunny" }))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(execute_count.load(Ordering::SeqCst), 0);
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "weather");
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert!(result.tool_results.is_empty());
+
+        let tool_call_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolCall(call) if call.tool_call_id == "call-1"))
+            .expect("tool call is streamed");
+        let (approval_request_index, approval_request) = result
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| {
+                if let TextStreamPart::ToolApprovalRequest(request) = part
+                    && request.tool_call_id == "call-1"
+                {
+                    Some((index, request))
+                } else {
+                    None
+                }
+            })
+            .expect("user approval request is streamed");
+        assert!(tool_call_index < approval_request_index);
+        assert_eq!(approval_request.is_automatic, None);
+        assert!(
+            result
+                .parts
+                .iter()
+                .all(|part| !matches!(part, TextStreamPart::ToolApprovalResponse(_)))
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.contains(&json!({
+            "type": "tool-input-available",
+            "toolCallId": "call-1",
+            "toolName": "weather",
+            "input": { "city": "Brisbane" }
+        })));
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-request",
+            "approvalId": approval_request.approval_id.clone(),
+            "toolCallId": "call-1"
+        })));
+    }
+
+    #[test]
+    fn stream_text_user_approval_function_can_block_one_call_and_execute_another() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane","mode":"needs-approval"}"#,
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "weather",
+                    r#"{"city":"Sydney","mode":"auto"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let approval_calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let approval_calls_for_callback = Arc::clone(&approval_calls);
+        let execute_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let execute_calls_for_tool = Arc::clone(&execute_calls);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |input, _options| {
+                        let execute_calls = Arc::clone(&execute_calls_for_tool);
+                        async move {
+                            execute_calls
+                                .lock()
+                                .expect("execute calls lock")
+                                .push(input["city"].as_str().expect("city is a string").to_owned());
+                            Ok(json!(format!(
+                                "forecast for {}",
+                                input["city"].as_str().expect("city is a string")
+                            )))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new().with_tool_approval_function(
+                        "weather",
+                        move |input, options| {
+                            let approval_calls = Arc::clone(&approval_calls_for_callback);
+                            async move {
+                                approval_calls.lock().expect("approval calls lock").push((
+                                    options.tool_call_id,
+                                    input["mode"].as_str().expect("mode is a string").to_owned(),
+                                ));
+                                if input["mode"] == json!("needs-approval") {
+                                    Some(ToolApprovalStatusKind::UserApproval.into())
+                                } else {
+                                    Some(ToolApprovalStatusKind::NotApplicable.into())
+                                }
+                            }
+                        },
+                    ),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(
+            approval_calls
+                .lock()
+                .expect("approval calls lock")
+                .as_slice(),
+            [
+                ("call-1".to_string(), "needs-approval".to_string()),
+                ("call-2".to_string(), "auto".to_string())
+            ]
+        );
+        assert_eq!(
+            execute_calls.lock().expect("execute calls lock").as_slice(),
+            ["Sydney"]
+        );
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-2");
+        assert_eq!(result.tool_results[0].output, json!("forecast for Sydney"));
+
+        let part_order = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(format!("call:{}", part.tool_call_id)),
+                TextStreamPart::ToolApprovalRequest(part) => {
+                    Some(format!("approval:{}", part.tool_call_id))
+                }
+                TextStreamPart::ToolResult(part) => Some(format!("result:{}", part.tool_call_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_order,
+            [
+                "call:call-1",
+                "approval:call-1",
+                "call:call-2",
+                "result:call-2"
+            ]
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.iter().any(|chunk| {
+            chunk["type"] == "tool-approval-request" && chunk["toolCallId"] == "call-1"
+        }));
+        assert!(chunks.iter().any(|chunk| {
+            chunk["type"] == "tool-output-available"
+                && chunk["toolCallId"] == "call-2"
+                && chunk["output"] == json!("forecast for Sydney")
+        }));
+    }
+
+    #[test]
+    fn stream_text_executes_initial_approved_tool_approval_before_first_model_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prepare_step_response_messages =
+            Arc::new(Mutex::new(Vec::<Vec<LanguageModelMessage>>::new()));
+        let prepare_step_response_messages_for_callback =
+            Arc::clone(&prepare_step_response_messages);
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", true),
+            false,
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id
+                        }))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_prepare_step(move |options| {
+                    let messages = Arc::clone(&prepare_step_response_messages_for_callback);
+                    async move {
+                        messages
+                            .lock()
+                            .expect("prepare-step messages lock")
+                            .push(options.response_messages);
+                        PrepareStepResult::new()
+                    }
+                })
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(&calls[0].prompt[..3], prompt.as_slice());
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "weather"
+                                && part.output == LanguageModelToolResultOutput::json(json!({
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }))
+                    )
+        ));
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(result.steps.len(), 1);
+
+        let prepare_step_response_messages = prepare_step_response_messages
+            .lock()
+            .expect("prepare-step messages lock");
+        assert_eq!(prepare_step_response_messages.len(), 1);
+        assert_eq!(prepare_step_response_messages[0].len(), 1);
+        assert!(matches!(
+            &prepare_step_response_messages[0][0],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.output == LanguageModelToolResultOutput::json(json!({
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }))
+                    )
+        ));
+
+        let first_tool_result_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolResult(result) if result.tool_call_id == "call-1"))
+            .expect("initial tool result is streamed");
+        let start_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::StartStep(_)))
+            .expect("start-step is streamed");
+        assert!(first_tool_result_index < start_step_index);
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        let tool_output_index = chunks
+            .iter()
+            .position(|chunk| {
+                chunk["type"] == "tool-output-available"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["output"]["forecast"] == "sunny"
+            })
+            .expect("initial tool output is in UI stream");
+        let ui_start_step_index = chunks
+            .iter()
+            .position(|chunk| chunk["type"] == "start-step")
+            .expect("UI start-step exists");
+        assert!(tool_output_index < ui_start_step_index);
+    }
+
+    #[test]
+    fn stream_text_serializes_initial_approved_tool_error_before_first_model_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Recovered from tool error.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", true),
+            false,
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                            "No valid token for plugin",
+                        ))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.output == LanguageModelToolResultOutput::error_text(
+                                    "No valid token for plugin"
+                                )
+                    )
+        ));
+        assert_eq!(result.text, "Recovered from tool error.");
+
+        let tool_error_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolResult(result) if result.tool_call_id == "call-1" && result.is_error == Some(true)))
+            .expect("initial tool error is streamed");
+        let start_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::StartStep(_)))
+            .expect("start-step is streamed");
+        assert!(tool_error_index < start_step_index);
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        let tool_error_chunk_index = chunks
+            .iter()
+            .position(|chunk| {
+                chunk["type"] == "tool-output-error"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk["errorText"] == "No valid token for plugin"
+            })
+            .expect("initial tool error is in UI stream");
+        let ui_start_step_index = chunks
+            .iter()
+            .position(|chunk| chunk["type"] == "start-step")
+            .expect("UI start-step exists");
+        assert!(tool_error_chunk_index < ui_start_step_index);
+    }
+
+    #[test]
+    fn stream_text_streams_initial_denied_tool_approval_before_first_model_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", false),
+            false,
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({ "forecast": "sunny" }))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(execute_count.load(Ordering::SeqCst), 0);
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(&calls[0].prompt[..3], prompt.as_slice());
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "weather"
+                                && matches!(
+                                    part.output,
+                                    LanguageModelToolResultOutput::ExecutionDenied { .. }
+                                )
+                    )
+        ));
+        assert_eq!(result.text, "Hello, world!");
+        assert!(result.tool_results.is_empty());
+
+        let denied_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolOutputDenied(denied) if denied.tool_call_id == "call-1" && denied.tool_name == "weather"))
+            .expect("initial denied tool output is streamed");
+        let start_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::StartStep(_)))
+            .expect("start-step is streamed");
+        assert!(denied_index < start_step_index);
+
+        let full_stream = serde_json::to_value(&result.parts).expect("parts serialize");
+        assert!(
+            full_stream
+                .as_array()
+                .expect("parts are an array")
+                .iter()
+                .any(|part| part["type"] == "tool-output-denied"
+                    && part["toolCallId"] == "call-1"
+                    && part["toolName"] == "weather")
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        let tool_denied_chunk_index = chunks
+            .iter()
+            .position(|chunk| {
+                chunk["type"] == "tool-output-denied"
+                    && chunk["toolCallId"] == "call-1"
+                    && chunk.get("toolName").is_none()
+            })
+            .expect("initial denied tool output is in UI stream");
+        let ui_start_step_index = chunks
+            .iter()
+            .position(|chunk| chunk["type"] == "start-step")
+            .expect("UI start-step exists");
+        assert!(tool_denied_chunk_index < ui_start_step_index);
+    }
+
+    #[test]
     fn stream_text_automatic_tool_approval_response_streams_before_tool_result() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![
@@ -10285,6 +14003,107 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_validates_tool_context_before_approval_callback_and_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let approval_called = Arc::new(AtomicBool::new(false));
+        let approval_called_for_callback = Arc::clone(&approval_called);
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_tool = Arc::clone(&executed);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("expected apiKey string")
+            }
+        });
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": 123 }))]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_context_schema(context_schema)
+                        .with_execute(move |_input, _options| {
+                            let executed = Arc::clone(&executed_for_tool);
+                            async move {
+                                executed.store(true, Ordering::SeqCst);
+                                Ok(json!({ "forecast": "sunny" }))
+                            }
+                        }),
+                )
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new().with_tool_approval_function(
+                        "weather",
+                        move |_input, _options| {
+                            let approval_called = Arc::clone(&approval_called_for_callback);
+                            async move {
+                                approval_called.store(true, Ordering::SeqCst);
+                                Some(
+                                    NormalizedToolApprovalStatus::approved_with_reason("trusted")
+                                        .into(),
+                                )
+                            }
+                        },
+                    ),
+                ),
+        ));
+
+        assert!(!approval_called.load(Ordering::SeqCst));
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert!(
+            result.tool_results[0]
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("expected apiKey string")
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolApprovalRequest(_)))
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolApprovalResponse(_)))
+        );
+    }
+
+    #[test]
     fn stream_text_repairs_and_refines_streamed_tool_call_before_execution() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -10336,5 +14155,72 @@ mod tests {
         assert_eq!(result.tool_results.len(), 1);
         assert_eq!(result.tool_results[0].output["city"], "BRISBANE");
         assert_eq!(result.tool_results[0].is_error, None);
+    }
+
+    #[test]
+    fn stream_text_repairs_unknown_streamed_tool_name_before_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "forecast", "{}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "calledWith": input,
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_call_repair(move |options| {
+                    let repair_options = Arc::clone(&repair_options_for_closure);
+                    async move {
+                        repair_options
+                            .lock()
+                            .expect("repair options lock")
+                            .push(options);
+                        Ok::<Option<LanguageModelToolCall>, String>(Some(
+                            LanguageModelToolCall::new("call-1", "weather", "{}"),
+                        ))
+                    }
+                }),
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert_eq!(repair_options[0].tool_call.tool_name, "forecast");
+        assert_eq!(repair_options[0].tool_call.input, "{}");
+        assert!(matches!(
+            &repair_options[0].error,
+            ToolCallRepairOriginalError::NoSuchTool(error)
+                if error.tool_name() == "forecast"
+                    && error.available_tools() == Some(&["weather".to_string()][..])
+        ));
+        drop(repair_options);
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "weather");
+        assert_eq!(result.tool_calls[0].input, json!({}));
+        assert_eq!(result.tool_calls[0].invalid, None);
+        assert_eq!(result.tool_calls[0].error, None);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_name, "weather");
+        assert_eq!(result.tool_results[0].input, json!({}));
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+        assert_eq!(result.tool_results[0].output["calledWith"], json!({}));
     }
 }

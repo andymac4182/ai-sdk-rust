@@ -717,6 +717,26 @@ impl LanguageModelCallPerformance {
             time_to_first_output_token_ms: None,
         }
     }
+
+    fn from_step_performance(
+        usage: &LanguageModelUsage,
+        response_time_ms: u64,
+        performance: &GenerateTextStepPerformance,
+    ) -> Self {
+        if performance.response_time_ms == 0 && performance.time_to_first_output_token_ms.is_none()
+        {
+            return Self::from_usage(usage, response_time_ms);
+        }
+
+        Self {
+            response_time_ms: performance.response_time_ms,
+            effective_output_tokens_per_second: performance.effective_output_tokens_per_second,
+            output_tokens_per_second: performance.output_tokens_per_second,
+            input_tokens_per_second: performance.input_tokens_per_second,
+            effective_total_tokens_per_second: performance.effective_total_tokens_per_second,
+            time_to_first_output_token_ms: performance.time_to_first_output_token_ms,
+        }
+    }
 }
 
 /// Event sent after a provider language model call completes, before local tool execution.
@@ -762,7 +782,11 @@ impl LanguageModelCallEndEvent {
                 .as_ref()
                 .and_then(|response| response.id.clone())
                 .expect("generate_text assigns a response id before language-model-call end"),
-            performance: LanguageModelCallPerformance::from_usage(&step.usage, response_time_ms),
+            performance: LanguageModelCallPerformance::from_step_performance(
+                &step.usage,
+                response_time_ms,
+                &step.performance,
+            ),
         }
     }
 }
@@ -4722,6 +4746,38 @@ impl GenerateTextStepPerformance {
             ..Self::default()
         }
     }
+
+    pub(crate) fn from_stream_usage(
+        usage: &LanguageModelUsage,
+        response_time_ms: u64,
+        step_time_ms: u64,
+        tool_execution_ms: BTreeMap<String, u64>,
+        time_to_first_output_token_ms: Option<u64>,
+    ) -> Self {
+        let output_after_first_token_ms =
+            time_to_first_output_token_ms.map(|duration| response_time_ms.saturating_sub(duration));
+
+        Self {
+            effective_output_tokens_per_second: calculate_tokens_per_second(
+                usage.output_tokens.total,
+                Some(response_time_ms),
+            ),
+            output_tokens_per_second: time_to_first_output_token_ms.map(|_| {
+                calculate_tokens_per_second(usage.output_tokens.total, output_after_first_token_ms)
+            }),
+            input_tokens_per_second: time_to_first_output_token_ms.map(|duration| {
+                calculate_tokens_per_second(usage.input_tokens.total, Some(duration))
+            }),
+            effective_total_tokens_per_second: calculate_tokens_per_second(
+                sum_token_counts(usage.input_tokens.total, usage.output_tokens.total),
+                Some(response_time_ms),
+            ),
+            step_time_ms,
+            response_time_ms,
+            tool_execution_ms,
+            time_to_first_output_token_ms,
+        }
+    }
 }
 
 /// Result of a single non-streaming generate-text step.
@@ -5255,6 +5311,26 @@ impl GenerateTextResult {
     pub fn into_output(self) -> Result<JsonValue, NoOutputGeneratedError> {
         self.output.ok_or_else(NoOutputGeneratedError::new)
     }
+
+    /// Deserializes the generated output into a caller-provided Rust type.
+    pub fn output_as<T>(&self) -> Result<T, NoOutputGeneratedError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let output = self.output()?;
+        serde_json::from_value(output.clone())
+            .map_err(|error| NoOutputGeneratedError::with_message(error.to_string()))
+    }
+
+    /// Consumes the result and deserializes the generated output into a Rust type.
+    pub fn into_output_as<T>(self) -> Result<T, NoOutputGeneratedError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let output = self.into_output()?;
+        serde_json::from_value(output)
+            .map_err(|error| NoOutputGeneratedError::with_message(error.to_string()))
+    }
 }
 
 /// Runs a non-streaming text generation call against a language model.
@@ -5338,7 +5414,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     let mut initial_response_messages = Vec::new();
-    if let Some(message) = initial_tool_approval_response_message(
+    if let Some(initial_response) = initial_tool_approval_response_message(
         &call_id,
         &current_prompt,
         &tools,
@@ -5356,8 +5432,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     )
     .await
     {
-        current_prompt.push(message.clone());
-        initial_response_messages.push(message);
+        current_prompt.push(initial_response.message.clone());
+        initial_response_messages.push(initial_response.message);
     }
 
     let mut steps = Vec::new();
@@ -5677,7 +5753,7 @@ fn provider_metadata_is_retryable(metadata: &JsonObject) -> bool {
         })
 }
 
-fn accumulated_response_messages(
+pub(crate) fn accumulated_response_messages(
     initial_response_messages: &[LanguageModelMessage],
     steps: &[GenerateTextStep],
 ) -> Vec<LanguageModelMessage> {
@@ -5688,7 +5764,7 @@ fn accumulated_response_messages(
         .collect()
 }
 
-fn merge_provider_options(
+pub(crate) fn merge_provider_options(
     base_provider_options: Option<&ProviderOptions>,
     step_provider_options: Option<ProviderOptions>,
 ) -> Option<ProviderOptions> {
@@ -6155,13 +6231,19 @@ pub(crate) fn update_pending_deferred_provider_tool_calls(
     }
 }
 
-async fn initial_tool_approval_response_message(
+pub(crate) struct InitialToolApprovalResponse {
+    pub(crate) message: LanguageModelMessage,
+    pub(crate) tool_results: Vec<GenerateTextToolResult>,
+    pub(crate) denied_tool_outputs: Vec<GenerateTextToolOutputDenied>,
+}
+
+pub(crate) async fn initial_tool_approval_response_message(
     call_id: &str,
     prompt: &LanguageModelPrompt,
     tools: &[Tool],
     tools_context: &JsonObject,
     tool_execution_callbacks: GenerateTextToolExecutionContext<'_, '_>,
-) -> Option<LanguageModelMessage> {
+) -> Option<InitialToolApprovalResponse> {
     let approvals = collect_tool_approvals(prompt).ok()?;
     let mut approved_tool_calls = approvals
         .approved_tool_approvals
@@ -6201,6 +6283,12 @@ async fn initial_tool_approval_response_message(
         content.push(LanguageModelToolContentPart::ToolResult(part));
     }
 
+    let denied_tool_outputs = approvals
+        .denied_tool_approvals
+        .iter()
+        .map(denied_initial_tool_approval_output_part)
+        .collect::<Vec<_>>();
+
     content.extend(
         approvals
             .denied_tool_approvals
@@ -6212,9 +6300,11 @@ async fn initial_tool_approval_response_message(
     if content.is_empty() {
         None
     } else {
-        Some(LanguageModelMessage::Tool(LanguageModelToolMessage::new(
-            content,
-        )))
+        Some(InitialToolApprovalResponse {
+            message: LanguageModelMessage::Tool(LanguageModelToolMessage::new(content)),
+            tool_results,
+            denied_tool_outputs,
+        })
     }
 }
 
@@ -6243,6 +6333,21 @@ fn denied_initial_tool_approval_result_part(
         approval.tool_call.tool_name.clone(),
         denied_initial_tool_approval_output(approval),
     )
+}
+
+fn denied_initial_tool_approval_output_part(
+    approval: &CollectedToolApproval,
+) -> GenerateTextToolOutputDenied {
+    let mut output = GenerateTextToolOutputDenied::new(
+        approval.tool_call.tool_call_id.clone(),
+        approval.tool_call.tool_name.clone(),
+    );
+
+    if let Some(provider_executed) = approval.tool_call.provider_executed {
+        output = output.with_provider_executed(provider_executed);
+    }
+
+    output
 }
 
 fn denied_initial_tool_approval_output(
@@ -8146,9 +8251,12 @@ mod tests {
     use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+        register_telemetry_integration, reset_telemetry_state_for_tests,
+        telemetry_test_guard_for_tests,
     };
     use crate::util::Callback;
     use crate::warning::Warning;
+    use serde::Deserialize;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
@@ -8979,6 +9087,98 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tool_approval_resolves_async_status_from_generic_function() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(|_options| async {
+                Some(ToolApprovalStatusKind::UserApproval.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_tool_call_tools_context_messages_and_runtime_to_generic_function()
+     {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let prompt = vec![
+            user_message("first"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("second")),
+            ])),
+        ];
+        let tools_context = JsonObject::from_iter([
+            ("weather".to_string(), json!({ "scope": "read" })),
+            ("otherTool".to_string(), json!({ "flag": true })),
+        ]);
+        let runtime_context = JsonObject::from_iter([("traceId".to_string(), json!("trace-1"))]);
+        let seen = Arc::new(Mutex::new(None::<GenericToolApprovalOptions>));
+        let seen_for_callback = Arc::clone(&seen);
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(move |options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    seen.lock().expect("seen lock").replace(options);
+                    Some(ToolApprovalStatusKind::NotApplicable.into())
+                }
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context)
+                .with_runtime_context(&runtime_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::NotApplicable);
+        let seen = seen.lock().expect("seen lock");
+        let options = seen.as_ref().expect("callback captured options");
+        assert_eq!(options.tool_call, tool_call);
+        assert_eq!(options.tools.as_ref().expect("tools passed").len(), 1);
+        assert_eq!(
+            options.tools.as_ref().expect("tools passed")[0].name,
+            "weather"
+        );
+        assert_eq!(options.messages, prompt);
+        assert_eq!(options.tools_context, tools_context);
+        assert_eq!(options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_through_object_status_reason_from_generic_function() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration =
+            ToolApprovalConfiguration::new().with_generic_tool_approval(|_options| async {
+                Some(NormalizedToolApprovalStatus::denied_with_reason("policy block").into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::denied_with_reason("policy block")
+        );
+    }
+
+    #[test]
     fn resolve_tool_approval_uses_generic_callback_before_tool_defined_approval() {
         let tool_call = approval_tool_call("weather");
         let tool_defined_called = Arc::new(AtomicBool::new(false));
@@ -9112,6 +9312,258 @@ mod tests {
                 .tool_context
                 .is_none()
         );
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_same_messages_and_validated_tool_context_to_per_tool_function()
+    {
+        let tool_call = approval_tool_call("weather");
+        let prompt = vec![user_message("step 1"), user_message("step 2")];
+        let runtime_context = JsonObject::new();
+        let context_schema = FlexibleSchema::from(Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        ));
+        let tools =
+            vec![Tool::new("weather", approval_tool_schema()).with_context_schema(context_schema)];
+        let seen = Arc::new(Mutex::new(None::<(JsonValue, SingleToolApprovalOptions)>));
+        let seen_for_callback = Arc::clone(&seen);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |input, options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    seen.lock().expect("seen lock").replace((input, options));
+                    Some(ToolApprovalStatusKind::Approved.into())
+                }
+            },
+        );
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": "secret" }))]);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context)
+                .with_runtime_context(&runtime_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::approved());
+        let seen = seen.lock().expect("seen lock");
+        let (input, options) = seen.as_ref().expect("callback captured options");
+        assert_eq!(input, &json!({ "city": "Berlin" }));
+        assert_eq!(options.tool_call_id, "call-1");
+        assert_eq!(options.messages, prompt);
+        assert_eq!(
+            options.tool_context.as_ref().expect("tool context"),
+            &json!({ "apiKey": "secret" })
+        );
+        assert_eq!(options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_tools_context_entry_through_after_schema_validation() {
+        let tool_call = approval_tool_call("weather");
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" },
+                        "region": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_none() {
+                    return ValidationResult::failure("expected apiKey string");
+                }
+                let mut validated = value.as_object().expect("context is an object").clone();
+                validated
+                    .entry("region".to_string())
+                    .or_insert_with(|| json!("us-east-1"));
+                ValidationResult::success(JsonValue::Object(validated))
+            }),
+        );
+        let tools =
+            vec![Tool::new("weather", approval_tool_schema()).with_context_schema(context_schema)];
+        let seen_context = Arc::new(Mutex::new(None::<JsonValue>));
+        let seen_context_for_callback = Arc::clone(&seen_context);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |_input, options| {
+                let seen_context = Arc::clone(&seen_context_for_callback);
+                async move {
+                    seen_context
+                        .lock()
+                        .expect("seen context lock")
+                        .replace(options.tool_context.expect("validated context"));
+                    Some(ToolApprovalStatusKind::NotApplicable.into())
+                }
+            },
+        );
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": "k" }))]);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_tools_context(&tools_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::NotApplicable);
+        assert_eq!(
+            seen_context
+                .lock()
+                .expect("seen context lock")
+                .as_ref()
+                .expect("context captured"),
+            &json!({
+                "apiKey": "k",
+                "region": "us-east-1"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_normalizes_static_string_before_tool_defined_approval() {
+        let tool_call = approval_tool_call("weather");
+        let tool_defined_called = Arc::new(AtomicBool::new(false));
+        let tool_defined_called_for_callback = Arc::clone(&tool_defined_called);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema()).with_needs_approval_function(
+                move |_input, _options| {
+                    tool_defined_called_for_callback.store(true, Ordering::SeqCst);
+                    ready(true)
+                },
+            ),
+        ];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_status("weather", ToolApprovalStatusKind::Denied);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::denied());
+        assert!(!tool_defined_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_through_static_object_status_reason() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new().with_tool_status(
+            "weather",
+            NormalizedToolApprovalStatus::denied_with_reason("blocked by policy"),
+        );
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::denied_with_reason("blocked by policy")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_uses_user_defined_callback_before_tool_defined_approval() {
+        let tool_call = approval_tool_call("weather");
+        let tool_defined_called = Arc::new(AtomicBool::new(false));
+        let tool_defined_called_for_callback = Arc::clone(&tool_defined_called);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema()).with_needs_approval_function(
+                move |_input, _options| {
+                    tool_defined_called_for_callback.store(true, Ordering::SeqCst);
+                    ready(true)
+                },
+            ),
+        ];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_approval_function("weather", |_input, _options| async {
+                Some(ToolApprovalStatusKind::Approved.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::approved());
+        assert!(!tool_defined_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_reason_returned_by_user_defined_callback() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            |_input, _options| async {
+                Some(
+                    NormalizedToolApprovalStatus::approved_with_reason("trusted internal tool")
+                        .into(),
+                )
+            },
+        );
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::approved_with_reason("trusted internal tool")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_normalizes_string_status_returned_by_user_defined_callback() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_approval_function("weather", |_input, _options| async {
+                Some(ToolApprovalStatusKind::UserApproval.into())
+            });
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
     }
 
     #[test]
@@ -14062,6 +14514,234 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_calls_globally_registered_integration_listeners() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let model = FakeLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_start_events = Arc::clone(&events);
+        let global_step_finish_events = Arc::clone(&events);
+        let global_end_events = Arc::clone(&events);
+        let global_start_seen = Arc::new(AtomicBool::new(false));
+        let global_step_finish_seen = Arc::new(AtomicBool::new(false));
+        let global_end_seen = Arc::new(AtomicBool::new(false));
+        let global_start_seen_for_callback = Arc::clone(&global_start_seen);
+        let global_step_finish_seen_for_callback = Arc::clone(&global_step_finish_seen);
+        let global_end_seen_for_callback = Arc::clone(&global_end_seen);
+        register_telemetry_integration(
+            TelemetryIntegration::new()
+                .with_callback(TelemetryEventKind::OnStart, move |_| {
+                    if !global_start_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_start_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onStart".to_string());
+                    }
+                })
+                .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                    if !global_step_finish_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_step_finish_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onStepFinish".to_string());
+                    }
+                })
+                .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                    if !global_end_seen_for_callback.swap(true, Ordering::SeqCst) {
+                        global_end_events
+                            .lock()
+                            .expect("telemetry event lock")
+                            .push("global-onEnd".to_string());
+                    }
+                }),
+        );
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            [
+                "global-onStart".to_string(),
+                "global-onStepFinish".to_string(),
+                "global-onEnd".to_string()
+            ]
+        );
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn generate_text_prefers_per_call_integrations_over_global_integrations() {
+        let _guard = telemetry_test_guard_for_tests();
+        reset_telemetry_state_for_tests();
+        let model = FakeLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_events = Arc::clone(&events);
+        register_telemetry_integration(TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnStart,
+            move |event| {
+                if event.function_id.as_deref() == Some("generate-text-per-call-precedence") {
+                    global_events
+                        .lock()
+                        .expect("telemetry event lock")
+                        .push("global".to_string());
+                }
+            },
+        ));
+        let per_call_events = Arc::clone(&events);
+        let per_call =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                per_call_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("per-call".to_string());
+            });
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")]).with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("generate-text-per-call-precedence")
+                    .with_integration(per_call),
+            ),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["per-call".to_string()]
+        );
+        reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn generate_text_calls_integration_listeners_alongside_user_callbacks() {
+        let model = FakeLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let user_start_events = Arc::clone(&events);
+        let user_step_finish_events = Arc::clone(&events);
+        let user_finish_events = Arc::clone(&events);
+        let integration_start_events = Arc::clone(&events);
+        let integration_step_finish_events = Arc::clone(&events);
+        let integration_end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnStart, move |_| {
+                integration_start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onStart".to_string());
+            })
+            .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                integration_step_finish_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onStepFinish".to_string());
+            })
+            .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                integration_end_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("integration-onEnd".to_string());
+            });
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")])
+                .with_on_start(move |_| {
+                    user_start_events
+                        .lock()
+                        .expect("telemetry event lock")
+                        .push("user-onStart".to_string());
+                    ready(())
+                })
+                .with_on_step_finish(move |_| {
+                    user_step_finish_events
+                        .lock()
+                        .expect("telemetry event lock")
+                        .push("user-onStepFinish".to_string());
+                    ready(())
+                })
+                .with_on_finish(move |_| {
+                    user_finish_events
+                        .lock()
+                        .expect("telemetry event lock")
+                        .push("user-onFinish".to_string());
+                    ready(())
+                })
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            [
+                "user-onStart".to_string(),
+                "integration-onStart".to_string(),
+                "user-onStepFinish".to_string(),
+                "integration-onStepFinish".to_string(),
+                "user-onFinish".to_string(),
+                "integration-onEnd".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_text_does_not_break_when_integration_listener_panics() {
+        let model = FakeLanguageModel::new();
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnStart, |_| {
+                panic!("integration error");
+            })
+            .with_callback(TelemetryEventKind::OnStepFinish, |_| {
+                panic!("integration error");
+            })
+            .with_callback(TelemetryEventKind::OnEnd, |_| {
+                panic!("integration error");
+            });
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")])
+                .with_telemetry(TelemetryOptions::new().with_integration(integration)),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+    }
+
+    #[test]
+    fn generate_text_supports_multiple_per_call_telemetry_integrations_as_array() {
+        let model = FakeLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_events = Arc::clone(&events);
+        let second_events = Arc::clone(&events);
+        let first =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                first_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("first".to_string());
+            });
+        let second =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |_| {
+                second_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push("second".to_string());
+            });
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")])
+                .with_telemetry(TelemetryOptions::new().with_integrations([first, second])),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            events.lock().expect("telemetry event lock").as_slice(),
+            ["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
     fn generate_text_calls_language_model_and_returns_plain_text_result() {
         let model = FakeLanguageModel::new();
         let prompt = vec![user_message("Say hello")];
@@ -14100,6 +14780,13 @@ mod tests {
                 .expect("default text output exists"),
             json!("Hello world")
         );
+        let typed_output: String = result.output_as().expect("default text output is typed");
+        assert_eq!(typed_output, "Hello world");
+        let owned_typed_output: String = result
+            .clone()
+            .into_output_as()
+            .expect("owned default text output is typed");
+        assert_eq!(owned_typed_output, "Hello world");
         assert_eq!(
             result.response_messages,
             vec![LanguageModelMessage::Assistant(
@@ -14159,6 +14846,84 @@ mod tests {
         assert_eq!(performance.time_to_first_output_token_ms, None);
     }
 
+    fn generate_text_result_with_output(output: JsonValue) -> GenerateTextResult {
+        let mut result = poll_ready(generate_text(GenerateTextOptions::new(
+            &FakeLanguageModel::new(),
+            vec![user_message("Say hello")],
+        )));
+        result.output = Some(output);
+        result
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_text_output_type_default() {
+        let result = generate_text_result_with_output(json!("Hello world"));
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_text_output_type() {
+        let result = generate_text_result_with_output(json!("Hello world"));
+        let output: String = result.output_as().expect("text output is typed");
+
+        assert_eq!(output, "Hello world");
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    struct TypedObjectOutput {
+        value: String,
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_object_output_type() {
+        let result = generate_text_result_with_output(json!({ "value": "typed" }));
+        let output: TypedObjectOutput = result.output_as().expect("object output is typed");
+
+        assert_eq!(
+            output,
+            TypedObjectOutput {
+                value: "typed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_array_output_type() {
+        let result = generate_text_result_with_output(json!(["a", "b"]));
+        let output: Vec<String> = result.output_as().expect("array output is typed");
+
+        assert_eq!(output, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    enum ChoiceOutput {
+        #[serde(rename = "a")]
+        A,
+        #[serde(rename = "b")]
+        B,
+        #[serde(rename = "c")]
+        C,
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_choice_output_type() {
+        let result = generate_text_result_with_output(json!("b"));
+        let output: ChoiceOutput = result.output_as().expect("choice output is typed");
+
+        assert_eq!(output, ChoiceOutput::B);
+    }
+
+    #[test]
+    fn generate_text_type_counterpart_should_infer_json_output_type() {
+        let output_value = json!({ "value": ["anything", 1, true] });
+        let result = generate_text_result_with_output(output_value.clone());
+        let output: JsonValue = result.output_as().expect("JSON output is typed");
+
+        assert_eq!(output, output_value);
+    }
+
     #[test]
     fn generate_text_messages_with_url_file_calls_model_supported_urls() {
         let supported_urls_called = Arc::new(AtomicBool::new(false));
@@ -14178,6 +14943,46 @@ mod tests {
                 ),
             )],
         ))];
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(&model, prompt)));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert!(supported_urls_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn generate_text_tool_result_url_file_calls_model_supported_urls() {
+        let supported_urls_called = Arc::new(AtomicBool::new(false));
+        let model = FakeLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
+                "Hello, world!",
+            ))])
+            .with_supported_urls_called(Arc::clone(&supported_urls_called));
+        let prompt = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "toolCallId",
+                    "toolName",
+                    json!({}),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/tool-image.png")
+                                    .expect("url parses"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                )),
+            ])),
+        ];
 
         let result = poll_ready(generate_text(GenerateTextOptions::new(&model, prompt)));
 

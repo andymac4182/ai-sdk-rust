@@ -1,4 +1,4 @@
-//! Pure utility helpers for the Linear adapter. 1:1 port of the
+//! Pure functions for the Linear adapter. 1:1 port of the
 //! pure-function subset of `packages/adapter-linear/src/utils.ts`:
 //!
 //! - [`get_user_name_from_profile_url`] - extract the

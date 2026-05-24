@@ -156,8 +156,8 @@ The queue is two-phase and gated:
 2. Resume unrelated standalone provider packages only after that first phase is
    verified or intentionally documented as non-portable.
 
-The first phase includes `packages/ai`, `packages/provider`,
-`packages/provider-utils`, `packages/openai-compatible`,
+The first phase includes `packages/ai`, `packages/provider-utils`,
+`packages/provider`, `packages/openai-compatible`,
 `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
 OpenAI-compatible and Open Responses routes, and portable non-provider rows such
 as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion/object
@@ -166,6 +166,12 @@ first phase, not as one of the later standalone providers. A standalone provider
 slice is blocked while any first-phase row is `not-started` or `in-progress`.
 Gateway progress alone does not unblock other providers; the whole common/core
 plus Vercel AI Gateway phase must be finished first.
+
+Within the first phase, package selection is strictly ordered: finish `ai`
+(`packages/ai`) to 100%, then `@ai-sdk/provider-utils`, then
+`@ai-sdk/provider`, then continue the remaining first-phase rows in the most
+effective order. Do not take a later package slice while a portable package
+earlier in that order remains open.
 
 ## Inventory Rules
 
@@ -235,11 +241,11 @@ inventory.
 
 | Upstream item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `packages/ai` (`ai`) | core package | in-progress | `src/lib.rs`, `src/agent.rs`, `src/generate_text.rs`, `src/stream_text.rs`, `src/generate_object.rs`, `src/stream_object.rs`, `src/embed.rs`, `src/generate_image.rs`, `src/generate_speech.rs`, `src/generate_video.rs`, `src/transcribe.rs`, `src/rerank.rs`, `src/upload_file.rs`, `src/upload_skill.rs`, `src/registry.rs`, `src/provider_middleware.rs`, `src/mock_models.rs`, `src/text_stream_response.rs`, `src/ui_message_stream.rs`, `src/chat_transport.rs`, `src/completion_transport.rs`, `src/object_transport.rs`, `src/logger.rs`, `src/telemetry.rs`, `src/retry.rs`, `src/util.rs`, `src/prompt.rs` | Unit tests in matching modules; `tool_loop_agent_exposes_version_id_and_tools`; `tool_loop_agent_generate_forwards_settings_and_instructions`; `tool_loop_agent_generate_passes_string_instructions`; `tool_loop_agent_generate_passes_system_message_instructions`; `tool_loop_agent_generate_passes_array_of_system_message_instructions`; `tool_loop_agent_generate_forwards_temperature_to_generate_text`; `tool_loop_agent_generate_forwards_max_output_tokens_to_generate_text`; `tool_loop_agent_generate_forwards_top_p_to_generate_text`; `tool_loop_agent_generate_forwards_top_k_to_generate_text`; `tool_loop_agent_generate_forwards_presence_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_frequency_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_stop_sequences_to_generate_text`; `tool_loop_agent_generate_forwards_seed_to_generate_text`; `tool_loop_agent_generate_forwards_headers_to_generate_text`; `tool_loop_agent_generate_forwards_include_request_messages_to_generate_text`; `tool_loop_agent_prepare_call_can_shape_provider_options`; `tool_loop_agent_generate_passes_sandbox_to_prepare_call`; `tool_loop_agent_generate_passes_sandbox_to_tool_execution`; `tool_loop_agent_generate_honors_tool_approval`; `tool_loop_agent_generate_calls_on_start_from_constructor`; `tool_loop_agent_generate_calls_on_start_from_method`; `tool_loop_agent_generate_on_start_passes_event_information`; `tool_loop_agent_generate_on_start_passes_messages_option`; `tool_loop_agent_generate_passes_abort_signal_to_generate_text`; `tool_loop_agent_generate_passes_timeout_to_tool_execution`; `tool_loop_agent_merges_generate_start_callbacks_in_order`; `tool_loop_agent_uses_upstream_twenty_step_default_for_tool_loop`; `tool_loop_agent_merges_tool_execution_callbacks_in_order`; `tool_loop_agent_stream_delegates_to_stream_text`; `tool_loop_agent_stream_passes_string_instructions`; `tool_loop_agent_stream_passes_system_message_instructions`; `tool_loop_agent_stream_forwards_include_raw_chunks_to_stream_text`; `tool_loop_agent_stream_prepare_call_can_shape_provider_options`; `tool_loop_agent_stream_passes_sandbox_to_prepare_call`; `tool_loop_agent_stream_passes_sandbox_to_tool_execution`; `tool_loop_agent_stream_honors_tool_approval`; `tool_loop_agent_stream_calls_on_start_from_constructor`; `tool_loop_agent_stream_calls_on_start_from_method`; `tool_loop_agent_stream_on_start_passes_event_information`; `tool_loop_agent_stream_passes_abort_signal_to_stream_text`; `tool_loop_agent_stream_passes_timeout_to_tool_execution`; `tool_loop_agent_merges_stream_finish_callbacks_in_order`; `mock_models::tests::*`; `logger::tests::*`; `telemetry::tests::*`; `generate_text_dispatches_telemetry_lifecycle_events`; `generate_text_dispatches_tool_execution_telemetry_events`; `stream_text_dispatches_telemetry_lifecycle_events`; `stream_text_dispatches_tool_execution_telemetry_events`; `generate_object_dispatches_telemetry_lifecycle_events`; `stream_object_dispatches_telemetry_lifecycle_events`; `generate_object_messages_with_url_file_calls_model_supported_urls`; `generate_text_messages_with_url_file_calls_model_supported_urls`; `stream_text_messages_with_url_file_calls_model_supported_urls`; `stream_object_messages_with_url_file_calls_model_supported_urls`; `embed_dispatches_telemetry_lifecycle_events`; `embed_many_dispatches_telemetry_lifecycle_events`; `rerank_dispatches_telemetry_lifecycle_events`; `ui_message_chunk_serializes_portable_tool_source_and_file_chunks`; `process_ui_message_stream_preserves_portable_non_text_chunks_as_parts`; `direct_chat_transport_streams_text_response_from_agent`; `direct_chat_transport_passes_prepared_agent_options`; `direct_chat_transport_applies_ui_message_stream_options`; `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`; `direct_chat_transport_rejects_invalid_ui_message_part_shape`; `direct_chat_transport_reconnect_returns_none`; `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`; `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`; `convert_ui_messages_maps_dynamic_tool_output_available_tool_name`; `convert_ui_messages_preserves_step_start_blocks_as_assistant_tool_pairs`; `convert_ui_messages_places_provider_executed_tool_result_in_assistant`; `convert_ui_messages_maps_denied_approval_response_to_execution_denied_result`; `convert_ui_messages_skips_unconverted_data_parts`; `convert_ui_messages_maps_file_provider_reference_and_metadata_parts`; `completion_transport_builds_default_request`; `completion_transport_builds_prepared_request_with_overrides`; `completion_transport_processes_text_stream`; `completion_transport_processes_data_event_stream`; `completion_transport_reports_data_event_error_chunks`; `completion_transport_reports_invalid_data_event_chunks`; `object_transport_builds_post_request_with_input_body`; `object_transport_processes_distinct_partial_json_updates`; `object_transport_skips_duplicate_partial_objects`; `object_transport_ignores_empty_chunks_until_json_can_be_repaired`; `object_transport_parses_final_json_for_validation_boundary`; `chat_transport::tests::*`; `retry::tests::*`; `util::tests::*`; `prompt::tests::*`; `examples/kitchen_sink.rs` | Non-streaming generation, streamed text collection with local tool continuation and textStream filtering, object, image, speech, video, transcription, embeddings, reranking, upload, registry, provider-level middleware wrapping, initial `ToolLoopAgent` wrapper over `generate_text`/`stream_text` with shared settings, prepare-call shaping, configured tools, instructions and instruction-shape forwarding, streaming delegation, model/request option forwarding, include request-message retention, prepare-call sandbox propagation, sandbox propagation into local tool execution, user-approval blocking, onStart callback/event forwarding, stream prepare-call provider-option shaping, per-call abort/timeout request controls, upstream's default twenty-step tool loop, and constructor/per-call lifecycle and tool-execution callback merging, tool input examples middleware, extract JSON middleware, simulate streaming middleware, text-stream response helpers, UI-message stream SSE/read/process/text-transform helpers including portable tool/source/file/approval chunk contracts, initial chat transport request contracts plus in-process `DirectChatTransport` agent streaming, UI-message text conversion, assistant tool-history conversion for static and dynamic tools, step-start splitting, provider-executed tool-result placement, output-error raw input, denied approval responses, skipped unconverted data parts, file/provider-reference mapping, and custom/reasoning provider metadata, high-level URL-file message supported-URL hook parity across generate/stream text/object APIs, agent call option forwarding, UI-message stream options, invalid-message validation, reconnect-null behavior, request timeout helper extraction, high-level language model call option preparation, prompt standardization, file-part data conversion, tool preparation, tool-choice preparation, completion API request shaping, completion text/data stream accumulation/error handling, object transport request shaping, partial JSON stream repair/change filtering, and final object JSON parse boundary, retry/backoff utility parity, dependency-free warning logger formatting/state, root telemetry options/registry/dispatcher/diagnostic channel, `generate_text`, `stream_text`, `generate_object`, `stream_object`, `embed`, `embed_many`, and `rerank` telemetry dispatch for operation/step/language-model/tool/object/end events where applicable, mergeObjects/splitArray/fixJson/getPotentialStartIndex/mergeAbortSignals/setAbortTimeout/mergeCallbacks/notify/SerialJobExecutor/prepareRetries/requestTimeout/prepareLanguageModelCallOptions/standardizePrompt/convertToLanguageModelV4FilePart/prepareTools/prepareToolChoice/stopCondition utility parity, tool loops, public mock provider-v4 models, and many provider-v4 shapes exist. Remaining UI-message-to-model-message edge coverage for broader approval states, agent call-options schema/type-level parity, finish callbacks, and remaining stream/UI edge cases remain unported. |
-| `packages/provider` (`@ai-sdk/provider`) | provider contracts | in-progress | `crates/ai-sdk-provider`; root facade shims in `src/provider.rs`, `src/language_model.rs`, `src/embedding_model.rs`, `src/image_model.rs`, `src/speech_model.rs`, `src/transcription_model.rs`, `src/reranking_model.rs`, `src/video_model.rs`, `src/files.rs`, `src/skills.rs`, `src/json.rs`, `src/warning.rs`, `src/file_data.rs`, `src/headers.rs` | Contract and serialization tests in `crates/ai-sdk-provider/src/*`; one-to-one `get_error_message_*` split for upstream `get-error-message.test.ts`; `call_options_carries_abort_signal_without_serializing_it`; non-language call-option abort signal serialization coverage; root facade compile coverage | Provider-v4 contracts, shared JSON/header shapes, warnings, file/provider references, model call/result contracts, language-model and non-language-model call-option abort signal propagation, abort wake support, and provider trait surfaces now live in the matching `ai-sdk-provider` crate. The upstream provider `getErrorMessage` test file is represented case-for-case in Rust; upstream v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
+| `packages/ai` (`ai`) | core package | in-progress | `src/lib.rs`, `src/agent.rs`, `src/generate_text.rs`, `src/stream_text.rs`, `src/generate_object.rs`, `src/stream_object.rs`, `src/embed.rs`, `src/generate_image.rs`, `src/generate_speech.rs`, `src/generate_video.rs`, `src/transcribe.rs`, `src/rerank.rs`, `src/upload_file.rs`, `src/upload_skill.rs`, `src/registry.rs`, `src/provider_middleware.rs`, `src/mock_models.rs`, `src/text_stream_response.rs`, `src/ui_message_stream.rs`, `src/chat_transport.rs`, `src/completion_transport.rs`, `src/object_transport.rs`, `src/logger.rs`, `src/telemetry.rs`, `src/retry.rs`, `src/util.rs`, `src/prompt.rs` | Unit tests in matching modules; `tool_loop_agent_exposes_version_id_and_tools`; `tool_loop_agent_generate_forwards_settings_and_instructions`; `tool_loop_agent_generate_passes_string_instructions`; `tool_loop_agent_generate_passes_system_message_instructions`; `tool_loop_agent_generate_passes_array_of_system_message_instructions`; `tool_loop_agent_generate_forwards_temperature_to_generate_text`; `tool_loop_agent_generate_forwards_max_output_tokens_to_generate_text`; `tool_loop_agent_generate_forwards_top_p_to_generate_text`; `tool_loop_agent_generate_forwards_top_k_to_generate_text`; `tool_loop_agent_generate_forwards_presence_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_frequency_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_stop_sequences_to_generate_text`; `tool_loop_agent_generate_forwards_seed_to_generate_text`; `tool_loop_agent_generate_forwards_headers_to_generate_text`; `tool_loop_agent_generate_forwards_include_request_messages_to_generate_text`; `tool_loop_agent_prepare_call_can_shape_provider_options`; `tool_loop_agent_generate_rejects_invalid_call_options_schema_before_model_call`; `tool_loop_agent_generate_passes_valid_call_options_schema`; `tool_loop_agent_generate_passes_sandbox_to_prepare_call`; `tool_loop_agent_generate_passes_sandbox_to_tool_execution`; `tool_loop_agent_generate_honors_tool_approval`; `tool_loop_agent_generate_calls_on_start_from_constructor`; `tool_loop_agent_generate_calls_on_start_from_method`; `tool_loop_agent_generate_on_start_passes_event_information`; `tool_loop_agent_generate_on_start_passes_messages_option`; `tool_loop_agent_generate_passes_abort_signal_to_generate_text`; `tool_loop_agent_generate_passes_timeout_to_tool_execution`; `tool_loop_agent_merges_generate_start_callbacks_in_order`; `tool_loop_agent_generate_calls_on_step_start_from_constructor`; `tool_loop_agent_generate_calls_on_step_start_from_method`; `tool_loop_agent_generate_merges_on_step_start_callbacks_in_order`; `tool_loop_agent_generate_on_step_start_passes_event_information`; `tool_loop_agent_generate_calls_on_step_finish_from_constructor`; `tool_loop_agent_generate_calls_on_step_finish_from_method`; `tool_loop_agent_generate_merges_on_step_finish_callbacks_in_order`; `tool_loop_agent_generate_on_step_finish_passes_step_result_to_callback`; `tool_loop_agent_generate_calls_on_finish_from_constructor`; `tool_loop_agent_generate_calls_on_finish_from_method`; `tool_loop_agent_generate_merges_on_finish_callbacks_in_order`; `tool_loop_agent_generate_on_finish_passes_event_information`; `tool_loop_agent_uses_upstream_twenty_step_default_for_tool_loop`; `tool_loop_agent_generate_calls_on_tool_execution_start_from_constructor`; `tool_loop_agent_generate_calls_on_tool_execution_start_from_method`; `tool_loop_agent_generate_merges_on_tool_execution_start_callbacks_in_order`; `tool_loop_agent_generate_on_tool_execution_start_passes_event_information`; `tool_loop_agent_generate_calls_on_tool_execution_end_from_constructor`; `tool_loop_agent_generate_calls_on_tool_execution_end_from_method`; `tool_loop_agent_generate_merges_on_tool_execution_end_callbacks_in_order`; `tool_loop_agent_generate_on_tool_execution_end_passes_event_information_on_success`; `tool_loop_agent_merges_tool_execution_callbacks_in_order`; `tool_loop_agent_stream_delegates_to_stream_text`; `tool_loop_agent_stream_passes_string_instructions`; `tool_loop_agent_stream_passes_system_message_instructions`; `tool_loop_agent_stream_forwards_include_raw_chunks_to_stream_text`; `tool_loop_agent_stream_prepare_call_can_shape_provider_options`; `tool_loop_agent_stream_passes_sandbox_to_prepare_call`; `tool_loop_agent_stream_passes_sandbox_to_tool_execution`; `tool_loop_agent_stream_honors_tool_approval`; `tool_loop_agent_stream_calls_on_start_from_constructor`; `tool_loop_agent_stream_calls_on_start_from_method`; `tool_loop_agent_stream_on_start_passes_event_information`; `tool_loop_agent_stream_passes_abort_signal_to_stream_text`; `tool_loop_agent_stream_passes_timeout_to_tool_execution`; `tool_loop_agent_stream_calls_on_tool_execution_start_from_constructor`; `tool_loop_agent_stream_calls_on_tool_execution_start_from_method`; `tool_loop_agent_stream_merges_on_tool_execution_start_callbacks_in_order`; `tool_loop_agent_stream_on_tool_execution_start_passes_event_information`; `tool_loop_agent_stream_calls_on_tool_execution_end_from_constructor`; `tool_loop_agent_stream_calls_on_tool_execution_end_from_method`; `tool_loop_agent_stream_merges_on_tool_execution_end_callbacks_in_order`; `tool_loop_agent_stream_on_tool_execution_end_passes_event_information_on_success`; `tool_loop_agent_generate_calls_per_call_integration_listeners_for_all_lifecycle_events`; `tool_loop_agent_stream_calls_per_call_integration_listeners_for_all_lifecycle_events`; `tool_loop_agent_generate_calls_globally_registered_integration_listeners`; `tool_loop_agent_stream_calls_globally_registered_integration_listeners`; `tool_loop_agent_generate_includes_configured_runtime_context_properties_in_telemetry`; `tool_loop_agent_stream_includes_configured_runtime_context_properties_in_telemetry`; `tool_loop_agent_generate_calls_integration_listeners_alongside_agent_callbacks`; `tool_loop_agent_stream_calls_integration_listeners_alongside_agent_callbacks`; `tool_loop_agent_generate_does_not_break_when_an_integration_listener_panics`; `tool_loop_agent_stream_does_not_break_when_an_integration_listener_panics`; `tool_loop_agent_merges_stream_finish_callbacks_in_order`; `mock_models::tests::*`; `logger::tests::*`; `telemetry::tests::*`; `generate_text_dispatches_telemetry_lifecycle_events`; `generate_text_dispatches_tool_execution_telemetry_events`; `stream_text_dispatches_telemetry_lifecycle_events`; `stream_text_dispatches_tool_execution_telemetry_events`; `generate_object_dispatches_telemetry_lifecycle_events`; `stream_object_dispatches_telemetry_lifecycle_events`; `generate_object_messages_with_url_file_calls_model_supported_urls`; `generate_text_messages_with_url_file_calls_model_supported_urls`; `stream_text_messages_with_url_file_calls_model_supported_urls`; `stream_object_messages_with_url_file_calls_model_supported_urls`; `embed_dispatches_telemetry_lifecycle_events`; `embed_many_dispatches_telemetry_lifecycle_events`; `rerank_dispatches_telemetry_lifecycle_events`; `ui_message_chunk_serializes_portable_tool_source_and_file_chunks`; `process_ui_message_stream_folds_tool_chunks_into_ui_tool_parts`; `process_ui_message_stream_folds_provider_executed_static_tools`; `process_ui_message_stream_folds_provider_executed_dynamic_tools`; `process_ui_message_stream_preserves_tool_call_and_result_metadata`; `direct_chat_transport_streams_text_response_from_agent`; `direct_chat_transport_passes_prepared_agent_options`; `direct_chat_transport_applies_ui_message_stream_options`; `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`; `direct_chat_transport_rejects_invalid_ui_message_part_shape`; `direct_chat_transport_reconnect_returns_none`; `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`; `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`; `convert_ui_messages_maps_dynamic_tool_output_available_tool_name`; `convert_ui_messages_preserves_step_start_blocks_as_assistant_tool_pairs`; `convert_ui_messages_places_provider_executed_tool_result_in_assistant`; `convert_ui_messages_maps_denied_approval_response_to_execution_denied_result`; `convert_ui_messages_skips_unconverted_data_parts`; `convert_ui_messages_maps_file_provider_reference_and_metadata_parts`; `completion_transport_builds_default_request`; `completion_transport_builds_prepared_request_with_overrides`; `completion_transport_processes_text_stream`; `completion_transport_processes_data_event_stream`; `completion_transport_reports_data_event_error_chunks`; `completion_transport_reports_invalid_data_event_chunks`; `object_transport_builds_post_request_with_input_body`; `object_transport_processes_distinct_partial_json_updates`; `object_transport_skips_duplicate_partial_objects`; `object_transport_ignores_empty_chunks_until_json_can_be_repaired`; `object_transport_parses_final_json_for_validation_boundary`; `chat_transport::tests::*`; `retry::tests::*`; `util::tests::*`; `prompt::tests::*`; `examples/kitchen_sink.rs` | Non-streaming generation, streamed text collection with local tool continuation and textStream filtering, object, image, speech, video, transcription, embeddings, reranking, upload, registry, provider-level middleware wrapping, initial `ToolLoopAgent` wrapper over `generate_text`/`stream_text` with shared settings, prepare-call shaping, configured tools, instructions and instruction-shape forwarding, streaming delegation, model/request option forwarding, include request-message retention, prepare-call sandbox propagation, sandbox propagation into local tool execution, user-approval blocking, onStart callback/event forwarding, step-start, step-finish, finish, and tool-execution callback/event forwarding, stream prepare-call provider-option shaping, per-call abort/timeout request controls, upstream's default twenty-step tool loop, and constructor/per-call lifecycle and tool-execution callback merging, tool input examples middleware, extract JSON middleware, simulate streaming middleware, text-stream response helpers, UI-message stream SSE/read/process/text-transform helpers including portable tool/source/file/approval chunk contracts, initial chat transport request contracts plus in-process `DirectChatTransport` agent streaming, UI-message text conversion, assistant tool-history conversion for static and dynamic tools, step-start splitting, provider-executed tool-result placement, output-error raw input, denied approval responses, skipped unconverted data parts, file/provider-reference mapping, and custom/reasoning provider metadata, high-level URL-file message supported-URL hook parity across generate/stream text/object APIs, agent call option forwarding, UI-message stream options, invalid-message validation, reconnect-null behavior, request timeout helper extraction, high-level language model call option preparation, prompt standardization, file-part data conversion, tool preparation, tool-choice preparation, completion API request shaping, completion text/data stream accumulation/error handling, object transport request shaping, partial JSON stream repair/change filtering, and final object JSON parse boundary, retry/backoff utility parity, dependency-free warning logger formatting/state, root telemetry options/registry/dispatcher/diagnostic channel, `generate_text`, `stream_text`, `generate_object`, `stream_object`, `embed`, `embed_many`, and `rerank` telemetry dispatch for operation/step/language-model/tool/object/end events where applicable, mergeObjects/splitArray/fixJson/getPotentialStartIndex/mergeAbortSignals/setAbortTimeout/mergeCallbacks/notify/SerialJobExecutor/prepareRetries/requestTimeout/prepareLanguageModelCallOptions/standardizePrompt/convertToLanguageModelV4FilePart/prepareTools/prepareToolChoice/stopCondition utility parity, tool loops, public mock provider-v4 models, and many provider-v4 shapes exist. Remaining UI-message-to-model-message edge coverage for broader approval states, agent call-options type-level parity and remaining stream/UI edge cases remain unported. |
 | `packages/provider-utils` (`@ai-sdk/provider-utils`) | provider support library | in-progress | `crates/ai-sdk-provider-utils`; root facade shim in `src/provider_utils.rs` | 760 upstream-shape unit tests in `crates/ai-sdk-provider-utils/src/provider_utils.rs`, including one-to-one `asArray`, `stripFileExtension`, `addAdditionalPropertiesToJsonSchema`, `filterNullable`, `removeUndefinedEntries`, complete portable `validateTypes`/`safeValidateTypes`, complete portable `secureJsonParse`, complete portable `parseJSON`/`safeParseJSON`/`isParsableJson`, complete portable `injectJsonInstruction`, exact `mediaTypeToExtension` table-row test splits, complete portable `detectMediaType`/`getTopLevelMediaType`/`isFullMediaType` case splits, complete portable `resolveFullMediaType` case splits, complete portable `isUrlSupported`, `validateDownloadUrl`, `downloadBlob`/`DownloadError`, `getFromApi`, `readResponseWithSizeLimit`, `responseHandler`, `handleFetchError`, `convertAsyncIteratorToReadableStream`, `isJSONSerializable`, complete portable `delay`, complete portable `executeTool`/`isExecutableTool`, portable `asSchema`/`StandardSchema`, `StreamingToolCallTracker`, and `serializeModelOptions` case splits, complete portable `convertToFormData` and `convertImageModelFileToDataUri` case splits, complete portable `normalizeHeaders` case splits, complete portable `mapReasoningToProvider*` case splits, complete portable `resolve` case splits, complete portable `createToolNameMapping` case splits, complete portable `prepareTools` case splits for root AI usage, complete portable `withUserAgentSuffix` and `getRuntimeEnvironmentUserAgent` case splits, complete portable `createIdGenerator`/`generateId` case splits, complete portable `DelayedPromise` case splits, portable `isProviderReference` case splits, complete portable `resolveProviderReference` case splits, complete portable `types/content-part.test-d.ts` case splits, `tool_execution_options_include_execution_metadata_context_abort_signal_and_sandbox`, `sandbox_command_options_include_abort_signal_without_serializing_it`, `tool_execute_function_accepts_input_output_and_execution_options`, `tool_needs_approval_function_accepts_input_options_and_returns_boolean`, `tool_to_model_output_accepts_untyped_output_without_execute`, `tool_to_model_output_accepts_execute_function_output`, `tool_to_model_output_accepts_output_schema_result_output`, `tool_needs_approval_function_accepts_input_schema_options`, `tool_needs_approval_function_accepts_execute_tool_options`, `tool_needs_approval_function_accepts_context_schema_context`, `dynamic_tool_upstream_should_include_dynamic_tools_in_the_tool_union`, `dynamic_tool_upstream_should_allow_function_style_properties`, `dynamic_tool_upstream_should_reject_provider_only_properties`, `dynamic_tool_upstream_should_create_dynamic_tools_with_the_dynamic_discriminator`, `provider_defined_tool_upstream_should_include_provider_defined_tools_in_the_tool_union`, `provider_defined_tool_upstream_should_require_provider_specific_properties`, `provider_defined_tool_upstream_should_allow_user_execution_or_an_output_schema`, `provider_defined_tool_upstream_rejects_function_only_properties`, `provider_executed_tool_upstream_should_include_provider_executed_tools_in_the_tool_union`, `provider_executed_tool_upstream_should_require_provider_specific_properties`, `provider_executed_tool_upstream_should_allow_deferred_result_support`, `provider_executed_tool_upstream_rejects_function_only_properties`, `function_tool_upstream_should_expose_the_function_tool_discriminator`, `function_tool_upstream_should_include_function_tools_in_the_tool_union`, `function_tool_upstream_should_allow_omitted_and_explicit_function_discriminators`, `function_tool_upstream_should_reject_dynamic_and_provider_only_properties`, `tool_union_upstream_should_expose_all_tool_variants_and_type_discriminators`, `tool_union_upstream_should_narrow_tools_by_type`, `tool_constructor_input_type_upstream_should_infer_input_type_from_zod_input_schema`, `tool_constructor_input_type_upstream_should_preserve_input_type_from_flexible_schema`, `tool_constructor_input_type_upstream_should_infer_input_type_with_optional_default_examples`, `tool_constructor_input_type_upstream_should_infer_input_type_with_refined_schema_examples`, `tool_constructor_context_type_upstream_should_infer_context_type_from_context_schema_in_execute`, `tool_constructor_context_type_upstream_should_infer_context_type_in_input_lifecycle_callbacks`, `tool_constructor_output_type_upstream_should_infer_output_type_from_execute_function`, `tool_constructor_output_type_upstream_should_infer_output_type_from_async_generator_execute_function`, `tool_input_lifecycle_callbacks_receive_upstream_execution_options`, `function_tool_retains_output_schema_without_provider_serialization`, `post_json_to_api_options_carries_abort_signal_without_serializing_it`, `post_form_data_to_api_options_carries_abort_signal_without_serializing_it`, `post_to_api_options_carries_abort_signal_without_serializing_it`, `post_json_to_api_aborts_before_transport_call`, and `post_json_to_api_aborts_pending_transport_when_signal_fires`; root facade compile coverage | Schema/validation including JSON Schema, lazy schema, and Standard Schema v1 conversion/validation, JSON parsing, header normalization/combination, resolvable value/function/future handling, nullish filtering, delayed externally resolved futures, abortable delay semantics, JSON instruction injection, reasoning provider mapping, media type detection/resolution, media/base64/form-data helpers, download and response-handler contracts, async iterator readable-stream cancellation, provider API request helpers including GET, JSON, form-data, and generic POST abort-signal propagation plus abort-aware pending transport cancellation, user-agent helpers, provider reference resolution, provider tool-name mapping, provider-utils content-part model-message/tool-result output contracts including legacy file/image variants, tool factories/types, function/dynamic tool output-schema retention for local execution typing, complete execute-tool and executable-tool helper parity, Rust abort-signal counterparts for tool execution, sandbox command options, tool input lifecycle callbacks, tool constructor input/context/output contracts, provider-facing prepareTools conversion including provider-defined tools, provider options, strict mode, input examples, and context/sandbox-derived descriptions, tool model-output callbacks, function-form approval callbacks, high-level tool variant contracts, and provider-only property exclusion, complete streaming tool-call tracking, and ID generation now live in the matching `ai-sdk-provider-utils` crate. The root crate retains a compatibility re-export shim only. `src/retry.rs` remains `packages/ai` ownership because upstream retry lives under `packages/ai/src/util`, not `packages/provider-utils`. Exact browser `ReadableStream`, Web fetch/runtime integration, the remaining provider-utils `*.test-d.ts` type-level inventory, and true mid-socket preemption for the current blocking `ureq` default transports remain incomplete or JavaScript-runtime-specific. Zod v3/v4 JSON-schema adapter snapshots are now explicitly inventoried as JavaScript/Zod-runtime-specific below instead of being counted as hidden Rust parity debt. |
+| `packages/provider` (`@ai-sdk/provider`) | provider contracts | in-progress | `crates/ai-sdk-provider`; root facade shims in `src/provider.rs`, `src/language_model.rs`, `src/embedding_model.rs`, `src/image_model.rs`, `src/speech_model.rs`, `src/transcription_model.rs`, `src/reranking_model.rs`, `src/video_model.rs`, `src/files.rs`, `src/skills.rs`, `src/json.rs`, `src/warning.rs`, `src/file_data.rs`, `src/headers.rs` | Contract and serialization tests in `crates/ai-sdk-provider/src/*`; one-to-one `get_error_message_*` split for upstream `get-error-message.test.ts`; `call_options_carries_abort_signal_without_serializing_it`; non-language call-option abort signal serialization coverage; root facade compile coverage | Provider-v4 contracts, shared JSON/header shapes, warnings, file/provider references, model call/result contracts, language-model and non-language-model call-option abort signal propagation, abort wake support, and provider trait surfaces now live in the matching `ai-sdk-provider` crate. The upstream provider `getErrorMessage` test file is represented case-for-case in Rust; upstream v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/gateway` (`@ai-sdk/gateway`) | provider package | verified | `crates/ai-sdk-gateway`; root facade shims in `src/gateway.rs`, `src/gateway_error.rs`, `src/gateway_tools.rs`, and `src/vercel_ai_gateway.rs` | 380 Gateway provider/error/tool/OpenAI-compatible facade tests in `crates/ai-sdk-gateway`, including `vercel_ai_gateway_openai_compatible_factory_uses_default_base_url`, `vercel_ai_gateway_openai_compatible_implements_provider_trait`, and `vercel_ai_gateway_openai_compatible_auth_token_matches_gateway_precedence`; root high-level Gateway tests in `src/gateway.rs`; `gateway_model_generates_text_through_generate_text`; `gateway_model_generates_object_through_generate_object`; `gateway_model_maps_standard_generate_content_parts`; `gateway_model_maps_standard_generate_content_parts_through_generate_text`; `gateway_model_runs_generate_text_tool_loop_end_to_end`; `gateway_model_streams_text_through_stream_text`; `gateway_model_streams_object_through_stream_object`; `gateway_model_streams_standard_content_parts_through_stream_text`; `gateway_model_runs_stream_text_tool_loop_end_to_end`; `gateway_model_filters_raw_stream_parts_unless_requested`; `gateway_model_encodes_language_prompt_file_bytes_for_generate`; `gateway_model_encodes_language_prompt_file_bytes_for_stream`; `gateway_provider_options_serialize_upstream_shape`; `gateway_provider_options_validation_matches_timeout_schema`; `gateway_model_passes_typed_gateway_provider_options_for_generate`; `gateway_model_passes_typed_gateway_provider_options_for_stream`; `gateway_embedding_model_embeds_through_embed`; `gateway_embedding_model_maps_gateway_error_to_metadata`; `gateway_image_model_generates_through_generate_image`; `gateway_image_model_maps_upstream_request_response_and_metadata`; `gateway_image_model_preserves_metadata_entries_without_images`; `gateway_image_model_encodes_files_and_mask`; `gateway_image_model_maps_gateway_error_to_metadata`; `gateway_reranking_model_reranks_through_rerank`; `gateway_reranking_model_omits_optional_body_fields`; `gateway_reranking_model_maps_gateway_error_to_metadata`; `gateway_video_model_generates_through_generate_video`; `gateway_video_model_preserves_empty_and_nested_provider_metadata`; `gateway_video_model_encodes_image_inputs_and_returns_url_videos`; `gateway_video_model_maps_sse_error_to_metadata`; `gateway_error_types_expose_upstream_names_status_and_retryability`; `gateway_authentication_error_matches_default_and_custom_upstream_values`; `gateway_authentication_contextual_error_matches_upstream_matrix`; `gateway_invalid_request_error_matches_default_custom_and_variant_checks`; `gateway_rate_limit_error_matches_default_and_variant_checks`; `gateway_model_not_found_error_matches_default_custom_and_variant_checks`; `gateway_internal_server_error_matches_default_custom_and_variant_checks`; `gateway_retryability_matches_upstream_status_matrix`; `gateway_response_error_matches_default_custom_and_variant_checks`; `create_gateway_error_from_response_maps_gateway_error_types`; `create_gateway_error_from_response_preserves_empty_auth_messages_with_context`; `create_gateway_error_from_response_uses_default_message_for_null_message`; `create_gateway_error_from_response_handles_null_error_type_as_internal`; `create_gateway_error_from_response_includes_cause_message`; `create_gateway_error_from_response_maps_malformed_responses`; `create_gateway_error_from_response_handles_model_not_found_param_edges`; `create_gateway_error_from_response_ignores_extra_fields`; `create_gateway_error_from_response_preserves_error_properties`; `create_gateway_error_from_response_maps_generation_id_to_error_variants`; `create_gateway_error_from_response_creates_contextual_auth_errors`; `extract_gateway_api_call_response_prefers_data_then_json_then_raw_body`; `extract_gateway_api_call_response_prefers_explicit_data_even_null_or_empty`; `extract_gateway_api_call_response_parses_json_or_returns_raw_text`; `extract_gateway_api_call_response_returns_empty_object_without_body`; `extract_gateway_api_call_response_parses_scalar_and_array_bodies`; `as_gateway_error_detects_all_undici_timeout_codes`; `as_gateway_error_maps_non_timeout_original_errors_to_response_errors`; `gateway_auth_method_header_matches_upstream_name`; `parse_gateway_auth_method_accepts_only_gateway_values`; `parse_gateway_auth_method_accepts_valid_values_and_extra_headers`; `parse_gateway_auth_method_rejects_invalid_values`; `parse_gateway_auth_method_returns_none_for_missing_or_nullish_headers`; `parse_gateway_auth_method_rejects_whitespace`; `get_gateway_auth_token_matches_upstream_precedence`; `get_gateway_auth_token_ignores_empty_values_without_trimming_whitespace`; `get_gateway_auth_token_handles_no_auth_at_all`; `get_gateway_auth_token_handles_valid_oidc_invalid_api_key`; `get_gateway_auth_token_handles_invalid_oidc_valid_api_key`; `get_gateway_auth_token_handles_no_oidc_invalid_api_key`; `get_gateway_auth_token_handles_no_oidc_valid_api_key`; `get_gateway_auth_token_handles_valid_oidc_no_api_key`; `get_gateway_auth_token_handles_valid_oidc_valid_api_key`; `get_gateway_auth_token_handles_valid_oidc_valid_options_api_key`; `get_gateway_auth_token_handles_invalid_oidc_invalid_api_key`; `get_gateway_auth_token_treats_empty_environment_variables_as_missing`; `get_gateway_auth_token_uses_whitespace_environment_api_key`; `get_gateway_auth_token_prioritizes_options_api_key_over_all_environment_variables`; `get_gateway_auth_token_prefers_options_api_key_over_ai_gateway_api_key`; `get_gateway_auth_token_prefers_ai_gateway_api_key_over_oidc_token`; `get_gateway_auth_token_falls_back_to_oidc_when_no_api_keys_are_available`; `gateway_provider_headers_support_oidc_auth_method`; `gateway_observability_headers_map_vercel_environment`; `gateway_observability_headers_skip_empty_values_and_use_request_env_fallback`; `create_gateway_language_model_uses_custom_configuration`; `create_gateway_language_model_uses_oidc_when_api_key_is_absent`; `gateway_provider_language_model_handles_model_specification_errors`; `gateway_provider_language_model_accepts_any_model_id`; `gateway_provider_language_model_accepts_non_existent_model_id`; `create_gateway_embedding_model_returns_gateway_embedding_model`; `create_gateway_image_model_uses_custom_base_url`; `create_gateway_image_model_reuses_headers_transport_and_observability`; `create_gateway_video_model_uses_custom_base_url`; `create_gateway_video_model_reuses_headers_transport_and_observability`; `create_gateway_reranking_model_uses_custom_base_url`; `create_gateway_reranking_alias_returns_gateway_reranking_model`; `create_gateway_fetches_available_models_with_custom_base_url`; `create_gateway_caches_metadata_for_configured_refresh_interval`; `create_gateway_uses_default_five_minute_metadata_refresh_interval`; `create_gateway_language_model_passes_observability_headers_from_environment`; `create_gateway_language_model_omits_missing_observability_headers`; `default_gateway_export_exposes_provider_instance`; `create_gateway_uses_default_base_url_when_none_is_provided`; `create_gateway_accepts_empty_options`; `default_gateway_export_constructs_image_model`; `default_gateway_export_constructs_video_model`; `create_gateway_overrides_default_base_url_when_provided`; `create_gateway_prefers_api_key_over_oidc_token`; `gateway_provider_real_world_vercel_deployment_uses_oidc_authentication`; `gateway_provider_real_world_local_development_uses_api_key_authentication`; `gateway_provider_real_world_explicit_api_key_override_wins_over_environment`; `create_gateway_authentication_handles_no_auth_at_all`; `create_gateway_authentication_handles_valid_oidc_invalid_api_key`; `create_gateway_authentication_handles_invalid_oidc_valid_api_key`; `create_gateway_authentication_handles_no_oidc_invalid_api_key`; `create_gateway_authentication_handles_no_oidc_valid_api_key`; `create_gateway_authentication_handles_valid_oidc_no_api_key`; `create_gateway_authentication_handles_valid_oidc_valid_api_key`; `create_gateway_authentication_handles_valid_oidc_valid_options_api_key`; `create_gateway_authentication_handles_invalid_oidc_invalid_api_key`; `gateway_provider_exposes_gateway_tools`; `perplexity_search_tool_factory_matches_gateway_provider_tool_contract`; `parallel_search_tool_factory_matches_gateway_provider_tool_contract`; `gateway_tools_create_provider_executed_perplexity_search_tool`; `gateway_tools_create_provider_executed_parallel_search_tool`; `gateway_fetch_metadata_fetches_available_models_from_correct_endpoint`; `gateway_fetch_metadata_handles_models_with_pricing_information`; `gateway_fetch_metadata_maps_cache_pricing_fields_to_sdk_names`; `gateway_fetch_metadata_handles_models_without_pricing_information`; `gateway_fetch_metadata_handles_mixed_models_with_and_without_pricing`; `gateway_fetch_metadata_handles_models_with_description`; `gateway_fetch_metadata_accepts_top_level_model_type_when_present`; `gateway_fetch_metadata_filters_unknown_model_type_values`; `gateway_fetch_metadata_preserves_all_known_model_type_values`; `gateway_fetch_metadata_keeps_known_models_and_filters_unknown_from_mixed_response`; `gateway_fetch_metadata_passes_headers_correctly`; `gateway_fetch_metadata_handles_api_errors`; `gateway_fetch_metadata_converts_api_call_errors_to_gateway_errors`; `gateway_fetch_metadata_handles_malformed_json_error_responses`; `gateway_fetch_metadata_handles_malformed_response_data`; `gateway_fetch_metadata_rejects_models_with_invalid_pricing_format`; `gateway_fetch_metadata_does_not_double_wrap_existing_gateway_errors`; `gateway_fetch_metadata_handles_rate_limit_server_errors`; `gateway_fetch_metadata_handles_internal_server_errors`; `gateway_fetch_metadata_preserves_error_cause_chain`; `gateway_fetch_metadata_uses_custom_fetch_function_when_provided`; `gateway_fetch_metadata_handles_empty_response`; `gateway_fetch_metadata_fetches_credits_from_correct_endpoint`; `gateway_fetch_metadata_passes_headers_correctly_to_credits_endpoint`; `gateway_fetch_metadata_handles_api_errors_for_credits_endpoint`; `gateway_fetch_metadata_handles_rate_limit_errors_for_credits_endpoint`; `gateway_fetch_metadata_handles_internal_server_errors_for_credits_endpoint`; `gateway_fetch_metadata_handles_malformed_credits_response`; `gateway_fetch_metadata_uses_custom_fetch_function_for_credits`; `gateway_fetch_metadata_converts_credits_api_call_errors_to_gateway_errors`; `gateway_fetch_metadata_handles_credits_malformed_json_error_responses`; `gateway_fetch_metadata_does_not_double_wrap_existing_credit_gateway_errors`; `gateway_fetch_metadata_preserves_credits_error_cause_chain`; `gateway_fetch_metadata_handles_empty_credits_response`; `gateway_provider_creates_embedding_model_aliases`; `gateway_provider_creates_image_model_aliases`; `gateway_provider_creates_reranking_model_aliases`; `gateway_provider_creates_video_model_aliases`; `gateway_provider_implements_provider_traits`; `gateway_provider_fetches_available_models_metadata`; `gateway_provider_caches_available_models_until_refresh`; `gateway_provider_refreshes_available_models_after_refresh_interval`; `gateway_provider_uses_default_metadata_cache_refresh_interval`; `gateway_provider_refreshes_available_models_when_cache_disabled`; `gateway_provider_fetches_credits_from_gateway_origin`; `gateway_provider_get_credits_includes_upstream_headers`; `gateway_provider_get_credits_surfaces_endpoint_errors`; `gateway_provider_get_credits_fetches_successfully`; `gateway_provider_get_credits_handles_authentication_errors`; `gateway_provider_get_credits_uses_custom_base_url`; `gateway_provider_get_credits_uses_oidc_authentication_headers`; `gateway_provider_get_credits_is_available_on_provider_interface`; `gateway_provider_account_methods_use_default_gateway_urls`; `gateway_provider_fetches_spend_report_with_query_params`; `gateway_provider_get_spend_report_fetches_successfully`; `gateway_provider_get_spend_report_passes_params_through`; `gateway_provider_get_spend_report_uses_custom_base_url`; `gateway_provider_get_spend_report_uses_custom_transport`; `gateway_provider_get_spend_report_is_available_on_provider_interface`; `default_gateway_export_get_spend_report_is_available`; `gateway_provider_get_spend_report_surfaces_endpoint_errors`; `gateway_provider_fetches_generation_info_and_unwraps_data`; `gateway_provider_metadata_surfaces_api_errors`; `gateway_provider_metadata_fetch_errors_convert_to_gateway_errors`; `gateway_provider_metadata_gateway_errors_are_not_double_wrapped`; `gateway_provider_account_apis_surface_malformed_json_error_responses`; `gateway_model_maps_gateway_error_to_error_finish_reason`; ignored `live_gateway_openai_generate_text`; ignored `live_gateway_openai_generate_object`; ignored `live_gateway_openai_stream_text`; ignored `live_gateway_openai_stream_object`; ignored `live_gateway_openai_embed`; ignored `live_gateway_openai_generate_image`; ignored `live_gateway_rerank`; ignored `live_gateway_generate_video`; ignored `live_gateway_available_models` | Gateway provider implementation, Gateway OpenAI-compatible/Responses provider factory implementation, error types/classification, portable `gateway-error-types`, `parse-auth-method`, `create-gateway-error`, `extract-api-call-response`, and `as-gateway-error` edge-case mappings, account metadata APIs, model request/response mappers, and provider-executed Parallel Search/Perplexity Search tools now live in the matching `ai-sdk-gateway` crate. The root crate retains compatibility re-export shims plus high-level SDK integration tests for those surfaces. Native AI SDK Gateway language model generation, createGateway language model configuration including OIDC fallback when no API key is configured and language-model arbitrary/non-existent id construction, createGateway embedding/image/video/reranking model factories, image/video header/transport/observability reuse, reranking alias, metadata fetch/cache/default-base/error routing, default provider image/video construction, observability header resolution, API-key precedence, and portable auth scenario/environment edge-case coverage, provider-v4 generated content parsing for text/reasoning/source/file/tool-result/custom parts, high-level generated/streamed content-part mapping, high-level `generate_text`, `generate_object`, `stream_text`, and `stream_object` local tool-loop/object output slices, streaming, language prompt file byte encoding, typed Gateway provider options for routing/BYOK/compliance/quota/timeouts with an upstream-minimum validation helper for `providerTimeouts.byok`, exact language-model raw-chunk filtering, response-metadata timestamp parsing, provider-option passthrough, transport-failure error mapping, and cause-message metadata, language-model abort-signal forwarding to prepared provider API requests, provider-v4 trait lookups for language/embedding/image plus optional reranking/video models, embedding generation, image generation request/response/warnings/usage/provider-metadata parity, reranking, video generation, image/video provider metadata edges, API-key/OIDC auth resolution, Vercel observability headers, available-model metadata discovery with refresh cache expiry, default Gateway metadata/account routing, credit balance success, authentication error handling, metadata and credits endpoint cause preservation, custom-base, OIDC-header, and provider-interface credit cases, credit request headers, spend report success, parameter forwarding, custom-base, custom-transport, provider-interface, and default-export spend report cases, generation info, credit/spend endpoint error propagation, and malformed account API error handling slices now run from `crates/ai-sdk-gateway`. Upstream mocked `getVercelOidcToken` rejection-only cases and `GatewayAuthenticationError` thrown-instance identity checks are JavaScript runtime/mock-specific and documented as non-portable for Rust, which reads the configured token source directly and returns typed transport errors instead of thrown JS class instances. The current upstream Gateway package test corpus is fully mapped: 372 portable upstream cases are represented by the 380-test `ai-sdk-gateway` crate inventory, with JavaScript request-context and class-instance identity cases documented as non-portable. |
-| `packages/openai` (`@ai-sdk/openai`) | provider package | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/openai_compatible.rs` | `openai_provider_creates_chat_model_with_headers_and_base_url`; `openai_provider_language_model_uses_responses_endpoint`; `open_responses_provider_prepares_openai_hosted_tools`; `open_responses_provider_adds_hosted_tool_include_options`; `open_responses_provider_maps_openai_hosted_tool_outputs`; `open_responses_provider_maps_additional_response_tool_items`; `open_responses_provider_maps_text_sources_and_compaction_metadata`; `open_responses_provider_streams_text_sources_reasoning_and_compaction_metadata`; `open_responses_provider_generates_phase_fixture_metadata`; `open_responses_provider_streams_phase_fixture_metadata`; `open_responses_provider_streams_hosted_tool_outputs`; `open_responses_provider_maps_web_search_api_sources`; `open_responses_provider_maps_web_search_missing_action`; `open_responses_provider_streams_web_search_action_query`; `open_responses_provider_streams_web_search_missing_action`; `open_responses_provider_maps_openai_numeric_error_code`; `open_responses_provider_streams_openai_error_event_without_synthetic_message`; `open_responses_provider_streams_additional_tool_items`; `open_responses_provider_streams_tool_input_delta_refinements`; `open_responses_provider_generates_apply_patch_create_file_fixture_request_body`; `open_responses_provider_generates_apply_patch_create_file_fixture_content`; `open_responses_provider_streams_apply_patch_create_file_fixture`; `open_responses_provider_streams_apply_patch_delete_file_fixture`; `open_responses_provider_maps_openai_responses_provider_options_to_request_body`; `open_responses_provider_streams_context_management_options`; `open_responses_provider_warns_for_conversation_with_previous_response_id`; `open_responses_provider_maps_openai_passthrough_option_edges`; `open_responses_provider_falls_back_to_openai_options_for_azure_requests`; `open_responses_provider_prefers_azure_options_over_openai_fallback`; `open_responses_provider_uses_azure_metadata_key_for_text_result`; `open_responses_provider_uses_azure_metadata_key_for_function_call_content`; `open_responses_provider_streams_azure_metadata_key_for_reasoning_and_finish`; `open_responses_provider_adds_encrypted_reasoning_include_for_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_non_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_store_true`; `open_responses_provider_allows_force_reasoning_for_unrecognized_model_ids`; `open_responses_provider_sends_xhigh_reasoning_effort_for_codex_max_model`; `open_responses_provider_warns_for_reasoning_effort_on_non_reasoning_models`; `open_responses_provider_applies_openai_model_capability_rules`; `open_responses_provider_validates_openai_service_tier_model_capabilities`; `open_responses_provider_maps_openai_system_message_modes`; `open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false`; `open_responses_provider_reconstructs_client_tool_search_output_with_store_false`; `open_responses_provider_warns_for_unstored_hosted_tool_results`; `open_responses_provider_reconstructs_local_shell_history_with_store_false`; `open_responses_provider_reconstructs_shell_history_with_store_false`; `open_responses_provider_reconstructs_stored_assistant_shell_outputs`; `open_responses_provider_reconstructs_apply_patch_history_with_store_false`; `open_responses_provider_reconstructs_stored_apply_patch_outputs`; `open_responses_provider_reconstructs_custom_tool_calls`; `open_responses_provider_reconstructs_custom_tool_outputs`; `open_responses_provider_converts_tool_result_file_content_outputs`; `openai_provider_creates_embedding_model_aliases`; `openai_provider_creates_completion_and_image_models`; `openai_provider_uses_default_base_url_name_override_and_provider_trait`; `openai_provider_settings_serde_accepts_upstream_base_url_name` | Initial provider foundation mirrors upstream `createOpenAI` settings for default/custom base URL, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, organization/project/custom headers, provider name override, OpenAI user-agent suffix, `openai(...)`/`languageModel`/`responses` over the Responses endpoint, OpenAI Responses hosted/provider-defined tool request preparation with automatic `include` additions for hosted web-search sources and code-interpreter outputs, OpenAI Responses provider-option request-key normalization including `instructions`, multi-value `include`, `user`, `conversation`, `metadata`, `store`, `truncation`, numeric `logprobs`, streaming `contextManagement` compaction forwarding, conversation/previous-response conflict warnings, Azure fallback to `providerOptions.openai` when `providerOptions.azure` is absent with Azure metadata retained and Azure-specific options taking precedence, Azure provider-metadata key coverage for non-streaming text results, non-streaming function calls, plus streaming reasoning and finish events, OpenAI Responses error data mapping for numeric error codes plus stream error-event finish reasons, OpenAI Responses model capability rules for `forceReasoning`, Codex Max `xhigh` reasoning effort, and reasoning-model temperature/topP stripping, `reasoningEffort`/`reasoningSummary` rejection on non-reasoning models, dedicated upstream non-reasoning model matrix coverage, dedicated `store: false`/`store: true` encrypted reasoning include request tests, service-tier support validation, and OpenAI system-message request shaping including reasoning-model `developer` role defaults plus `systemMessageMode` overrides/removal warnings, non-streaming Responses output mapping for web search including API-typed sources and missing-action resilience, file search, code interpreter, image generation, tool search, local/shell calls and outputs, apply-patch calls, MCP calls and approval requests, computer calls, custom tool calls, text/reasoning provider metadata including phase, annotation sources, compaction custom content, streaming text/source/reasoning/phase/compaction metadata edges, streaming hosted web-search/file-search/code-interpreter/image-generation tool calls and results including API-typed sources and missing-action resilience, streaming custom/function tool input deltas, streamed tool item provider metadata (`itemId`/`namespace`), code-interpreter code deltas, apply-patch diff deltas, image-generation preliminary partial-image results, streaming custom/tool-search/local-shell/shell/apply-patch/MCP/computer-use item mapping, prompt-history reconstruction for server/client `tool_search`, local-shell, shell, apply-patch, and custom provider tool calls/outputs, stored assistant shell-output and apply-patch output reconstruction, tool-result image-detail provider option forwarding, hosted-result warning/skip behavior for unsupported provider-executed tools when not stored, and chat/completion/embedding/image model aliases over the existing OpenAI-compatible transport. Files, skills, speech, transcription, broader OpenAI-specific image details, full Responses streaming/tool matrix, and provider-specific error mappings outside Responses remain unported. |
+| `packages/openai` (`@ai-sdk/openai`) | provider package | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/openai_compatible.rs` | `openai_provider_creates_chat_model_with_headers_and_base_url`; `openai_provider_language_model_uses_responses_endpoint`; `open_responses_provider_prepares_openai_hosted_tools`; `open_responses_provider_adds_hosted_tool_include_options`; `open_responses_provider_maps_openai_hosted_tool_outputs`; `open_responses_provider_maps_additional_response_tool_items`; `open_responses_provider_maps_text_sources_and_compaction_metadata`; `open_responses_provider_streams_text_sources_reasoning_and_compaction_metadata`; `open_responses_provider_generates_phase_fixture_metadata`; `open_responses_provider_streams_phase_fixture_metadata`; `open_responses_provider_streams_hosted_tool_outputs`; `open_responses_provider_maps_web_search_api_sources`; `open_responses_provider_maps_web_search_missing_action`; `open_responses_provider_streams_web_search_action_query`; `open_responses_provider_streams_web_search_missing_action`; `open_responses_provider_maps_openai_numeric_error_code`; `open_responses_provider_streams_openai_error_event_without_synthetic_message`; `open_responses_provider_streams_additional_tool_items`; `open_responses_provider_streams_tool_input_delta_refinements`; `open_responses_provider_generates_apply_patch_create_file_fixture_request_body`; `open_responses_provider_generates_apply_patch_create_file_fixture_content`; `open_responses_provider_streams_apply_patch_create_file_fixture`; `open_responses_provider_streams_apply_patch_delete_file_fixture`; `open_responses_provider_maps_openai_responses_provider_options_to_request_body`; `open_responses_provider_streams_context_management_options`; `open_responses_provider_warns_for_conversation_with_previous_response_id`; `open_responses_provider_maps_openai_passthrough_option_edges`; `open_responses_provider_falls_back_to_openai_options_for_azure_requests`; `open_responses_provider_prefers_azure_options_over_openai_fallback`; `open_responses_provider_uses_azure_metadata_key_for_text_result`; `open_responses_provider_uses_azure_metadata_key_for_function_call_content`; `open_responses_provider_streams_azure_metadata_key_for_reasoning_and_finish`; `open_responses_provider_adds_encrypted_reasoning_include_for_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_non_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_store_true`; `open_responses_provider_allows_force_reasoning_for_unrecognized_model_ids`; `open_responses_provider_sends_xhigh_reasoning_effort_for_codex_max_model`; `open_responses_provider_warns_for_reasoning_effort_on_non_reasoning_models`; `open_responses_provider_applies_openai_model_capability_rules`; `open_responses_provider_validates_openai_service_tier_model_capabilities`; `open_responses_provider_maps_openai_system_message_modes`; `open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false`; `open_responses_provider_reconstructs_client_tool_search_output_with_store_false`; `open_responses_provider_warns_for_unstored_hosted_tool_results`; `open_responses_provider_reconstructs_local_shell_history_with_store_false`; `open_responses_provider_reconstructs_shell_history_with_store_false`; `open_responses_provider_reconstructs_stored_assistant_shell_outputs`; `open_responses_provider_reconstructs_apply_patch_history_with_store_false`; `open_responses_provider_reconstructs_stored_apply_patch_outputs`; `open_responses_provider_reconstructs_custom_tool_calls`; `open_responses_provider_reconstructs_custom_tool_outputs`; `open_responses_provider_converts_tool_result_file_content_outputs`; `openai_provider_creates_embedding_model_aliases`; `openai_provider_creates_completion_and_image_models`; `openai_completion_should_extract_text_response`; `openai_completion_should_extract_usage`; `openai_completion_should_send_request_body`; `openai_completion_should_send_additional_response_information`; `openai_completion_should_extract_logprobs`; `openai_completion_should_extract_finish_reason`; `openai_completion_should_support_unknown_finish_reason`; `openai_completion_should_expose_the_raw_response_headers`; `openai_completion_should_pass_the_model_and_the_prompt`; `openai_completion_should_pass_headers`; `openai_completion_stream_should_stream_text_deltas`; `openai_completion_stream_should_handle_error_stream_parts`; `openai_completion_stream_should_handle_unparsable_stream_parts`; `openai_completion_stream_should_send_request_body`; `openai_completion_stream_should_expose_the_raw_response_headers`; `openai_completion_stream_should_pass_the_model_and_the_prompt`; `openai_completion_stream_should_pass_headers`; `openai_embedding_should_extract_embedding`; `openai_embedding_should_expose_the_raw_response_headers`; `openai_embedding_should_expose_the_raw_response_body`; `openai_embedding_should_extract_usage`; `openai_embedding_should_pass_the_model_and_the_values`; `openai_embedding_should_pass_the_dimensions_setting`; `openai_embedding_should_pass_headers`; `openai_provider_uses_default_base_url_name_override_and_provider_trait`; `openai_provider_settings_serde_accepts_upstream_base_url_name`; `openai_provider_uses_the_default_openai_base_url_when_not_provided`; `openai_provider_uses_openai_base_url_when_set`; `openai_provider_prefers_the_base_url_option_over_openai_base_url`; `openai_files_should_send_correct_multipart_request_with_purpose`; `openai_files_should_return_provider_reference_with_openai_key`; `openai_files_should_return_provider_metadata_from_response`; `openai_files_should_default_purpose_to_assistants_when_not_provided`; `openai_files_should_pass_expires_after_when_provided`; `openai_files_should_pass_auth_headers`; `openai_files_should_handle_base64_string_data`; `openai_files_should_set_specification_version_and_provider`; `openai_skills_should_send_files_as_multipart_form_data`; `openai_skills_should_pass_authorization_headers`; `openai_skills_should_map_response_to_provider_reference`; `openai_skills_should_emit_unsupported_warning_for_display_title`; `openai_skills_should_return_no_warnings_when_display_title_is_not_set`; `openai_skills_should_handle_uint8array_file_content`; `openai_skills_should_set_specification_version_and_provider`; `openai_speech_should_pass_the_model_and_text`; `openai_speech_should_pass_headers`; `openai_speech_should_pass_options`; `openai_speech_should_return_audio_data_with_correct_content_type`; `openai_speech_should_include_response_data_with_timestamp_model_id_and_headers`; `openai_speech_should_use_real_date_when_no_custom_date_provider_is_specified`; `openai_speech_should_handle_different_audio_formats`; `openai_speech_should_include_warnings_if_any_are_generated`; `openai_speech_should_set_specification_version_and_provider`; `openai_transcription_should_pass_the_model`; `openai_transcription_should_pass_headers`; `openai_transcription_should_extract_the_transcription_text`; `openai_transcription_should_include_response_data_with_timestamp_model_id_and_headers`; `openai_transcription_should_use_real_date_when_no_custom_date_provider_is_specified`; `openai_transcription_should_pass_response_format_when_timestamp_granularities_is_set`; `openai_transcription_should_not_set_verbose_json_for_gpt_4o_transcribe`; `openai_transcription_should_pass_timestamp_granularities_when_specified`; `openai_transcription_should_work_when_no_words_language_or_duration_are_returned`; `openai_transcription_should_parse_segments_when_provided_in_response`; `openai_transcription_should_fallback_to_words_when_segments_are_not_available`; `openai_transcription_should_handle_empty_segments_array`; `openai_transcription_should_handle_segments_with_missing_optional_fields`; `openai_transcription_should_set_specification_version_and_provider`; `openai_image_should_pass_the_model_and_the_settings`; `openai_image_should_map_provider_options_to_snake_case_for_images_generations`; `openai_image_should_pass_headers`; `openai_image_should_extract_the_generated_images`; `openai_image_should_return_warnings_for_unsupported_settings`; `openai_image_should_respect_max_images_per_call_setting`; `openai_image_should_include_response_data_with_timestamp_model_id_and_headers`; `openai_image_should_use_real_date_when_no_custom_date_provider_is_specified`; `openai_image_should_not_include_response_format_for_gpt_image_1`; `openai_image_should_not_include_response_format_for_gpt_image_2`; `openai_image_should_not_include_response_format_for_chatgpt_image_latest`; `openai_image_should_not_include_response_format_for_date_suffixed_gpt_image_model_ids`; `openai_image_should_handle_null_revised_prompt_responses`; `openai_image_should_include_response_format_for_dall_e_3`; `openai_image_should_return_image_meta_data`; `openai_image_should_map_openai_usage_to_usage`; `openai_image_should_distribute_input_token_details_evenly_across_images`; `openai_image_should_call_images_edits_endpoint_when_files_are_provided`; `openai_image_should_send_image_as_form_data_with_uint8array_input`; `openai_image_should_send_image_as_form_data_with_base64_string_input`; `openai_image_should_send_multiple_images_as_form_data_array`; `openai_image_should_pass_provider_options_in_form_data`; `openai_image_should_map_provider_options_to_snake_case_for_images_edits`; `openai_image_should_extract_the_edited_images_from_response`; `openai_image_should_include_response_metadata_for_edited_images`; `openai_image_should_return_warnings_for_unsupported_settings_in_edit_mode`; `openai_image_should_return_usage_information_for_edited_images` | Initial provider foundation mirrors upstream `createOpenAI` settings for default/custom base URL, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, organization/project/custom headers, provider name override, OpenAI user-agent suffix, `openai(...)`/`languageModel`/`responses` over the Responses endpoint, OpenAI Responses hosted/provider-defined tool request preparation with automatic `include` additions for hosted web-search sources and code-interpreter outputs, OpenAI Responses provider-option request-key normalization including `instructions`, multi-value `include`, `user`, `conversation`, `metadata`, `store`, `truncation`, numeric `logprobs`, streaming `contextManagement` compaction forwarding, conversation/previous-response conflict warnings, Azure fallback to `providerOptions.openai` when `providerOptions.azure` is absent with Azure metadata retained and Azure-specific options taking precedence, Azure provider-metadata key coverage for non-streaming text results, non-streaming function calls, plus streaming reasoning and finish events, OpenAI Responses error data mapping for numeric error codes plus stream error-event finish reasons, OpenAI Responses model capability rules for `forceReasoning`, Codex Max `xhigh` reasoning effort, and reasoning-model temperature/topP stripping, `reasoningEffort`/`reasoningSummary` rejection on non-reasoning models, dedicated upstream non-reasoning model matrix coverage, dedicated `store: false`/`store: true` encrypted reasoning include request tests, service-tier support validation, and OpenAI system-message request shaping including reasoning-model `developer` role defaults plus `systemMessageMode` overrides/removal warnings, non-streaming Responses output mapping for web search including API-typed sources and missing-action resilience, file search, code interpreter, image generation, tool search, local/shell calls and outputs, apply-patch calls, MCP calls and approval requests, computer calls, custom tool calls, text/reasoning provider metadata including phase, annotation sources, compaction custom content, streaming text/source/reasoning/phase/compaction metadata edges, streaming hosted web-search/file-search/code-interpreter/image-generation tool calls and results including API-typed sources and missing-action resilience, streaming custom/function tool input deltas, streamed tool item provider metadata (`itemId`/`namespace`), code-interpreter code deltas, apply-patch diff deltas, image-generation preliminary partial-image results, streaming custom/tool-search/local-shell/shell/apply-patch/MCP/computer-use item mapping, prompt-history reconstruction for server/client `tool_search`, local-shell, shell, apply-patch, and custom provider tool calls/outputs, stored assistant shell-output and apply-patch output reconstruction, tool-result image-detail provider option forwarding, hosted-result warning/skip behavior for unsupported provider-executed tools when not stored, chat/completion/embedding aliases over the existing OpenAI-compatible transport, OpenAI completion `/completions` non-stream and streaming request/result/logprobs/header parity, plus a dedicated OpenAI image model for `/images/generations` and `/images/edits`, and Files plus Skills upload multipart request/result parity, plus Speech `/audio/speech` JSON request/binary response parity and Transcription `/audio/transcriptions` multipart request/JSON response parity, plus OpenAI image generation/edit request shaping, max image limits, response-format defaults, warnings, response metadata, provider metadata, and usage-token distribution parity. Full Responses streaming/tool matrix, and provider-specific error mappings outside Responses remain unported. |
 | `packages/openai-compatible` (`@ai-sdk/openai-compatible`) | provider base package | verified | `crates/ai-sdk-openai-compatible`; root facade shim in `src/openai_compatible.rs`; Vercel AI Gateway integration through `crates/ai-sdk-gateway/src/vercel_ai_gateway.rs` with root tests in `src/vercel_ai_gateway.rs` | `openai_compatible_provider_configures_headers_urls_and_model_aliases`; `openai_compatible_provider_lists_models`; `openai_compatible_provider_retrieves_model_by_id`; `openai_compatible_chat_generates_text_through_generate_text`; `openai_compatible_chat_streams_text_through_stream_text`; `openai_compatible_chat_streams_reasoning_raw_chunks_and_parse_errors`; `openai_compatible_chat_passes_tools_tool_choice_and_provider_options`; `openai_compatible_chat_converts_multimodal_user_messages`; `openai_compatible_chat_rejects_unsupported_file_messages_before_transport`; `openai_compatible_chat_converts_assistant_tool_history`; `openai_compatible_chat_runs_generate_text_tool_loop_end_to_end`; `openai_compatible_chat_runs_stream_text_tool_loop_end_to_end`; `openai_compatible_chat_maps_tool_calls_from_generate`; `openai_compatible_chat_streams_tool_calls`; `openai_compatible_embedding_model_embeds_through_embed_many`; `openai_compatible_embedding_model_passes_options_and_errors`; `openai_compatible_completion_generates_text_through_generate_text`; `openai_compatible_completion_streams_text_through_stream_text`; `openai_compatible_completion_passes_options_warnings_and_errors`; `openai_compatible_image_model_generates_through_generate_image`; `openai_compatible_image_model_edits_with_files_and_mask`; `openai_compatible_image_model_passes_options_warnings_and_errors`; `to_camel_case_upstream_should_convert_hyphenated_names_to_camel_case`; `to_camel_case_upstream_should_convert_underscored_names_to_camel_case`; `to_camel_case_upstream_should_handle_multiple_separators`; `to_camel_case_upstream_should_return_same_string_when_already_camel_case`; `to_camel_case_upstream_should_return_same_string_when_no_separators`; `to_camel_case_upstream_should_handle_empty_string`; `resolve_provider_options_key_upstream_should_return_camel_case_key_when_camel_case_options_present`; `resolve_provider_options_key_upstream_should_return_raw_key_when_only_raw_options_present`; `resolve_provider_options_key_upstream_should_return_camel_case_key_when_both_are_present`; `resolve_provider_options_key_upstream_should_return_raw_key_when_no_options_are_present`; `resolve_provider_options_key_upstream_should_return_raw_key_when_provider_options_is_undefined`; `resolve_provider_options_key_upstream_should_return_raw_key_when_name_has_no_separators`; `deprecated_provider_options_key_upstream_should_push_warning_when_raw_key_is_used_and_differs`; `deprecated_provider_options_key_upstream_should_not_warn_when_only_camel_case_key_is_used`; `deprecated_provider_options_key_upstream_should_not_warn_when_raw_name_is_already_camel_case`; `deprecated_provider_options_key_upstream_should_not_warn_when_raw_key_is_not_present`; `deprecated_provider_options_key_upstream_should_not_warn_when_provider_options_is_undefined`; `openai_compatible_chat_maps_response_formats_and_warnings`; `openai_compatible_chat_injects_json_instruction_when_response_format_body_is_disabled`; `vercel_ai_gateway_openai_compatible_generates_text_through_openai_chat`; `vercel_ai_gateway_openai_compatible_generates_object_through_openai_chat`; `vercel_ai_gateway_openai_compatible_streams_object_through_openai_chat`; `vercel_ai_gateway_openai_compatible_runs_generate_text_tool_loop_end_to_end`; `vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat`; `vercel_ai_gateway_openai_compatible_runs_stream_text_tool_loop_end_to_end`; `vercel_ai_gateway_openai_compatible_embeds_through_openai_embeddings`; `vercel_ai_gateway_openai_compatible_generates_images_through_openai_images_endpoint`; `vercel_ai_gateway_openai_compatible_maps_chat_image_outputs_through_generate_text`; `vercel_ai_gateway_openai_compatible_streams_chat_image_outputs_through_stream_text`; `vercel_ai_gateway_openai_compatible_implements_provider_trait`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text_tool_loop`; ignored `live_vercel_ai_gateway_openai_compatible_stream_text`; ignored `live_vercel_ai_gateway_openai_compatible_generate_object`; ignored `live_vercel_ai_gateway_openai_compatible_stream_object`; ignored `live_vercel_ai_gateway_openai_compatible_embed`; ignored `live_vercel_ai_gateway_openai_compatible_generate_image`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text_with_image_output` | Initial provider foundation, model factory aliases, request headers/URLs/query params, non-streaming chat `/chat/completions`, chat provider options (`user`, `reasoningEffort`, `textVerbosity`, `strictJsonSchema`, custom provider body passthrough), OpenAI-compatible prompt conversion for multimodal user content, assistant reasoning/tool-call history, tool-result messages, provider metadata, Google thought signatures, high-level `generate_text`, `generate_object`, `stream_object`, and `stream_text` tool-loop continuation over OpenAI-compatible chat, function-tool/tool-choice request shaping, non-streaming tool-call response mapping, chat SSE streaming for text/reasoning/raw chunks/usage/tool calls, JSON instruction injection for providers that reject the OpenAI `response_format` body field, embedding `/embeddings` calls, completion `/completions` generate/stream calls, image `/images/generations` plus `/images/edits`, and exact upstream `to-camel-case.test.ts` raw/camel provider-option key normalization tests for chat/completion/embedding/image provider-option paths exist. Vercel AI Gateway's OpenAI-compatible base URL is covered by text, local tool-loop continuation, structured object parsing, streamed object parsing, streaming text with local tool-loop continuation, embedding slices, image generation over `/images/generations`, chat image-output mapping from `message.images` and `delta.images` into generated files, and provider-v4 trait integration for `openai/...` and image-capable Gateway model ids with optional `.env.local` live validation for text, tools, objects, streaming objects, streaming text, embeddings, and images. All 8 current upstream `packages/openai-compatible` test files are enumerated in verified detailed rows below, covering 230 portable upstream cases with named Rust counterparts and additional Rust integration/live Gateway coverage on top. The OpenAI-compatible provider implementation and direct provider tests live in the matching `ai-sdk-openai-compatible` crate, with the root module reduced to a compatibility re-export shim plus existing root API integration tests. |
 | `packages/open-responses` (`@ai-sdk/open-responses`) | provider package | in-progress | `crates/ai-sdk-open-responses`; root facade shim in `src/open_responses.rs` | `open_responses_provider_generates_text_with_request_and_response_metadata`; `open_responses_provider_converts_user_file_prompt_parts`; `open_responses_provider_sends_pdf_input_file_request_body`; `open_responses_provider_produces_pdf_input_file_content`; `open_responses_provider_extracts_pdf_input_file_usage`; `open_responses_provider_streams_pdf_input_file_fixture`; `open_responses_provider_sends_lmstudio_basic_request_body`; `open_responses_provider_produces_lmstudio_basic_content`; `open_responses_provider_extracts_lmstudio_basic_usage`; `open_responses_provider_streams_lmstudio_basic_content`; `open_responses_provider_streams_text_with_request_and_response_metadata`; `open_responses_provider_generates_object_with_json_schema_response_format`; `open_responses_provider_prepares_openai_hosted_tools`; `open_responses_provider_adds_hosted_tool_include_options`; `open_responses_provider_maps_openai_hosted_tool_outputs`; `open_responses_provider_maps_additional_response_tool_items`; `open_responses_provider_maps_text_sources_and_compaction_metadata`; `open_responses_provider_streams_text_sources_reasoning_and_compaction_metadata`; `open_responses_provider_generates_phase_fixture_metadata`; `open_responses_provider_streams_phase_fixture_metadata`; `open_responses_provider_streams_hosted_tool_outputs`; `open_responses_provider_maps_web_search_api_sources`; `open_responses_provider_maps_web_search_missing_action`; `open_responses_provider_streams_web_search_action_query`; `open_responses_provider_streams_web_search_missing_action`; `open_responses_provider_maps_openai_numeric_error_code`; `open_responses_provider_streams_openai_error_event_without_synthetic_message`; `open_responses_provider_streams_additional_tool_items`; `open_responses_provider_streams_tool_input_delta_refinements`; `open_responses_provider_generates_apply_patch_create_file_fixture_request_body`; `open_responses_provider_generates_apply_patch_create_file_fixture_content`; `open_responses_provider_streams_apply_patch_create_file_fixture`; `open_responses_provider_streams_apply_patch_delete_file_fixture`; `open_responses_provider_maps_openai_responses_provider_options_to_request_body`; `open_responses_provider_streams_context_management_options`; `open_responses_provider_warns_for_conversation_with_previous_response_id`; `open_responses_provider_maps_openai_passthrough_option_edges`; `open_responses_provider_falls_back_to_openai_options_for_azure_requests`; `open_responses_provider_prefers_azure_options_over_openai_fallback`; `open_responses_provider_uses_azure_metadata_key_for_text_result`; `open_responses_provider_uses_azure_metadata_key_for_function_call_content`; `open_responses_provider_streams_azure_metadata_key_for_reasoning_and_finish`; `open_responses_provider_adds_encrypted_reasoning_include_for_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_non_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_store_true`; `open_responses_provider_allows_force_reasoning_for_unrecognized_model_ids`; `open_responses_provider_sends_xhigh_reasoning_effort_for_codex_max_model`; `open_responses_provider_warns_for_reasoning_effort_on_non_reasoning_models`; `open_responses_provider_applies_openai_model_capability_rules`; `open_responses_provider_validates_openai_service_tier_model_capabilities`; `open_responses_provider_sends_instructions_from_system_message`; `open_responses_provider_joins_multiple_system_messages_with_newlines`; `open_responses_provider_converts_openai_message_chain_with_system_input_items`; `open_responses_provider_maps_openai_system_message_modes`; `open_responses_provider_skips_conversation_history_items`; `open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false`; `open_responses_provider_reconstructs_client_tool_search_output_with_store_false`; `open_responses_provider_warns_for_unstored_hosted_tool_results`; `open_responses_provider_reconstructs_local_shell_history_with_store_false`; `open_responses_provider_reconstructs_shell_history_with_store_false`; `open_responses_provider_reconstructs_stored_assistant_shell_outputs`; `open_responses_provider_reconstructs_apply_patch_history_with_store_false`; `open_responses_provider_reconstructs_stored_apply_patch_outputs`; `open_responses_provider_reconstructs_custom_tool_calls`; `open_responses_provider_reconstructs_custom_tool_outputs`; `open_responses_provider_converts_standard_tool_result_outputs`; `open_responses_provider_sends_lmstudio_request_parameters_body`; `open_responses_provider_sends_lmstudio_tools_request_body`; `open_responses_provider_sends_tool_choice_auto`; `open_responses_provider_sends_tool_choice_none`; `open_responses_provider_sends_tool_choice_required`; `open_responses_provider_sends_tool_choice_specific_tool`; `open_responses_provider_maps_allowed_tools_required_mode`; `open_responses_provider_maps_function_call_response_and_usage`; `open_responses_provider_resolves_provider_reference_file_parts`; `open_responses_provider_rejects_missing_provider_reference_file_part`; `open_responses_provider_converts_tool_result_file_content_outputs`; `open_responses_provider_maps_api_error_data_to_metadata_and_response`; `open_responses_provider_preserves_stream_error_event_data`; `open_responses_provider_runs_generate_text_tool_loop_end_to_end`; `open_responses_streams_function_call_argument_deltas`; `open_responses_provider_reports_unsupported_embedding_and_image`; `open_responses_provider_maps_top_level_reasoning_high_to_effort`; `open_responses_provider_maps_top_level_reasoning_minimal_to_low`; `open_responses_provider_maps_top_level_reasoning_none_to_none`; `open_responses_provider_passes_top_level_reasoning_xhigh_directly`; `open_responses_provider_omits_reasoning_when_not_specified`; `open_responses_provider_sends_detailed_reasoning_summary_from_provider_options`; `open_responses_provider_combines_top_level_reasoning_with_summary`; `open_responses_provider_sends_concise_reasoning_summary_from_provider_options`; `open_responses_provider_omits_reasoning_for_empty_provider_options`; additive `open_responses_provider_filters_non_reasoning_generic_provider_options`; `open_responses_finish_reason_undefined_with_tool_calls_maps_tool_calls`; `open_responses_finish_reason_null_with_tool_calls_maps_tool_calls`; `open_responses_finish_reason_undefined_without_tool_calls_maps_stop`; `open_responses_finish_reason_null_without_tool_calls_maps_stop`; `open_responses_finish_reason_max_output_tokens_maps_length`; `open_responses_finish_reason_content_filter_maps_content_filter`; `open_responses_finish_reason_unknown_with_tool_calls_maps_tool_calls`; `open_responses_finish_reason_unknown_without_tool_calls_maps_other`; additive `open_responses_finish_reason_maps_legacy_max_tokens_to_length`; `open_responses_provider_maps_upstream_multi_turn_tool_conversation_fixture`; `open_responses_provider_streams_mcp_approval_request_fixture_turn_1`; `open_responses_provider_streams_mcp_approval_denial_fixture_turn_2`; `open_responses_provider_streams_mcp_approval_retry_fixture_turn_3`; `open_responses_provider_streams_mcp_approval_result_fixture_turn_4`; `openai_provider_language_model_uses_responses_endpoint` | Initial Open Responses provider settings, provider id, generic system instructions plus OpenAI/Gateway system/developer/removal system-message modes, basic user/assistant/tool message-chain conversion, upstream multi-turn tool conversation request shaping, standard tool-result text/JSON/error/denied output conversion, LMStudio request parameters including presence/frequency penalties and JSON schema text-format mapping, generic LMStudio function tool request shaping, basic function tool-choice modes including `allowed_tools` required mode, non-streaming function-call response and usage-detail mapping, user-agent suffix, bearer/custom headers, non-streaming and SSE `/responses` request body for text, image, and file prompts including provider-reference image/PDF file ids with missing-provider errors plus upstream PDF input-file fixture response and stream deltas, LMStudio basic generation request-body, content, usage, and basic streaming fixture mapping, generic provider-options filtering plus OpenAI/Azure/Gateway body passthrough with OpenAI wrapper request-key normalization and request option edges for `instructions`, `include`, `user`, `conversation`, `metadata`, `store`, `truncation`, and `logprobs`, streaming `contextManagement` compaction forwarding, conversation/previous-response conflict warnings, Azure fallback to `providerOptions.openai` when `providerOptions.azure` is absent with Azure metadata retained and Azure-specific options taking precedence, Azure provider-metadata key coverage for non-streaming text results, non-streaming function calls, plus streaming reasoning and finish events, top-level/provider reasoning request option matrix, OpenAI/Azure/Gateway model capability rules for `forceReasoning`, Codex Max `xhigh` reasoning effort, and reasoning-model temperature/topP stripping, non-reasoning reasoning-option warnings with dedicated upstream non-reasoning model matrix coverage, dedicated `store: false`/`store: true` encrypted reasoning include request tests, and service-tier validation, JSON schema response-format request shaping, high-level object generation, function tool request shaping including OpenAI hosted/provider-defined tool request preparation, hosted web-search/code-interpreter automatic include options, and hosted tool-choice name mapping, `tool_choice`, tool-result `function_call_output` continuation, response text/reasoning/tool-call extraction, non-streaming provider-executed hosted tool-call/tool-result output mapping for web search including API-typed sources and missing-action resilience, file search, code interpreter, image generation, tool search, local/shell calls and outputs, apply-patch calls, MCP calls and approval requests, computer calls, custom tool calls, text/reasoning provider metadata including phase, annotation sources, compaction custom content, server/client `tool_search` prompt-history reconstruction for `store: false`, local-shell prompt-history reconstruction for `local_shell_call` and `local_shell_call_output`, shell prompt-history reconstruction for `shell_call` and `shell_call_output`, apply-patch prompt-history reconstruction for `apply_patch_call` and `apply_patch_call_output`, custom provider-tool prompt-history reconstruction for `custom_tool_call` and `custom_tool_call_output`, stored assistant shell-output and apply-patch output reconstruction, tool-result image-detail provider option forwarding, hosted-result warning/skip behavior for unsupported provider-executed tools when not stored, streamed function-call/custom-tool argument deltas, streamed function/custom/tool-search/local-shell/shell/apply-patch/MCP provider metadata (`itemId`/`namespace`), MCP approval request/denial/retry/approval streaming fixtures, streaming text/reasoning/source/phase metadata, streaming compaction custom content, streaming hosted web-search/file-search/code-interpreter/image-generation tool calls and results, web-search API-typed source and missing-action resilience, code-interpreter code deltas, and preliminary partial-image results, streaming apply-patch diff input deltas, streaming custom/tool-search/local-shell/shell/apply-patch/MCP/computer-use item mapping, raw chunks, parse/error stream parts with provider error payloads, usage/cached/reasoning token mapping, finish reason mapping, response metadata, API error metadata (`type`/`param`/string-or-numeric `code`/status/retryability) and SSE error event raw finish-reason preservation, unsupported embedding/image lookups, and completed function-call stream item mapping are represented. The Open Responses provider implementation and direct package-owned tests now live in the matching `ai-sdk-open-responses` crate. The root module is reduced to a compatibility re-export shim plus root high-level API integration tests for `generate_text`, `generate_object`, and `stream_text`. The remaining structured output/tools and broader Responses streaming matrices remain unported. |
 | `packages/anthropic` (`@ai-sdk/anthropic`) | provider package | not-started | none | none | Needs language model, files, cache control, prompt conversion, tool preparation, usage conversion, and error mapping. |
@@ -279,7 +285,7 @@ inventory.
 | `packages/voyage` (`@ai-sdk/voyage`) | provider package | in-progress | `src/voyage.rs` | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results`; `voyage_embedding_model_chunks_at_128_and_maps_api_error_to_metadata`; `voyage_provider_creates_reranking_model_with_object_warning_and_options`; `voyage_reranking_model_maps_api_error_to_metadata`; `voyage_provider_reports_unsupported_language_and_image_models`; `voyage_provider_uses_default_base_url_and_factory_alias`; `voyage_provider_implements_provider_traits`; `voyage_provider_settings_serde_accepts_upstream_base_url`; `voyage_api_key_prefers_explicit_then_env`; `voyage_embedding_direct_call_reports_too_many_values` | Initial provider foundation mirrors upstream `createVoyage` settings for default/custom base URL, `VOYAGE_API_KEY`, custom headers, Voyage user-agent suffix, `voyage()`/`create_voyage`, embedding/text-embedding aliases, reranking aliases, provider-v4 trait integration, `/embeddings` request options (`input_type`, `truncation`, `output_dimension`, `output_dtype`), 128-value chunking, response index sorting, `/rerank` request options (`top_k`, `return_documents`, `truncation`), object-document string conversion compatibility warnings, response headers/raw bodies, API error metadata from `detail`, and unsupported language/image lookups. Full zod-equivalent provider-option validation and live Voyage validation remain unported. |
 | `packages/mcp` (`@ai-sdk/mcp`) | protocol/client package | in-progress | `crates/ai-sdk-mcp` | `protocol_constants_match_upstream_mcp_package`; `json_rpc_message_shapes_match_mcp_transport_boundary`; `list_tools_result_is_serializable_cache_data`; `mcp_client_initializes_and_sends_initialized_notification`; `mcp_client_lists_calls_reads_resources_and_prompts`; `mcp_client_reports_capability_protocol_and_json_rpc_errors`; `mcp_client_handles_elicitation_request_messages`; `mcp_client_reports_elicitation_request_errors_to_server`; `mcp_client_invokes_uncaught_error_callback_for_transport_start_errors`; `mcp_client_invokes_uncaught_error_callback_for_elicitation_handler_errors`; `mcp_client_builds_executable_dynamic_tools_from_definitions`; `mcp_client_builds_schema_typed_tools_from_structured_content`; `mcp_client_schema_typed_tools_parse_text_content_fallback`; `mcp_client_schema_typed_tools_report_output_validation_errors`; `mcp_client_runs_authenticated_http_tools_with_output_schema_and_provider_metadata`; `mcp_http_transport_posts_json_and_cleans_up_session`; `mcp_http_transport_parses_sse_message_responses`; `mcp_http_transport_reopens_inbound_sse_after_accepted_post`; `mcp_http_transport_sends_last_event_id_when_resuming_inbound_sse`; `mcp_http_transport_retries_inbound_sse_open_failures`; `mcp_http_transport_retries_resumed_inbound_sse_after_accepted_post`; `mcp_http_transport_computes_inbound_sse_reconnect_backoff`; `mcp_http_transport_reports_max_inbound_sse_reconnect_attempts`; `mcp_http_transport_reports_invalid_inbound_sse_messages`; `mcp_http_transport_reports_http_errors_with_sse_hint`; `mcp_sse_transport_connects_to_endpoint_and_posts_messages`; `mcp_sse_transport_parses_post_sse_message_responses`; `mcp_sse_transport_rejects_endpoint_origin_mismatch`; `mcp_sse_transport_reports_http_errors_with_http_hint`; `mcp_sse_transport_reports_post_errors`; `stdio_environment_copies_custom_env_and_inherits_safe_defaults`; `stdio_message_framing_serializes_deserializes_and_buffers_lines`; `stdio_transport_errors_when_not_connected`; `stdio_transport_writes_message_and_reads_response_line`; `mcp_to_model_output_converts_text_images_and_unknown_content`; `mcp_to_model_output_falls_back_to_json_without_content_array`; `mcp_app_client_capabilities_match_upstream_extension_shape`; `mcp_app_tool_meta_reads_ui_and_legacy_resource_uris`; `mcp_app_tool_meta_rejects_invalid_resource_uri`; `split_mcp_app_tools_respects_model_and_app_visibility`; `mcp_app_resource_from_read_result_extracts_text_html_and_meta`; `mcp_app_resource_from_read_result_decodes_blob_html`; `read_mcp_app_resource_rejects_non_ui_uri`; `mcp_provider_metadata_includes_title_and_app_metadata`; `resource_url_from_server_url_removes_fragment_and_preserves_url_parts`; `resource_url_strip_slash_removes_only_pathless_trailing_slash`; `check_resource_allowed_matches_origin_and_path_boundaries`; `select_resource_url_uses_protected_metadata_when_allowed`; `select_resource_url_rejects_mismatched_protected_metadata`; `extract_resource_metadata_url_reads_bearer_www_authenticate_parameter`; `build_discovery_urls_matches_upstream_priority_order`; `oauth_metadata_safe_url_deserialization_rejects_dangerous_schemes`; `discover_oauth_protected_resource_metadata_uses_path_query_and_protocol_header`; `discover_oauth_protected_resource_metadata_falls_back_to_root_on_path_4xx`; `discover_oauth_protected_resource_metadata_does_not_fallback_for_explicit_metadata_url`; `discover_authorization_server_metadata_tries_urls_in_order`; `discover_authorization_server_metadata_validates_oidc_s256_support`; `discover_authorization_server_metadata_returns_none_when_all_endpoints_are_4xx`; `oauth_pkce_challenge_derives_s256_challenge_from_verifier`; `oauth_pkce_challenge_generates_random_url_safe_verifier`; `start_authorization_builds_pkce_resource_scope_state_and_prompt_params`; `start_authorization_can_generate_pkce_material`; `start_authorization_uses_metadata_endpoint_and_validates_capabilities`; `start_authorization_strips_pathless_resource_trailing_slash`; `parse_oauth_error_response_reads_standard_error_body`; `exchange_authorization_posts_code_verifier_client_secret_and_resource`; `exchange_authorization_uses_basic_auth_when_metadata_prefers_it`; `exchange_authorization_allows_custom_client_authentication_hook`; `exchange_authorization_validates_grant_type_and_token_response`; `refresh_authorization_posts_refresh_token_and_preserves_missing_replacement`; `refresh_authorization_reports_oauth_error_response`; `refresh_authorization_allows_custom_client_authentication_hook`; `register_client_posts_metadata_and_parses_full_information`; `register_client_uses_metadata_endpoint_and_requires_registration_support`; `auth_registers_client_and_redirects_when_tokens_are_missing`; `auth_exchanges_callback_code_and_saves_tokens_with_resource`; `auth_rejects_mismatched_callback_state_before_token_exchange`; `auth_invalidates_rejected_refresh_token_and_retries_to_redirect`; `auth_invalidates_rejected_client_credentials_and_reregisters`; `cargo run -p ai-sdk-mcp --example local_mcp_client`; `cargo run -p ai-sdk-mcp --example http_auth_typed_tools`; `cargo run -p ai-sdk-mcp --example stdio_typed_tools`; `cargo run -p ai-sdk-mcp --example sse_typed_tools`; `cargo run -p ai-sdk-mcp --example hosted_oauth_http`; `vercel_ai_gateway_openai_compatible_runs_generate_text_with_mcp_tools`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text_mcp_tool_loop` | Package-owned crate mirrors the portable upstream `@ai-sdk/mcp` protocol constants, JSON-RPC message envelope shapes, MCP implementation/capability/tool/resource/prompt/elicitation result data structures, serializable `listTools` cache data, deterministic transport trait and mock transport, client initialize/request/notification/close lifecycle, protocol negotiation, capability gating, JSON-RPC error metadata, `tools/list`, `tools/call`, resource and prompt methods, client-side `elicitation/create` request handling with success, missing-handler, invalid-request, handler-error JSON-RPC replies, and upstream-shaped `onUncaughtError` callback behavior for transport startup and request-handler errors, dynamic AI SDK tool creation from MCP definitions with MCP/App metadata and execution, schema-filtered tool creation, authenticated loopback Streamable HTTP tool execution with bearer headers, session cleanup and provider metadata assertions, output-schema retention, `structuredContent` extraction, text JSON fallback parsing, validation errors, and `isError` bypass behavior, initial Streamable HTTP transport with real loopback POST JSON, protocol/session/custom headers, best-effort inbound SSE GET on start and after `202 Accepted`, upstream-shaped inbound SSE reconnect delay/backoff/max-retry behavior, `Last-Event-ID` resumption headers across retries, invalid inbound SSE message errors, JSON and SSE message response parsing, 404 SSE hint errors, and DELETE session cleanup, standalone SSE transport with endpoint event parsing, same-origin enforcement, bounded message parsing, POST dispatch, bounded POST message response parsing, custom headers, and HTTP/POST error reporting, stdio inherited environment filtering/overlay behavior, newline-delimited JSON-RPC stdio serialization/deserialization and read buffering, child-process stdio transport start/write/read/close behavior, MCP Apps capability metadata, `_meta.ui`/legacy resource URI parsing, model/app visibility splitting, `ui://` app resource extraction from text or base64 blob resources, MCP tool-result conversion into model-facing text/file/content or JSON fallback output, OAuth resource URL helpers and protected-resource selection, upstream-shaped OAuth metadata/client/token/error structs with safe URL validation, `WWW-Authenticate` protected-resource metadata extraction, protected-resource metadata discovery over loopback HTTP with path-aware root fallback and `MCP-Protocol-Version`, authorization-server OAuth/OIDC discovery ordering with S256 PKCE validation, generated or caller-supplied S256 PKCE material, authorization URL construction with scope, state, offline-access consent prompt, RFC 8707 resource parameter handling, form-encoded authorization-code exchange, refresh-token exchange with refresh-token preservation, client auth method selection for public, post-body secret, basic auth requests, and custom client-authentication hooks, standard OAuth error body parsing, dynamic client registration over JSON, high-level OAuth provider orchestration for protected-resource discovery, dynamic registration, callback code exchange, stored-state validation, refresh-token reuse, redirect PKCE persistence, custom resource validation override, credential invalidation retry behavior, and a deterministic local MCP client example that mirrors the upstream tool-definitions flow by listing tools, converting definitions into AI SDK tools, calling tools, reading resources/templates, listing/getting prompts, handling elicitation, printing server instructions, and closing the client, plus authenticated Streamable HTTP, stdio, and SSE typed-tool examples that start local servers, validate `structuredContent`, and print MCP provider metadata, plus a hosted OAuth HTTP example that starts a local protected-resource and authorization server, performs dynamic client registration, PKCE redirect/callback exchange, token exchange, configured auth-provider transport creation, and protected tool execution, plus a Vercel AI Gateway OpenAI-compatible `generate_text` integration that consumes MCP tool definitions, executes the selected MCP tool, and has an ignored live Gateway proof for the same tool-loop path. Remaining work: protected live MCP service auth validation if suitable credentials are available. |
 | `packages/otel` (`@ai-sdk/otel`) | telemetry package | in-progress | `crates/ai-sdk-otel` | `select_attributes_matches_telemetry_recording_flags`; `assemble_operation_name_includes_function_id_when_present`; `maps_provider_and_operation_names_to_genai_semconv_values`; `formats_system_and_input_messages`; `formats_output_messages_and_finish_reasons`; `base_and_supplemental_attributes_match_upstream_prefixes`; `stringify_for_telemetry_converts_file_data_to_strings`; `record_span_executes_function_records_attributes_and_ends_by_default`; `record_span_can_leave_successful_span_open`; `record_span_records_exception_status_and_ends_on_error`; `record_error_on_span_sets_status_only_for_non_error_values`; `mock_and_noop_tracers_match_upstream_test_shapes`; `open_telemetry_records_generate_text_root_step_and_chat_spans`; `open_telemetry_records_object_operation_and_step_spans`; `open_telemetry_enrichment_keeps_official_attribute_precedence`; `open_telemetry_records_tool_span_and_wraps_execute_tool`; `open_telemetry_records_error_on_active_spans_and_cleans_state`; `open_telemetry_records_embedding_operation_and_inner_span`; `open_telemetry_records_rerank_operation_and_inner_span`; `legacy_open_telemetry_records_generate_text_step_tool_and_root_spans`; `legacy_open_telemetry_records_object_embedding_and_rerank_spans`; `otlp_http_json_payload_uses_collector_shape`; `local_otlp_http_receiver_captures_exported_span_payload`; `real_opentelemetry_http_exporter_sends_json_to_local_receiver`; `open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver`; `legacy_open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text_with_otel`; ignored `live_vercel_ai_gateway_openai_compatible_stream_text_with_otel`; ignored `live_vercel_ai_gateway_openai_compatible_generate_object_with_otel`; ignored `live_vercel_ai_gateway_openai_compatible_stream_object_with_otel`; ignored `live_vercel_ai_gateway_openai_responses_generate_text_with_otel`; ignored `live_vercel_ai_gateway_openai_responses_stream_text_with_otel`; `scripts/check-otel-loopback.sh`; `cargo run -p ai-sdk-otel --example local_otlp_receiver` | Initial package-owned crate covers portable helper behavior from upstream `@ai-sdk/otel`: telemetry/input/output attribute gating, operation/resource attribute naming, provider and operation GenAI semantic-convention mapping, system/input/output/object message formatting, file/base64/URL prompt telemetry stringification, base model-call attributes, supplemental attribute selection, runtime-context/header/detailed-usage attribute helpers, finish-reason mapping, and dependency-free Rust analogues for `recordSpan`, `recordErrorOnSpan`, `MockTracer`, noop tracer behavior, `OpenTelemetry` operation/step/language-model/tool/object/embedding/reranking lifecycle span recording, `LegacyOpenTelemetry` legacy `ai.*` text/tool/object/embedding/reranking span recording, enrichment precedence, active-span error cleanup, OTLP/HTTP JSON export payload construction, a loopback local OTLP receiver that captures actual HTTP wire payloads, a `real-opentelemetry` feature that configures the real Rust `opentelemetry` SDK OTLP/HTTP JSON exporter against that receiver, root dispatcher adapters that register `OpenTelemetry` and `LegacyOpenTelemetry` as normal telemetry integrations and export dispatcher-produced spans to the receiver, a required `scripts/check-otel-loopback.sh` proof command that also runs live Gateway OpenAI-compatible generate, stream, object, and stream-object telemetry checks plus Gateway OpenAI Responses generate and stream telemetry checks when live mode is enabled, and a runnable daemon-style local receiver example for manual collector-style validation. Remaining work: provider live tests that enable telemetry and assert emitted OTLP data through the local receiver or a collector. |
-| `packages/workflow` (`@ai-sdk/workflow`) | agent/workflow package | in-progress | `crates/ai-sdk-workflow` | `serialize_tool_set_serializes_function_tools_with_description_and_input_schema`; `serialize_tool_set_preserves_provider_tool_identity_and_args`; `resolve_serializable_tools_reconstructs_function_tools`; `resolve_serializable_tools_reconstructs_provider_tools`; `resolve_serializable_tools_reports_missing_provider_tool_id`; `to_ui_message_chunk_maps_text_reasoning_and_tool_call_parts`; `to_ui_message_chunk_maps_files_sources_results_approval_and_errors`; `model_call_stream_to_ui_chunks_adds_lifecycle_chunks_and_drops_internal_parts`; `workflow_chat_transport_uses_default_options_and_builds_send_request`; `workflow_chat_transport_sends_messages_and_reports_chat_end`; `workflow_chat_transport_requires_workflow_run_id_for_interrupted_send`; `workflow_chat_transport_reconnects_after_interrupted_send_using_run_id_and_chunk_index`; `workflow_chat_transport_reconnect_uses_positive_initial_start_index_for_retries`; `workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header`; `workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header`; `workflow_chat_transport_reconnect_formats_consecutive_errors`; `workflow_chat_transport_reports_http_errors`; `stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation`; `stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls`; `stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata`; `stream_text_iterator_omits_provider_options_without_metadata`; `stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata`; `stream_text_iterator_passes_contexts_to_executor_and_yields_them`; `stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages`; `stream_text_iterator_upstream_should_apply_prepare_step_system_after_messages_override`; `stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically`; `stream_text_iterator_upstream_should_allow_prepare_step_to_set_active_tools_and_tool_choice`; `stream_text_iterator_upstream_should_update_runtime_and_tools_context_from_prepare_step`; `do_stream_step_from_parts_collects_provider_executed_results_and_valid_step_content`; `workflow_agent_upstream_should_expose_id_when_provided_in_constructor`; `workflow_agent_upstream_should_have_undefined_id_when_not_provided`; `workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result`; `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`; `workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools`; `workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag`; `workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing`; `workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute`; `workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools`; `workflow_agent_compat_should_call_on_finish_from_constructor`; `workflow_agent_compat_should_call_on_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order`; `workflow_agent_compat_should_pass_finish_event_information`; `workflow_agent_compat_should_call_experimental_on_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_start_event_information`; `workflow_agent_compat_should_call_experimental_on_step_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_step_start_event_information`; `workflow_agent_compat_should_call_on_step_finish_from_constructor`; `workflow_agent_compat_should_call_on_step_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order`; `workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback`; `workflow_agent_compat_should_call_on_tool_execution_start_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_start_event_information`; `workflow_agent_compat_should_call_on_tool_execution_end_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success`; `workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally`; `workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function`; `workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context`; `workflow_agent_upstream_should_validate_per_tool_context_against_context_schema`; `workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator`; `workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop` | Initial package-owned crate covers portable `serializable-schema`, `to-ui-message-chunk`, `workflow-chat-transport`, deterministic `stream-text-iterator` behavior, and the first deterministic `WorkflowAgent` loop behavior: runtime tools serialize to plain descriptions/input JSON Schemas, provider tool identity/args/`isProviderExecuted` survive workflow step boundaries, serializable definitions reconstruct Rust tool descriptors, model-call stream parts convert into UI-message text/reasoning/file/source/tool/approval/error chunks with workflow lifecycle wrappers, chat transport builds send/reconnect requests and handles interrupted stream resume planning, the stream-text iterator collects model-call stream steps, preserves runtime/tool contexts, applies prepare-step message/system/model/generation/active-tool/tool-choice/runtime/tool-context overrides, maps single, parallel, and mixed tool-call provider metadata into continuation prompt `providerOptions`, strips OpenAI `itemId`, accepts tool-result continuation messages, captures provider-executed tool results, and `WorkflowAgent` now exposes optional ids, executes local tools, converts tool execution failures to `error-text`, skips local execution for provider-executed tool calls, surfaces provider-executed results/errors, returns an empty text result for missing provider-executed results, stops for client-side tools without executors, calls finish callbacks for client-side stops, constructor-then-stream finish callbacks with event payloads, start and step-start callbacks with constructor-then-stream ordering and event payloads, step-finish callbacks with constructor-then-stream ordering and step payloads, and tool-execution start/end callbacks with constructor-then-stream ordering and event payloads, clears final tool calls and results after completed tool rounds, passes accumulated messages and per-tool context to tool callbacks, forwards prepare-step callbacks through the agent facade, updates runtime context from prepare-step callbacks, and validates Rust-side context schema validators. Real model execution inside the iterator, real HTTP/SSE transport adapters, integration-style workflow execution, and Ajv-equivalent runtime validation for arbitrary JSON Schema remain unported. |
+| `packages/workflow` (`@ai-sdk/workflow`) | agent/workflow package | in-progress | `crates/ai-sdk-workflow` | `serialize_tool_set_serializes_function_tools_with_description_and_input_schema`; `serialize_tool_set_preserves_provider_tool_identity_and_args`; `resolve_serializable_tools_reconstructs_function_tools`; `resolve_serializable_tools_reconstructs_provider_tools`; `resolve_serializable_tools_reports_missing_provider_tool_id`; `to_ui_message_chunk_maps_text_reasoning_and_tool_call_parts`; `to_ui_message_chunk_maps_files_sources_results_approval_and_errors`; `model_call_stream_to_ui_chunks_adds_lifecycle_chunks_and_drops_internal_parts`; `workflow_chat_transport_uses_default_options_and_builds_send_request`; `workflow_chat_transport_sends_messages_and_reports_chat_end`; `workflow_chat_transport_requires_workflow_run_id_for_interrupted_send`; `workflow_chat_transport_reconnects_after_interrupted_send_using_run_id_and_chunk_index`; `workflow_chat_transport_reconnect_uses_positive_initial_start_index_for_retries`; `workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header`; `workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header`; `workflow_chat_transport_reconnect_formats_consecutive_errors`; `workflow_chat_transport_reports_http_errors`; `stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation`; `stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls`; `stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata`; `stream_text_iterator_upstream_should_not_add_provider_options_when_provider_metadata_is_undefined`; `stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors`; `stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id`; `stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata`; `stream_text_iterator_omits_provider_options_without_metadata`; `stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata`; `stream_text_iterator_passes_contexts_to_executor_and_yields_them`; `stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages`; `stream_text_iterator_upstream_should_apply_prepare_step_system_after_messages_override`; `stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically`; `stream_text_iterator_upstream_should_allow_prepare_step_to_set_active_tools_and_tool_choice`; `stream_text_iterator_upstream_should_update_runtime_and_tools_context_from_prepare_step`; `do_stream_step_from_parts_collects_provider_executed_results_and_valid_step_content`; `workflow_agent_upstream_should_expose_id_when_provided_in_constructor`; `workflow_agent_upstream_should_have_undefined_id_when_not_provided`; `workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result`; `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`; `workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools`; `workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag`; `workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing`; `workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute`; `workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools`; `workflow_agent_compat_should_call_on_finish_from_constructor`; `workflow_agent_compat_should_call_on_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order`; `workflow_agent_compat_should_pass_finish_event_information`; `workflow_agent_compat_should_call_experimental_on_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_start_event_information`; `workflow_agent_compat_should_call_experimental_on_step_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_step_start_event_information`; `workflow_agent_compat_should_call_on_step_finish_from_constructor`; `workflow_agent_compat_should_call_on_step_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order`; `workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback`; `workflow_agent_compat_should_call_on_tool_execution_start_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_start_event_information`; `workflow_agent_compat_should_call_on_tool_execution_end_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success`; `workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally`; `workflow_agent_upstream_should_pass_generation_settings_from_constructor_to_stream_text_iterator`; `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_generation_settings`; `workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator`; `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice`; `workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified`; `workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function`; `workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context`; `workflow_agent_upstream_should_validate_per_tool_context_against_context_schema`; `workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator`; `workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop` | Initial package-owned crate covers portable `serializable-schema`, `to-ui-message-chunk`, `workflow-chat-transport`, deterministic `stream-text-iterator` behavior, and the first deterministic `WorkflowAgent` loop behavior: runtime tools serialize to plain descriptions/input JSON Schemas, provider tool identity/args/`isProviderExecuted` survive workflow step boundaries, serializable definitions reconstruct Rust tool descriptors, model-call stream parts convert into UI-message text/reasoning/file/source/tool/approval/error chunks with workflow lifecycle wrappers, chat transport builds send/reconnect requests and handles interrupted stream resume planning, the stream-text iterator collects model-call stream steps, preserves runtime/tool contexts, applies prepare-step message/system/model/generation/active-tool/tool-choice/runtime/tool-context overrides, maps single, parallel, mixed, and absent tool-call provider metadata into continuation prompt `providerOptions`, strips OpenAI `itemId` while preserving other OpenAI and non-OpenAI metadata, accepts tool-result continuation messages, captures provider-executed tool results, and `WorkflowAgent` now exposes optional ids, executes local tools, converts tool execution failures to `error-text`, skips local execution for provider-executed tool calls, surfaces provider-executed results/errors, returns an empty text result for missing provider-executed results, stops for client-side tools without executors, calls finish callbacks for client-side stops, constructor-then-stream finish callbacks with event payloads, start and step-start callbacks with constructor-then-stream ordering and event payloads, step-finish callbacks with constructor-then-stream ordering and step payloads, and tool-execution start/end callbacks with constructor-then-stream ordering and event payloads, clears final tool calls and results after completed tool rounds, passes accumulated messages and per-tool context to tool callbacks, forwards prepare-step callbacks through the agent facade, updates runtime context from prepare-step callbacks, and validates Rust-side context schema validators. Real model execution inside the iterator, real HTTP/SSE transport adapters, integration-style workflow execution, and Ajv-equivalent runtime validation for arbitrary JSON Schema remain unported. |
 | `packages/test-server` (`@ai-sdk/test-server`) | testing support package | verified | `crates/ai-sdk-test-server` | `create_test_server_exposes_urls_and_empty_calls`; `create_test_server_supports_response_mutations_and_reset`; `create_test_server_supports_response_types`; `create_test_server_tracks_request_inspection`; `create_test_server_parses_multipart_request_body`; `create_test_server_selects_sequence_and_dynamic_responses_by_call_number`; `response_controller_records_writes_errors_and_close`; `loopback_test_server_serves_http_and_records_requests`; `loopback_test_server_serves_streams_missing_routes_and_reset`; `cargo test -p ai-sdk-test-server` | Package-owned crate covers the portable upstream `createTestServer` surface: mutable URL handlers, static/missing/sequence/dynamic responses, JSON/stream/binary/empty/error/controlled-stream response rendering, call capture, request header/body/multipart body/URL/method/credentials inspection, reset behavior, `convertArrayToReadableStream`-style chunk collection, and a dependency-light loopback HTTP server for real request/response validation of path-keyed routes. Upstream's MSW interception and `with-vitest` lifecycle hook wrapper are JavaScript-runtime bindings, so they are intentionally documented as non-portable rather than remaining Rust parity debt. |
 | `packages/devtools` (`@ai-sdk/devtools`) | JavaScript devtools package | js-only-documented | none | This row | Upstream exposes JavaScript middleware/telemetry integration for AI SDK DevTools. Portable Rust tracing/telemetry behavior is tracked under telemetry rows; browser devtools integration is intentionally not ported. |
 | `packages/codemod` (`@ai-sdk/codemod`) | JavaScript migration tooling | js-only-documented | none | This row | Upstream codemods transform JavaScript/TypeScript source between AI SDK versions. No Rust SDK runtime equivalent is required. |
@@ -423,23 +429,23 @@ inventory.
 | Text stream response helpers | verified | `src/text_stream_response.rs`; `src/stream_text.rs`; `src/stream_object.rs` | `create_text_stream_response_sets_headers_status_and_encoded_chunks`; `pipe_text_stream_to_response_writes_headers_chunks_and_end`; stream text/object response method assertions | Mirrors upstream `text-stream/create-text-stream-response.ts` and `pipe-text-stream-to-response.ts` with Rust-native collected responses, result convenience methods, and a writer trait instead of JS Web/Node response types. |
 | `streamText` UI-message response helper cases | verified | `src/stream_text.rs` | `stream_text_result_to_ui_message_stream_masks_error_messages_by_default`; `stream_text_result_to_ui_message_stream_supports_custom_error_messages`; `stream_text_result_pipe_ui_message_stream_to_response_writes_data_stream_parts`; `stream_text_result_pipe_ui_message_stream_to_response_applies_custom_headers`; `stream_text_result_pipe_ui_message_stream_to_response_masks_error_messages_by_default`; `stream_text_result_pipe_ui_message_stream_to_response_supports_custom_error_messages`; `stream_text_result_pipe_ui_message_stream_to_response_omits_finish_when_send_finish_false`; `stream_text_result_pipe_ui_message_stream_to_response_writes_reasoning_content`; `stream_text_result_pipe_ui_message_stream_to_response_writes_source_content`; `stream_text_result_pipe_ui_message_stream_to_response_writes_file_content` | Mirrors the adjacent upstream `packages/ai/src/generate-text/stream-text.test.ts` `result.toUIMessageStream` default/custom error masking cases and `result.pipeUIMessageStreamToResponse` data stream, custom header/status, default/custom error masking, `sendFinish: false`, reasoning, source, and file content cases. Rust uses the crate's collected response/writer trait boundary instead of Node.js response objects and Web `ReadableStream`s, while preserving upstream SSE chunk shapes and the default `An error occurred.` masking behavior unless a custom `onError` mapper is supplied. |
 | `streamText` multiple result consumption | verified | `src/stream_text.rs` | `stream_text_result_supports_text_ui_message_and_full_stream_from_single_result` | Mirrors upstream `packages/ai/src/generate-text/stream-text.test.ts` `multiple stream consumption` by proving one collected Rust `StreamTextResult` can be read as text deltas, serialized full-stream parts, and UI-message chunks without one view consuming or mutating the others. Rust materializes provider streams into owned result fields instead of one-shot JavaScript async iterables/ReadableStreams, so this is the equivalent multi-view contract. |
-| UI message streams | in-progress | `src/ui_message_stream.rs`; `src/stream_text.rs` | `create_ui_message_stream_response_sets_sse_headers_and_encoded_chunks`; `create_ui_message_stream_response_preserves_existing_headers_and_encodes_errors`; `ui_message_chunk_serializes_portable_tool_source_and_file_chunks`; `handle_ui_message_stream_finish_injects_id_and_calls_on_finish`; `create_ui_message_stream_invokes_step_and_finish_callbacks`; `create_ui_message_stream_adds_error_chunk_when_execute_returns_error`; `create_ui_message_stream_adds_error_chunk_when_merged_stream_errors`; `stream_text_result_maps_portable_non_text_parts_to_ui_message_stream`; `stream_text_result_ui_message_stream_options_mask_errors_with_on_error`; `stream_text_result_ui_message_stream_options_use_persistence_message_ids`; `stream_text_result_ui_message_stream_options_on_finish_receives_persisted_messages`; `stream_text_result_applies_ui_message_metadata_callback_in_sequence`; `process_ui_message_stream_preserves_portable_non_text_chunks_as_parts`; `process_ui_message_stream_accepts_abort_chunks`; `read_ui_message_stream_invokes_finish_callback_with_final_state`; `pipe_ui_message_stream_to_response_writes_headers_chunks_and_end`; `get_response_ui_message_id_*`; `transform_text_to_ui_message_stream_*`; `read_ui_message_stream_returns_message_states_for_basic_text_stream`; `process_ui_message_stream_accumulates_reasoning_parts`; `process_ui_message_stream_reports_missing_text_delta`; `tool_ui_part_predicates_match_upstream_runtime_shape`; `last_assistant_message_is_complete_with_tool_calls_matches_upstream_cases`; `last_assistant_message_is_complete_with_approval_responses_matches_upstream_cases` | Text/reasoning/tool/source/file/reasoning-file/custom/approval/abort UI-message chunk contracts, `streamText.toUIMessageStream` conversion for portable non-text parts with source gating, provider metadata, message-metadata callback sequencing, persistence-mode response id reuse/generation from original messages, upstream-style finish and step-finish callback event reconstruction, and custom `onError` masking for stream/tool error chunks, SSE response helpers, portable UI message shape, text-to-UI-message transform, read/process state snapshots including abort-state tracking and finish callback final-state events, Rust-native `createUIMessageStream` writer/write/merge callback flow with fallible execute and merged-stream error chunks, non-text chunk preservation as message parts, metadata merging, error termination, malformed text/reasoning errors, response-message id continuation selection, tool-part detection, and last-assistant tool/approval completion predicates mirror upstream `createUIMessageStream`, `createUIMessageStreamResponse`, `pipeUIMessageStreamToResponse`, `transformTextToUiMessageStream`, `readUIMessageStream`, `processUIMessageStream`, protocol headers, `getResponseUIMessageId`, `handleUIMessageStreamFinish`, `isToolUIPart`, `lastAssistantMessageIsCompleteWithToolCalls`, and `lastAssistantMessageIsCompleteWithApprovalResponses`. Post-return delayed merge behavior remains unported because the Rust facade currently materializes a collected `Vec` rather than a live `ReadableStream`. |
-| Chat/completion/object UI transport contracts | in-progress | `src/chat_transport.rs`, `src/completion_transport.rs`, `src/object_transport.rs` | `chat_request_options_serialize_upstream_shape`; `http_chat_transport_builds_default_send_messages_request`; `http_chat_transport_prepare_send_options_match_upstream_callback_input`; `http_chat_transport_prepared_send_request_overrides_defaults`; `http_chat_transport_builds_default_reconnect_request`; `http_chat_transport_prepared_reconnect_request_overrides_defaults`; `default_chat_transport_parses_ui_message_event_stream`; `default_chat_transport_reports_invalid_ui_message_event`; `text_stream_chat_transport_maps_text_to_ui_message_stream`; `direct_chat_transport_streams_text_response_from_agent`; `direct_chat_transport_passes_prepared_agent_options`; `direct_chat_transport_applies_ui_message_stream_options`; `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`; `direct_chat_transport_rejects_invalid_ui_message_part_shape`; `direct_chat_transport_reconnect_returns_none`; `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`; `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`; `convert_ui_messages_maps_dynamic_tool_output_available_tool_name`; `convert_ui_messages_preserves_step_start_blocks_as_assistant_tool_pairs`; `convert_ui_messages_places_provider_executed_tool_result_in_assistant`; `convert_ui_messages_maps_denied_approval_response_to_execution_denied_result`; `convert_ui_messages_skips_unconverted_data_parts`; `convert_ui_messages_maps_file_provider_reference_and_metadata_parts`; `completion_transport_builds_default_request`; `completion_transport_builds_prepared_request_with_overrides`; `completion_transport_processes_text_stream`; `completion_transport_processes_data_event_stream`; `completion_transport_reports_data_event_error_chunks`; `completion_transport_reports_invalid_data_event_chunks`; `object_transport_builds_post_request_with_input_body`; `object_transport_processes_distinct_partial_json_updates`; `object_transport_skips_duplicate_partial_objects`; `object_transport_ignores_empty_chunks_until_json_can_be_repaired`; `object_transport_parses_final_json_for_validation_boundary` | Portable chat transport contract mirrors upstream `ChatTransport`, `ChatRequestOptions`, and deterministic `HttpChatTransport` request construction for send and reconnect flows, including API defaults, body/header merging, credentials, `prepareSendMessagesRequest` callback input shape, prepared request overrides, JSON `Content-Type`, and reconnect stream URL construction. Rust `DefaultChatTransport` and `TextStreamChatTransport` wrappers now preserve deterministic HTTP request builders while covering upstream response-stream transforms: JSON UI-message SSE parsing with validation errors and text stream conversion into UI-message chunks. Initial Rust-native `DirectChatTransport` mirrors upstream's in-process agent bridge by validating portable UI messages, converting system/user/assistant text, file/provider-reference, unconverted data-part skips, custom/reasoning metadata, and assistant tool-history parts into model messages, splitting assistant blocks on `step-start`, emitting following tool-result messages for local tools, keeping provider-executed tool results inside assistant content, forwarding Rust agent model settings, applying `to_ui_message_stream` options, and returning `None` for reconnect. Completion transport now mirrors upstream `callCompletionApi` portable behavior for POST body/header shaping, default `/api/completion`, `data` and `text` stream protocols, text-delta accumulation, error chunks, and invalid JSON event chunks. Object transport now mirrors upstream `experimental_useObject` portable behavior for POST input body/header shaping, partial JSON repair over accumulated text chunks, deep-equality duplicate suppression, and the final JSON parse boundary before schema validation. Browser fetch, AbortSignal, Web `ReadableStream`, React/Vue hook state, broader approval-state edge cases, and full chat state management remain unported or JS-runtime-specific. |
-| Agent and tool-loop agent APIs | in-progress | `src/agent.rs` | `tool_loop_agent_exposes_version_id_and_tools`; `tool_loop_agent_generate_forwards_settings_and_instructions`; `tool_loop_agent_generate_forwards_temperature_to_generate_text`; `tool_loop_agent_generate_forwards_max_output_tokens_to_generate_text`; `tool_loop_agent_generate_forwards_top_p_to_generate_text`; `tool_loop_agent_generate_forwards_top_k_to_generate_text`; `tool_loop_agent_generate_forwards_presence_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_frequency_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_stop_sequences_to_generate_text`; `tool_loop_agent_generate_forwards_seed_to_generate_text`; `tool_loop_agent_generate_forwards_headers_to_generate_text`; `tool_loop_agent_prepare_call_can_shape_provider_options`; `tool_loop_agent_generate_passes_abort_signal_to_generate_text`; `tool_loop_agent_generate_passes_timeout_to_tool_execution`; `tool_loop_agent_merges_generate_start_callbacks_in_order`; `tool_loop_agent_uses_upstream_twenty_step_default_for_tool_loop`; `tool_loop_agent_merges_tool_execution_callbacks_in_order`; `tool_loop_agent_stream_delegates_to_stream_text`; `tool_loop_agent_stream_forwards_include_raw_chunks_to_stream_text`; `tool_loop_agent_stream_passes_abort_signal_to_stream_text`; `tool_loop_agent_stream_passes_timeout_to_tool_execution`; `tool_loop_agent_merges_stream_finish_callbacks_in_order`; `direct_chat_transport_streams_text_response_from_agent`; `create_agent_ui_stream_response_uses_tool_model_output_for_ui_tool_results`; `create_agent_ui_stream_response_calls_on_finish_with_auto_original_messages` | Initial `ToolLoopAgent` wrapper mirrors upstream agent version/id/tools, shared settings, default twenty-step loops, generate/stream delegation, model/request option forwarding, prepare-call shaping, callback merging, and per-call Rust abort/timeout request controls for provider calls and local tool execution, and is now exercised through `DirectChatTransport` and `create_agent_ui_stream_response`. The agent UI response helper converts UI message history through tool `toModelOutput`, reuses original UI messages for `onFinish`, and emits the standard UI-message stream response. Remaining generic agent call-options schema/type-level parity, runtime-context typing, and broader agent surfaces remain unported. |
+| UI message streams | in-progress | `src/ui_message_stream.rs`; `src/stream_text.rs` | `create_ui_message_stream_response_sets_sse_headers_and_encoded_chunks`; `create_ui_message_stream_response_preserves_existing_headers_and_encodes_errors`; `ui_message_chunk_serializes_portable_tool_source_and_file_chunks`; `ui_message_chunk_deserializes_dynamic_data_wire_chunk`; `ui_message_chunk_serializes_dynamic_data_wire_chunk`; `process_ui_message_stream_accepts_dynamic_data_wire_chunks`; `handle_ui_message_stream_finish_injects_id_and_calls_on_finish`; `create_ui_message_stream_invokes_step_and_finish_callbacks`; `create_ui_message_stream_adds_error_chunk_when_execute_returns_error`; `create_ui_message_stream_adds_error_chunk_when_merged_stream_errors`; `stream_text_result_maps_portable_non_text_parts_to_ui_message_stream`; `stream_text_result_ui_message_stream_options_mask_errors_with_on_error`; `stream_text_result_ui_message_stream_options_use_persistence_message_ids`; `stream_text_result_ui_message_stream_options_on_finish_receives_persisted_messages`; `stream_text_result_applies_ui_message_metadata_callback_in_sequence`; `process_ui_message_stream_folds_tool_chunks_into_ui_tool_parts`; `process_ui_message_stream_folds_provider_executed_static_tools`; `process_ui_message_stream_folds_provider_executed_dynamic_tools`; `process_ui_message_stream_preserves_tool_call_and_result_metadata`; `process_ui_message_stream_retains_tool_metadata_during_input_streaming`; `process_ui_message_stream_maps_tool_input_error_to_raw_input_output_error`; `process_ui_message_stream_keeps_static_tool_type_on_dynamic_error_mismatch`; `process_ui_message_stream_updates_preliminary_tool_results_until_final_output`; `process_ui_message_stream_preserves_static_tool_title_through_output`; `process_ui_message_stream_preserves_dynamic_tool_title_through_output`; `process_ui_message_stream_preserves_tool_title_in_error_state`; `process_ui_message_stream_maps_static_tool_approval_request`; `process_ui_message_stream_maps_dynamic_tool_approval_request`; `process_ui_message_stream_preserves_automatic_approval_metadata_through_denial`; `process_ui_message_stream_preserves_automatic_approval_metadata_through_execution`; `process_ui_message_stream_accepts_abort_chunks`; `read_ui_message_stream_invokes_finish_callback_with_final_state`; `pipe_ui_message_stream_to_response_writes_headers_chunks_and_end`; `get_response_ui_message_id_*`; `transform_text_to_ui_message_stream_*`; `read_ui_message_stream_returns_message_states_for_basic_text_stream`; `process_ui_message_stream_accumulates_reasoning_parts`; `process_ui_message_stream_reports_missing_text_delta`; `process_ui_message_stream_reports_missing_reasoning_delta`; `process_ui_message_stream_reports_missing_tool_input_delta`; `process_ui_message_stream_reports_missing_text_end`; `process_ui_message_stream_reports_missing_reasoning_end`; `process_ui_message_stream_appends_data_parts`; `process_ui_message_stream_skips_transient_data_parts`; `process_ui_message_stream_replaces_data_parts_with_matching_id`; `process_ui_message_stream_replaces_object_data_parts_with_matching_id`; `tool_ui_part_predicates_match_upstream_runtime_shape`; `get_static_tool_name_should_return_the_tool_name_after_the_tool_prefix`; `get_static_tool_name_should_return_the_tool_name_for_tools_that_contains_a_dash`; `is_custom_content_ui_part_should_return_true_for_a_custom_part`; `is_custom_content_ui_part_should_return_true_for_a_custom_part_without_provider_metadata`; `is_custom_content_ui_part_should_return_false_for_a_text_part`; `is_data_ui_part_should_return_true_if_the_part_is_a_data_part`; `is_data_ui_part_should_return_false_if_the_part_is_not_a_data_part`; `validate_ui_messages_should_*`; `safe_validate_ui_messages_should_*`; `last_assistant_message_is_complete_with_tool_calls_matches_upstream_cases`; `last_assistant_message_is_complete_with_approval_responses_matches_upstream_cases` | Text/reasoning/tool/source/file/reasoning-file/custom/approval/abort UI-message chunk contracts, `streamText.toUIMessageStream` conversion for portable non-text parts with source gating, provider metadata, message-metadata callback sequencing, persistence-mode response id reuse/generation from original messages, upstream-style finish and step-finish callback event reconstruction, and custom `onError` masking for stream/tool error chunks, SSE response helpers, portable UI message shape, text-to-UI-message transform, read/process state snapshots including abort-state tracking and finish callback final-state events, Rust-native `createUIMessageStream` writer/write/merge callback flow with fallible execute and merged-stream error chunks, tool chunk folding into upstream-shaped static and dynamic UI tool parts, input-streaming call metadata retention, tool-input-error rawInput mapping, static-type preservation for dynamic error mismatch, preliminary tool result replacement, static/dynamic/error-state tool title preservation, static/dynamic tool approval request folding, automatic approval metadata preservation through denial/execution, metadata merging, error termination, malformed text/reasoning/tool-input delta/end errors, upstream dynamic `data-*` wire serialization/deserialization, persistent and transient data UI part processing, id-based scalar/object data part replacement, response-message id continuation selection, tool-part detection, static-tool name extraction, custom-content detection, data-part detection, `validateUIMessages`/`safeValidateUIMessages` full 52-case portable corpus for parameter, metadata, data-part, static-tool, dynamic-tool, safe-failure, result-provider-metadata, raw-input, approval, and part-shape validation, and last-assistant tool/approval completion predicates mirror upstream `createUIMessageStream`, `createUIMessageStreamResponse`, `pipeUIMessageStreamToResponse`, `transformTextToUiMessageStream`, `readUIMessageStream`, `processUIMessageStream`, `validate-ui-messages`, `ui-messages`, protocol headers, `getResponseUIMessageId`, `handleUIMessageStreamFinish`, `isToolUIPart`, `lastAssistantMessageIsCompleteWithToolCalls`, and `lastAssistantMessageIsCompleteWithApprovalResponses`. Post-return delayed merge behavior remains unported because the Rust facade currently materializes a collected `Vec` rather than a live `ReadableStream`; JavaScript-specific `validate-ui-messages` type assertions remain compile-time-only while the portable runtime corpus is mapped one-to-one. |
+| Chat/completion/object UI transport contracts | in-progress | `src/chat_transport.rs`, `src/completion_transport.rs`, `src/object_transport.rs`, `src/ui_message_stream.rs` | `chat_request_options_serialize_upstream_shape`; `http_chat_transport_builds_default_send_messages_request`; `http_chat_transport_includes_body_in_request_when_function_is_provided`; `http_chat_transport_includes_headers_in_request_when_function_is_provided`; `http_chat_transport_prepare_send_options_match_upstream_callback_input`; `http_chat_transport_prepared_send_request_overrides_defaults`; `http_chat_transport_builds_default_reconnect_request`; `http_chat_transport_prepared_reconnect_request_overrides_defaults`; `default_chat_transport_parses_ui_message_event_stream`; `default_chat_transport_reports_invalid_ui_message_event`; `text_stream_chat_transport_maps_text_to_ui_message_stream`; `process_text_stream_should_process_stream_chunks_correctly`; `process_text_stream_should_handle_empty_streams`; `direct_chat_transport_streams_text_response_from_agent`; `direct_chat_transport_passes_prepared_agent_options`; `direct_chat_transport_applies_ui_message_stream_options`; `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`; `direct_chat_transport_rejects_invalid_ui_message_part_shape`; `direct_chat_transport_reconnect_returns_none`; `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`; `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`; `convert_ui_messages_maps_dynamic_tool_output_available_tool_name`; `convert_ui_messages_preserves_step_start_blocks_as_assistant_tool_pairs`; `convert_ui_messages_places_provider_executed_tool_result_in_assistant`; `convert_ui_messages_maps_denied_approval_response_to_execution_denied_result`; `convert_ui_messages_skips_unconverted_data_parts`; `convert_ui_messages_maps_file_provider_reference_and_metadata_parts`; `completion_transport_builds_default_request`; `completion_transport_builds_prepared_request_with_overrides`; `completion_transport_processes_text_stream`; `completion_transport_processes_data_event_stream`; `completion_transport_reports_data_event_error_chunks`; `completion_transport_reports_invalid_data_event_chunks`; `object_transport_builds_post_request_with_input_body`; `object_transport_processes_distinct_partial_json_updates`; `object_transport_skips_duplicate_partial_objects`; `object_transport_ignores_empty_chunks_until_json_can_be_repaired`; `object_transport_parses_final_json_for_validation_boundary` | Portable chat transport contract mirrors upstream `ChatTransport`, `ChatRequestOptions`, and deterministic `HttpChatTransport` request construction for send and reconnect flows, including API defaults, static and callback-produced body/header values, body/header merging, credentials, `prepareSendMessagesRequest` callback input shape, prepared request overrides, JSON `Content-Type`, and reconnect stream URL construction. Rust `DefaultChatTransport`, `TextStreamChatTransport`, and `process_text_stream` wrappers now preserve deterministic HTTP request builders while covering upstream response-stream transforms: JSON UI-message SSE parsing with validation errors, text stream conversion into UI-message chunks, byte text-stream decoding into callback text parts, and empty-stream no-callback behavior. Initial Rust-native `DirectChatTransport` mirrors upstream's in-process agent bridge by validating portable UI messages, converting system/user/assistant text, file/provider-reference, unconverted data-part skips, custom/reasoning metadata, and assistant tool-history parts into model messages, splitting assistant blocks on `step-start`, emitting following tool-result messages for local tools, keeping provider-executed tool results inside assistant content, forwarding Rust agent model settings, applying `to_ui_message_stream` options, and returning `None` for reconnect. Completion transport now mirrors upstream `callCompletionApi` portable behavior for POST body/header shaping, default `/api/completion`, `data` and `text` stream protocols, text-delta accumulation, error chunks, and invalid JSON event chunks. Object transport now mirrors upstream `experimental_useObject` portable behavior for POST input body/header shaping, partial JSON repair over accumulated text chunks, deep-equality duplicate suppression, and the final JSON parse boundary before schema validation. Browser fetch, AbortSignal, Web `ReadableStream`, React/Vue hook state, broader approval-state edge cases, and full chat state management remain unported or JS-runtime-specific. |
+| Agent and tool-loop agent APIs | in-progress | `src/agent.rs` | `tool_loop_agent_exposes_version_id_and_tools`; `tool_loop_agent_generate_forwards_settings_and_instructions`; `tool_loop_agent_generate_forwards_temperature_to_generate_text`; `tool_loop_agent_generate_forwards_max_output_tokens_to_generate_text`; `tool_loop_agent_generate_forwards_top_p_to_generate_text`; `tool_loop_agent_generate_forwards_top_k_to_generate_text`; `tool_loop_agent_generate_forwards_presence_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_frequency_penalty_to_generate_text`; `tool_loop_agent_generate_forwards_stop_sequences_to_generate_text`; `tool_loop_agent_generate_forwards_seed_to_generate_text`; `tool_loop_agent_generate_forwards_headers_to_generate_text`; `tool_loop_agent_prepare_call_can_shape_provider_options`; `tool_loop_agent_generate_rejects_invalid_call_options_schema_before_model_call`; `tool_loop_agent_generate_passes_valid_call_options_schema`; `tool_loop_agent_generate_passes_abort_signal_to_generate_text`; `tool_loop_agent_generate_passes_timeout_to_tool_execution`; `tool_loop_agent_merges_generate_start_callbacks_in_order`; `tool_loop_agent_generate_calls_on_step_start_from_constructor`; `tool_loop_agent_generate_calls_on_step_start_from_method`; `tool_loop_agent_generate_merges_on_step_start_callbacks_in_order`; `tool_loop_agent_generate_on_step_start_passes_event_information`; `tool_loop_agent_generate_calls_on_step_finish_from_constructor`; `tool_loop_agent_generate_calls_on_step_finish_from_method`; `tool_loop_agent_generate_merges_on_step_finish_callbacks_in_order`; `tool_loop_agent_generate_on_step_finish_passes_step_result_to_callback`; `tool_loop_agent_generate_calls_on_finish_from_constructor`; `tool_loop_agent_generate_calls_on_finish_from_method`; `tool_loop_agent_generate_merges_on_finish_callbacks_in_order`; `tool_loop_agent_generate_on_finish_passes_event_information`; `tool_loop_agent_uses_upstream_twenty_step_default_for_tool_loop`; `tool_loop_agent_generate_calls_on_tool_execution_start_from_constructor`; `tool_loop_agent_generate_calls_on_tool_execution_start_from_method`; `tool_loop_agent_generate_merges_on_tool_execution_start_callbacks_in_order`; `tool_loop_agent_generate_on_tool_execution_start_passes_event_information`; `tool_loop_agent_generate_calls_on_tool_execution_end_from_constructor`; `tool_loop_agent_generate_calls_on_tool_execution_end_from_method`; `tool_loop_agent_generate_merges_on_tool_execution_end_callbacks_in_order`; `tool_loop_agent_generate_on_tool_execution_end_passes_event_information_on_success`; `tool_loop_agent_merges_tool_execution_callbacks_in_order`; `tool_loop_agent_stream_delegates_to_stream_text`; `tool_loop_agent_stream_forwards_include_raw_chunks_to_stream_text`; `tool_loop_agent_stream_passes_abort_signal_to_stream_text`; `tool_loop_agent_stream_passes_timeout_to_tool_execution`; `tool_loop_agent_stream_calls_on_tool_execution_start_from_constructor`; `tool_loop_agent_stream_calls_on_tool_execution_start_from_method`; `tool_loop_agent_stream_merges_on_tool_execution_start_callbacks_in_order`; `tool_loop_agent_stream_on_tool_execution_start_passes_event_information`; `tool_loop_agent_stream_calls_on_tool_execution_end_from_constructor`; `tool_loop_agent_stream_calls_on_tool_execution_end_from_method`; `tool_loop_agent_stream_merges_on_tool_execution_end_callbacks_in_order`; `tool_loop_agent_stream_on_tool_execution_end_passes_event_information_on_success`; `tool_loop_agent_generate_calls_per_call_integration_listeners_for_all_lifecycle_events`; `tool_loop_agent_stream_calls_per_call_integration_listeners_for_all_lifecycle_events`; `tool_loop_agent_generate_calls_globally_registered_integration_listeners`; `tool_loop_agent_stream_calls_globally_registered_integration_listeners`; `tool_loop_agent_generate_includes_configured_runtime_context_properties_in_telemetry`; `tool_loop_agent_stream_includes_configured_runtime_context_properties_in_telemetry`; `tool_loop_agent_generate_calls_integration_listeners_alongside_agent_callbacks`; `tool_loop_agent_stream_calls_integration_listeners_alongside_agent_callbacks`; `tool_loop_agent_generate_does_not_break_when_an_integration_listener_panics`; `tool_loop_agent_stream_does_not_break_when_an_integration_listener_panics`; `tool_loop_agent_merges_stream_finish_callbacks_in_order`; `tool_loop_agent_stream_merges_on_step_start_callbacks_in_order`; `tool_loop_agent_stream_on_step_start_passes_event_information`; `tool_loop_agent_stream_merges_on_step_finish_callbacks_in_order`; `tool_loop_agent_stream_on_step_finish_passes_step_result_to_callback`; `tool_loop_agent_stream_calls_on_finish_from_constructor`; `tool_loop_agent_stream_calls_on_finish_from_method`; `tool_loop_agent_stream_on_finish_passes_event_information`; `direct_chat_transport_streams_text_response_from_agent`; `create_agent_ui_stream_response_uses_tool_model_output_for_ui_tool_results`; `create_agent_ui_stream_response_calls_on_finish_with_auto_original_messages` | Initial `ToolLoopAgent` wrapper mirrors upstream agent version/id/tools, shared settings, default twenty-step loops, generate/stream delegation, model/request option forwarding, prepare-call shaping, callback merging, step-start, step-finish, finish, and tool-execution start/end callback event forwarding, telemetry integration listener forwarding including global listeners, runtime-context filtering, callback interleaving, panic isolation, and per-call Rust abort/timeout request controls for provider calls and local tool execution, and is now exercised through `DirectChatTransport` and `create_agent_ui_stream_response`. The agent UI response helper converts UI message history through tool `toModelOutput`, reuses original UI messages for `onFinish`, and emits the standard UI-message stream response. Remaining generic agent call-options type-level parity, runtime-context typing, and broader agent surfaces remain unported. |
 | `generateObject` non-streaming structured output | verified | `src/generate_object.rs` | `generate_object_*` tests; `generate_object_accepts_experimental_telemetry_alias`; `generate_object_retries_retryable_pre_content_errors`; `generate_object_callback_panics_do_not_break_generation` | Non-streaming object output is covered, including retryable pre-content provider failures up to `maxRetries`, callback panic isolation, and deprecated `experimental_telemetry` aliases telemetry without adding telemetry config fields to start callback events; `streamObject` is tracked separately. |
-| `streamObject` | in-progress | `src/stream_object.rs`, `src/lib.rs`, `crates/ai-sdk-provider/src/language_model.rs`, `crates/ai-sdk-provider-utils/src/provider_utils.rs`, `crates/ai-sdk-gateway/src/gateway.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs`, `crates/ai-sdk-open-responses/src/open_responses.rs` | `stream_object_calls_model_with_json_response_format_and_standardized_prompt`; `stream_object_collects_partial_objects_text_and_finish_metadata`; `stream_object_result_full_stream_matches_upstream_object_chunks`; `stream_object_result_full_stream_sends_finish_provider_metadata_and_timestamp`; `stream_object_array_output_formats_single_chunk_text_delta`; `stream_object_enum_output_streams_value_and_sends_response_format`; `stream_object_enum_output_completes_unambiguous_prefixes`; `stream_object_enum_output_handles_non_ambiguous_values`; `stream_object_no_schema_output_streams_partial_objects_without_response_schema`; `stream_object_repair_text_repairs_json_parse_error`; `stream_object_repair_text_repairs_type_validation_error`; `stream_object_repair_text_handles_repair_returning_none`; `stream_object_repair_text_repairs_json_wrapped_with_markdown_code_blocks`; `stream_object_repair_text_reports_no_object_when_parsing_still_fails`; `stream_object_invokes_lifecycle_callbacks_with_streamed_step`; `stream_object_step_finish_reports_ms_to_first_chunk`; `stream_object_callback_panics_do_not_break_stream`; `stream_object_accepts_experimental_telemetry_alias`; `stream_object_type_counterpart_*`; `stream_object_invokes_error_callback_for_error_parts`; `stream_object_retries_retryable_pre_stream_errors`; `stream_object_aborts_before_model_call_and_suppresses_finish`; `stream_object_aborts_after_model_call_and_suppresses_finish`; `post_json_to_api_aborts_before_transport_call`; `post_json_to_api_aborts_pending_transport_when_signal_fires`; `gateway_model_passes_typed_gateway_provider_options_for_generate`; array/enum/error/warning/callback tests | Initial dependency-light collector over provider-v4 streams. It sends JSON response formats, accumulates text deltas, emits partial objects/text/full-stream parts with upstream object/text/finish ordering plus finish provider metadata and timestamps, unwraps array/enum/no-schema outputs, maps array output text deltas to upstream array syntax, streams complete array elements, applies enum prefix partial-output rules and enum response-format schema construction, exposes typed Rust accessors for final object, partial-object stream entries, and array elements, exposes text response helpers, parses final objects, applies upstream-style repair callbacks to final parse and validation failures including markdown code-fence cleanup and failed repaired text, invokes start/step-start/step-finish/finish lifecycle callbacks with a shared call id and `msToFirstChunk`, ignores synchronous callback panics so callback failures do not break the stream, runs `onError` callbacks for provider error stream parts, carries provider warnings on the result and lifecycle callbacks, aliases deprecated `experimental_telemetry` without exposing telemetry option fields on start callback events, retries retryable pre-stream provider failures up to `maxRetries`, exposes max-retry configuration in start events, and now supports a Rust-native abort controller/signal that propagates to provider call options and first-phase provider HTTP requests, emits an abort-shaped error before provider calls or between returned stream parts, and suppresses step-finish/finish callbacks and end telemetry. Remaining stream-result edge cases remain unported. |
+| `streamObject` | in-progress | `src/stream_object.rs`, `src/lib.rs`, `crates/ai-sdk-provider/src/language_model.rs`, `crates/ai-sdk-provider-utils/src/provider_utils.rs`, `crates/ai-sdk-gateway/src/gateway.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs`, `crates/ai-sdk-open-responses/src/open_responses.rs` | `stream_object_calls_model_with_json_response_format_and_standardized_prompt`; `stream_object_collects_partial_objects_text_and_finish_metadata`; `stream_object_result_full_stream_matches_upstream_object_chunks`; `stream_object_result_full_stream_sends_finish_provider_metadata_and_timestamp`; `stream_object_array_output_formats_single_chunk_text_delta`; `stream_object_enum_output_streams_value_and_sends_response_format`; `stream_object_enum_output_completes_unambiguous_prefixes`; `stream_object_enum_output_handles_non_ambiguous_values`; `stream_object_no_schema_output_streams_partial_objects_without_response_schema`; `stream_object_repair_text_repairs_json_parse_error`; `stream_object_repair_text_repairs_type_validation_error`; `stream_object_repair_text_handles_repair_returning_none`; `stream_object_repair_text_repairs_json_wrapped_with_markdown_code_blocks`; `stream_object_repair_text_reports_no_object_when_parsing_still_fails`; `stream_object_invokes_lifecycle_callbacks_with_streamed_step`; `stream_object_step_finish_reports_ms_to_first_chunk`; `stream_object_callback_panics_do_not_break_stream`; `stream_object_accepts_experimental_telemetry_alias`; `stream_object_type_counterpart_*`; `stream_object_object_stream_invokes_on_error_callback_with_error`; `stream_object_invokes_error_callback_for_error_parts`; `stream_object_retries_retryable_pre_stream_errors`; `stream_object_aborts_before_model_call_and_suppresses_finish`; `stream_object_aborts_after_model_call_and_suppresses_finish`; `post_json_to_api_aborts_before_transport_call`; `post_json_to_api_aborts_pending_transport_when_signal_fires`; `gateway_model_passes_typed_gateway_provider_options_for_generate`; array/enum/error/warning/callback tests | Initial dependency-light collector over provider-v4 streams. It sends JSON response formats, accumulates text deltas, emits partial objects/text/full-stream parts with upstream object/text/finish ordering plus finish provider metadata and timestamps, unwraps array/enum/no-schema outputs, maps array output text deltas to upstream array syntax, streams complete array elements, applies enum prefix partial-output rules and enum response-format schema construction, exposes typed Rust accessors for final object, partial-object stream entries, and array elements, exposes text response helpers, parses final objects, applies upstream-style repair callbacks to final parse and validation failures including markdown code-fence cleanup and failed repaired text, invokes start/step-start/step-finish/finish lifecycle callbacks with a shared call id and `msToFirstChunk`, ignores synchronous callback panics so callback failures do not break the stream, runs `onError` callbacks for provider error stream parts including the Rust counterpart for upstream `doStream` rejection, carries provider warnings on the result and lifecycle callbacks, aliases deprecated `experimental_telemetry` without exposing telemetry option fields on start callback events, retries retryable pre-stream provider failures up to `maxRetries`, exposes max-retry configuration in start events, and now supports a Rust-native abort controller/signal that propagates to provider call options and first-phase provider HTTP requests, emits an abort-shaped error before provider calls or between returned stream parts, and suppresses step-finish/finish callbacks and end telemetry. Remaining stream-result edge cases remain unported. |
 | Embeddings: `embed`, `embedMany` | verified | `src/embed.rs` | `embed_calls_model_with_single_value_and_maps_result`; `embed_accepts_experimental_telemetry_alias`; `embed_many_accepts_experimental_telemetry_alias`; `embed_many_*` tests | Deprecated `experimental_telemetry` alias behavior now has one-to-one Rust counterparts for both embed APIs. Provider implementations remain unported. |
 | Image generation: `generateImage` and `experimental_generateImage` | verified | `src/generate_image.rs` | `generate_image_*` tests | Provider implementations remain unported. |
 | Speech generation: `generateSpeech` and experimental alias | verified | `src/generate_speech.rs` | Speech generation tests | Provider implementations remain unported. |
 | Video generation: `generateVideo` and experimental alias | verified | `src/generate_video.rs` | Video generation tests, including `generate_video_forwards_abort_signal_to_model_call` and `generate_video_forwards_abort_signal_to_download_callback` | Provider implementations remain unported. |
 | Transcription: `transcribe` and experimental alias | verified | `src/transcribe.rs` | `transcribe_*` tests, including `transcribe_forwards_abort_signal_to_model_call` and `transcribe_forwards_abort_signal_to_download_callback` | Provider implementations remain unported. |
 | Reranking: `rerank` | verified | `src/rerank.rs` | `rerank_*` tests; `rerank_accepts_experimental_telemetry_alias` | Deprecated `experimental_telemetry` alias behavior now has a named Rust counterpart. Provider implementations remain unported. |
-| File upload: `uploadFile` | verified | `src/upload_file.rs` | `upload_file_*` tests | Provider implementations remain unported. |
-| Skill upload: `uploadSkill` | verified | `src/upload_skill.rs` | `upload_skill_*` tests | Provider implementations remain unported. |
-| Provider registry | verified | `src/registry.rs` | `create_provider_registry_*` tests | Gateway-specific registry helpers remain unported. |
-| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_*`; `default_settings_middleware_*`; `add_tool_input_examples_middleware_*`; `extract_json_middleware_*`; `extract_reasoning_middleware_*`; `simulate_streaming_middleware_*` tests | Mirrors upstream v4 model-level hooks plus default settings, tool input example description transforms, extract-JSON transforms, extract-reasoning transforms, and simulated streaming over Rust `Vec<LanguageModelStreamPart>` streams. |
-| Embedding model middleware: wrap/default settings | verified | `src/embedding_model_middleware.rs` | `wrap_embedding_model_*`; `default_embedding_settings_middleware_*` tests | Mirrors upstream v4 hooks. |
-| Image model middleware: wrap | verified | `src/image_model_middleware.rs` | `image_model_middleware_exposes_upstream_v4_hooks`; wrap tests | Additional upstream AI middleware remains unported. |
+| File upload: `uploadFile` | verified | `src/upload_file.rs` | `upload_file_*` tests; `upload_file_passes_tagged_base64_string_data_through_to_files_upload_file`; `upload_file_forwards_provider_options_to_files_upload_file`; `upload_file_passes_undefined_provider_options_when_not_provided`; `upload_file_passes_warnings_from_provider_result`; `upload_file_returns_result_without_provider_metadata_when_not_provided`; `upload_file_returns_provider_metadata_when_provided`; `upload_file_resolves_files_v4_from_provider_v4_with_files_method` | Mirrors upstream direct `FilesV4` upload behavior, tagged data/base64/text defaults, provider-options forwarding and absence, filename/result warning/providerMetadata pass-through, plus typed provider-v4 `files()` resolution through `upload_file_with_provider`. The upstream missing `files()` runtime throw is JavaScript dynamic object behavior; Rust callers use the `ProviderWithFiles` bound. Provider implementations remain unported. |
+| Skill upload: `uploadSkill` | verified | `src/upload_skill.rs` | `upload_skill_*` tests; `upload_skill_returns_provider_reference_warnings_and_provider_metadata_from_skills`; `upload_skill_passes_provider_options_to_the_skills`; `upload_skill_resolves_skills_v4_from_provider_v4_with_skills_method` | Mirrors upstream direct `SkillsV4` upload behavior, providerReference/warnings/providerMetadata pass-through, provider-options forwarding, displayTitle handling, plus typed provider-v4 `skills()` resolution through `upload_skill_with_provider`. The upstream missing `skills()` runtime throw is JavaScript dynamic object behavior; Rust callers use the `ProviderWithSkills` bound. Provider implementations remain unported. |
+| Provider registry | in-progress | `src/registry.rs` | `create_provider_registry_*` tests; `experimental_create_provider_registry_is_a_deprecated_alias`; `experimental_create_provider_registry_with_options_is_a_deprecated_alias`; `create_provider_registry_should_wrap_all_language_models_accessed_through_the_provider_registry`; `create_provider_registry_should_wrap_all_image_models_accessed_through_the_provider_registry`; `custom_provider_language_model_should_return_the_language_model_if_it_exists`; `custom_provider_language_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_language_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_embedding_model_should_return_the_embedding_model_if_it_exists`; `custom_provider_embedding_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_embedding_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_image_model_should_return_the_image_model_if_it_exists`; `custom_provider_image_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_image_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_transcription_model_should_return_the_transcription_model_if_it_exists`; `custom_provider_transcription_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_transcription_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_speech_model_should_return_the_speech_model_if_it_exists`; `custom_provider_speech_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_speech_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_reranking_model_should_return_the_reranking_model_if_it_exists`; `custom_provider_reranking_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_reranking_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_video_model_should_return_the_video_model_if_it_exists`; `custom_provider_video_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`; `custom_provider_video_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`; `custom_provider_files_should_return_the_files_interface_if_it_exists`; `custom_provider_skills_should_return_the_skills_interface_if_it_exists`; `custom_provider_files_and_skills_should_expose_both_interfaces_when_both_exist`; `custom_provider_files_should_use_fallback_provider_files_if_files_is_not_configured_and_fallback_exists`; `custom_provider_skills_should_use_fallback_provider_skills_if_skills_is_not_configured_and_fallback_exists`; `custom_provider_should_resolve_string_model_ids_through_the_explicit_default_provider` | Core provider/model lookup, custom separators, deprecated `experimental_createProviderRegistry` alias coverage, missing-provider/model errors, files/skills interfaces, language/image model middleware wrapping through registry lookup, direct `customProvider` current-v4 language/embedding/image model maps plus fallback-provider lookup for those required model families, direct optional transcription/speech/reranking/video model maps plus no-fallback and fallback-provider behavior, direct `customProvider` files/skills exposure, fallback-provider files/skills exposure, and string model-id alias resolution through an explicit Rust default/fallback provider are covered. Remaining registry-family gap: Gateway-specific registry helpers. Rust uses an explicit provider boundary instead of JavaScript's mutable `globalThis.AI_SDK_DEFAULT_PROVIDER`. |
+| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_model_property_should_pass_through_by_default`; `wrap_language_model_model_property_should_use_middleware_override_model_id_if_provided`; `wrap_language_model_model_property_should_use_model_id_parameter_if_provided`; `wrap_language_model_provider_property_should_pass_through_by_default`; `wrap_language_model_provider_property_should_use_middleware_override_provider_if_provided`; `wrap_language_model_provider_property_should_use_provider_id_parameter_if_provided`; `wrap_language_model_supported_urls_property_should_pass_through_by_default`; `wrap_language_model_supported_urls_property_should_use_middleware_override_if_provided`; `wrap_language_model_should_call_transform_params_middleware_for_do_generate`; `wrap_language_model_should_call_wrap_generate_middleware`; `wrap_language_model_should_call_transform_params_middleware_for_do_stream`; `wrap_language_model_should_call_wrap_stream_middleware`; `wrap_language_model_should_support_models_that_use_context_in_supported_urls`; `wrap_language_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_generate`; `wrap_language_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_stream`; `wrap_language_model_should_chain_multiple_wrap_generate_middlewares_in_the_correct_order`; `wrap_language_model_should_chain_multiple_wrap_stream_middlewares_in_the_correct_order`; `default_settings_middleware_*`; `add_tool_input_examples_middleware_*`; `extract_json_middleware_*`; `extract_reasoning_middleware_*`; `simulate_streaming_middleware_*` tests | Mirrors upstream v4 model-level hooks plus complete portable `wrapLanguageModel` identity/supported-URL/transform/wrap sequencing cases, default settings, tool input example description transforms, extract-JSON transforms, extract-reasoning transforms, and simulated streaming over Rust `Vec<LanguageModelStreamPart>` streams. Rust composes multiple language middlewares through nested wrappers instead of a JavaScript array argument; the upstream array-mutation identity check is JavaScript-runtime-specific and documented as non-portable. The default-settings tests now split the portable upstream cases for default application, user precedence, provider-options merging, zero-valued temperature, max output tokens, stop sequences, topP, headers, and empty/absent provider options; the JavaScript-only explicit `temperature: null as any` case is represented by Rust's typed `Option<f64>` boundary rather than a runtime null value. |
+| Embedding model middleware: wrap/default settings | verified | `src/embedding_model_middleware.rs` | `wrap_embedding_model_model_property_should_pass_through_by_default`; `wrap_embedding_model_model_property_should_use_middleware_override_model_id_if_provided`; `wrap_embedding_model_model_property_should_use_model_id_parameter_if_provided`; `wrap_embedding_model_provider_property_should_pass_through_by_default`; `wrap_embedding_model_provider_property_should_use_middleware_override_provider_if_provided`; `wrap_embedding_model_provider_property_should_use_provider_id_parameter_if_provided`; `wrap_embedding_model_max_embeddings_per_call_property_should_pass_through_by_default`; `wrap_embedding_model_max_embeddings_per_call_property_should_use_middleware_override_if_provided`; `wrap_embedding_model_supports_parallel_calls_property_should_pass_through_by_default`; `wrap_embedding_model_supports_parallel_calls_property_should_use_middleware_override_if_provided`; `wrap_embedding_model_should_call_transform_params_middleware_for_do_embed`; `wrap_embedding_model_should_call_wrap_embed_middleware`; `wrap_embedding_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_embed`; `wrap_embedding_model_should_chain_multiple_wrap_embed_middlewares_in_the_correct_order`; `default_embedding_settings_middleware_applies_headers_without_overriding_params`; `default_embedding_settings_middleware_deep_merges_provider_options`; `default_embedding_settings_middleware_preserves_none_when_no_defaults_or_params`; `default_embedding_settings_middleware_should_merge_headers`; `default_embedding_settings_middleware_should_handle_empty_default_headers`; `default_embedding_settings_middleware_should_handle_empty_param_headers`; `default_embedding_settings_middleware_should_handle_both_headers_being_undefined`; `default_embedding_settings_middleware_should_handle_empty_default_provider_options`; `default_embedding_settings_middleware_should_handle_empty_param_provider_options`; `default_embedding_settings_middleware_should_handle_both_provider_options_being_undefined` | Mirrors upstream v4 hooks plus the complete portable `wrapEmbeddingModel` identity/capability/transform/wrap sequencing cases and the complete portable `defaultEmbeddingSettingsMiddleware` case set. Rust composes multiple embedding middlewares through nested wrappers instead of a JavaScript array argument; the upstream array-mutation identity check is JavaScript-runtime-specific and documented as non-portable. |
+| Image model middleware: wrap | verified | `src/image_model_middleware.rs` | `wrap_image_model_model_property_should_pass_through_by_default`; `wrap_image_model_model_property_should_use_middleware_override_model_id_if_provided`; `wrap_image_model_model_property_should_use_model_id_parameter_if_provided`; `wrap_image_model_provider_property_should_pass_through_by_default`; `wrap_image_model_provider_property_should_use_middleware_override_provider_if_provided`; `wrap_image_model_provider_property_should_use_provider_id_parameter_if_provided`; `wrap_image_model_max_images_per_call_property_should_pass_through_by_default`; `wrap_image_model_max_images_per_call_property_should_use_middleware_override_if_provided`; `wrap_image_model_should_call_transform_params_middleware_for_do_generate`; `wrap_image_model_should_call_wrap_generate_middleware`; `wrap_image_model_should_support_models_that_use_context_in_max_images_per_call`; `wrap_image_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_generate`; `wrap_image_model_should_chain_multiple_wrap_generate_middlewares_in_the_correct_order` | Mirrors upstream v4 hooks plus the complete portable `wrapImageModel` identity/capability/transform/wrap sequencing cases. Rust composes multiple image middlewares through nested wrappers instead of a JavaScript array argument; the upstream array-mutation identity check is JavaScript-runtime-specific and documented as non-portable. |
 | Provider wrapping middleware | verified | `src/provider_middleware.rs` | `wrap_provider_wraps_all_language_model_lookups`; `wrap_provider_with_image_middleware_wraps_all_image_model_lookups`; passthrough and optional-interface tests | Mirrors upstream `middleware/wrap-provider.ts` for provider-v4 Rust providers: wraps every language lookup, optionally wraps image lookups, forwards embedding and optional provider extensions. Provider-v2/v3 conversion remains tracked separately. |
 | Provider `getErrorMessage` helper | verified | `crates/ai-sdk-provider/src/provider.rs` | `get_error_message_returns_unknown_error_for_null`; `get_error_message_returns_unknown_error_for_undefined`; `get_error_message_returns_string_as_is`; `get_error_message_returns_empty_string_as_is`; `get_error_message_includes_error_type_prefix_for_basic_error`; `get_error_message_includes_type_error_prefix`; `get_error_message_includes_range_error_prefix`; `get_error_message_returns_error_name_for_empty_message`; `get_error_message_returns_type_error_name_for_empty_message`; `get_error_message_handles_custom_error_subclasses`; `get_error_message_respects_custom_to_string_overrides`; `get_error_message_handles_custom_error_subclass_with_empty_message`; `get_error_message_json_stringifies_plain_objects`; `get_error_message_json_stringifies_numbers`; `get_error_message_json_stringifies_booleans`; `get_error_message_json_stringifies_arrays` | Mirrors upstream `packages/provider/src/errors/get-error-message.test.ts` one-to-one: nullable values become `unknown error`, strings including empty strings pass through, JavaScript error names and custom `toString` output are represented through Rust `Display`, and JSON-like objects, numbers, booleans, and arrays serialize to stable compact JSON strings. |
 | Provider-utils nullish filtering helpers | verified | `crates/ai-sdk-provider-utils/src/provider_utils.rs` | `filter_nullable_removes_null_and_undefined_values_from_value_list`; `filter_nullable_preserves_other_falsy_values`; `remove_undefined_entries_should_remove_undefined_entries_from_record`; `remove_undefined_entries_should_handle_empty_object`; `remove_undefined_entries_should_handle_object_with_all_undefined_values`; `remove_undefined_entries_should_remove_null_values`; `remove_undefined_entries_should_preserve_falsy_values_except_null_and_undefined`; `remove_undefined_entries_preserves_manual_null_json_values_for_rust_callers` | Mirrors upstream `filter-nullable.test.ts` and `remove-undefined-entries.test.ts` one-to-one: nullish values are omitted from lists and records, empty and all-missing records return empty maps, and falsy-but-present values remain. The extra Rust-only manual `JsonValue::Null` case documents the generic `Option<T>` boundary without replacing the upstream nullish tests. |
@@ -481,22 +487,23 @@ inventory.
 | Provider-utils user-agent suffixing | verified | `crates/ai-sdk-provider-utils/src/provider_utils.rs` | `with_user_agent_suffix_upstream_creates_new_user_agent_header`; `with_user_agent_suffix_upstream_appends_suffix_parts_to_existing_user_agent_header`; `with_user_agent_suffix_upstream_removes_missing_header_entries`; `with_user_agent_suffix_upstream_preserves_headers_instance_entries`; `with_user_agent_suffix_upstream_handles_array_header_entries`; existing grouped regressions | Mirrors upstream `with-user-agent-suffix.test.ts` one-to-one for creating and appending user-agent values, filtering missing header entries, preserving browser `Headers`-style entries at the iterable header boundary, and handling array header entries. The older grouped Rust tests remain as additive coverage only. |
 | Provider-utils provider-reference detection | verified | `crates/ai-sdk-provider-utils/src/provider_utils.rs` | `is_provider_reference_upstream_returns_true_for_plain_record_of_provider_ids`; `is_provider_reference_upstream_returns_true_for_record_with_single_file_id_like_key`; `is_provider_reference_upstream_returns_false_for_object_carrying_type_property`; `is_provider_reference_upstream_returns_false_for_tagged_data_object`; `is_provider_reference_upstream_returns_false_for_uint8_array_json_boundary`; `is_provider_reference_upstream_returns_false_for_null`; `is_provider_reference_upstream_returns_false_for_string_primitive`; `is_provider_reference_upstream_returns_false_for_number_primitive`; existing grouped regressions | Mirrors every portable upstream `is-provider-reference.test.ts` case one-to-one for provider-id records, fileId-like records, tagged reference/data objects, Uint8Array-like JSON arrays, null, string, and number inputs. The upstream `URL` instance case is JavaScript-object-prototype-specific and non-portable at the Rust `serde_json::Value` boundary. |
 | Provider-utils provider-reference resolution | verified | `crates/ai-sdk-provider-utils/src/provider_utils.rs` | `resolve_provider_reference_upstream_returns_identifier_when_provider_key_exists`; `resolve_provider_reference_upstream_returns_correct_identifier_for_different_provider`; `resolve_provider_reference_upstream_throws_when_no_entry_exists_for_provider`; `resolve_provider_reference_upstream_throws_when_reference_is_empty`; `resolve_provider_reference_upstream_works_with_single_provider_reference`; existing grouped regressions | Mirrors upstream `resolve-provider-reference.test.ts` one-to-one for provider-specific lookup, alternate provider lookup, missing-provider errors including retained provider/reference context, empty references, and single-provider references. The older grouped Rust tests remain as additive coverage only. |
-| Add tool input examples middleware | verified | `src/language_model_middleware.rs` | `add_tool_input_examples_middleware_appends_examples_and_removes_them_by_default`; `add_tool_input_examples_middleware_supports_custom_options` | Mirrors upstream `middleware/add-tool-input-examples-middleware.ts`: formats function tool `inputExamples` into descriptions, defaults to the `Input Examples:` prefix, supports custom formatters, and removes structured examples by default. |
-| Extract JSON middleware | verified | `src/language_model_middleware.rs` | `extract_json_middleware_default_transform_strips_markdown_fences`; `extract_json_middleware_transforms_generate_text_parts`; `extract_json_middleware_transforms_vec_stream_text_blocks` | Mirrors upstream `middleware/extract-json-middleware.ts` for non-streaming text parts and this crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary. Browser stream transform details are represented as collected Rust stream transformation. |
-| Extract reasoning middleware | verified | `src/language_model_middleware.rs` | `extract_reasoning_middleware_extracts_generate_text_tags`; `extract_reasoning_middleware_supports_start_with_reasoning_for_generate`; `extract_reasoning_middleware_extracts_split_stream_tags`; `extract_reasoning_middleware_separates_multiple_stream_tags` | Mirrors upstream `middleware/extract-reasoning-middleware.ts` for non-streaming text parts and this crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary, including split tags, delayed text starts, multiple reasoning blocks, separators, and start-with-reasoning mode. |
-| Simulate streaming middleware | verified | `src/language_model_middleware.rs` | `simulate_streaming_middleware_turns_generate_result_into_vec_stream` | Mirrors upstream `middleware/simulate-streaming-middleware.ts` for Rust models whose stream type is `Vec<LanguageModelStreamPart>`, turning `do_generate` content into stream start, response metadata, text/reasoning/content parts, finish metadata, and stream result response headers. |
+| Add tool input examples middleware | verified | `src/language_model_middleware.rs` | `add_tool_input_examples_middleware_appends_examples_and_removes_them_by_default`; `add_tool_input_examples_middleware_supports_custom_options`; `add_tool_input_examples_middleware_handles_tool_without_existing_description`; `add_tool_input_examples_middleware_uses_default_json_stringify_format`; `add_tool_input_examples_middleware_passes_through_tools_without_input_examples`; `add_tool_input_examples_middleware_passes_through_tools_with_empty_input_examples`; `add_tool_input_examples_middleware_passes_through_provider_tools_unchanged`; `add_tool_input_examples_middleware_handles_multiple_tools_with_mixed_examples`; `add_tool_input_examples_middleware_handles_empty_tools_array`; `add_tool_input_examples_middleware_handles_undefined_tools` | Mirrors upstream `middleware/add-tool-input-examples-middleware.ts`: formats function tool `inputExamples` into descriptions, handles missing descriptions, defaults to the `Input Examples:` prefix and JSON stringify formatting, supports custom formatters, removes structured examples by default, can retain examples with `remove: false`, leaves function/provider tools without examples unchanged, and preserves empty or absent tool lists. |
+| Extract JSON middleware | verified | `src/language_model_middleware.rs` | `extract_json_middleware_wrap_generate_should_strip_markdown_json_fence_from_text_content`; `extract_json_middleware_wrap_generate_should_strip_markdown_fence_without_json_tag`; `extract_json_middleware_wrap_generate_should_leave_text_without_fences_unchanged`; `extract_json_middleware_wrap_generate_should_use_custom_transform_function_when_provided`; `extract_json_middleware_wrap_generate_should_preserve_non_text_content_parts`; `extract_json_middleware_wrap_stream_should_strip_markdown_json_fence_from_streamed_text`; `extract_json_middleware_wrap_stream_should_strip_markdown_fence_without_json_tag`; `extract_json_middleware_wrap_stream_should_leave_text_without_fences_unchanged_in_stream`; `extract_json_middleware_wrap_stream_should_handle_fence_split_across_multiple_deltas`; `extract_json_middleware_wrap_stream_should_handle_content_that_starts_with_backtick_but_is_not_a_fence`; `extract_json_middleware_wrap_stream_should_pass_through_non_text_chunks_unchanged`; `extract_json_middleware_wrap_stream_should_handle_multiple_text_blocks_with_different_ids`; `extract_json_middleware_wrap_stream_should_handle_text_delta_without_prior_text_start`; `extract_json_middleware_wrap_stream_should_emit_text_start_when_stream_ends_while_still_in_prefix_phase`; `extract_json_middleware_wrap_stream_should_apply_custom_transform_to_streamed_content`; `extract_json_middleware_wrap_stream_should_handle_large_content_exceeding_suffix_buffer`; `extract_json_middleware_wrap_stream_should_handle_content_arriving_character_by_character`; `extract_json_middleware_wrap_stream_should_handle_fence_with_extra_whitespace`; `extract_json_middleware_wrap_stream_should_verify_stream_output_matches_expected_structure`; `extract_json_middleware_wrap_stream_should_handle_empty_content_between_fences`; `extract_json_middleware_wrap_stream_should_handle_content_starting_without_backtick_quickly_switching_to_streaming` | Mirrors current upstream `middleware/extract-json-middleware.test.ts` portable cases for non-streaming text parts and this crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary, including split fences, non-fence backticks, non-text chunks, multiple text IDs, missing text-start edge, empty fenced content, custom transforms, large/character-by-character content, and closing fences with extra whitespace. Browser `ReadableStream` mechanics are represented as collected Rust stream transformation. |
+| Extract reasoning middleware | verified | `src/language_model_middleware.rs` | `extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_think_tags`; `extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_think_tags_when_there_is_no_text`; `extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_multiple_think_tags`; `extract_reasoning_middleware_wrap_generate_should_prepend_think_tag_iff_start_with_reasoning_is_true`; `extract_reasoning_middleware_wrap_generate_should_preserve_reasoning_property_even_when_rest_contains_other_properties`; `extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_split_think_tags`; `extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_single_chunk_with_multiple_think_tags`; `extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_think_when_there_is_no_text`; `extract_reasoning_middleware_wrap_stream_should_prepend_think_tag_if_start_with_reasoning_is_true`; `extract_reasoning_middleware_wrap_stream_should_keep_original_text_when_think_tag_is_not_present`; `extract_reasoning_middleware_wrap_stream_should_handle_empty_think_tags_without_crashing` | Mirrors current upstream `middleware/extract-reasoning-middleware.test.ts` portable cases for non-streaming text parts and this crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary, including split tags, delayed text starts, multiple reasoning blocks, separators, no-text reasoning, start-with-reasoning true/false behavior, original-text passthrough, and empty reasoning tags. |
+| Simulate streaming middleware | verified | `src/language_model_middleware.rs` | `simulate_streaming_middleware_should_simulate_streaming_with_text_response`; `simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_string`; `simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_array_of_text_objects`; `simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_array_of_mixed_objects`; `simulate_streaming_middleware_should_simulate_streaming_with_tool_calls`; `simulate_streaming_middleware_should_preserve_additional_metadata_in_the_response`; `simulate_streaming_middleware_should_handle_empty_text_response`; `simulate_streaming_middleware_should_pass_through_warnings_from_the_model`; existing grouped regression | Mirrors current upstream `middleware/simulate-streaming-middleware.test.ts` portable cases one-to-one for text responses, reasoning parts with and without provider metadata, mixed reasoning/text order, tool calls, call-level provider metadata, empty text, and warnings. Rust models use the crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary, so upstream browser `ReadableStream` collection is represented by direct stream-part assertions. |
 | Prompt standardization, model-message conversion, request options | in-progress | `src/prompt.rs`, `src/language_model.rs`, `src/chat_transport.rs` | Prompt conversion and call-option tests; request timeout helper tests; language model call setting preparation tests; tool-choice preparation tests; `convert_ui_messages_maps_simple_system_message`; `convert_ui_messages_maps_simple_user_message`; `convert_ui_messages_maps_custom_assistant_part`; `convert_ui_messages_maps_simple_assistant_text_message`; `convert_ui_messages_maps_assistant_reasoning_parts`; `convert_ui_messages_maps_system_provider_metadata`; `convert_ui_messages_merges_system_provider_metadata_from_text_parts`; `convert_ui_messages_maps_system_anthropic_cache_control_metadata`; `convert_ui_messages_maps_user_text_provider_metadata`; `convert_ui_messages_maps_user_file_provider_metadata`; `convert_ui_messages_maps_assistant_text_provider_metadata`; `convert_ui_messages_maps_assistant_file_provider_metadata`; `convert_ui_messages_maps_user_file_url_part`; `convert_ui_messages_includes_user_file_filename`; `convert_ui_messages_maps_user_file_provider_reference`; `convert_ui_messages_omits_user_file_filename_when_absent`; `convert_ui_messages_maps_assistant_file_url_part`; `convert_ui_messages_includes_assistant_file_filename`; `convert_ui_messages_maps_assistant_file_provider_reference`; `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`; `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`; `convert_ui_messages_maps_dynamic_tool_output_available_tool_name`; `convert_ui_messages_preserves_step_start_blocks_as_assistant_tool_pairs`; `convert_ui_messages_places_provider_executed_tool_result_in_assistant`; `convert_ui_messages_maps_provider_executed_tool_output_available`; `convert_ui_messages_maps_provider_executed_tool_output_error`; `convert_ui_messages_propagates_provider_metadata_to_provider_executed_tool_result`; `convert_ui_messages_prefers_result_provider_metadata_for_provider_executed_tool_result`; `convert_ui_messages_maps_denied_approval_response_to_execution_denied_result`; `convert_ui_messages_skips_unconverted_data_parts`; `convert_ui_messages_maps_file_provider_reference_and_metadata_parts` | Many prompt parts are covered; request timeout helpers and high-level language model call setting preparation now have named counterparts for upstream `prepare-language-model-call-options.test.ts`; `prepareToolChoice` now has named Rust counterparts for default auto, none, tool object, auto, and required cases; UI-to-model conversion now includes simple system/user/assistant messages, custom assistant parts, assistant reasoning parts, system/user/assistant text and file provider metadata, merged system provider metadata, Anthropic cache-control metadata, user/assistant file URL conversion, filename omission/inclusion, provider-reference file data, assistant static/dynamic tool history, output-error raw input, step-start block ordering, provider-executed tool-result placement, provider-executed output errors, provider metadata propagation to provider-executed results, result-provider-metadata precedence, denied approval responses, skipped unconverted data UI parts, file/provider-reference mapping, and custom/reasoning provider metadata. Broader approval-state edge coverage and remaining agent-specific call-option schema/type-level parity remain unported. Legacy v2/v3 adapter cases are documented separately as JavaScript package compatibility. |
 | UI-to-model assistant tool output and conversation splitting | verified | `src/chat_transport.rs` | `convert_ui_messages_maps_tool_output_available_with_provider_metadata`; `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`; `convert_ui_messages_maps_tool_output_error_input_to_error_text`; `convert_ui_messages_maps_tool_invocation_multi_part_response`; `convert_ui_messages_maps_empty_tool_invocation_conversation`; `convert_ui_messages_maps_multiple_messages_conversation`; `convert_ui_messages_maps_multiple_tool_invocations_with_steps`; `convert_ui_messages_maps_tool_invocations_mixed_with_text`; `convert_ui_messages_maps_multiple_tool_invocations_with_trailing_user_message` | Mirrors the first upstream `convert-to-model-messages.test.ts` assistant tool-output and conversation-shaping cases one-to-one: local tool output with provider metadata, output-error with `rawInput`, output-error with ordinary `input`, snapshot-equivalent screenshot tool output, assistant/user conversation with no tools, multiple plain messages, `step-start` splitting for multiple tool calls/results, mixed text/tool invocation steps, and trailing user messages after split tool history. |
 | UI-to-model incomplete tool filtering | verified | `src/chat_transport.rs` | `convert_ui_messages_can_ignore_incomplete_tool_calls` | Adds `ConvertUiMessagesToModelMessagesOptions::ignore_incomplete_tool_calls` and mirrors upstream `ignoreIncompleteToolCalls: true` by dropping `input-streaming` and `input-available` static/dynamic tool parts before model-message conversion while preserving completed tool history, following assistant text, and trailing user messages. |
+| UI-to-model unknown role validation | verified | `src/chat_transport.rs`, `src/ui_message_stream.rs` | `convert_ui_messages_rejects_unknown_roles_at_json_boundary` | Documents upstream `convert-to-model-messages.test.ts` unknown role handling at Rust's typed JSON boundary: JavaScript can pass `role: "unknown" as any` into conversion, while Rust rejects that invalid `UiMessageRole` during deserialization before conversion. |
 | UI-to-model dynamic tool conversion | verified | `src/chat_transport.rs` | `convert_ui_messages_maps_dynamic_tool_output_available_tool_name`; `convert_ui_messages_maps_dynamic_tool_with_trailing_user_message`; `convert_ui_messages_maps_provider_executed_dynamic_tool_with_trailing_user_message` | Mirrors upstream `convert-to-model-messages.test.ts` dynamic tool conversion for ordinary dynamic tool results, trailing user message preservation under `ignoreIncompleteToolCalls`, and provider-executed dynamic tool result placement with provider metadata copied to both the tool call and in-assistant tool result. |
 | UI-to-model approval response conversion | verified | `src/chat_transport.rs`, `crates/ai-sdk-provider/src/language_model.rs` | `convert_ui_messages_maps_approved_static_tool_approval_response`; `convert_ui_messages_maps_approved_dynamic_tool_approval_response`; `convert_ui_messages_preserves_automatic_approval_metadata_for_tool_result`; `convert_ui_messages_marks_provider_executed_denied_approval_response`; `convert_ui_messages_maps_denied_static_tool_approval_with_follow_up_text`; `convert_ui_messages_maps_denied_dynamic_tool_approval_with_follow_up_text`; `convert_ui_messages_maps_static_tool_output_denied`; `convert_ui_messages_maps_dynamic_tool_output_denied`; `convert_ui_messages_maps_approved_tool_result_with_follow_up_text`; `convert_ui_messages_maps_approved_tool_error_with_follow_up_text`; provider contract coverage in `tool_message_serializes_tool_result_and_approval_response_parts` | Mirrors upstream `packages/ai/src/ui/convert-to-model-messages.test.ts` approval-response matrix one-to-one for approved static/dynamic tools, automatic approval metadata on approved tool results, provider-executed denied approval responses, denied static/dynamic approval follow-up text, static/dynamic `output-denied`, and approved tool result/error follow-up text. The matching Rust prompt part preserves upstream `providerExecuted` on `tool-approval-response`. |
 | UI-to-model data part conversion | verified | `src/chat_transport.rs` | `convert_ui_messages_skips_unconverted_data_parts`; `convert_ui_messages_converts_user_data_url_to_text_with_converter`; `convert_ui_messages_skips_user_data_parts_when_no_converter_provided`; `convert_ui_messages_selectively_converts_user_data_parts`; `convert_ui_messages_converts_user_data_parts_to_file_with_converter`; `convert_ui_messages_converts_multiple_user_data_part_types`; `convert_ui_messages_handles_user_message_without_data_parts_with_converter`; `convert_ui_messages_preserves_user_data_part_order_with_converter`; `convert_ui_messages_converts_assistant_data_url_to_text_with_converter`; `convert_ui_messages_skips_assistant_data_parts_when_no_converter_provided`; `convert_ui_messages_selectively_converts_assistant_data_parts`; `convert_ui_messages_converts_assistant_data_parts_to_file_with_converter`; `convert_ui_messages_converts_multiple_assistant_data_part_types`; `convert_ui_messages_handles_assistant_message_without_data_parts_with_converter`; `convert_ui_messages_preserves_assistant_data_part_order_with_converter` | Adds a `convert_data_part` Rust conversion hook for UI data parts and maps every portable upstream `data part conversion` test in `convert-to-model-messages.test.ts` one-to-one for user and assistant messages: data URL to text, no-converter skips, selective conversion, file conversion, multiple data-type conversion with skipped notes, no-data-message passthrough, and part-order preservation. Rust file data uses the typed `FileData::Data` JSON shape while preserving the same base64 payload, media type, and filename behavior. |
 | Model resolution | verified | `src/resolve_model.rs` | `resolve_language_model_should_return_it_as_is`; `resolve_language_model_should_return_a_gateway_language_model`; `resolve_language_model_should_return_a_language_model_from_the_default_provider`; `resolve_embedding_model_should_return_it_as_is`; `resolve_embedding_model_should_return_a_gateway_embedding_model`; `resolve_embedding_model_should_return_an_embedding_model_from_the_default_provider`; `resolve_image_model_should_return_it_as_is`; `resolve_image_model_should_return_a_gateway_image_model`; `resolve_image_model_should_return_an_image_model_from_the_default_provider`; `resolve_video_model_should_return_it_as_is`; `resolve_video_model_should_return_a_gateway_video_model_converted_to_v4`; `resolve_video_model_should_return_a_video_model_from_the_default_provider`; `resolve_reranking_model_should_return_it_as_is`; `resolve_reranking_model_should_return_a_gateway_reranking_model_converted_to_v4`; `resolve_reranking_model_should_return_a_reranking_model_from_the_default_provider`; `resolve_reranking_model_should_report_missing_default_provider_support_as_no_such_model`; `resolve_video_model_should_report_missing_default_provider_support_as_no_such_model`; `resolve_transcription_model_supports_the_upstream_resolve_function_surface`; `resolve_speech_model_supports_the_upstream_resolve_function_surface`; `resolved_model_into_owned_clones_direct_models_and_moves_provider_models` | Adds Rust `ModelSource` and `ResolvedModel` helpers for upstream `model/resolve-model.ts`'s portable current-provider boundary. Direct current-version model inputs preserve borrowed identity, string model ids resolve through an explicit provider, and `GatewayProvider` covers the upstream no-global-default Gateway fallback for language, embedding, image, video, and reranking models. Explicit `MockProvider` coverage mirrors the upstream global default-provider cases without introducing process-global mutable state. Rust optional provider support for video/reranking is represented by trait bounds plus typed `NoSuchModelError` values for missing registrations. Legacy v2/v3 adapters, unsupported-version throw tests, JavaScript prototype preservation, and mutable `globalThis.AI_SDK_DEFAULT_PROVIDER` are JavaScript runtime/object boundaries documented in the compatibility row below. |
 | Provider-v2/v3 compatibility adapters | js-only-documented | none | This row | Upstream `packages/ai/src/model/as-embedding-model-v3.test.ts` (18 cases), `as-embedding-model-v4.test.ts` (8), `as-image-model-v3.test.ts` (17), `as-image-model-v4.test.ts` (7), `as-language-model-v3.test.ts` (19), `as-language-model-v4.test.ts` (9), `as-provider-v4.test.ts` (7), `as-reranking-model-v4.test.ts` (6), `as-speech-model-v3.test.ts` (16), `as-speech-model-v4.test.ts` (7), `as-transcription-model-v3.test.ts` (20), `as-transcription-model-v4.test.ts` (7), and `as-video-model-v4.test.ts` (6), for 147 `it` cases. These helpers adapt legacy JavaScript provider object versions (`specificationVersion: "v2"` / `"v3"`) into the current JavaScript v4 model/provider surface while preserving prototype method identity, JavaScript property descriptors, promise-valued capability properties, Web `ReadableStream` instances, and compatibility warning calls. The Rust port exposes only the current provider-v4 traits and model structs; there are no public Rust v2/v3 trait objects, JavaScript prototypes, or JS package-version object identities to accept or adapt. Portable current-version model/provider behavior is covered by the provider-v4 contract, middleware, mock model, provider registry, and high-level API rows. |
-| Public mock models and test fixtures | verified | `src/mock_models.rs` | `mock_language_model_records_calls_and_returns_scripted_results`; `mock_language_model_can_drive_generate_text`; `mock_provider_resolves_registered_models_and_reports_missing_ids` | Provides scriptable provider-v4 mock language, embedding, image, speech, transcription, reranking, video models, and a mock provider with shared call recording. Upstream v2/v3 mock helpers are intentionally not exposed yet because the Rust provider-v4 contracts are the active portable boundary. |
+| Public mock models and test fixtures | verified | `src/mock_models.rs` | `mock_language_model_v4_returns_array_backed_generate_results_from_the_first_entry`; `mock_language_model_v4_returns_array_backed_stream_results_from_the_first_entry`; `mock_embedding_model_v4_returns_array_backed_embed_results_from_the_first_entry`; `mock_language_model_records_calls_and_returns_scripted_results`; `mock_language_model_can_drive_generate_text`; `mock_provider_resolves_registered_models_and_reports_missing_ids` | Mirrors current-version upstream `test/mock-language-model.test.ts` and `test/mock-embedding-model.test.ts` portable v4 array-backed script cases for generate, stream, and embed calls. Provides scriptable provider-v4 mock language, embedding, image, speech, transcription, reranking, video models, and a mock provider with shared call recording. Upstream v2/v3 mock helpers are JavaScript compatibility fixtures for legacy provider object versions and are documented as non-portable because the Rust port exposes only current provider-v4 traits and model structs. |
 | Telemetry and logger | in-progress | `src/logger.rs`, `src/telemetry.rs`, `src/generate_text.rs`, `src/stream_text.rs`, `src/generate_object.rs`, `src/stream_object.rs`, `src/embed.rs`, `src/rerank.rs`, `crates/ai-sdk-otel` | `format_warning_matches_upstream_warning_messages`; `warning_logger_emits_info_once_for_first_non_empty_batch`; `warning_logger_can_be_disabled_and_reset`; `process_wide_log_warnings_matches_upstream_first_call_state`; `custom_logger_receives_original_options_without_default_records`; `telemetry_registry_adds_global_integrations_in_order`; `telemetry_dispatcher_invokes_local_integration_with_augmented_event`; `telemetry_dispatcher_uses_global_integrations_when_local_integrations_are_absent`; `telemetry_dispatcher_publishes_diagnostics_without_integrations`; `telemetry_dispatcher_wraps_execute_tool_and_prefers_local_wrappers`; `open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver`; `legacy_open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text_with_otel`; ignored `live_vercel_ai_gateway_openai_compatible_stream_text_with_otel`; ignored `live_vercel_ai_gateway_openai_compatible_generate_object_with_otel`; ignored `live_vercel_ai_gateway_openai_compatible_stream_object_with_otel`; ignored `live_vercel_ai_gateway_openai_responses_generate_text_with_otel`; ignored `live_vercel_ai_gateway_openai_responses_stream_text_with_otel`; `generate_text_dispatches_telemetry_lifecycle_events`; `generate_text_dispatches_tool_execution_telemetry_events`; `stream_text_dispatches_telemetry_lifecycle_events`; `stream_text_dispatches_tool_execution_telemetry_events`; `generate_object_dispatches_telemetry_lifecycle_events`; `stream_object_dispatches_telemetry_lifecycle_events`; `embed_dispatches_telemetry_lifecycle_events`; `embed_many_dispatches_telemetry_lifecycle_events`; `rerank_dispatches_telemetry_lifecycle_events`; `select_attributes_matches_telemetry_recording_flags`; `formats_system_and_input_messages`; `record_span_records_exception_status_and_ends_on_error`; `open_telemetry_records_generate_text_root_step_and_chat_spans`; `open_telemetry_records_object_operation_and_step_spans`; `open_telemetry_records_embedding_operation_and_inner_span`; `open_telemetry_records_rerank_operation_and_inner_span`; `legacy_open_telemetry_records_generate_text_step_tool_and_root_spans`; `legacy_open_telemetry_records_object_embedding_and_rerank_spans`; `local_otlp_http_receiver_captures_exported_span_payload`; `real_opentelemetry_http_exporter_sends_json_to_local_receiver` | Upstream `packages/ai/src/logger/log-warnings.ts` warning formatting, suppression, custom logger callback, first-call info, reset state, and deprecation warning classification are covered as root-owned `packages/ai` API. Root-owned `packages/ai/src/telemetry/*` now has an initial Rust dispatcher covering telemetry options, global vs per-call integration resolution, lifecycle fan-out, diagnostic channel publication, disabled telemetry behavior, panic isolation, execute-tool wrapper composition, a `create_open_telemetry_integration` adapter that translates dispatcher events into package-owned OTel semantic-convention spans, and a `create_legacy_open_telemetry_integration` adapter that translates the same dispatcher events into legacy `ai.*` spans; both adapters export through the local OTLP receiver path. `generate_text`, `stream_text`, `generate_object`, `stream_object`, `embed`, `embed_many`, and `rerank` now dispatch high-level lifecycle telemetry events through that dispatcher. The matching `ai-sdk-otel` crate covers initial `@ai-sdk/otel` helper surfaces for attribute gating, GenAI semantic-convention formatting, dependency-free text/tool/object/embedding/reranking lifecycle span recording for both `OpenTelemetry` and `LegacyOpenTelemetry`, local OTLP/HTTP receiver/export validation, and real Rust OpenTelemetry SDK OTLP/HTTP JSON exporter proof under the `real-opentelemetry` feature. Initial provider-live telemetry proof exists for Gateway OpenAI-compatible `generate_text`, `stream_text`, `generate_object`, and `stream_object`, plus Gateway OpenAI Responses `generate_text` and `stream_text`, through the local receiver. Remaining work: broaden provider live tests with telemetry enabled across remaining provider-backed rows. |
 | MCP client and tool bridge | in-progress | `crates/ai-sdk-mcp` | `mcp_client_initializes_and_sends_initialized_notification`; `mcp_client_lists_calls_reads_resources_and_prompts`; `mcp_client_reports_capability_protocol_and_json_rpc_errors`; `mcp_client_handles_elicitation_request_messages`; `mcp_client_reports_elicitation_request_errors_to_server`; `mcp_client_invokes_uncaught_error_callback_for_transport_start_errors`; `mcp_client_invokes_uncaught_error_callback_for_elicitation_handler_errors`; `mcp_client_builds_executable_dynamic_tools_from_definitions`; `mcp_client_builds_schema_typed_tools_from_structured_content`; `mcp_client_schema_typed_tools_parse_text_content_fallback`; `mcp_client_schema_typed_tools_report_output_validation_errors`; `mcp_client_runs_authenticated_http_tools_with_output_schema_and_provider_metadata`; `mcp_http_transport_refreshes_oauth_tokens_for_unauthorized_inbound_sse`; `mcp_http_transport_refreshes_oauth_tokens_and_retries_unauthorized_post`; `mcp_http_transport_reopens_inbound_sse_after_accepted_post`; `mcp_http_transport_sends_last_event_id_when_resuming_inbound_sse`; `mcp_http_transport_retries_inbound_sse_open_failures`; `mcp_http_transport_retries_resumed_inbound_sse_after_accepted_post`; `mcp_http_transport_computes_inbound_sse_reconnect_backoff`; `mcp_http_transport_reports_max_inbound_sse_reconnect_attempts`; `mcp_http_transport_reports_invalid_inbound_sse_messages`; `mcp_sse_transport_connects_to_endpoint_and_posts_messages`; `mcp_sse_transport_refreshes_oauth_tokens_for_unauthorized_connect`; `mcp_sse_transport_refreshes_oauth_tokens_and_retries_unauthorized_post`; `mcp_transport_config_http_builds_authenticated_transport`; `mcp_transport_config_sse_builds_authenticated_transport`; `mcp_http_transport_rejects_redirects_by_default`; `mcp_sse_transport_parses_post_sse_message_responses`; `mcp_sse_transport_rejects_endpoint_origin_mismatch`; `mcp_sse_transport_reports_http_errors_with_http_hint`; `mcp_sse_transport_reports_post_errors`; `discover_oauth_protected_resource_metadata_uses_path_query_and_protocol_header`; `discover_authorization_server_metadata_tries_urls_in_order`; `select_resource_url_uses_protected_metadata_when_allowed`; `oauth_pkce_challenge_generates_random_url_safe_verifier`; `start_authorization_builds_pkce_resource_scope_state_and_prompt_params`; `start_authorization_can_generate_pkce_material`; `exchange_authorization_posts_code_verifier_client_secret_and_resource`; `refresh_authorization_posts_refresh_token_and_preserves_missing_replacement`; `register_client_posts_metadata_and_parses_full_information`; `auth_registers_client_and_redirects_when_tokens_are_missing`; `auth_exchanges_callback_code_and_saves_tokens_with_resource`; `auth_rejects_mismatched_callback_state_before_token_exchange`; `auth_invalidates_rejected_refresh_token_and_retries_to_redirect`; `auth_invalidates_rejected_client_credentials_and_reregisters`; `cargo run -p ai-sdk-mcp --example local_mcp_client`; `cargo run -p ai-sdk-mcp --example http_auth_typed_tools`; `cargo run -p ai-sdk-mcp --example stdio_typed_tools`; `cargo run -p ai-sdk-mcp --example sse_typed_tools`; `cargo run -p ai-sdk-mcp --example hosted_oauth_http`; `vercel_ai_gateway_openai_compatible_runs_generate_text_with_mcp_tools`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text_mcp_tool_loop` | Package-owned MCP client now covers deterministic transport initialization, JSON-RPC request/notification lifecycle, negotiated protocol version storage, server info/instructions access, capability gating, tool listing/calling, resource and prompt methods, JSON-RPC error data, client-side `elicitation/create` request handling, upstream-shaped uncaught error callbacks, schema-filtered typed tool output extraction/validation, authenticated loopback Streamable HTTP tool execution with bearer headers, typed output validation, session cleanup, and MCP provider metadata assertions, transport-owned OAuth provider bearer-token injection plus one-shot 401 authorization retry for HTTP inbound SSE GET, HTTP JSON-RPC POST, standalone SSE connect, and standalone SSE endpoint POST using protected-resource metadata and refresh-token auth, upstream-shaped `McpTransportConfig`/`create_mcp_transport` HTTP and SSE factories with hosted-auth header/OAuth propagation, and default redirect rejection, standalone SSE transport endpoint parsing/POST dispatch/bounded POST message response parsing/error reporting, Streamable HTTP inbound SSE opening after start and `202 Accepted`, upstream-shaped inbound SSE reconnect delay/backoff/max-retry behavior, `Last-Event-ID` resume headers across retries, invalid inbound SSE message errors, dynamic AI SDK tool generation/execution from MCP definitions, OAuth resource/safe-URL helpers, protected-resource selection, protected-resource and authorization-server discovery over real loopback HTTP, authorization URL construction with generated or caller-supplied PKCE/resource/scope/state handling, token exchange, refresh, standard error response parsing, dynamic client registration, high-level OAuth provider orchestration, callback state validation, credential invalidation retry behavior, and package-owned local MCP examples for listing/calling deterministic in-process tools plus authenticated Streamable HTTP, stdio, SSE, and hosted OAuth HTTP execution with provider metadata and protected auth-flow coverage, plus a Vercel AI Gateway OpenAI-compatible `generate_text` integration that consumes MCP tool definitions and has an ignored live Gateway proof for the same tool-loop path. Protected live-service auth validation remains unported without suitable live service credentials. |
-| Workflow agent package | in-progress | `crates/ai-sdk-workflow` | `serialize_tool_set_serializes_function_tools_with_description_and_input_schema`; `resolve_serializable_tools_reconstructs_provider_tools`; `to_ui_message_chunk_maps_text_reasoning_and_tool_call_parts`; `to_ui_message_chunk_maps_files_sources_results_approval_and_errors`; `model_call_stream_to_ui_chunks_adds_lifecycle_chunks_and_drops_internal_parts`; `workflow_chat_transport_reconnects_after_interrupted_send_using_run_id_and_chunk_index`; `workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header`; `workflow_chat_transport_reconnect_formats_consecutive_errors`; `stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation`; `stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata`; `stream_text_iterator_passes_contexts_to_executor_and_yields_them`; `stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages`; `stream_text_iterator_upstream_should_apply_prepare_step_system_after_messages_override`; `stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically`; `stream_text_iterator_upstream_should_allow_prepare_step_to_set_active_tools_and_tool_choice`; `stream_text_iterator_upstream_should_update_runtime_and_tools_context_from_prepare_step`; `do_stream_step_from_parts_collects_provider_executed_results_and_valid_step_content`; `workflow_agent_upstream_should_expose_id_when_provided_in_constructor`; `workflow_agent_upstream_should_have_undefined_id_when_not_provided`; `workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result`; `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`; `workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools`; `workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag`; `workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing`; `workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute`; `workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools`; `workflow_agent_compat_should_call_on_finish_from_constructor`; `workflow_agent_compat_should_call_on_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order`; `workflow_agent_compat_should_pass_finish_event_information`; `workflow_agent_compat_should_call_experimental_on_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_start_event_information`; `workflow_agent_compat_should_call_experimental_on_step_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_step_start_event_information`; `workflow_agent_compat_should_call_on_step_finish_from_constructor`; `workflow_agent_compat_should_call_on_step_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order`; `workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback`; `workflow_agent_compat_should_call_on_tool_execution_start_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_start_event_information`; `workflow_agent_compat_should_call_on_tool_execution_end_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success`; `workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally`; `workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function`; `workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context`; `workflow_agent_upstream_should_validate_per_tool_context_against_context_schema`; `workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator`; `workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop` | Initial Rust crate-owned `@ai-sdk/workflow` foundation covers serializable tool definitions, reconstruction across workflow step boundaries, model-call stream to UI-message chunk conversion with lifecycle wrappers, deterministic chat transport request/reconnect behavior, a deterministic stream-text iterator stepper that appends assistant tool-call messages, consumes tool-result continuations, preserves provider metadata as provider options for single, parallel, and mixed tool-call continuations with OpenAI item-id sanitization, forwards runtime/tool contexts, applies prepare-step message/system/model/generation/active-tool/tool-choice/runtime/tool-context overrides, and collects provider-executed tool results, plus the first deterministic WorkflowAgent facade for optional id, local tool success/errors, provider-executed tool results/errors/missing-result fallback, client-side tool stopping, finish callbacks for client-side stops, constructor-then-stream finish callback ordering with event payloads, start and step-start callbacks with constructor-then-stream ordering and event payloads, step-finish callbacks with constructor-then-stream ordering and step payloads, tool-execution start/end callbacks with constructor-then-stream ordering and event payloads, empty final tool calls after completed tool rounds, accumulated-message execution options, per-tool context delivery, agent-level prepare-step forwarding, runtime context prepare-step updates, and Rust-side context validator failures. Real model-backed iterator execution, real HTTP/SSE transport adapters, integration workflows, and full JSON Schema runtime validation remain unported. |
+| Workflow agent package | in-progress | `crates/ai-sdk-workflow` | `serialize_tool_set_serializes_function_tools_with_description_and_input_schema`; `resolve_serializable_tools_reconstructs_provider_tools`; `to_ui_message_chunk_maps_text_reasoning_and_tool_call_parts`; `to_ui_message_chunk_maps_files_sources_results_approval_and_errors`; `model_call_stream_to_ui_chunks_adds_lifecycle_chunks_and_drops_internal_parts`; `workflow_chat_transport_reconnects_after_interrupted_send_using_run_id_and_chunk_index`; `workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header`; `workflow_chat_transport_reconnect_formats_consecutive_errors`; `stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation`; `stream_text_iterator_upstream_should_not_add_provider_options_when_provider_metadata_is_undefined`; `stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors`; `stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id`; `stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata`; `stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata`; `stream_text_iterator_passes_contexts_to_executor_and_yields_them`; `stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages`; `stream_text_iterator_upstream_should_apply_prepare_step_system_after_messages_override`; `stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically`; `stream_text_iterator_upstream_should_allow_prepare_step_to_set_active_tools_and_tool_choice`; `stream_text_iterator_upstream_should_update_runtime_and_tools_context_from_prepare_step`; `do_stream_step_from_parts_collects_provider_executed_results_and_valid_step_content`; `workflow_agent_upstream_should_expose_id_when_provided_in_constructor`; `workflow_agent_upstream_should_have_undefined_id_when_not_provided`; `workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result`; `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`; `workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools`; `workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag`; `workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing`; `workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute`; `workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools`; `workflow_agent_compat_should_call_on_finish_from_constructor`; `workflow_agent_compat_should_call_on_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order`; `workflow_agent_compat_should_pass_finish_event_information`; `workflow_agent_compat_should_call_experimental_on_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_start_event_information`; `workflow_agent_compat_should_call_experimental_on_step_start_from_constructor`; `workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order`; `workflow_agent_compat_should_pass_experimental_on_step_start_event_information`; `workflow_agent_compat_should_call_on_step_finish_from_constructor`; `workflow_agent_compat_should_call_on_step_finish_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order`; `workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback`; `workflow_agent_compat_should_call_on_tool_execution_start_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_start_event_information`; `workflow_agent_compat_should_call_on_tool_execution_end_from_constructor`; `workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method`; `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order`; `workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success`; `workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally`; `workflow_agent_upstream_should_pass_generation_settings_from_constructor_to_stream_text_iterator`; `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_generation_settings`; `workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator`; `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice`; `workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified`; `workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function`; `workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context`; `workflow_agent_upstream_should_validate_per_tool_context_against_context_schema`; `workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator`; `workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop` | Initial Rust crate-owned `@ai-sdk/workflow` foundation covers serializable tool definitions, reconstruction across workflow step boundaries, model-call stream to UI-message chunk conversion with lifecycle wrappers, deterministic chat transport request/reconnect behavior, a deterministic stream-text iterator stepper that appends assistant tool-call messages, consumes tool-result continuations, preserves provider metadata as provider options for single, parallel, mixed, and absent tool-call continuations with OpenAI item-id sanitization, forwards runtime/tool contexts, applies prepare-step message/system/model/generation/active-tool/tool-choice/runtime/tool-context overrides, and collects provider-executed tool results, plus the first deterministic WorkflowAgent facade for optional id, local tool success/errors, provider-executed tool results/errors/missing-result fallback, client-side tool stopping, finish callbacks for client-side stops, constructor-then-stream finish callback ordering with event payloads, start and step-start callbacks with constructor-then-stream ordering and event payloads, step-finish callbacks with constructor-then-stream ordering and step payloads, tool-execution start/end callbacks with constructor-then-stream ordering and event payloads, empty final tool calls after completed tool rounds, accumulated-message execution options, per-tool context delivery, agent-level prepare-step forwarding, constructor and stream-level generation-setting and tool-choice forwarding, active-tool filtering, runtime context prepare-step updates, and Rust-side context validator failures. Real model-backed iterator execution, real HTTP/SSE transport adapters, integration workflows, and full JSON Schema runtime validation remain unported. |
 | WorkflowAgent mixed tool execution and invalid calls | verified | `crates/ai-sdk-workflow/src/workflow_agent.rs` | `workflow_agent_upstream_should_handle_mixed_provider_executed_and_local_tools`; `workflow_agent_upstream_should_handle_mixed_executable_and_client_side_tools_in_same_step`; `workflow_agent_upstream_should_keep_invalid_tool_calls_on_error_path_without_executing` | Adds named Rust counterparts for upstream `workflow-agent.test.ts` mixed provider/local tool rounds, mixed executable/client-side tool rounds, and invalid tool-call error-path behavior. The agent executes local tools, consumes provider-executed stream results, returns only server-executed results when a client-side tool stops the loop, and converts invalid calls to `error-text` without invoking the local executor. |
 | Gateway provider and metadata APIs | verified | `crates/ai-sdk-gateway`, root facade shims in `src/gateway.rs`, `src/gateway_error.rs`, and `src/gateway_tools.rs` | `gateway_model_generates_text_through_generate_text`; `gateway_model_generates_object_through_generate_object`; `gateway_model_maps_standard_generate_content_parts`; `gateway_model_maps_standard_generate_content_parts_through_generate_text`; `gateway_model_runs_generate_text_tool_loop_end_to_end`; `gateway_model_streams_text_through_stream_text`; `gateway_model_streams_object_through_stream_object`; `gateway_model_streams_standard_content_parts_through_stream_text`; `gateway_model_runs_stream_text_tool_loop_end_to_end`; `gateway_model_encodes_language_prompt_file_bytes_for_generate`; `gateway_model_encodes_language_prompt_file_bytes_for_stream`; `gateway_provider_options_serialize_upstream_shape`; `gateway_provider_options_validation_matches_timeout_schema`; `gateway_model_passes_typed_gateway_provider_options_for_generate`; `gateway_model_passes_typed_gateway_provider_options_for_stream`; `gateway_embedding_model_embeds_through_embed`; `gateway_image_model_generates_through_generate_image`; `gateway_image_model_preserves_metadata_entries_without_images`; `gateway_image_model_encodes_files_and_mask`; `gateway_reranking_model_reranks_through_rerank`; `gateway_reranking_model_omits_optional_body_fields`; `gateway_video_model_generates_through_generate_video`; `gateway_video_model_preserves_empty_and_nested_provider_metadata`; `gateway_video_model_encodes_image_inputs_and_returns_url_videos`; `create_gateway_language_model_uses_custom_configuration`; `create_gateway_language_model_uses_oidc_when_api_key_is_absent`; `gateway_provider_language_model_handles_model_specification_errors`; `gateway_provider_language_model_accepts_any_model_id`; `gateway_provider_language_model_accepts_non_existent_model_id`; `create_gateway_embedding_model_returns_gateway_embedding_model`; `create_gateway_image_model_uses_custom_base_url`; `create_gateway_image_model_reuses_headers_transport_and_observability`; `create_gateway_video_model_uses_custom_base_url`; `create_gateway_video_model_reuses_headers_transport_and_observability`; `create_gateway_reranking_model_uses_custom_base_url`; `create_gateway_reranking_alias_returns_gateway_reranking_model`; `create_gateway_fetches_available_models_with_custom_base_url`; `create_gateway_caches_metadata_for_configured_refresh_interval`; `create_gateway_uses_default_five_minute_metadata_refresh_interval`; `create_gateway_language_model_passes_observability_headers_from_environment`; `create_gateway_language_model_omits_missing_observability_headers`; `default_gateway_export_exposes_provider_instance`; `create_gateway_uses_default_base_url_when_none_is_provided`; `create_gateway_accepts_empty_options`; `default_gateway_export_constructs_image_model`; `default_gateway_export_constructs_video_model`; `create_gateway_overrides_default_base_url_when_provided`; `create_gateway_prefers_api_key_over_oidc_token`; `gateway_provider_real_world_vercel_deployment_uses_oidc_authentication`; `gateway_provider_real_world_local_development_uses_api_key_authentication`; `gateway_provider_real_world_explicit_api_key_override_wins_over_environment`; `create_gateway_authentication_handles_no_auth_at_all`; `create_gateway_authentication_handles_valid_oidc_invalid_api_key`; `create_gateway_authentication_handles_invalid_oidc_valid_api_key`; `create_gateway_authentication_handles_no_oidc_invalid_api_key`; `create_gateway_authentication_handles_no_oidc_valid_api_key`; `create_gateway_authentication_handles_valid_oidc_no_api_key`; `create_gateway_authentication_handles_valid_oidc_valid_api_key`; `create_gateway_authentication_handles_valid_oidc_valid_options_api_key`; `create_gateway_authentication_handles_invalid_oidc_invalid_api_key`; `gateway_provider_creates_embedding_model_aliases`; `gateway_provider_creates_image_model_aliases`; `gateway_provider_creates_reranking_model_aliases`; `gateway_provider_creates_video_model_aliases`; `gateway_provider_implements_provider_traits`; `gateway_provider_exposes_gateway_tools`; `perplexity_search_tool_factory_matches_gateway_provider_tool_contract`; `parallel_search_tool_factory_matches_gateway_provider_tool_contract`; `gateway_tools_create_provider_executed_perplexity_search_tool`; `gateway_tools_create_provider_executed_parallel_search_tool`; `get_gateway_auth_token_matches_upstream_precedence`; `get_gateway_auth_token_ignores_empty_values_without_trimming_whitespace`; `get_gateway_auth_token_handles_no_auth_at_all`; `get_gateway_auth_token_handles_valid_oidc_invalid_api_key`; `get_gateway_auth_token_handles_invalid_oidc_valid_api_key`; `get_gateway_auth_token_handles_no_oidc_invalid_api_key`; `get_gateway_auth_token_handles_no_oidc_valid_api_key`; `get_gateway_auth_token_handles_valid_oidc_no_api_key`; `get_gateway_auth_token_handles_valid_oidc_valid_api_key`; `get_gateway_auth_token_handles_valid_oidc_valid_options_api_key`; `get_gateway_auth_token_handles_invalid_oidc_invalid_api_key`; `get_gateway_auth_token_treats_empty_environment_variables_as_missing`; `get_gateway_auth_token_uses_whitespace_environment_api_key`; `get_gateway_auth_token_prioritizes_options_api_key_over_all_environment_variables`; `get_gateway_auth_token_prefers_options_api_key_over_ai_gateway_api_key`; `get_gateway_auth_token_prefers_ai_gateway_api_key_over_oidc_token`; `get_gateway_auth_token_falls_back_to_oidc_when_no_api_keys_are_available`; `gateway_provider_headers_support_oidc_auth_method`; `gateway_observability_headers_map_vercel_environment`; `gateway_observability_headers_skip_empty_values_and_use_request_env_fallback`; `gateway_provider_fetches_available_models_metadata`; `gateway_provider_caches_available_models_until_refresh`; `gateway_provider_refreshes_available_models_after_refresh_interval`; `gateway_provider_uses_default_metadata_cache_refresh_interval`; `gateway_provider_refreshes_available_models_when_cache_disabled`; `gateway_provider_fetches_credits_from_gateway_origin`; `gateway_provider_get_credits_includes_upstream_headers`; `gateway_provider_get_credits_surfaces_endpoint_errors`; `gateway_provider_get_credits_fetches_successfully`; `gateway_provider_get_credits_handles_authentication_errors`; `gateway_provider_get_credits_uses_custom_base_url`; `gateway_provider_get_credits_uses_oidc_authentication_headers`; `gateway_provider_get_credits_is_available_on_provider_interface`; `gateway_provider_account_methods_use_default_gateway_urls`; `gateway_provider_fetches_spend_report_with_query_params`; `gateway_provider_get_spend_report_fetches_successfully`; `gateway_provider_get_spend_report_passes_params_through`; `gateway_provider_get_spend_report_uses_custom_base_url`; `gateway_provider_get_spend_report_uses_custom_transport`; `gateway_provider_get_spend_report_is_available_on_provider_interface`; `default_gateway_export_get_spend_report_is_available`; `gateway_provider_get_spend_report_surfaces_endpoint_errors`; `gateway_provider_fetches_generation_info_and_unwraps_data`; `gateway_provider_metadata_surfaces_api_errors`; `gateway_provider_metadata_fetch_errors_convert_to_gateway_errors`; `gateway_provider_metadata_gateway_errors_are_not_double_wrapped`; `gateway_provider_account_apis_surface_malformed_json_error_responses`; `gateway_error_types_expose_upstream_names_status_and_retryability`; ignored `live_gateway_openai_generate_text`; ignored `live_gateway_openai_generate_object`; ignored `live_gateway_openai_stream_text`; ignored `live_gateway_openai_stream_object`; ignored `live_gateway_openai_embed`; ignored `live_gateway_openai_generate_image`; ignored `live_gateway_rerank`; ignored `live_gateway_generate_video`; ignored `live_gateway_available_models` | Gateway provider implementation, error classification, metadata/account APIs, and provider-executed Gateway tools now live in the matching `ai-sdk-gateway` crate. Minimal provider settings, `create_gateway`, deprecated `create_gateway_provider` alias, `gateway`, provider-v4 trait and optional reranking/video trait integration, non-streaming language/object model calls, provider-v4 generated content part parsing, high-level generated/streamed content-part mapping, SSE streaming, high-level generate/stream tool-loop continuation from Gateway tool-call content, high-level object and stream-object JSON response-format calls, language prompt file byte encoding, typed Gateway provider options with upstream-minimum `providerTimeouts.byok` validation helpers, embedding model calls, image model calls, image/video provider metadata edges, reranking model calls, video model calls, raw-chunk filtering, model request headers, `createGateway` custom base URL/API-key/custom headers for language-model requests plus OIDC fallback when no API key is configured, model factories for embedding/image/video/reranking, image/video header/transport/observability reuse, reranking alias, metadata fetch/cache/default-base/error routing, default provider image/video construction, observability header resolution, API-key precedence over OIDC, portable auth scenario/environment edge-case coverage, and API-key/OIDC auth resolution, Vercel observability headers, cached `get_available_models`, metadata cache expiry, default cache timing, default metadata/account routing, `get_credits` success/auth-error/custom-base/OIDC-header/provider-interface cases, credit request headers, `get_spend_report` success/parameter-forwarding/custom-base/custom-transport/provider-interface/default-export cases, credit/spend endpoint error propagation, `get_generation_info`, and malformed account API error responses are implemented and tested in `crates/ai-sdk-gateway`; root `src/gateway.rs` is now only a compatibility shim plus high-level SDK integration tests. Upstream mocked `getVercelOidcToken` rejection-only cases are JavaScript OIDC-provider-mock-specific and are documented as non-portable for Rust, which reads the configured token source directly. The current upstream Gateway package test corpus is fully mapped, with JavaScript OIDC mock plumbing and callable-constructor identity checks documented as non-portable. |
 | Gateway metadata/account edge cases | verified | `crates/ai-sdk-gateway/src/gateway.rs` | `gateway_provider_metadata_preserves_known_model_types_and_filters_unknown`; `gateway_provider_metadata_rejects_invalid_pricing_format`; `gateway_provider_caches_available_models_until_refresh`; `gateway_provider_refreshes_available_models_after_refresh_interval`; `gateway_provider_uses_default_metadata_cache_refresh_interval`; `gateway_provider_account_methods_use_default_gateway_urls`; `gateway_provider_get_credits_includes_upstream_headers`; `gateway_provider_get_credits_surfaces_endpoint_errors`; `gateway_provider_fetches_empty_metadata_and_zero_credits`; `gateway_provider_spend_report_omits_optional_query_params_and_metrics`; `gateway_provider_get_spend_report_surfaces_endpoint_errors`; `gateway_provider_generation_info_encodes_special_ids_and_byok_response`; `gateway_provider_account_apis_surface_malformed_json_error_responses` | Mirrors upstream Gateway metadata, credits, spend report, and generation info tests for known/unknown model types, malformed pricing, immediate metadata cache reuse, metadata cache expiry after the configured refresh interval, default cache timing, default Gateway metadata/account endpoint routing, credit request headers, credit/spend endpoint transport errors, empty account data, omitted optional query parameters, sparse metric rows, BYOK generation data, URL encoding, and malformed account API error responses. |
@@ -592,10 +599,10 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
-| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/standardize-prompt/file-part-data/prepare-tools/tool-choice/tool-model-output/filter-active-tools/collect-tool-approvals/validate-tool-context/prune-messages/stop-condition/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper, model/request option forwarding, instruction-shape forwarding, include request-message retention, prepare-call sandbox/stream provider-option shaping, sandbox propagation into local tool execution, user-approval blocking, onStart callback/event forwarding, callback-merging, and per-call abort/timeout request-control coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
-| Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI-compatible non-language abort request forwarding, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
-| `packages/provider` | 1 | in-progress | Upstream `get-error-message.test.ts` now has a one-to-one Rust test split for every portable original case, including null/undefined, strings, named/custom errors, custom `toString`, and JSON-like values. The package row remains in progress while v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
+| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, named restricted telemetry dispatcher context-filtering counterparts, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/standardize-prompt/file-part-data/prepare-tools/tool-choice/tool-model-output/filter-active-tools/collect-tool-approvals/validate-tool-context/prune-messages/stop-condition/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper, model/request option forwarding, instruction-shape forwarding, include request-message retention, prepare-call sandbox/stream provider-option shaping, sandbox propagation into local tool execution, user-approval blocking, onStart callback/event forwarding, callback-merging, and per-call abort/timeout request-control coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options type-level parity, and broader edge coverage remain. |
+| Provider package tests | 251 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI-compatible non-language abort request forwarding, OpenAI foundation, OpenAI speech, OpenAI transcription, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented in the matching `ai-sdk-provider-utils` crate, including one-to-one `filterNullable`, `removeUndefinedEntries`, complete portable `validateTypes`/`safeValidateTypes`, complete portable `secureJsonParse`, complete portable `parseJSON`/`safeParseJSON`/`isParsableJson`, complete portable `injectJsonInstruction`, exact `mediaTypeToExtension` table rows, complete portable `normalizeHeaders` cases, complete portable `mapReasoningToProvider*` cases, complete portable `resolve` cases, complete portable `createToolNameMapping` cases, complete portable `withUserAgentSuffix`, `getRuntimeEnvironmentUserAgent`, `isUrlSupported`, `validateDownloadUrl`, `downloadBlob`/`DownloadError`, `getFromApi`, `delay`, `executeTool`, `isExecutableTool`, portable `asSchema`/`StandardSchema`, `readResponseWithSizeLimit`, `responseHandler`, `handleFetchError`, `convertAsyncIteratorToReadableStream`, `isJSONSerializable`, `StreamingToolCallTracker`, `serializeModelOptions`, and provider-utils `content-part` type-contract cases, complete portable `createIdGenerator`/`generateId` cases, complete portable `DelayedPromise` cases, portable `isProviderReference` cases, and complete portable `resolveProviderReference` cases plus abort propagation for GET, JSON, form-data, and generic POST request helpers, but exact browser stream/fetch parity and Zod adapter snapshots are incomplete or JavaScript-specific. |
+| `packages/provider` | 1 | in-progress | Upstream `get-error-message.test.ts` now has a one-to-one Rust test split for every portable original case, including null/undefined, strings, named/custom errors, custom `toString`, and JSON-like values. The package row remains in progress while v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | Framework adapter tests | 21 | js-only-documented | Angular, React, RSC, Svelte, and Vue bindings are JavaScript framework-specific; portable transport/message semantics are tracked separately. |
 | MCP, Gateway, OTel, Workflow, test server | 39 | in-progress | Gateway package coverage is fully represented in the current upstream audit: 372 upstream `packages/gateway` `it`/`test` cases are mapped by the 380-test `ai-sdk-gateway` crate, with JavaScript-only request-context and class-identity cases documented as non-portable; MCP now has package-owned protocol/type, deterministic client/request lifecycle, mock transport, initial real HTTP transport with inbound SSE GET/resumption/retry coverage, standalone SSE transport, child-process stdio transport, MCP Apps, resource/prompt methods, dynamic and schema-typed tool creation/execution, client-side elicitation request handling, uncaught error callbacks, tool-output conversion coverage, OAuth discovery/authorization/token/registration foundations with generated PKCE, protected-resource selection, high-level provider orchestration, real loopback HTTP validation including authenticated Streamable HTTP tool execution, upstream-shaped HTTP/SSE transport config factories with hosted-auth OAuth propagation and default redirect rejection, and a local MCP client example covering tools/resources/prompts/elicitation; OTel now has package-owned helper, lifecycle, local OTLP/HTTP receiver/export coverage, real Rust OpenTelemetry SDK exporter proof, `OpenTelemetry` and `LegacyOpenTelemetry` recorders, root dispatcher adapters that export dispatcher-produced spans through the local receiver, and initial Gateway provider-live telemetry proof; root telemetry has initial dispatcher/registry/diagnostic-channel coverage plus text, object, embedding, and reranking operation dispatch; Workflow now has an initial package-owned crate with serializable tool schema helper coverage, model-call stream to UI-message chunk conversion, deterministic chat transport request/reconnect planning, deterministic stream-text iterator continuation coverage, and first deterministic WorkflowAgent loop coverage for id, local/provider-executed tool results, client-side tool stopping, messages, per-tool context, prepare-step callback overrides, start/step-start callback behavior, finish callback behavior including constructor-then-stream ordering with event payloads, step-finish callback behavior with step payloads, and local tool-execution callback behavior; test-server is verified for portable Rust parity with MSW and Vitest lifecycle hooks documented as JavaScript-runtime-specific. Gateway JavaScript Date-object identity and thrown Gateway error instance identity cases are documented as non-portable; protected live MCP auth validation, broader Workflow real model/real transport execution, and broader OTel provider-live integration beyond Gateway text and streaming remain unported. |
 | Codemod tests | 54 | js-only-documented | JavaScript migration tooling is intentionally not part of the Rust runtime. |
@@ -604,6 +611,336 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-24: `packages/ai` `processUIMessageStream` tool-part parity
+  changed Rust processing from raw `tool-input-*`/`tool-output-*` chunk
+  preservation to upstream-shaped `tool-*` and `dynamic-tool` UI parts. Named
+  Rust counterparts now cover provider-executed static and dynamic tool state
+  transitions plus separate call/result provider metadata and tool metadata:
+  `process_ui_message_stream_folds_tool_chunks_into_ui_tool_parts`,
+  `process_ui_message_stream_folds_provider_executed_static_tools`,
+  `process_ui_message_stream_folds_provider_executed_dynamic_tools`, and
+  `process_ui_message_stream_preserves_tool_call_and_result_metadata`.
+- 2026-05-25: `packages/ai` `processUIMessageStream` tool-error edge parity
+  added named Rust counterparts for upstream provider metadata while input is
+  streaming, tool-input-error raw-input output-error state, and the
+  static-start/dynamic-error mismatch regression:
+  `process_ui_message_stream_retains_tool_metadata_during_input_streaming`,
+  `process_ui_message_stream_maps_tool_input_error_to_raw_input_output_error`,
+  and
+  `process_ui_message_stream_keeps_static_tool_type_on_dynamic_error_mismatch`.
+- 2026-05-25: `packages/ai` `processUIMessageStream` preliminary result and
+  title parity added named Rust counterparts for upstream preliminary output
+  replacement plus static, dynamic, and error-state title preservation:
+  `process_ui_message_stream_updates_preliminary_tool_results_until_final_output`,
+  `process_ui_message_stream_preserves_static_tool_title_through_output`,
+  `process_ui_message_stream_preserves_dynamic_tool_title_through_output`, and
+  `process_ui_message_stream_preserves_tool_title_in_error_state`. Rust now
+  removes `preliminary` from the tool UI part once the final output arrives
+  without a preliminary flag.
+- 2026-05-25: `packages/ai` `processUIMessageStream` approval-state parity
+  added named Rust counterparts for upstream static/dynamic approval requests
+  and automatic approval metadata through denial and execution:
+  `process_ui_message_stream_maps_static_tool_approval_request`,
+  `process_ui_message_stream_maps_dynamic_tool_approval_request`,
+  `process_ui_message_stream_preserves_automatic_approval_metadata_through_denial`,
+  and
+  `process_ui_message_stream_preserves_automatic_approval_metadata_through_execution`.
+  Rust now tracks approval ids so approval responses mutate the original tool
+  UI part instead of appending raw approval chunks.
+- 2026-05-25: `packages/ai` `processUIMessageStream` resumed approved-tool
+  execution parity added named Rust counterparts for upstream initial tool
+  execution after approval, preliminary resumed outputs, and execution denial:
+  `process_ui_message_stream_updates_existing_static_tool_after_approval`,
+  `process_ui_message_stream_updates_existing_dynamic_tool_after_approval`,
+  `process_ui_message_stream_replaces_existing_preliminary_tool_outputs_after_approval`,
+  and
+  `process_ui_message_stream_updates_existing_tool_denial_after_approval_response`.
+  `StreamingUiMessageState::new` now seeds tool, approval, and data part
+  indexes from an existing assistant message so resumed chunks mutate prior UI
+  parts before appending the next step.
+- 2026-05-25: `packages/ai` `tool-output-denied` UI-message chunk wire
+  parity added `ui_message_chunk_deserializes_tool_output_denied_without_tool_name`,
+  matching upstream `process-ui-message-stream.test.ts` denial chunks that only
+  carry `toolCallId`. Rust still preserves `toolName` when callers provide it.
+- 2026-05-25: `packages/ai` `streamText` initial denied approval parity added
+  `stream_text_streams_initial_denied_tool_approval_before_first_model_call`,
+  matching upstream's prior denied approval response case by carrying
+  `execution-denied` into the first model prompt while emitting full-stream and
+  UI `tool-output-denied` chunks before the first provider `start-step`.
+- 2026-05-25: `packages/ai` provider-executed `streamText` approval
+  continuation parity added
+  `stream_text_sends_approved_provider_executed_tool_approval_response_once`
+  and
+  `stream_text_sends_denied_provider_executed_tool_approval_response_once`,
+  matching upstream's MCP approval approved/denied cases by proving the
+  provider-facing prompt strips the assistant approval-request part and sends
+  the approval response exactly once.
+- 2026-05-24: `packages/ai` `processUIMessageStream` malformed-stream
+  parity added named Rust counterparts for upstream
+  `process-ui-message-stream.test.ts` missing-start error cases:
+  `process_ui_message_stream_reports_missing_text_delta`,
+  `process_ui_message_stream_reports_missing_reasoning_delta`,
+  `process_ui_message_stream_reports_missing_tool_input_delta`,
+  `process_ui_message_stream_reports_missing_text_end`, and
+  `process_ui_message_stream_reports_missing_reasoning_end`. Rust now reports
+  upstream-shaped chunk type, chunk id, and descriptive error messages for
+  missing text/reasoning/tool-input starts, and `tool-input-delta` requires a
+  prior `tool-input-start` in streaming UI-message state.
+- 2026-05-24: `packages/ai` `processUIMessageStream` data-part parity added
+  named Rust counterparts for upstream persistent, transient, and id-replacement
+  data UI part cases: `process_ui_message_stream_appends_data_parts`,
+  `process_ui_message_stream_skips_transient_data_parts`, and
+  `process_ui_message_stream_replaces_data_parts_with_matching_id`, and
+  `process_ui_message_stream_replaces_object_data_parts_with_matching_id`. Rust now
+  persists `data-*` UI parts, omits transient data parts from message state,
+  and replaces earlier scalar or object data parts with the same id rather than
+  deep-merging object payloads.
+- 2026-05-25: `packages/ai` UI-message dynamic data chunk wire parity added
+  `ui_message_chunk_deserializes_dynamic_data_wire_chunk` and
+  `ui_message_chunk_serializes_dynamic_data_wire_chunk`, plus
+  `process_ui_message_stream_accepts_dynamic_data_wire_chunks`, so upstream
+  `type: "data-*"` wire chunks serialize and deserialize through Rust's typed
+  `Data` variant and process into upstream-shaped `data-*` UI parts with id
+  replacement.
+- 2026-05-25: `packages/ai` upload helper one-to-one evidence expanded for
+  upstream `uploadFile`/`uploadSkill` portable cases with named Rust
+  counterparts for tagged base64 forwarding, provider-options forwarding and
+  absence, warning and providerMetadata result pass-through, and provider-v4
+  files/skills resolution. The JavaScript dynamic missing-method throw remains
+  documented at Rust's typed `ProviderWithFiles`/`ProviderWithSkills` boundary.
+- 2026-05-23: `packages/openai` Speech parity added `OpenAISpeechModel`
+  and `ProviderWithSpeechModel` support plus named Rust counterparts for every
+  portable upstream `src/speech/openai-speech-model.test.ts` case:
+  `openai_speech_should_pass_the_model_and_text`,
+  `openai_speech_should_pass_headers`,
+  `openai_speech_should_pass_options`,
+  `openai_speech_should_return_audio_data_with_correct_content_type`,
+  `openai_speech_should_include_response_data_with_timestamp_model_id_and_headers`,
+  `openai_speech_should_use_real_date_when_no_custom_date_provider_is_specified`,
+  `openai_speech_should_handle_different_audio_formats`, and
+  `openai_speech_should_include_warnings_if_any_are_generated`. Rust now maps
+  OpenAI `/audio/speech` JSON request shaping, OpenAI/provider/request headers,
+  default voice and response format handling, voice/output-format/speed options,
+  binary audio response handling, response headers, timestamp/model metadata,
+  provider options for typed OpenAI speech fields, and empty-warning behavior.
+  Additive `openai_speech_should_set_specification_version_and_provider` proves
+  the provider-v4 speech identity.
+- 2026-05-23: `packages/openai` Transcription parity added
+  `OpenAITranscriptionModel` and `ProviderWithTranscriptionModel` support plus
+  named Rust counterparts for every portable upstream
+  `src/transcription/openai-transcription-model.test.ts` case:
+  `openai_transcription_should_pass_the_model`,
+  `openai_transcription_should_pass_headers`,
+  `openai_transcription_should_extract_the_transcription_text`,
+  `openai_transcription_should_include_response_data_with_timestamp_model_id_and_headers`,
+  `openai_transcription_should_use_real_date_when_no_custom_date_provider_is_specified`,
+  `openai_transcription_should_pass_response_format_when_timestamp_granularities_is_set`,
+  `openai_transcription_should_not_set_verbose_json_for_gpt_4o_transcribe`,
+  `openai_transcription_should_pass_timestamp_granularities_when_specified`,
+  `openai_transcription_should_work_when_no_words_language_or_duration_are_returned`,
+  `openai_transcription_should_parse_segments_when_provided_in_response`,
+  `openai_transcription_should_fallback_to_words_when_segments_are_not_available`,
+  `openai_transcription_should_handle_empty_segments_array`, and
+  `openai_transcription_should_handle_segments_with_missing_optional_fields`.
+  Rust now maps OpenAI `/audio/transcriptions` multipart request shaping,
+  OpenAI/provider/request headers, typed provider options for response format,
+  temperature and timestamp granularities, JSON response parsing, language
+  normalization, duration, segment and word fallback mapping, response
+  headers/body, and timestamp/model metadata. Additive
+  `openai_transcription_should_set_specification_version_and_provider` proves
+  the provider-v4 transcription identity.
+- 2026-05-24: `packages/openai` Image model parity added `OpenAIImageModel`
+  support plus named Rust counterparts for every portable upstream
+  `src/image/openai-image-model.test.ts` case:
+  `openai_image_should_pass_the_model_and_the_settings`,
+  `openai_image_should_map_provider_options_to_snake_case_for_images_generations`,
+  `openai_image_should_pass_headers`,
+  `openai_image_should_extract_the_generated_images`,
+  `openai_image_should_return_warnings_for_unsupported_settings`,
+  `openai_image_should_respect_max_images_per_call_setting`,
+  `openai_image_should_include_response_data_with_timestamp_model_id_and_headers`,
+  `openai_image_should_use_real_date_when_no_custom_date_provider_is_specified`,
+  `openai_image_should_not_include_response_format_for_gpt_image_1`,
+  `openai_image_should_not_include_response_format_for_gpt_image_2`,
+  `openai_image_should_not_include_response_format_for_chatgpt_image_latest`,
+  `openai_image_should_not_include_response_format_for_date_suffixed_gpt_image_model_ids`,
+  `openai_image_should_handle_null_revised_prompt_responses`,
+  `openai_image_should_include_response_format_for_dall_e_3`,
+  `openai_image_should_return_image_meta_data`,
+  `openai_image_should_map_openai_usage_to_usage`,
+  `openai_image_should_distribute_input_token_details_evenly_across_images`,
+  `openai_image_should_call_images_edits_endpoint_when_files_are_provided`,
+  `openai_image_should_send_image_as_form_data_with_uint8array_input`,
+  `openai_image_should_send_image_as_form_data_with_base64_string_input`,
+  `openai_image_should_send_multiple_images_as_form_data_array`,
+  `openai_image_should_pass_provider_options_in_form_data`,
+  `openai_image_should_map_provider_options_to_snake_case_for_images_edits`,
+  `openai_image_should_extract_the_edited_images_from_response`,
+  `openai_image_should_include_response_metadata_for_edited_images`,
+  `openai_image_should_return_warnings_for_unsupported_settings_in_edit_mode`,
+  and `openai_image_should_return_usage_information_for_edited_images`. Rust
+  now maps `/images/generations` and `/images/edits` request shaping,
+  OpenAI/provider/request headers, provider-option snake casing, unsupported
+  aspect-ratio/seed warnings, model-specific `maxImagesPerCall`, model-specific
+  `response_format` defaults, generated/edited image extraction, response
+  headers/timestamp/model metadata, provider image metadata, usage mapping, and
+  image/text token detail distribution.
+- 2026-05-24: `packages/openai` provider base URL precedence parity split
+  upstream `openai-provider.test.ts` into named Rust counterparts for default
+  OpenAI base URL resolution, `OPENAI_BASE_URL` fallback, and explicit
+  `baseURL` precedence:
+  `openai_provider_uses_the_default_openai_base_url_when_not_provided`,
+  `openai_provider_uses_openai_base_url_when_set`, and
+  `openai_provider_prefers_the_base_url_option_over_openai_base_url`.
+- 2026-05-24: `packages/openai` Embedding parity split upstream
+  `src/embedding/openai-embedding-model.test.ts` into named Rust counterparts:
+  `openai_embedding_should_extract_embedding`,
+  `openai_embedding_should_expose_the_raw_response_headers`,
+  `openai_embedding_should_expose_the_raw_response_body`,
+  `openai_embedding_should_extract_usage`,
+  `openai_embedding_should_pass_the_model_and_the_values`,
+  `openai_embedding_should_pass_the_dimensions_setting`, and
+  `openai_embedding_should_pass_headers`. Rust now maps OpenAI embedding
+  vector extraction, raw response headers/body, token usage, request body
+  model/input/`encoding_format`, `dimensions` provider option forwarding, and
+  OpenAI provider/request header merging.
+- 2026-05-24: `packages/openai` Completion non-stream parity split upstream
+  `src/completion/openai-completion-language-model.test.ts` `doGenerate`
+  cases into named Rust counterparts:
+  `openai_completion_should_extract_text_response`,
+  `openai_completion_should_extract_usage`,
+  `openai_completion_should_send_request_body`,
+  `openai_completion_should_send_additional_response_information`,
+  `openai_completion_should_extract_logprobs`,
+  `openai_completion_should_extract_finish_reason`,
+  `openai_completion_should_support_unknown_finish_reason`,
+  `openai_completion_should_expose_the_raw_response_headers`,
+  `openai_completion_should_pass_the_model_and_the_prompt`, and
+  `openai_completion_should_pass_headers`. Rust now maps OpenAI completion
+  text extraction, usage, request body, response metadata, logprobs provider
+  metadata, finish reason mapping, response headers, model/prompt shaping, and
+  provider/request header merging.
+- 2026-05-24: `packages/openai` Completion streaming parity split upstream
+  `src/completion/openai-completion-language-model.test.ts` `doStream` cases
+  into named Rust counterparts:
+  `openai_completion_stream_should_stream_text_deltas`,
+  `openai_completion_stream_should_handle_error_stream_parts`,
+  `openai_completion_stream_should_handle_unparsable_stream_parts`,
+  `openai_completion_stream_should_send_request_body`,
+  `openai_completion_stream_should_expose_the_raw_response_headers`,
+  `openai_completion_stream_should_pass_the_model_and_the_prompt`, and
+  `openai_completion_stream_should_pass_headers`. Rust now maps OpenAI
+  completion SSE text deltas, provider-error and parse-error stream parts,
+  streamed usage and logprobs finish metadata, request body `stream: true`,
+  response headers, model/prompt shaping, and provider/request header merging.
+- 2026-05-23: `packages/openai` Skills upload parity added `OpenAISkills`
+  and `ProviderWithSkills` support plus named Rust counterparts for every
+  portable upstream `src/skills/openai-skills.test.ts` case:
+  `openai_skills_should_send_files_as_multipart_form_data`,
+  `openai_skills_should_pass_authorization_headers`,
+  `openai_skills_should_map_response_to_provider_reference`,
+  `openai_skills_should_emit_unsupported_warning_for_display_title`,
+  `openai_skills_should_return_no_warnings_when_display_title_is_not_set`,
+  and `openai_skills_should_handle_uint8array_file_content`. Rust now maps
+  OpenAI `/skills` upload request shaping through multipart form data,
+  OpenAI auth headers, base64/text/raw byte file conversion, provider
+  references, response name/description/latest-version fields, OpenAI provider
+  metadata, and the unsupported `displayTitle` warning. Additive
+  `openai_skills_should_set_specification_version_and_provider` proves the
+  provider-v4 skills identity.
+- 2026-05-23: `packages/openai` Files upload parity added `OpenAIFiles`
+  and `ProviderWithFiles` support plus named Rust counterparts for the portable
+  upstream `src/files/openai-files.test.ts` cases:
+  `openai_files_should_send_correct_multipart_request_with_purpose`,
+  `openai_files_should_return_provider_reference_with_openai_key`,
+  `openai_files_should_return_provider_metadata_from_response`,
+  `openai_files_should_default_purpose_to_assistants_when_not_provided`,
+  `openai_files_should_pass_expires_after_when_provided`,
+  `openai_files_should_pass_auth_headers`,
+  `openai_files_should_handle_base64_string_data`, and
+  `openai_files_should_set_specification_version_and_provider`. Rust now maps
+  OpenAI `/files` upload request shaping through multipart form data, default
+  `purpose: assistants`, provider `expiresAfter` to `expires_after`,
+  OpenAI auth headers, base64 data conversion, provider references, provider
+  metadata, and provider-v4 files identity.
+- 2026-05-23: `packages/ai` `smoothStream` portable edge-case parity
+  added named Rust counterparts for the remaining portable upstream
+  `generate-text/smooth-stream.test.ts` cases:
+  `smooth_stream_should_split_larger_text_chunks`,
+  `smooth_stream_should_keep_longer_whitespace_sequences_together`,
+  `smooth_stream_should_flush_text_buffer_before_tool_call_starts`,
+  `smooth_stream_should_flush_text_buffer_before_streaming_tool_input_starts`,
+  `smooth_stream_should_not_return_chunks_with_just_spaces`,
+  `smooth_stream_should_split_text_by_lines_when_using_line_chunking_mode`,
+  `smooth_stream_should_handle_text_without_line_endings_in_line_chunking_mode`,
+  `smooth_stream_should_support_custom_chunking_regexps_character_level`,
+  `smooth_stream_should_change_the_id_when_the_text_part_id_changes`,
+  `smooth_stream_should_split_larger_reasoning_chunks`,
+  `smooth_stream_should_flush_reasoning_buffer_before_tool_call`,
+  `smooth_stream_should_use_line_chunking_for_reasoning`,
+  `smooth_stream_should_flush_text_buffer_when_switching_to_reasoning`,
+  `smooth_stream_should_flush_reasoning_buffer_when_switching_to_text`,
+  `smooth_stream_should_handle_multiple_switches_between_text_and_reasoning`,
+  and
+  `smooth_stream_preserves_provider_metadata_on_reasoning_start_for_redacted_thinking`.
+  Rust now has one-to-one portable coverage for upstream word, line, regex,
+  callback-detector, delay, text-id switching, reasoning, interleaving, tool-call
+  flush, streamed tool-input flush, whitespace buffering, and Anthropic
+  reasoning metadata preservation behavior. Upstream invalid `chunking` option
+  construction is covered by Rust's typed `SmoothStreamChunking` API plus
+  detector/pattern validation tests; `Intl.Segmenter` cases remain
+  JavaScript-runtime-specific unless a future dependency-backed segmentation
+  strategy is intentionally added.
+- 2026-05-23: `packages/openai` non-Responses error schema parity added
+  `OpenAIErrorData` / `OpenAIErrorDetails` plus
+  `openai_error_data_schema_should_parse_openrouter_resource_exhausted_error`
+  in `src/openai.rs`, mapping upstream `openai-error.test.ts` for OpenRouter's
+  nested resource-exhausted error body with a numeric `code`. The Rust schema
+  keeps upstream's loose OpenAI-compatible boundary: required `message`,
+  optional `type`, optional arbitrary `param`, and optional string-or-number
+  `code`.
+- 2026-05-23: `packages/ai` restricted telemetry dispatcher parity added
+  named Rust counterparts for every portable upstream
+  `generate-text/restricted-telemetry-dispatcher.test.ts` case:
+  `restricted_telemetry_dispatcher_excludes_runtime_context_when_no_include_context_is_configured`,
+  `restricted_telemetry_dispatcher_only_includes_runtime_context_properties_marked_as_true`,
+  `restricted_telemetry_dispatcher_includes_configured_runtime_context_for_start_events_without_mutating_source_event`,
+  `restricted_telemetry_dispatcher_filters_tools_context_per_tool_for_start_events_without_mutating_source_event`,
+  `restricted_telemetry_dispatcher_excludes_tools_context_properties_when_no_include_context_is_configured`,
+  `restricted_telemetry_dispatcher_includes_configured_runtime_context_for_step_start_events_and_previous_steps`,
+  `restricted_telemetry_dispatcher_filters_tools_context_for_step_start_events_and_previous_steps`,
+  `restricted_telemetry_dispatcher_includes_configured_runtime_context_for_step_finish_events_without_mutating_source_step`,
+  `restricted_telemetry_dispatcher_filters_tools_context_for_step_finish_events_without_mutating_source_step`,
+  `restricted_telemetry_dispatcher_includes_configured_runtime_context_for_end_events_and_all_steps_without_mutating_source_steps`,
+  `restricted_telemetry_dispatcher_filters_tools_context_for_end_events_and_all_steps_without_mutating_source_steps`,
+  `restricted_telemetry_dispatcher_filters_tool_execution_start_events_without_mutating_the_source_event`,
+  `restricted_telemetry_dispatcher_filters_tool_execution_end_events_without_mutating_the_source_event`,
+  and
+  `restricted_telemetry_dispatcher_passes_through_execute_tool_without_filtering`.
+  `TelemetryDispatcher` now applies `include_runtime_context` and
+  `include_tools_context` to top-level events, prior step payloads, and
+  tool-execution `toolContext` payloads before integrations or diagnostics see
+  them, while execute-tool wrappers remain unfiltered as upstream requires.
+- 2026-05-23: `packages/ai` `resolveToolApproval` remaining portable
+  callback/static/context parity added named Rust counterparts
+  `resolve_tool_approval_resolves_async_status_from_generic_function`,
+  `resolve_tool_approval_passes_tool_call_tools_context_messages_and_runtime_to_generic_function`,
+  `resolve_tool_approval_passes_through_object_status_reason_from_generic_function`,
+  `resolve_tool_approval_passes_same_messages_and_validated_tool_context_to_per_tool_function`,
+  `resolve_tool_approval_passes_tools_context_entry_through_after_schema_validation`,
+  `resolve_tool_approval_normalizes_static_string_before_tool_defined_approval`,
+  `resolve_tool_approval_passes_through_static_object_status_reason`,
+  `resolve_tool_approval_uses_user_defined_callback_before_tool_defined_approval`,
+  `resolve_tool_approval_passes_reason_returned_by_user_defined_callback`,
+  and
+  `resolve_tool_approval_normalizes_string_status_returned_by_user_defined_callback`.
+  Rust now has named value-equivalent coverage for the upstream generic
+  callback option payload, async callback resolution, object-status reasons,
+  static status precedence, per-tool validated context, schema-defaulted
+  context transformation, and per-tool callback reason/string normalization.
+  The upstream JavaScript reference-identity assertions are represented by
+  cloned Rust value-equivalence checks because the Rust callback boundary owns
+  typed values rather than JavaScript object references.
 - 2026-05-23: `packages/ai` `resolveToolApproval` callback
   normalization parity added named Rust counterparts
   `resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable`,
@@ -641,6 +978,225 @@ focused tests for each portable behavior before changing rows to `verified`.
   `tool_loop_agent_stream_calls_on_start_from_constructor`,
   `tool_loop_agent_stream_calls_on_start_from_method`, and
   `tool_loop_agent_stream_on_start_passes_event_information`.
+- 2026-05-24: `packages/ai` `ToolLoopAgent` step callback parity added
+  named Rust counterparts for the upstream `experimental_onStepStart` and
+  `onStepFinish` constructor/method/order/event cases across generate and
+  stream. The tests are
+  `tool_loop_agent_generate_calls_on_step_start_from_constructor`,
+  `tool_loop_agent_generate_calls_on_step_start_from_method`,
+  `tool_loop_agent_generate_merges_on_step_start_callbacks_in_order`,
+  `tool_loop_agent_generate_on_step_start_passes_event_information`,
+  `tool_loop_agent_generate_calls_on_step_finish_from_constructor`,
+  `tool_loop_agent_generate_calls_on_step_finish_from_method`,
+  `tool_loop_agent_generate_merges_on_step_finish_callbacks_in_order`,
+  `tool_loop_agent_generate_on_step_finish_passes_step_result_to_callback`,
+  `tool_loop_agent_stream_merges_on_step_start_callbacks_in_order`,
+  `tool_loop_agent_stream_on_step_start_passes_event_information`,
+  `tool_loop_agent_stream_merges_on_step_finish_callbacks_in_order`, and
+  `tool_loop_agent_stream_on_step_finish_passes_step_result_to_callback`.
+- 2026-05-24: `packages/ai` `ToolLoopAgent` finish callback parity added
+  named Rust counterparts for the upstream `onFinish` constructor, method,
+  combined-order, and final-event payload cases across generate and stream.
+  The tests are `tool_loop_agent_generate_calls_on_finish_from_constructor`,
+  `tool_loop_agent_generate_calls_on_finish_from_method`,
+  `tool_loop_agent_generate_merges_on_finish_callbacks_in_order`,
+  `tool_loop_agent_generate_on_finish_passes_event_information`,
+  `tool_loop_agent_stream_calls_on_finish_from_constructor`,
+  `tool_loop_agent_stream_calls_on_finish_from_method`,
+  `tool_loop_agent_merges_stream_finish_callbacks_in_order`, and
+  `tool_loop_agent_stream_on_finish_passes_event_information`.
+- 2026-05-24: `packages/ai` `ToolLoopAgent` tool-execution callback parity
+  added named Rust counterparts for upstream `onToolExecutionStart` and
+  `onToolExecutionEnd` constructor, method, callback-order, and event-payload
+  cases across generate and stream. The tests are
+  `tool_loop_agent_generate_calls_on_tool_execution_start_from_constructor`,
+  `tool_loop_agent_generate_calls_on_tool_execution_start_from_method`,
+  `tool_loop_agent_generate_merges_on_tool_execution_start_callbacks_in_order`,
+  `tool_loop_agent_generate_on_tool_execution_start_passes_event_information`,
+  `tool_loop_agent_generate_calls_on_tool_execution_end_from_constructor`,
+  `tool_loop_agent_generate_calls_on_tool_execution_end_from_method`,
+  `tool_loop_agent_generate_merges_on_tool_execution_end_callbacks_in_order`,
+  `tool_loop_agent_generate_on_tool_execution_end_passes_event_information_on_success`,
+  `tool_loop_agent_stream_calls_on_tool_execution_start_from_constructor`,
+  `tool_loop_agent_stream_calls_on_tool_execution_start_from_method`,
+  `tool_loop_agent_stream_merges_on_tool_execution_start_callbacks_in_order`,
+  `tool_loop_agent_stream_on_tool_execution_start_passes_event_information`,
+  `tool_loop_agent_stream_calls_on_tool_execution_end_from_constructor`,
+  `tool_loop_agent_stream_calls_on_tool_execution_end_from_method`,
+  `tool_loop_agent_stream_merges_on_tool_execution_end_callbacks_in_order`,
+  and
+  `tool_loop_agent_stream_on_tool_execution_end_passes_event_information_on_success`.
+- 2026-05-24: `packages/ai` `ToolLoopAgent` telemetry integration parity
+  added named Rust counterparts for upstream generate and stream per-call and
+  global integration listener lifecycle ordering, runtime-context filtering,
+  agent-callback interleaving, and listener panic isolation. The tests are
+  `tool_loop_agent_generate_calls_per_call_integration_listeners_for_all_lifecycle_events`,
+  `tool_loop_agent_stream_calls_per_call_integration_listeners_for_all_lifecycle_events`,
+  `tool_loop_agent_generate_calls_globally_registered_integration_listeners`,
+  `tool_loop_agent_stream_calls_globally_registered_integration_listeners`,
+  `tool_loop_agent_generate_includes_configured_runtime_context_properties_in_telemetry`,
+  `tool_loop_agent_stream_includes_configured_runtime_context_properties_in_telemetry`,
+  `tool_loop_agent_generate_calls_integration_listeners_alongside_agent_callbacks`,
+  `tool_loop_agent_stream_calls_integration_listeners_alongside_agent_callbacks`,
+  `tool_loop_agent_generate_does_not_break_when_an_integration_listener_panics`,
+  and `tool_loop_agent_stream_does_not_break_when_an_integration_listener_panics`.
+- 2026-05-24: `packages/ai` `ToolLoopAgent` call-options schema parity
+  added `ToolLoopAgentSettings::with_call_options_schema`,
+  `ToolLoopAgentCallOptions::with_options`, validated options propagation into
+  `prepare_call`, and named Rust counterparts for upstream
+  `callOptionsSchema` tests:
+  `tool_loop_agent_generate_rejects_invalid_call_options_schema_before_model_call`
+  and
+  `tool_loop_agent_generate_passes_valid_call_options_schema`.
+- 2026-05-25: `packages/ai` `ToolLoopAgent` `prepareStep` parity added
+  `ToolLoopAgentSettings::with_prepare_step` and
+  `ToolLoopAgentCallOptions::with_prepare_step`, forwarding the callback into
+  both `generate_text` and `stream_text`. The named Rust counterparts are
+  `tool_loop_agent_generate_passes_prepare_step_to_generate_text` and
+  `tool_loop_agent_stream_per_call_prepare_step_overrides_default_prepare_step`,
+  covering default prepare-step pass-through and per-call override semantics.
+  The upstream `runtimeContext` and `toolsContext` `prepareStep` type-surface
+  cases now also have the named Rust counterpart
+  `tool_loop_agent_prepare_step_receives_merged_runtime_and_tools_context`,
+  proving default/per-call context merging is visible to `prepare_step` and
+  finish callbacks.
+  The upstream agent `toolsContext` execution-surface type cases now have the
+  named Rust counterpart
+  `tool_loop_agent_generate_passes_tools_context_to_tool_execution_surfaces`,
+  proving validated per-tool context reaches the local executor plus
+  tool-execution start/end callbacks.
+- 2026-05-24: `packages/ai` `InferAgentUIMessage` type-level parity added
+  named Rust counterparts for upstream `infer-agent-ui-message.test-d.ts`:
+  `infer_agent_ui_message_should_not_contain_arbitrary_static_tools_when_no_tools_are_provided`
+  and `infer_agent_ui_message_should_include_metadata_when_provided`. Rust
+  proves the equivalent typed boundary by exposing no configured static tools
+  for a no-tool `ToolLoopAgent`, keeping dynamic/data UI parts representable,
+  and preserving caller-provided UI message metadata through serialization.
+- 2026-05-24: `packages/ai` `ui/chat.test-d.ts` inventory documented all 8
+  `onToolCall` generic inference cases as TypeScript compiler-only. These
+  cases assert conditional mapped types over `ToolSet | UITools`, Zod-driven
+  `tool()` generic inference, literal tool-name unions, and output-schema
+  independence in `ChatInit<UIMessage<...>>`. Rust has no TypeScript
+  conditional type, `never`/`undefined`, `expectTypeOf`, or Zod inference
+  layer to port at runtime. The portable runtime behavior behind the same
+  surface remains tracked by UI-message stream `onToolCall` execution,
+  tool-part validation, and DirectChatTransport/convert-to-model-message tests;
+  a future Rust-native chat state facade should add its own typed callback
+  tests if that API is introduced.
+- 2026-05-24: `packages/ai` `handleUIMessageStreamFinish` parity added
+  named Rust counterparts for the portable upstream
+  `handle-ui-message-stream-finish.test.ts` pass-through, injected message id,
+  finish callback, continuation, abort, multi-step `onStepFinish`, combined
+  step/final callback, continuation step, cloned-message, and no-callback
+  pass-through cases:
+  `handle_ui_message_stream_finish_passes_through_chunks_without_callbacks`,
+  `handle_ui_message_stream_finish_handles_empty_original_messages_array`,
+  `handle_ui_message_stream_finish_handles_continuation_when_last_message_is_assistant`,
+  `handle_ui_message_stream_finish_does_not_treat_user_message_as_continuation`,
+  `handle_ui_message_stream_finish_sets_is_aborted_when_abort_chunk_is_encountered`,
+  `handle_ui_message_stream_finish_sets_is_aborted_false_without_abort_chunk`,
+  `handle_ui_message_stream_finish_passes_through_abort_chunk_without_callbacks`,
+  `handle_ui_message_stream_finish_handles_multiple_abort_chunks`,
+  `handle_ui_message_stream_finish_calls_on_step_finish_when_finish_step_chunk_is_encountered`,
+  `handle_ui_message_stream_finish_calls_on_step_finish_multiple_times_for_multiple_steps`,
+  `handle_ui_message_stream_finish_calls_both_on_step_finish_and_on_finish`,
+  `handle_ui_message_stream_finish_handles_continuation_scenario_with_on_step_finish`,
+  `handle_ui_message_stream_finish_provides_cloned_messages_to_on_step_finish`,
+  and
+  `handle_ui_message_stream_finish_does_not_process_stream_when_no_callbacks_are_provided`.
+  Rust now preserves open text/reasoning part tracking after abort chunks so
+  later chunks in the same upstream-style stream remain processable. Upstream's
+  reader-cancellation and rejected async callback logging cases remain
+  JavaScript Web-stream/Promise-runtime boundaries for the current
+  materialized synchronous Rust API.
+- 2026-05-24: `packages/ai` `createUIMessageStreamResponse`
+  `consumeSseStream` parity added `UiMessageSseConsumer` and named Rust
+  counterparts for upstream `create-ui-message-stream-response.test.ts`
+  consumer cases:
+  `create_ui_message_stream_response_calls_consume_sse_stream_with_teed_stream`,
+  `create_ui_message_stream_response_does_not_block_response_for_consume_sse_stream`,
+  `create_ui_message_stream_response_handles_synchronous_consume_sse_stream`,
+  and
+  `create_ui_message_stream_response_handles_consume_sse_stream_errors_gracefully`.
+  Rust represents upstream's teed `ReadableStream<string>` as a cloned
+  materialized encoded SSE body; consumer errors are ignored so the returned
+  response body remains readable. Exact asynchronous Web-stream scheduling is
+  JavaScript-runtime-specific for the current Rust helper.
+- 2026-05-24: `packages/ai` `createUIMessageStream` writer basics parity
+  added named Rust counterparts for portable upstream
+  `create-ui-message-stream.test.ts` write/merge/error cases:
+  `create_ui_message_stream_should_send_data_stream_part_and_close_the_stream`,
+  `create_ui_message_stream_should_forward_a_single_stream_with_two_elements`,
+  and `create_ui_message_stream_should_add_error_parts_when_stream_errors`.
+  Rust maps upstream `writer.write` and `writer.merge(ReadableStream)` to the
+  existing materialized writer and `merge`/`merge_result` APIs. Browser
+  `ReadableStream` scheduling cases such as delayed merged streams and writes
+  after close remain JavaScript-runtime-specific until a live stream
+  abstraction is introduced.
+- 2026-05-24: `packages/ai` UI-message text/response edge parity added named
+  Rust counterparts for the remaining portable upstream
+  `transform-text-to-ui-message-stream.test.ts` single-chunk case and
+  `pipe-ui-message-stream-to-response.test.ts` error-stream case:
+  `transform_text_to_ui_message_stream_should_handle_single_chunk_streams` and
+  `pipe_ui_message_stream_to_response_should_handle_errors_in_the_stream`.
+  Together with the existing multi-chunk, empty-stream, header, and encoded SSE
+  tests, the portable upstream transform and pipe test files are now mapped in
+  Rust; Node `ServerResponse` and Web `ReadableStream` details remain covered
+  through the crate's response-writer and collected-stream boundaries.
+- 2026-05-24: `packages/ai` provider-registry middleware parity added
+  `create_provider_registry_with_language_model_middleware` plus the named Rust
+  counterpart
+  `create_provider_registry_should_wrap_all_language_models_accessed_through_the_provider_registry`
+  for upstream `provider-registry.test.ts` language-model registry middleware
+  wrapping. Rust returns an explicit `ProviderRegistry<WrappedProvider<...>>`
+  so the middleware-adjusted model type is visible at compile time.
+- 2026-05-24: `packages/ai` provider-registry image middleware parity added
+  `create_provider_registry_with_image_model_middleware`,
+  `WrappedProviderWithImageModelMiddleware`, and the named Rust counterpart
+  `create_provider_registry_should_wrap_all_image_models_accessed_through_the_provider_registry`
+  for upstream `provider-registry.test.ts` image-model registry middleware
+  wrapping. Rust keeps language and image registry middleware constructors
+  separate so each returned registry exposes the middleware-adjusted model type.
+- 2026-05-24: `packages/ai` `customProvider` direct model-map parity added
+  the public Rust `CustomProvider`/`custom_provider` surface plus named Rust
+  counterparts for upstream `custom-provider.test.ts` current-v4
+  language/embedding/image direct model lookup, missing-model/no-fallback
+  error, and fallback-provider cases:
+  `custom_provider_language_model_should_return_the_language_model_if_it_exists`;
+  `custom_provider_language_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`;
+  `custom_provider_language_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`;
+  `custom_provider_embedding_model_should_return_the_embedding_model_if_it_exists`;
+  `custom_provider_embedding_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`;
+  `custom_provider_embedding_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`;
+  `custom_provider_image_model_should_return_the_image_model_if_it_exists`;
+  `custom_provider_image_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`;
+  `custom_provider_image_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`.
+  Direct files/skills exposure now has named Rust counterparts
+  `custom_provider_files_should_return_the_files_interface_if_it_exists`,
+  `custom_provider_skills_should_return_the_skills_interface_if_it_exists`,
+  and `custom_provider_files_and_skills_should_expose_both_interfaces_when_both_exist`.
+  Direct optional-model maps now have named Rust counterparts for the portable
+  upstream current-v4 optional family cases:
+  `custom_provider_transcription_model_should_return_the_transcription_model_if_it_exists`;
+  `custom_provider_transcription_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`;
+  `custom_provider_speech_model_should_return_the_speech_model_if_it_exists`;
+  `custom_provider_speech_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`;
+  `custom_provider_reranking_model_should_return_the_reranking_model_if_it_exists`;
+  `custom_provider_reranking_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`;
+  `custom_provider_video_model_should_return_the_video_model_if_it_exists`;
+  `custom_provider_video_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback`.
+  Optional model fallback providers now have named Rust counterparts:
+  `custom_provider_transcription_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`;
+  `custom_provider_speech_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`;
+  `custom_provider_reranking_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`;
+  `custom_provider_video_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists`.
+  Fallback provider files/skills now have named Rust counterparts:
+  `custom_provider_files_should_use_fallback_provider_files_if_files_is_not_configured_and_fallback_exists`;
+  `custom_provider_skills_should_use_fallback_provider_skills_if_skills_is_not_configured_and_fallback_exists`.
+  String model-id aliases now have the named Rust counterpart
+  `custom_provider_should_resolve_string_model_ids_through_the_explicit_default_provider`.
+  Rust resolves aliases through the configured fallback/default provider
+  instead of JavaScript's mutable `globalThis.AI_SDK_DEFAULT_PROVIDER`.
 - 2026-05-23: `packages/ai` `streamText` automatic tool approval stream
   parity added the named Rust counterpart
   `stream_text_automatic_tool_approval_response_streams_before_tool_result`
@@ -649,6 +1205,21 @@ focused tests for each portable behavior before changing rows to `verified`.
   Rust now emits automatic approval request metadata and approval-response
   chunks into both `fullStream` and `toUIMessageStream`, while preserving the
   continuation prompt ordering for approved and denied local tools.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` provider-emitted
+  approval-request parity added
+  `stream_text_handles_multiple_provider_executed_tool_approval_requests`,
+  proving multiple provider-executed tool calls keep their matching approval
+  requests and stream ordering.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` missing approval tool
+  call parity added
+  `stream_text_emits_error_when_tool_call_missing_for_provider_approval_request`,
+  proving provider-emitted approval requests for unknown tool calls become
+  error stream parts instead of invalid approval-request parts.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` unknown-tool repair
+  parity added
+  `stream_text_repairs_unknown_streamed_tool_name_before_execution`, proving
+  streamed unknown tool names invoke the repair callback with `NoSuchToolError`
+  context and emit the repaired executable tool call/result.
 - 2026-05-23: `packages/ai` `ToolLoopAgent` tool approval parity added
   named Rust counterparts for the upstream generate and stream
   `toolApproval: { testTool: 'user-approval' }` blocking cases. The tests are
@@ -802,6 +1373,138 @@ focused tests for each portable behavior before changing rows to `verified`.
   calls while preserving their existing `InvalidPromptError` boundary, with
   `generate_text_from_prompt_rejects_missing_tool_results_before_model_call`
   covering the root generate-text integration path.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` system-message
+  conversion parity added named Rust counterparts for the first three upstream
+  `prompt/convert-to-language-model-prompt.test.ts` system-message cases:
+  `convert_to_language_model_prompt_should_convert_a_string_system_message`,
+  `convert_to_language_model_prompt_should_convert_a_system_model_message_system_message`,
+  and
+  `convert_to_language_model_prompt_should_convert_an_array_of_system_model_message_system_messages`.
+  These prove text instructions plus single and array `SystemModelMessage`
+  instructions are prepended to provider-facing prompts while preserving system
+  message provider options.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` user file
+  conversion parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` file URL/base64/byte
+  cases:
+  `convert_to_language_model_prompt_should_pass_through_urls_when_the_model_supports_a_particular_url`,
+  `convert_to_language_model_prompt_should_handle_file_parts_with_base64_string_data`,
+  and
+  `convert_to_language_model_prompt_should_handle_file_parts_with_uint8_array_data`.
+  Rust proves these at the provider-facing prompt boundary: supported URL file
+  data remains a tagged URL part, base64 data remains a tagged data part, and
+  byte data preserves the upstream `Uint8Array` payload as bytes.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` provider-reference
+  and filename parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` image/file reference and
+  filename cases:
+  `convert_to_language_model_prompt_should_pass_through_provider_reference_for_image_parts_without_conversion`,
+  `convert_to_language_model_prompt_should_handle_file_parts_with_filename`,
+  and
+  `convert_to_language_model_prompt_should_pass_through_provider_reference_for_file_parts_without_conversion`.
+  These prove provider references stay tagged reference file data for image and
+  file parts, and user-supplied filenames are preserved.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` message-level
+  provider-options parity added the named Rust counterpart
+  `convert_to_language_model_prompt_should_add_provider_options_to_messages`
+  for the upstream `prompt/convert-to-language-model-prompt.test.ts` provider
+  options case, proving provider options stay on the converted user message
+  without moving them into individual content parts.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` empty text
+  filtering parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` user and assistant text
+  part cases:
+  `convert_to_language_model_message_user_should_filter_out_empty_text_parts`,
+  `convert_to_language_model_message_user_should_pass_through_non_empty_text_parts`,
+  `convert_to_language_model_message_assistant_should_ignore_empty_text_parts_when_there_are_no_provider_options`,
+  and
+  `convert_to_language_model_message_assistant_should_include_empty_text_parts_when_there_are_provider_options`.
+  Rust now removes empty user text and empty assistant text without provider
+  options while preserving empty assistant text that carries provider options.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` assistant
+  custom/reasoning/file parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` assistant custom,
+  reasoning, assistant file provider-reference, and reasoning-file cases:
+  `convert_to_language_model_message_assistant_should_include_custom_parts`,
+  `convert_to_language_model_message_assistant_reasoning_should_pass_through_provider_options`,
+  `convert_to_language_model_message_assistant_reasoning_should_support_a_mix_of_reasoning_redacted_reasoning_and_text_parts`,
+  `convert_to_language_model_message_assistant_should_pass_through_provider_reference_for_file_parts_without_conversion`,
+  `convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_base64_data`,
+  and
+  `convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_uint8_array_data`.
+  Rust proves provider options stay on custom and reasoning parts, reasoning
+  and redacted-reasoning ordering is preserved, assistant file provider
+  references and filenames pass through unchanged, and reasoning-file base64
+  plus byte data preserve the upstream provider-facing tagged file data shape.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` assistant
+  tool/file continuation parity added named Rust counterparts for upstream
+  `prompt/convert-to-language-model-prompt.test.ts` assistant tool-call,
+  tool-result, provider-executed tool, and assistant file cases:
+  `convert_to_language_model_message_assistant_tool_call_should_pass_through_provider_options`,
+  `convert_to_language_model_message_assistant_tool_call_should_include_provider_executed_flag`,
+  `convert_to_language_model_message_assistant_tool_result_should_include_provider_options`,
+  `convert_to_language_model_message_assistant_provider_executed_tool_calls_and_results_should_include_provider_executed_flag`,
+  `convert_to_language_model_message_assistant_file_parts_should_convert_file_data_correctly`,
+  `convert_to_language_model_message_assistant_file_parts_should_preserve_filename_when_present`,
+  and
+  `convert_to_language_model_message_assistant_file_parts_should_handle_provider_options`.
+  Rust proves provider options remain on tool-call, tool-result, and file
+  parts, provider-executed tool-call flags are preserved alongside paired tool
+  results, and assistant file base64 data, filenames, and provider options
+  keep the upstream provider-facing shape.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` tool-message
+  parity added named Rust counterparts for the portable upstream
+  `prompt/convert-to-language-model-prompt.test.ts` tool-message cases:
+  `convert_to_language_model_message_tool_should_convert_basic_tool_result_message`,
+  `convert_to_language_model_message_tool_should_convert_tool_result_with_provider_metadata`,
+  and
+  `convert_to_language_model_message_tool_should_include_error_flag`.
+  Rust proves tool-role result messages preserve JSON output payloads and
+  provider options. The upstream "error flag" case currently expects the same
+  provider-facing shape as the basic result case, so the Rust counterpart
+  deliberately locks that duplicate snapshot behavior.
+- 2026-05-25: `packages/ai` `convertToLanguageModelMessage` tool-result
+  multipart content parity added named Rust counterparts for the portable
+  current-shape upstream `prompt/convert-to-language-model-prompt.test.ts`
+  tool-result content cases:
+  `convert_to_language_model_message_tool_should_pass_the_new_file_shape_through_unchanged`
+  and `convert_to_language_model_message_tool_should_include_multipart_content`.
+  Rust proves current tagged `file` data, URL, provider-reference, text data,
+  filename, provider-options, custom content, and multipart ordering are
+  preserved at the provider-facing prompt boundary. The upstream
+  `process.emitWarning` assertions for deprecated `file-data`, `file-url`,
+  `file-reference`, `file-id`, `image-data`, `image-url`,
+  `image-file-reference`, and `image-file-id` shorthand inputs are documented
+  as JavaScript-runtime compatibility behavior: Rust does not expose
+  `process.emitWarning`, and the root prompt converter accepts the normalized
+  provider-facing content enum instead of deprecated JavaScript shorthands.
+  The legacy shorthand data shapes remain represented at the
+  `@ai-sdk/provider-utils` type boundary by the existing
+  `content_part_tool_result_legacy_variants_still_type_checks_*` Rust tests.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` consecutive
+  tool-message parity added the named Rust counterpart
+  `convert_to_language_model_prompt_should_combine_2_consecutive_tool_messages_into_a_single_tool_message`
+  for the upstream `prompt/convert-to-language-model-prompt.test.ts` tool
+  message case. Rust proves assistant approval requests are stripped from
+  provider-facing assistant content, non-provider approval responses satisfy
+  missing-result validation without being sent to providers, and consecutive
+  tool-role messages collapse into one provider-facing tool message containing
+  the actual tool result.
+- 2026-05-25: `packages/ai` `convertToLanguageModelPrompt` tool-result URL
+  content parity added named Rust detection counterparts
+  `prompt_has_url_files_should_detect_url_content_in_tool_results` and
+  `prompt_has_url_files_should_detect_url_content_in_assistant_tool_results`
+  for the upstream `prompt/convert-to-language-model-prompt.test.ts` tool and
+  assistant tool-result URL download-trigger locations. Rust high-level
+  generate/stream entry points use this detector to call provider
+  `supported_urls()` when URL-backed files appear in tool-result multipart
+  content; the JavaScript custom async `download` callback shape remains a JS
+  prompt-boundary API and is not exposed by the current Rust prompt converter.
+  `generate_text_tool_result_url_file_calls_model_supported_urls` now proves
+  the root `generate_text` entry point exercises that detection path for
+  provider-facing tool history, and
+  `stream_text_tool_result_url_file_calls_model_supported_urls` proves the same
+  detector is honored by the root `stream_text` entry point.
 - 2026-05-23: `packages/ai` `prepareTools` parity split the prior grouped Rust
   coverage into 7 named counterparts for upstream `prompt/prepare-tools.test.ts`:
   `prepare_tools_should_return_undefined_when_tools_are_not_provided`,
@@ -1077,6 +1780,85 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream single-step, per-step multi-step, and empty-warning
   `logWarnings` spy cases. `generate_text` and `stream_text` now invoke the
   shared warning logger with provider/model scope for each completed step.
+- 2026-05-25: `packages/ai` `generateText` telemetry integration parity added
+  `generate_text_calls_globally_registered_integration_listeners`,
+  `generate_text_prefers_per_call_integrations_over_global_integrations`,
+  `generate_text_calls_integration_listeners_alongside_user_callbacks`,
+  `generate_text_does_not_break_when_integration_listener_panics`, and
+  `generate_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+  matching the upstream global-listener, per-call precedence, user-callback
+  ordering, panic-isolation, and multiple per-call integration array cases.
+- 2026-05-25: `packages/ai` `streamText` telemetry integration parity added
+  `stream_text_calls_globally_registered_integration_listeners`,
+  `stream_text_prefers_per_call_integrations_over_global_integrations`,
+  `stream_text_calls_integration_listeners_alongside_user_callbacks`, and
+  `stream_text_does_not_break_when_integration_listener_panics`, matching the
+  upstream global-listener, per-call precedence, user-callback ordering, and
+  panic-isolation cases. These sit alongside the existing all-lifecycle,
+  tool-execution, and multiple per-call integration tests.
+- 2026-05-24: `packages/ai` streamed tool execution context-validation parity
+  added
+  `stream_text_validates_tool_context_before_approval_callback_and_execution`,
+  mapping upstream `executeToolsFromStream`'s context-schema failure before
+  approval callbacks by proving invalid `toolsContext` suppresses approval
+  callbacks and local tool execution before emitting the tool error.
+- 2026-05-24: `packages/ai` `addToolInputExamplesMiddleware` edge-case parity
+  expanded with named Rust counterparts for the remaining portable upstream
+  cases: missing descriptions, default JSON stringify formatting, function
+  tools without examples, empty example arrays, provider tools, mixed tool
+  lists, empty tool arrays, and absent tools. The existing default removal,
+  custom prefix/formatter, and `remove: false` tests remain the counterpart
+  coverage for the upstream option cases.
+- 2026-05-24: `packages/ai` `defaultSettingsMiddleware` one-to-one case
+  mapping expanded with named Rust counterparts for default application, user
+  precedence, provider-options merge, complex/nested provider-options merge,
+  zero temperature preservation, max-output-token, stop-sequence, topP,
+  header merge, empty header, and empty/absent provider-options cases. The
+  upstream untyped `temperature: null as any` case is JavaScript-runtime-only
+  at Rust's typed `Option<f64>` boundary and remains documented instead of
+  modeled as a valid Rust call option.
+- 2026-05-24: `packages/ai` `defaultEmbeddingSettingsMiddleware` one-to-one
+  case mapping expanded with named Rust counterparts for the complete portable
+  upstream file: header merging, empty default headers, empty param headers,
+  absent headers, empty default provider options, empty param provider options,
+  and absent provider options. The prior grouped header/provider-option tests
+  remain additive coverage.
+- 2026-05-24: `packages/ai` `wrapEmbeddingModel` one-to-one case mapping
+  expanded with named Rust counterparts for the portable upstream identity,
+  provider, max-embeddings, parallel-call, transformParams, wrapEmbed, multiple
+  transform, and multiple wrap sequencing cases. Rust represents upstream
+  middleware arrays by explicit nested `wrap_embedding_model` composition; the
+  upstream "should not mutate the middleware array argument" case is
+  JavaScript-array identity behavior and is documented as non-portable at the
+  Rust typed-wrapper boundary.
+- 2026-05-24: `packages/ai` `wrapImageModel` one-to-one case mapping expanded
+  with named Rust counterparts for the portable upstream identity, provider,
+  max-images, transformParams, wrapGenerate, stateful max-images, multiple
+  transform, and multiple wrap sequencing cases. Rust represents upstream
+  middleware arrays by explicit nested `wrap_image_model` composition; the
+  upstream "should not mutate the middleware array argument" case is
+  JavaScript-array identity behavior and is documented as non-portable at the
+  Rust typed-wrapper boundary.
+- 2026-05-24: `packages/ai` `wrapLanguageModel` one-to-one case mapping
+  expanded with named Rust counterparts for the portable upstream identity,
+  provider, supportedUrls, generate/stream transformParams, generate/stream
+  wrapping, stateful supportedUrls, multiple transform, and multiple wrap
+  sequencing cases. Rust represents upstream middleware arrays by explicit
+  nested `wrap_language_model` composition; the upstream "should not mutate the
+  middleware array argument" case is JavaScript-array identity behavior and is
+  documented as non-portable at the Rust typed-wrapper boundary.
+- 2026-05-24: `packages/ai` `extractJsonMiddleware` one-to-one case mapping
+  expanded with named Rust counterparts for the current portable upstream
+  generate and stream cases, including JSON fences with and without language
+  tags, custom transforms, non-text preservation, split fences, non-fence
+  backticks, multiple text block IDs, missing text-start deltas, short prefix
+  buffers, large and character-by-character content, extra whitespace around
+  fences, empty fenced content, and fast non-backtick streaming.
+- 2026-05-24: `packages/ai` `extractReasoningMiddleware` one-to-one case
+  mapping expanded with named Rust counterparts for the current portable
+  upstream generate and stream cases, including single and multiple think tags,
+  no-text reasoning output, start-with-reasoning true/false behavior,
+  non-reasoning passthrough, split stream tags, and empty think tags.
 - 2026-05-23: `packages/ai` `streamText` UI-message response helper
   parity added named Rust counterparts
   `stream_text_result_to_ui_message_stream_masks_error_messages_by_default`,
@@ -1122,6 +1904,24 @@ focused tests for each portable behavior before changing rows to `verified`.
   for the upstream case where refined tool input must reach the emitted
   tool-call part, local tool-result part, language-model-call-end callback, and
   tool-execution-start callback.
+- 2026-05-25: `packages/ai` `invokeToolCallbacksFromStream` parity tightened
+  the named Rust counterpart
+  `stream_text_invokes_tool_input_lifecycle_callbacks_from_stream` for upstream
+  `generate-text/invoke-tool-callbacks-from-stream.test.ts`: it now proves
+  streamed text/tool-input/tool-call chunks pass through in order while
+  `onInputStart`, both `onInputDelta` callbacks, and `onInputAvailable` receive
+  the runtime context, original messages, tool-call id, parsed input, and the
+  caller abort signal.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` generated call-id
+  callback parity added the named Rust counterpart
+  `stream_text_generates_consistent_call_id_for_language_model_callbacks`,
+  proving a generated streaming language-model call id is reused across
+  start/end callbacks while fallback response identity is still generated.
+- 2026-05-25: `packages/ai` `streamLanguageModelCall` performance timing
+  parity added
+  `stream_text_measures_time_to_first_output_token_from_text_deltas`, proving
+  streamed text deltas populate `timeToFirstOutputTokenMs` plus input/output
+  token-per-second metrics on language-model-call-end performance.
 - 2026-05-23: `packages/ai` `streamText` `result.fullStream`
   tool-call parity added the named Rust counterpart
   `stream_text_result_full_stream_sends_tool_calls` for the upstream snapshot
@@ -1253,6 +2053,33 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls`
   and
   `stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata`.
+- 2026-05-24: Workflow stream-text iterator OpenAI item-id sanitization parity
+  split the remaining upstream provider-metadata cases into named Rust
+  counterparts:
+  `stream_text_iterator_upstream_should_not_add_provider_options_when_provider_metadata_is_undefined`,
+  `stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors`,
+  `stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id`,
+  and
+  `stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata`.
+- 2026-05-24: WorkflowAgent option-forwarding parity added named Rust
+  counterparts for upstream `workflow-agent.test.ts` generation-settings,
+  `toolChoice`, and `activeTools` cases:
+  `workflow_agent_upstream_should_pass_generation_settings_from_constructor_to_stream_text_iterator`,
+  `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_generation_settings`,
+  `workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator`,
+  `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice`,
+  and `workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified`.
+- 2026-05-24: WorkflowAgent constructor default active-tools parity added
+  `workflow_agent_upstream_should_use_constructor_active_tools_when_not_specified_in_stream`,
+  mirroring upstream `workflow-agent.test.ts` `should use constructor
+  activeTools when not specified in stream()`.
+- 2026-05-24: WorkflowAgent tool-execution callback event parity added
+  `step_number` to Rust start/end events and named Rust counterparts
+  `workflow_agent_upstream_should_pass_step_number_to_tool_execution_start_and_use_success_union_on_end`
+  and
+  `workflow_agent_upstream_should_pass_success_false_in_tool_execution_end_when_tool_errors`,
+  mirroring upstream `workflow-agent.test.ts` callback event `stepNumber` and
+  `success: false` error-union cases.
 - 2026-05-22: WorkflowAgent ToolLoop compatibility finish-callback parity
   fixed constructor/stream callback merging so constructor callbacks run before
   per-stream callbacks, with named Rust counterparts for upstream
@@ -1291,7 +2118,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_object_type_counterpart_supports_enum_types`, and
   `stream_object_type_counterpart_supports_array_output_mode`. The upstream
   unsupported `timeout` option is already impossible through Rust's
-  `StreamObjectOptions` API, which has no timeout field.
+  `StreamObjectOptions` API, which has no timeout field; the named Rust
+  counterpart
+  `stream_object_type_counterpart_does_not_accept_timeout_option` now makes
+  that type-level boundary explicit.
 - 2026-05-21: High-level `experimental_telemetry` alias parity added named
   Rust counterparts for upstream deprecated telemetry alias tests across
   `generateText`, `streamText`, `generateObject`, `streamObject`, `embed`,
@@ -1625,6 +2455,126 @@ focused tests for each portable behavior before changing rows to `verified`.
   and reconnect/prepared override tests in `src/chat_transport.rs`, covering
   upstream `ChatTransport`/`HttpChatTransport` send and reconnect request
   construction without browser fetch/WebStream bindings.
+- 2026-05-25: `packages/ai` `HttpChatTransport` function-valued body/header
+  parity added `http_chat_transport_includes_body_in_request_when_function_is_provided`
+  and `http_chat_transport_includes_headers_in_request_when_function_is_provided`,
+  so Rust transport options can now resolve callback-produced request body and
+  header maps like upstream `body: () => ...` and `headers: () => ...`.
+- 2026-05-25: `packages/ai` initial `Chat` state-manager parity added
+  `chat_should_include_the_metadata_of_text_message`, covering the portable
+  upstream `ui/chat.test.ts` metadata-preserving text-message flow: metadata is
+  retained in the submitted transport messages, request options are forwarded,
+  and the chat history keeps the user metadata while folding streamed assistant
+  chunks into state.
+- 2026-05-25: `packages/ai` `Chat` error-part parity added
+  `chat_should_handle_error_parts`, covering the portable upstream
+  `ui/chat.test.ts` error chunk flow where streamed `error` chunks set chat
+  status to `error` and expose the error text.
+- 2026-05-25: `packages/ai` `Chat` transport-error parity added
+  `chat_should_set_error_status_when_transport_send_fails`, covering upstream
+  chat UI error-state behavior when the request/transport fails before a
+  response stream can be folded.
+- 2026-05-25: `packages/ai` `Chat.clearError` parity added
+  `chat_should_clear_the_error_and_set_the_status_to_ready`, covering the
+  portable upstream `ui/chat.test.ts` clear-error flow after a streamed error.
+- 2026-05-25: `packages/ai` `Chat` replacement parity added
+  `chat_should_replace_an_existing_user_message`, covering the portable
+  upstream `ui/chat.test.ts` `messageId` flow where sending a replacement user
+  message truncates prior assistant history, submits only the replacement
+  message, and folds the new assistant response into state.
+- 2026-05-25: `packages/ai` `Chat` streaming-update parity added
+  `chat_should_update_the_messages_during_streaming`, covering the portable
+  upstream `ui/chat.test.ts` simple-message history updates by exposing the
+  Rust stream-state snapshots returned from `send_message`.
+- 2026-05-25: `packages/ai` `Chat.onFinish` simple-message parity added
+  `chat_should_call_on_finish_with_message_and_messages` and
+  `chat_should_return_the_correct_final_messages`, covering the portable
+  upstream `ui/chat.test.ts` finish payload and final-message shapes by
+  recording the final assistant message, full message list, finish reason, and
+  abort/disconnect/error flags after a successful send.
+- 2026-05-25: `packages/ai` `Chat` disconnected-response parity added
+  `chat_should_handle_a_disconnected_response_stream`,
+  `chat_disconnected_should_call_on_finish_with_message_and_messages`,
+  `chat_disconnected_should_return_the_correct_final_messages`, and
+  `chat_disconnected_should_update_the_messages_during_streaming`, covering the
+  portable upstream `ui/chat.test.ts` disconnected response flow by folding
+  partial stream chunks, preserving the streaming assistant part, recording the
+  finish payload's `isDisconnect` and `isError` flags, and splitting the
+  original finish/final-message/streaming-update assertions into named Rust
+  counterparts.
+- 2026-05-25: `packages/ai` `Chat` aborted-response parity added
+  `chat_should_handle_a_stop_and_an_aborted_response_stream`,
+  `chat_aborted_should_have_been_aborted`,
+  `chat_aborted_should_call_on_finish_with_message_and_messages`,
+  `chat_aborted_should_return_the_correct_final_messages`, and
+  `chat_aborted_should_update_the_messages_during_streaming`, covering the
+  portable upstream `ui/chat.test.ts` stopped/aborted response behavior by
+  exposing abort status, reason, and the finish payload's `isAbort` flag while
+  preserving the partial assistant state. Rust now distinguishes a transport
+  abort from an in-band UI abort chunk so the upstream `chat.stop()` path keeps
+  the active text part in `streaming` state instead of finalizing it as `done`.
+- 2026-05-25: `packages/ai` `Chat.addToolOutput` state parity added
+  `chat_should_add_tool_output_to_the_latest_assistant_message` and
+  `chat_should_add_tool_error_to_the_latest_assistant_message`, plus
+  `chat_should_add_dynamic_tool_output_to_the_latest_assistant_message`,
+  covering the portable upstream `ui/chat.test.ts` tool-output, tool-error,
+  and dynamic-tool output submission UI state by mutating the matching latest
+  assistant tool part to `output-available` or `output-error` while preserving
+  its input and tool-call metadata.
+- 2026-05-25: `packages/ai` `Chat.addToolOutput` follow-up submission parity
+  added `chat_should_submit_message_when_a_tool_output_is_added` and
+  `chat_add_tool_output_should_forward_options_to_make_request_when_auto_sending`,
+  covering the
+  portable upstream `ui/chat.test.ts` second `submit-message` call after a
+  tool output is appended to the latest assistant message. The Rust state
+  manager now resubmits the full message list with the assistant message id and
+  folds the follow-up response back into that same assistant message.
+- 2026-05-25: `packages/ai` `Chat.addToolOutput` follow-up edge parity added
+  `chat_should_submit_message_when_a_tool_error_result_is_added`,
+  `chat_should_submit_message_when_a_dynamic_tool_output_is_added`, and
+  `chat_should_keep_tool_output_state_when_follow_up_send_fails` plus the
+  upstream-named
+  `chat_should_not_send_message_when_the_server_responded_with_an_error`, covering the
+  portable upstream `ui/chat.test.ts` tool-error submission, dynamic-tool
+  follow-up response folding into the same assistant message, and failed
+  follow-up request behavior that preserves the submitted tool output state.
+- 2026-05-25: `packages/ai` `Chat.addToolOutput` resend gating/options parity
+  added `chat_should_not_submit_message_when_tool_output_is_added_without_follow_up`
+  plus the upstream-named
+  `chat_should_delay_tool_output_submission_until_the_stream_is_finished`,
+  and
+  `chat_should_not_send_message_when_send_automatically_when_returns_false_via_promise`,
+  and expanded `chat_should_submit_message_when_a_tool_output_is_added`,
+  covering the portable upstream `ui/chat.test.ts` no-auto-send predicate and
+  false async predicate cases plus the delayed submission/options forwarding
+  paths by proving Rust tool-output mutation does not make a second transport
+  call until explicit follow-up submission and that the follow-up request
+  forwards both custom headers and body properties. JavaScript Promise and
+  controlled `ReadableStream` timing are represented at Rust's explicit
+  follow-up gate boundary.
+- 2026-05-25: `packages/ai` `Chat.addToolApprovalResponse` approved-flow
+  parity added `chat_should_add_tool_approval_response_to_the_latest_assistant_message`
+  and
+  `chat_should_add_denied_tool_approval_response_with_reason_to_latest_assistant_message`,
+  `chat_should_submit_message_when_a_tool_approval_response_is_added`,
+  `chat_approved_auto_send_should_update_tool_invocation_to_show_approval_response`,
+  and
+  `chat_add_tool_approval_response_should_forward_options_to_make_request_when_auto_sending`,
+  covering the portable upstream `ui/chat.test.ts` approval response state
+  mutation, denied response reasons, approved automatic follow-up body/header
+  option forwarding, and response folding that turns the approved tool part
+  into `output-available` while appending the follow-up assistant text to the
+  same message.
+- 2026-05-25: `packages/ai` `Chat.addToolResult` alias parity added
+  `chat_should_submit_message_when_a_tool_result_is_added`, covering the
+  portable upstream `ui/chat.test.ts` deprecated `addToolResult` flow by
+  exposing the Rust compatibility alias and proving it mutates the same tool
+  output state and follow-up `submit-message` request shape as `addToolOutput`.
+- 2026-05-25: `packages/ai` `Chat.sendMessage` request-body parity added
+  `chat_should_send_the_messages_to_the_api`, covering the portable upstream
+  `ui/chat.test.ts` simple-message transport request shape by asserting the
+  `submit-message` trigger, chat id, message id, and submitted user-message
+  payload without metadata or request-option noise.
 - 2026-05-19: UI-message last-assistant completion predicate parity added the
   initial aggregate checks in `src/ui_message_stream.rs`, covering
   last-step-only tool completion, dynamic tools, provider-executed tool
@@ -1653,6 +2603,18 @@ focused tests for each portable behavior before changing rows to `verified`.
   retryable pre-stream 500/429 failures, successful response streaming after
   retry, and preservation of standardized system/user prompts across retry
   attempts.
+- 2026-05-24: `streamText` `result.consumeStream` parity added
+  `StreamTextResult::consume_stream` and
+  `StreamTextResult::consume_stream_with_on_error`, with named Rust
+  counterparts
+  `stream_text_result_consume_stream_ignores_abort_error_during_stream_consumption`,
+  `stream_text_result_consume_stream_ignores_response_aborted_error_during_stream_consumption`,
+  `stream_text_result_consume_stream_ignores_any_errors_during_stream_consumption`,
+  and
+  `stream_text_result_consume_stream_calls_on_error_callback_with_the_error`.
+  Rust consumes the materialized stream result and reports provider error JSON
+  to the callback instead of exposing Web `ReadableStream` thrown `Error`
+  object identity.
 - 2026-05-21: `packages/ai` retry utility parity added named Rust counterparts
   for every portable upstream `util/retry-with-exponential-backoff.test.ts`
   case in `src/retry.rs`, including rate-limit `retry-after-ms`, `retry-after`
@@ -1680,25 +2642,28 @@ focused tests for each portable behavior before changing rows to `verified`.
   `generate_object_result_contains_request_information`,
   `generate_object_result_contains_response_information`,
   `generate_object_result_contains_provider_metadata`,
+  `generate_object_result_to_json_response_returns_json_response`,
   `generate_object_passes_headers_to_model`, and
   `generate_object_passes_provider_options_to_model` in
   `src/generate_object.rs`, mapping upstream `result.request`,
-  `result.response`, `result.providerMetadata`, `options.headers`, and
-  `options.providerOptions` cases one-to-one while preserving the Rust AI
-  user-agent suffix behavior.
+  `result.response`, `result.providerMetadata`, `result.toJsonResponse`,
+  `options.headers`, and `options.providerOptions` cases one-to-one while
+  preserving the Rust AI user-agent suffix behavior.
 - 2026-05-23: `generateObject` callback panic parity added
   `generate_object_callback_panics_do_not_break_generation` in
   `src/generate_object.rs`, mapping upstream
   `callbacks > error handling in callbacks > should not break the generation
   when a callback throws` for synchronous callback failures.
-- 2026-05-23: `generateObject` warning logger parity added
+- 2026-05-25: `generateObject` warning/result parity added
+  `generate_object_result_returns_warnings`,
   `generate_object_calls_log_warnings_with_the_correct_warnings` and
   `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`
   in `src/generate_object.rs`, plus scoped warning logger invocation from
-  `generate_object`. These map upstream `should call logWarnings with the
-  correct warnings` and `should call logWarnings with empty array when no
-  warnings are present` by proving the logger receives provider warnings,
-  empty-warning calls, provider id, and model id.
+  `generate_object`. These map upstream `should return warnings`,
+  `should call logWarnings with the correct warnings`, and `should call
+  logWarnings with empty array when no warnings are present` by proving
+  provider warnings are returned on the result and the logger receives provider
+  warnings, empty-warning calls, provider id, and model id.
 - 2026-05-23: `generateText` and `streamText` warning logger parity added
   `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
   `generate_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
@@ -1710,6 +2675,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   logger invocation from each API. These map upstream `logWarnings` single-step,
   per-step multi-step, and empty-warning spy cases by proving the logger
   receives each step's warnings, empty-warning calls, provider id, and model id.
+- 2026-05-24: `streamText` telemetry integration array parity added
+  `stream_text_supports_multiple_per_call_telemetry_integrations_as_array` in
+  `src/stream_text.rs`, mapping upstream
+  `telemetry integrations > should support multiple per-call integrations as an
+  array` by proving both integrations receive `onStart` in configured order.
 - 2026-05-22: `streamObject` object-stream schema metadata parity added
   `stream_object_object_stream_uses_schema_name_and_description` in
   `src/stream_object.rs`, mapping upstream `output = "object" >
@@ -1740,7 +2710,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/stream_object.rs`, mapping upstream `result.fullStream` object-output
   ordering with object deltas, text deltas, and final finish metadata.
 - 2026-05-21: `streamObject` text response parity added
-  `stream_object_result_text_stream_and_response_match_upstream_object_chunks`
+  `stream_object_result_text_stream_sends_text_stream`,
+  `stream_object_result_to_text_stream_response_creates_response_with_text_stream`,
   and
   `stream_object_result_pipe_text_stream_to_response_writes_default_headers_chunks_and_end`
   in `src/stream_object.rs`, mapping upstream `result.textStream`,
@@ -1788,12 +2759,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   Rust's explicit `object: None`, retained error state, response metadata,
   usage, and finish reason.
 - 2026-05-22: `streamObject` provider-error stream parity added
-  `stream_object_partial_object_stream_suppresses_provider_errors` in
-  `src/stream_object.rs`, mapping the upstream `partialObjectStream` case where
-  model errors are suppressed from partial object deltas while still surfacing
-  through `onError` and the final error result. Rust models the upstream thrown
-  `doStream` error as a provider `Error` stream part because the Rust provider
-  trait returns a stream result instead of throwing a promise.
+  `stream_object_partial_object_stream_suppresses_provider_errors` and
+  `stream_object_object_stream_invokes_on_error_callback_with_error` in
+  `src/stream_object.rs`, mapping the upstream `partialObjectStream`
+  suppression and `onError` callback cases where `doStream` rejects before
+  yielding object deltas. Rust models the upstream thrown `doStream` error as a
+  provider `Error` stream part because the Rust provider trait returns a typed
+  stream result instead of throwing a promise.
 - 2026-05-21: `streamObject` array output parity added
   `stream_object_array_three_elements_streams_complete_objects_in_partial_object_stream`,
   `stream_object_array_three_elements_streams_complete_objects_in_text_stream`,
@@ -1827,6 +2799,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   so the equivalent proof is that each high-level API invokes the model trait
   method for URL file prompts and the generation still resolves to the expected
   text or object.
+- 2026-05-25: `packages/ai` `streamText` prepare-step URL-file model-switch
+  parity added
+  `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
+  matching upstream's `prepareStep with model switch and image URLs` case by
+  proving URL-file support is queried on the step-selected model, not the
+  original model, and that the switched model receives the provider call with
+  the URL file prompt.
 - 2026-05-21: `streamObject` warnings and callback parity added
   `stream_object_warnings_resolve_empty_when_no_warnings_are_present`,
   `stream_object_warnings_resolve_model_warnings`,
@@ -1871,6 +2850,30 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/stream_text.rs`, covering upstream `smoothStream` default `10ms`, custom
   numeric, and `null` `delayInMs` scheduling after detected smoothed chunks
   while keeping final buffer flushes immediate.
+- 2026-05-23: `streamText` smooth stream edge-case parity added
+  `smooth_stream_should_split_larger_text_chunks`,
+  `smooth_stream_should_keep_longer_whitespace_sequences_together`,
+  `smooth_stream_should_flush_text_buffer_before_tool_call_starts`,
+  `smooth_stream_should_flush_text_buffer_before_streaming_tool_input_starts`,
+  `smooth_stream_should_not_return_chunks_with_just_spaces`,
+  `smooth_stream_should_split_text_by_lines_when_using_line_chunking_mode`,
+  `smooth_stream_should_handle_text_without_line_endings_in_line_chunking_mode`,
+  `smooth_stream_should_support_custom_chunking_regexps_character_level`,
+  `smooth_stream_should_change_the_id_when_the_text_part_id_changes`,
+  `smooth_stream_should_split_larger_reasoning_chunks`,
+  `smooth_stream_should_flush_reasoning_buffer_before_tool_call`,
+  `smooth_stream_should_use_line_chunking_for_reasoning`,
+  `smooth_stream_should_flush_text_buffer_when_switching_to_reasoning`,
+  `smooth_stream_should_flush_reasoning_buffer_when_switching_to_text`,
+  `smooth_stream_should_handle_multiple_switches_between_text_and_reasoning`,
+  and
+  `smooth_stream_preserves_provider_metadata_on_reasoning_start_for_redacted_thinking`
+  in `src/stream_text.rs`, completing the portable upstream edge matrix around
+  longer text/reasoning chunks, whitespace-only buffering, line-only final
+  flushes, regex character chunking, text-id changes, tool-call flushes,
+  streamed tool-input flushes, text/reasoning switching, and redacted-thinking
+  provider metadata. Upstream `Intl.Segmenter` chunking remains documented as a
+  JavaScript runtime boundary for Rust's dependency-light native smoother.
 - 2026-05-20: `streamText` arbitrary transform parity added
   `stream_text_transform_updates_text_response_and_callbacks`,
   `stream_text_transform_applies_multiple_transforms_in_order`, and
@@ -1897,13 +2900,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   honor `toUIMessageStream` options.
 - 2026-05-20: UI-message stream creation and step-finish persistence parity
   added `create_ui_message_stream_invokes_step_and_finish_callbacks` and
-  `create_ui_message_stream_adds_error_chunk_when_execute_returns_error` plus
+  `create_ui_message_stream_keeps_existing_message_id_from_start_chunk`,
+  `create_ui_message_stream_adds_error_chunk_when_execute_returns_error`,
+  `create_ui_message_stream_should_add_error_parts_when_execute_throws`, plus
   `create_ui_message_stream_adds_error_chunk_when_merged_stream_errors` in
   `src/ui_message_stream.rs`, covering a Rust-native writer/write/merge flow,
-  generated response-id injection, `onStepFinish` snapshots across multi-step
-  streams, final `onFinish` persisted-message reconstruction, finish reason
-  propagation, and custom `onError` masking for fallible execute callbacks and
-  merged-stream failures.
+  generated response-id injection, preservation of an existing start-chunk
+  message id, `onStepFinish` snapshots across multi-step streams, final
+  `onFinish` persisted-message reconstruction, finish reason propagation,
+  exact execute-error-only output, and custom `onError` masking for fallible
+  execute callbacks and merged-stream failures.
 - 2026-05-19: Gateway image-model request/response metadata parity added
   `gateway_image_model_maps_upstream_request_response_and_metadata` in
   `crates/ai-sdk-gateway`, covering upstream-style max image splitting behavior,
@@ -1912,14 +2918,18 @@ focused tests for each portable behavior before changing rows to `verified`.
   provider metadata.
 - 2026-05-19: Direct chat transport parity added
   `direct_chat_transport_streams_text_response_from_agent`,
+  `direct_chat_transport_passes_abort_signal_to_agent`,
   `direct_chat_transport_passes_prepared_agent_options`,
   `direct_chat_transport_applies_ui_message_stream_options`,
+  `direct_chat_transport_sends_reasoning_when_enabled`,
   `direct_chat_transport_converts_ui_messages_to_model_messages_in_order`,
   `direct_chat_transport_rejects_invalid_ui_message_part_shape`, and
   `direct_chat_transport_reconnect_returns_none` in `src/chat_transport.rs`,
   covering upstream `DirectChatTransport`'s portable in-process agent bridge,
-  UI-message text conversion, Rust agent option forwarding, UI-message stream
-  options, validation errors, and reconnect-null behavior.
+  UI-message text conversion, native Rust abort-signal forwarding to the agent
+  and model call, Rust agent option forwarding, enabled and disabled
+  UI-message stream reasoning options, validation errors, and reconnect-null
+  behavior.
 - 2026-05-19: Assistant tool-history UI-to-model conversion parity added
   `convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages`,
   `convert_ui_messages_maps_tool_output_error_raw_input_to_error_text`,
@@ -2065,6 +3075,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   conversion, no-data-message passthrough, and part-order preservation. The
   Rust hook is `convert_ui_messages_to_model_messages_with_data_part_converter`
   and returns `ConvertedUiMessageDataPart` text or file parts.
+- 2026-05-24: UI-message unknown-role handling is now explicitly mapped with
+  `convert_ui_messages_rejects_unknown_roles_at_json_boundary`. Upstream's
+  `role: "unknown" as any` conversion error is a JavaScript dynamic-typing
+  boundary; Rust rejects the same invalid role during `UiMessage`
+  deserialization before model-message conversion.
 - 2026-05-20: Completion transport parity added `CompletionTransport` in
   `src/completion_transport.rs`, with
   `completion_transport_builds_default_request`,
@@ -2310,6 +3325,169 @@ focused tests for each portable behavior before changing rows to `verified`.
   `reasoningSummary` including upstream's full `nonReasoningModelIds` matrix, dedicated `store: false`/`store: true` encrypted reasoning include request tests, unsupported
   OpenAI Responses presence/frequency penalties, dedicated `forceReasoning`/Codex Max `xhigh` tests, and
   flex/priority `serviceTier` validation.
+- 2026-05-24: OpenAI language-model capability matrix parity added
+  `openai_language_model_capabilities_is_reasoning_model_matches_upstream_matrix`
+  and
+  `openai_language_model_capabilities_supports_non_reasoning_parameters_matches_upstream_matrix`,
+  mapping upstream `openai-language-model-capabilities.test.ts` table rows
+  directly for reasoning-model detection and GPT-5.1+ non-reasoning-parameter
+  compatibility.
+- 2026-05-24: OpenAI hosted tool type parity added
+  `openai_web_search_tool_matches_upstream_tool_type_contract` and
+  `openai_local_shell_tool_matches_upstream_tool_type_contract`, mapping
+  upstream `tool/web-search.test-d.ts` and `tool/local-shell.test-d.ts`
+  `Tool<...>` assertions to Rust provider-tool helper constructors with
+  explicit provider ids, names, provider arguments, and serialized tool shapes.
+- 2026-05-24: OpenAI chat provider-option extension parity added
+  `openai_chat_should_send_max_completion_tokens_extension_setting`,
+  `openai_chat_should_send_prediction_extension_setting`,
+  `openai_chat_should_send_store_extension_setting`,
+  `openai_chat_should_send_metadata_extension_values`,
+  `openai_chat_should_send_prompt_cache_key_extension_value`,
+  `openai_chat_should_send_prompt_cache_retention_extension_value`,
+  `openai_chat_should_send_safety_identifier_extension_value`,
+  `openai_chat_should_send_service_tier_flex_processing_setting`, and
+  `openai_chat_should_send_service_tier_priority_processing_setting`, plus
+  `openai_chat_should_pass_logit_bias_parallel_tool_calls_and_user_settings`,
+  `openai_chat_should_send_numeric_logprobs_as_logprobs_and_top_logprobs`,
+  `openai_chat_should_send_boolean_logprobs_true_with_zero_top_logprobs`, and
+  `openai_chat_should_omit_boolean_logprobs_false`, plus
+  `openai_chat_should_not_set_reasoning_effort_when_reasoning_is_provider_default`,
+  `openai_chat_should_pass_top_level_reasoning_as_reasoning_effort`,
+  `openai_chat_should_prefer_provider_options_reasoning_effort_over_top_level_reasoning`,
+  `openai_chat_should_pass_reasoning_effort_setting_from_provider_options`,
+  `openai_chat_should_pass_reasoning_effort_setting_from_settings`,
+  `openai_chat_should_pass_reasoning_effort_xhigh_setting`, and
+  `openai_chat_should_pass_text_verbosity_setting_from_provider_options`, mapping
+  upstream `openai-chat-language-model.test.ts` chat extension request-body
+  cases for `maxCompletionTokens`, `prediction`, `store`, `metadata`,
+  prompt-cache settings, `safetyIdentifier`, basic `serviceTier`
+  flex/priority serialization, `logitBias` to `logit_bias`,
+  `parallelToolCalls` to `parallel_tool_calls`, `user`, and
+  `logprobs`/`top_logprobs` option shaping, plus `reasoning:
+  provider-default`, top-level `reasoning`, provider-option
+  `reasoningEffort` low/high/xhigh precedence, and `textVerbosity` to
+  `verbosity` through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat tool request-body parity added
+  `openai_chat_should_pass_tools_and_tool_choice`, mapping upstream
+  `openai-chat-language-model.test.ts` `should pass tools and toolChoice` to
+  the OpenAI provider facade by asserting function-tool JSON Schema request
+  shaping and specific `tool_choice` serialization.
+- 2026-05-24: OpenAI chat basic generate parity added
+  `openai_chat_should_extract_text_response`,
+  `openai_chat_should_extract_usage`,
+  `openai_chat_should_send_request_body`,
+  `openai_chat_should_send_additional_response_information`,
+  `openai_chat_should_expose_the_raw_response_headers`,
+  `openai_chat_should_pass_the_model_and_the_messages`, and
+  `openai_chat_should_pass_headers`, mapping the upstream
+  `openai-chat-language-model.test.ts` basic non-streaming chat cases through
+  the OpenAI provider facade for generated text content, usage accounting, raw
+  request body capture, response id/timestamp/model/body metadata, response
+  headers, model/message request shaping, and provider/request header merging.
+- 2026-05-24: OpenAI chat finish/tool-result parity added
+  `openai_chat_should_support_partial_usage`,
+  `openai_chat_should_extract_finish_reason`,
+  `openai_chat_should_support_unknown_finish_reason`, and
+  `openai_chat_should_parse_tool_results`, mapping upstream
+  `openai-chat-language-model.test.ts` partial usage, known and unknown finish
+  reason, and generated tool-call parsing cases through the OpenAI provider
+  facade.
+- 2026-05-24: OpenAI chat annotation/citation parity added
+  `openai_chat_should_parse_annotations_and_citations`, mapping upstream
+  `openai-chat-language-model.test.ts` `should parse annotations/citations` by
+  parsing chat `url_citation` annotations into generated URL source content
+  with title preservation through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat strict tool-call parity added
+  `openai_chat_should_set_strict_with_tool_call` and
+  `openai_chat_should_set_strict_for_tool_usage`, mapping upstream
+  `openai-chat-language-model.test.ts` strict tool-call request/result cases
+  to the OpenAI provider facade by asserting required and specific
+  `tool_choice` request bodies and parsed assistant tool-call content.
+- 2026-05-24: OpenAI chat usage/provider-metadata parity added
+  `openai_chat_should_return_cached_tokens_in_prompt_details_tokens` and
+  `openai_chat_should_return_prediction_tokens_in_provider_metadata`, mapping
+  upstream `openai-chat-language-model.test.ts` prompt `cached_tokens` usage
+  and completion `accepted_prediction_tokens`/`rejected_prediction_tokens`
+  provider-metadata cases through the OpenAI provider facade.
+- 2026-05-24: OpenAI chat reasoning-token usage parity added
+  `openai_chat_should_return_reasoning_tokens_in_provider_metadata`, mapping
+  upstream `openai-chat-language-model.test.ts` `should return the reasoning
+  tokens in the provider metadata` through the OpenAI provider facade by
+  asserting completion `reasoning_tokens` splits output text/reasoning usage
+  and preserves the raw usage payload.
+- 2026-05-24: OpenAI chat response-format request-body parity added
+  `openai_chat_should_not_send_response_format_when_response_format_is_text`,
+  `openai_chat_should_forward_json_response_format_as_json_object_without_schema`,
+  `openai_chat_should_forward_json_response_format_as_json_object_and_include_schema`,
+  `openai_chat_should_use_json_schema_and_strict_with_response_format_json`,
+  `openai_chat_should_set_name_and_description_with_response_format_json`, and
+  `openai_chat_should_allow_undefined_schema_with_response_format_json_when_structured_outputs_are_enabled`,
+  mapping upstream `openai-chat-language-model.test.ts` response-format cases
+  for text omission, JSON object fallback, structured JSON Schema request body
+  shaping, strict schema defaulting, and name/description passthrough through
+  the OpenAI provider facade. The OpenAI facade now marks OpenAI-compatible
+  chat settings as structured-output capable so the wrapper route matches
+  upstream `@ai-sdk/openai` behavior instead of relying only on generic
+  OpenAI-compatible defaults.
+- 2026-05-24: OpenAI chat logprobs provider-metadata parity added
+  `openai_chat_should_extract_logprobs_provider_metadata` and
+  `openai_chat_stream_should_extract_logprobs_provider_metadata`, mapping
+  upstream `openai-chat-language-model.test.ts` non-streaming
+  `should extract logprobs` and streaming `should stream text deltas`
+  provider-metadata assertions by storing `choice.logprobs.content` under
+  `providerMetadata.openai.logprobs` for OpenAI chat generate and stream
+  results.
+- 2026-05-24: OpenAI chat stream request and finish parity added
+  `openai_chat_stream_should_stream_text_deltas`,
+  `openai_chat_stream_should_handle_error_stream_parts`,
+  `openai_chat_stream_should_send_request_body`,
+  `openai_chat_stream_should_expose_the_raw_response_headers`,
+  `openai_chat_stream_should_pass_the_messages_and_the_model`,
+  `openai_chat_stream_should_pass_headers`,
+  `openai_chat_stream_should_return_cached_tokens_in_provider_metadata`,
+  `openai_chat_stream_should_return_prediction_tokens_in_provider_metadata`,
+  `openai_chat_stream_should_send_store_extension_setting`,
+  `openai_chat_stream_should_send_metadata_extension_values`,
+  `openai_chat_stream_should_send_service_tier_flex_processing_setting`, and
+  `openai_chat_stream_should_send_service_tier_priority_processing_setting`,
+  mapping the upstream non-Responses OpenAI chat streaming text, error, request
+  body, raw headers, request headers, streamed usage/provider metadata, store,
+  metadata, and service-tier cases. The OpenAI provider now enables upstream
+  `stream_options.include_usage` for OpenAI chat and completion streams.
+- 2026-05-24: OpenAI chat streaming annotation/tool-call edge parity added
+  `openai_chat_stream_should_stream_annotations_and_citations`,
+  `openai_chat_stream_should_stream_tool_deltas`,
+  `openai_chat_stream_should_stream_tool_call_deltas_when_arguments_are_in_first_chunk`,
+  `openai_chat_stream_should_not_duplicate_tool_calls_after_completed_empty_chunk`,
+  `openai_chat_stream_should_stream_tool_call_with_missing_type_field`, and
+  `openai_chat_stream_should_stream_tool_call_that_is_sent_in_one_chunk`,
+  mapping the adjacent upstream `doStream` citation and function-tool delta
+  cases in the OpenAI facade. The shared OpenAI-compatible chat stream parser
+  now emits `Source` parts for streamed `delta.annotations` URL citations
+  instead of only supporting non-streaming message annotations.
+- 2026-05-24: OpenAI chat model-specific request rule parity added
+  `openai_chat_reasoning_model_should_clear_unsupported_standard_settings`,
+  `openai_chat_reasoning_model_should_convert_max_output_tokens_to_max_completion_tokens`,
+  `openai_chat_should_allow_temperature_when_reasoning_none_on_gpt_5_1`,
+  `openai_chat_should_still_clear_temperature_when_reasoning_none_on_o4_mini`,
+  `openai_chat_should_allow_forcing_reasoning_behavior_for_unrecognized_model_ids`,
+  `openai_chat_should_remove_temperature_setting_for_search_preview_models`, and
+  `openai_chat_should_warn_and_remove_unsupported_service_tier_settings`, plus
+  `openai_chat_reasoning_model_should_clear_unsupported_logit_bias_and_logprobs_settings`, mapping
+  upstream `openai-chat-language-model.test.ts` reasoning-model, search-preview,
+  forced-reasoning, logprobs/logit-bias/top-logprobs pruning warnings, and
+  service-tier request pruning/warning cases for the non-Responses OpenAI chat
+  facade.
+- 2026-05-24: OpenAI chat system-message mode parity added
+  `openai_chat_should_default_system_message_mode_to_developer_when_forcing_reasoning`,
+  `openai_chat_should_use_developer_messages_for_o1`,
+  `openai_chat_should_allow_overriding_system_message_mode_via_provider_options`,
+  `openai_chat_should_use_default_system_message_mode_when_not_overridden`, and
+  `openai_chat_should_remove_system_messages_when_requested`, mapping upstream
+  `convert-to-openai-chat-messages.test.ts` and `openai-chat-language-model.test.ts`
+  system/developer/remove message-mode behavior for the non-Responses OpenAI
+  chat facade while preserving generic OpenAI-compatible system-message output.
 - 2026-05-20: OpenAI Responses hosted tool include parity added
   `open_responses_provider_adds_hosted_tool_include_options` now covers
   upstream automatic `include` additions for hosted web-search action sources
@@ -3356,6 +4534,33 @@ focused tests for each portable behavior before changing rows to `verified`.
   user-agent, existing user-agent append, missing-header filtering, browser
   `Headers`-style iterable, and array-header entry case. Existing grouped Rust
   user-agent tests remain additive only.
+- 2026-05-24: OpenAI image model parity added a dedicated `OpenAIImageModel`
+  for `/images/generations` and `/images/edits`, with named Rust counterparts
+  for all 27 portable upstream `openai-image-model.test.ts` generation/edit
+  cases covering request bodies, provider-option snake casing, headers,
+  warnings, max image limits, response-format defaults, response metadata,
+  provider metadata, usage mapping, token-detail distribution, and multipart
+  edit inputs.
+- 2026-05-24: `generateObject` callback parity split the upstream
+  `generate-object.test.ts` callback corpus into named Rust counterparts for
+  onStart ordering and event payloads, deprecated telemetry alias payload
+  isolation, onStepStart ordering/model metadata, onStepFinish raw object text,
+  usage and reasoning, onFinish parsed object/provider metadata/reasoning,
+  callback ordering, call-id correlation, and callback panic isolation.
+- 2026-05-24: `generateObject`/`streamObject` timeout type-level parity added
+  named Rust counterparts for the upstream `.test-d.ts` unsupported `timeout`
+  option assertions:
+  `generate_object_type_counterpart_does_not_accept_timeout_option` and
+  `stream_object_type_counterpart_does_not_accept_timeout_option`. Rust proves
+  this at the typed options boundary: neither API exposes a timeout field, and
+  no timeout-derived abort signal is forwarded to the model call.
+- 2026-05-24: `generateObject` result type-level parity added a typed
+  `GenerateObjectResult<JsonValue>::object_as` accessor and named Rust
+  counterparts for the remaining portable upstream `generate-object.test-d.ts`
+  result assertions: `generate_object_type_counterpart_supports_enum_types`,
+  `generate_object_type_counterpart_supports_schema_types`,
+  `generate_object_type_counterpart_supports_no_schema_output_mode`, and
+  `generate_object_type_counterpart_supports_array_output_mode`.
 
 ## Next Unported Work Queue
 
@@ -3363,7 +4568,7 @@ focused tests for each portable behavior before changing rows to `verified`.
    before returning to unrelated standalone providers. This ordering is a hard
    gate, not a preference: every next eligible slice must come from this
    first-phase queue until it is closed. The first phase covers
-   `packages/ai`, `packages/provider`, `packages/provider-utils`,
+   `packages/ai`, `packages/provider-utils`, `packages/provider`,
    `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
    the Vercel AI Gateway OpenAI-compatible and Open Responses routes, and the
    portable non-provider package rows such as MCP, OTel, Workflow, telemetry,
@@ -3372,6 +4577,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    standalone providers.
    Standalone provider slices are blocked while any of these rows are not yet
    verified or explicitly documented as intentionally non-portable.
+   Within this gate, use the current hard package order as the slice selection
+   rule at the start of every iteration: choose the first package below 100% in
+   this order and stay on it until it is verified or explicitly documented as
+   intentionally non-portable. Finish `packages/ai` to 100% first, then
+   `@ai-sdk/provider-utils`, then `@ai-sdk/provider`, then continue the
+   remaining first-phase rows in the most effective order. Do not start a
+   provider-utils slice while portable `packages/ai` inventory remains open,
+   and do not start a provider slice while portable provider-utils inventory
+   remains open.
 2. Treat the original upstream TypeScript tests as the non-negotiable floor for
    every slice. Each future iteration must start from the exact original
    package test list and ensure EVERY portable `it`/`test` case, table row,
@@ -3416,18 +4630,39 @@ focused tests for each portable behavior before changing rows to `verified`.
    reasoning/provider-option `it.each` matrices, and confirmed the
    package-owned `ai-sdk-open-responses` crate's 523 tests include named Rust
    counterparts for every portable current Responses case. Continue
-   `packages/openai` from non-Responses surfaces such as files, skills, speech,
-   transcription, images, and non-Responses error mappings.
+   `packages/openai` from remaining non-Responses surfaces such as chat,
+   provider factory/capability matrices, and
+   non-Responses error mappings.
+   The upstream `openai-error.test.ts` non-Responses schema case now has the
+   named Rust counterpart
+   `openai_error_data_schema_should_parse_openrouter_resource_exhausted_error`.
+   The upstream `openai-provider.test.ts` base URL precedence cases now have
+   named Rust counterparts under `openai_provider_*base_url*`.
+   The portable upstream `embedding/openai-embedding-model.test.ts` cases now
+   have named Rust counterparts under `openai_embedding_should_*`.
+   The portable upstream `files/openai-files.test.ts` upload cases now have
+   named Rust counterparts under `openai_files_should_*`.
+   The portable upstream `skills/openai-skills.test.ts` upload cases now have
+   named Rust counterparts under `openai_skills_should_*`.
+   The portable upstream `speech/openai-speech-model.test.ts` generation cases
+   now have named Rust counterparts under `openai_speech_should_*`.
+   The portable upstream `transcription/openai-transcription-model.test.ts`
+   generation cases now have named Rust counterparts under
+   `openai_transcription_should_*`.
+   The portable upstream `image/openai-image-model.test.ts` generation/edit
+   cases now have named Rust counterparts under `openai_image_should_*`.
 5. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
-   expanding to unrelated providers. Continue choosing from `packages/ai`,
-   `packages/provider`, `packages/provider-utils`, `packages/open-responses`,
-   `packages/gateway`, Vercel AI Gateway routes, MCP,
-   OTel, Workflow, telemetry, UI transport, chat state management, and
-   test-server support until those rows are verified or intentionally
-   documented as non-portable. The OpenAI-compatible package row is now
-   verified against all current upstream package tests; do not spend another
-   first-phase slice there unless upstream changes or a regression appears.
+   expanding to unrelated providers. Within that first-phase set, finish open
+   packages in this order unless upstream drift or a regression forces a
+   narrower repair first: `packages/ai` to 100%, then
+   `packages/provider-utils`, then `packages/provider`, then the remaining
+   first-phase rows (`packages/open-responses`, `packages/gateway`, Vercel AI
+   Gateway routes, MCP, OTel, Workflow, telemetry, UI transport, chat state
+   management, and test-server support). The OpenAI-compatible package row is
+   now verified against all current upstream package tests; do not spend
+   another first-phase slice there unless upstream changes or a regression
+   appears.
 6. Continue `packages/mcp` inside `crates/ai-sdk-mcp` only where live protected
    service validation is possible with suitable credentials, or where upstream
    adds new portable MCP surfaces. HTTP transport bearer-token injection and
@@ -3539,13 +4774,28 @@ focused tests for each portable behavior before changing rows to `verified`.
    callbacks.
    The same upstream file's callback precedence and normalization cases now
    have named Rust counterparts in
+   `resolve_tool_approval_resolves_async_status_from_generic_function`,
+   `resolve_tool_approval_passes_tool_call_tools_context_messages_and_runtime_to_generic_function`,
+   `resolve_tool_approval_passes_through_object_status_reason_from_generic_function`,
+   `resolve_tool_approval_passes_same_messages_and_validated_tool_context_to_per_tool_function`,
+   `resolve_tool_approval_passes_tools_context_entry_through_after_schema_validation`,
+   `resolve_tool_approval_normalizes_static_string_before_tool_defined_approval`,
+   `resolve_tool_approval_passes_through_static_object_status_reason`,
+   `resolve_tool_approval_uses_user_defined_callback_before_tool_defined_approval`,
+   `resolve_tool_approval_passes_reason_returned_by_user_defined_callback`,
+   `resolve_tool_approval_normalizes_string_status_returned_by_user_defined_callback`,
    `resolve_tool_approval_treats_none_from_generic_callback_as_not_applicable`,
    `resolve_tool_approval_uses_generic_callback_before_tool_defined_approval`,
    `resolve_tool_approval_treats_none_from_per_tool_callback_as_not_applicable`,
    and `resolve_tool_approval_passes_no_tool_context_without_context_schema`,
    proving generic callbacks run before tool-defined approval callbacks,
-   missing callback returns normalize to `not-applicable`, and absent
-   `toolsContext` entries become absent `toolContext` options.
+   async callback results resolve, option payloads and object-status reasons
+   are preserved, static statuses short-circuit tool-defined callbacks,
+   validated/schema-transformed contexts reach per-tool callbacks, missing
+   callback returns normalize to `not-applicable`, and absent `toolsContext`
+   entries become absent `toolContext` options. JavaScript reference-identity
+   checks are documented as Rust value-equivalence at the owned callback
+   boundary.
    The upstream `generate-text/sum-token-counts.test.ts` cases now have named
    Rust counterparts in `sum_token_counts_should_*`. The upstream
    `generate-text/calculate-tokens-per-second.test.ts` portable cases now have
@@ -3632,6 +4882,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    `execute_tool_call_should_measure_only_inner_execute_duration_when_wrapped`.
    Rust documents JavaScript object identity checks for merged `AbortSignal`
    as native signal-linkage assertions instead of pointer identity.
+   The upstream `execute-tools-from-stream.test.ts` context-validation error
+   case now has the named high-level Rust counterpart
+   `stream_text_validates_tool_context_before_approval_callback_and_execution`,
+   proving invalid streamed tool context prevents approval callbacks and local
+   tool execution before the tool-error output is surfaced. The exact
+   JavaScript thrown-stream `TypeValidationError` boundary is represented as
+   Rust's materialized stream result with the same pre-callback/pre-execution
+   ordering guarantee.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error
@@ -3687,6 +4945,22 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_result_full_stream_passes_provider_metadata_on_tool_input_start`,
    `stream_text_result_full_stream_sends_tool_results`, and
    `stream_text_result_full_stream_sends_delayed_asynchronous_tool_results`.
+   The upstream raw-chunk forwarding cases now have named Rust counterparts in
+   `stream_text_preserves_raw_chunks_when_requested`,
+   `stream_text_omits_raw_chunks_by_default`,
+   `stream_text_passes_explicit_false_include_raw_chunks_to_model`, and
+   `stream_text_invokes_chunk_callback_for_portable_chunks`, proving requested
+   raw chunks reach `result.fullStream`/`onChunk`, disabled raw chunks are
+   filtered, and explicit `false` is forwarded to the provider call boundary.
+   The deprecated JavaScript `includeRawChunks` and `experimental_include`
+   aliases are documented as JavaScript option-surface compatibility because
+   Rust exposes only the typed `with_include_raw_chunks` builder.
+   The upstream mixed multi-content streaming interleaving cases now have the
+   named Rust counterpart
+   `stream_text_result_preserves_interleaved_text_and_reasoning_content_order`,
+   proving `fullStream` part ordering, final text/reasoning accumulation, and
+   step-finish generated content ordering for overlapping text/reasoning block
+   ids.
    The portable upstream error callback cases for mid-stream provider error
    chunks and second-step continuation stream errors now have named Rust
    counterparts in
@@ -3711,15 +4985,111 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_result_supports_text_ui_message_and_full_stream_from_single_result`,
    proving text-stream, full-stream, and UI-message views can be read from the
    same materialized `StreamTextResult`.
-   The upstream automatic approval and automatic denial tool-approval stream
-   cases now have Rust coverage in
-   `stream_text_automatic_tool_approval_response_streams_before_tool_result`
+   The upstream `result.consumeStream` error-handling cases now have named
+   Rust counterparts in `stream_text_result_consume_stream_*`, proving
+   consumption ignores AbortError, ResponseAborted, and generic provider
+   errors by default while `consume_stream_with_on_error` reports the error
+   value to the callback. Rust consumes the materialized stream result rather
+   than a Web `ReadableStream`, so JavaScript thrown `Error` object identity is
+   represented as provider error JSON.
+   The upstream `streamText` abort-during-tool-execution case now has the
+   named Rust counterpart
+   `stream_text_aborts_during_tool_execution_before_tool_result`, proving a
+   local tool-triggered abort stops before tool-result and finish-step
+   emission and calls `onAbort` with only previously completed steps.
+   The upstream `streamText` context `onFinish` case now has the named Rust
+   counterpart `stream_text_passes_runtime_context_to_finish_callback`,
+   proving the final finish event receives the configured runtime context.
+   The upstream `streamText` single invalid tool-call content, full-stream,
+   and UI-message stream cases now have the named Rust counterpart
+   `stream_text_marks_schema_invalid_tool_call_in_result_full_and_ui_stream`,
+   proving streamed schema-invalid tool calls are marked invalid before local
+   execution, produce a tool-error result, update full-stream parts, and emit
+   raw tool input/output error text into UI-message chunks while provider
+   stream errors remain masked by default.
+   The upstream `streamText` single tool preliminary-result full-stream,
+   UI-message stream, final-result content, and step-content cases now have
+   the named Rust counterpart
+   `stream_text_streams_preliminary_tool_results_before_final_result`,
+   proving local streaming tool executors emit preliminary tool-result parts
+   before the repeated final result while `result.tool_results` and step
+   tool-results retain only the final output.
+   The upstream `streamText` provider-executed dynamic tool input-streaming
+   full-stream, UI-message stream, and content cases now have the named Rust
+   counterpart
+   `stream_text_preserves_provider_executed_dynamic_tool_input_streaming`,
+   proving provider-executed dynamic flags and provider metadata survive
+   streamed tool-input start/delta/end, tool-call, tool-result, UI-message
+   chunks, and final step tool state.
+   The upstream `streamText` deferred provider `tool-error` cases now have
+   named Rust counterparts in
+   `stream_text_resolves_deferred_provider_tool_error_in_same_step` and
+   `stream_text_resolves_deferred_provider_tool_error_in_later_step`, proving
+   same-step provider errors close without another model call while later-step
+   deferred provider errors continue once and resolve as provider-executed tool
+   errors.
+   The upstream user-approval, automatic approval, and automatic denial
+   tool-approval stream cases now have Rust coverage in
+   `stream_text_streams_user_tool_approval_request_without_executing_tool`,
+   `stream_text_user_approval_function_can_block_one_call_and_execute_another`,
+   `stream_text_automatic_tool_approval_response_streams_before_tool_result`,
    and the hardened
    `stream_text_applies_denied_tool_approval_to_continuation_messages`,
-   proving `tool-approval-request` automatic metadata and
-   `tool-approval-response` chunks are emitted into both `fullStream` and
-   `toUIMessageStream` before approved local tool results or denied
-   continuation prompts.
+   proving `tool-approval-request` parts are emitted into both `fullStream`
+   and `toUIMessageStream`, user approval waits without local execution,
+   callback-based approval can block one tool call while another local call
+   executes, and automatic `tool-approval-response` chunks are emitted before
+   approved local tool results or denied continuation prompts.
+   The upstream `streamText` approved prior tool-approval response path now
+   has the named Rust counterpart
+   `stream_text_executes_initial_approved_tool_approval_before_first_model_call`,
+   proving approved initial tool approval responses execute before the first
+   provider stream call, are visible to `prepareStep.responseMessages`, and
+   emit full-stream/UI tool-result chunks before the first `start-step`.
+   The approved-initial tool error path now has the named Rust counterpart
+   `stream_text_serializes_initial_approved_tool_error_before_first_model_call`,
+   proving an approved prior tool approval whose local executor fails is
+   serialized as an `error-text` tool result in the first provider prompt and
+   emitted as a full-stream/UI tool-error chunk before the first `start-step`.
+   The denied-initial tool approval path now has the named Rust counterpart
+   `stream_text_streams_initial_denied_tool_approval_before_first_model_call`,
+   proving a prior denied tool approval is not executed, is converted to an
+   `execution-denied` tool result in the first provider prompt, and emits
+   full-stream/UI `tool-output-denied` chunks before the first `start-step`.
+   The provider-executed MCP approval-response continuation cases now have
+   named Rust counterparts in
+   `stream_text_sends_approved_provider_executed_tool_approval_response_once`
+   and
+   `stream_text_sends_denied_provider_executed_tool_approval_response_once`,
+   proving approved and denied provider-executed approval responses are sent to
+   the model exactly once without replaying the assistant approval-request
+   part, and that provider-executed tool results/text are surfaced afterward.
+   The upstream `streamText` prepare-step model switch with image URLs case now
+   has the named Rust counterpart
+   `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
+   proving URL-file support checks are performed against the model selected by
+   `prepareStep` rather than the original model before the provider stream
+   call.
+   The upstream `streamText` telemetry integration listener cases now have
+   named Rust counterparts in
+   `stream_text_calls_globally_registered_integration_listeners`,
+   `stream_text_prefers_per_call_integrations_over_global_integrations`,
+   `stream_text_calls_integration_listeners_alongside_user_callbacks`,
+   `stream_text_does_not_break_when_integration_listener_panics`, and
+   `stream_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+   proving global integration fallback, per-call override precedence,
+   user-callback plus integration ordering, panic isolation, and array
+   integration ordering.
+   The upstream `generateText` telemetry integration listener cases now have
+   named Rust counterparts in
+   `generate_text_calls_globally_registered_integration_listeners`,
+   `generate_text_prefers_per_call_integrations_over_global_integrations`,
+   `generate_text_calls_integration_listeners_alongside_user_callbacks`,
+   `generate_text_does_not_break_when_integration_listener_panics`, and
+   `generate_text_supports_multiple_per_call_telemetry_integrations_as_array`,
+   proving global integration fallback, per-call override precedence,
+   user-callback plus integration ordering, panic isolation, and array
+   integration ordering.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
@@ -3732,6 +5102,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
    and
    `stream_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
+   The portable upstream `smoothStream` edge matrix now has named Rust
+   counterparts for large text/reasoning splitting, whitespace buffering,
+   line-mode final flushes, regex character splitting, text-id switching,
+   tool-call and streamed tool-input flushes, text/reasoning switching,
+   multi-switch ordering, and reasoning-start provider metadata preservation.
+   Remaining `smoothStream` gaps are limited to JavaScript runtime boundaries:
+   invalid untyped `chunking` construction and `Intl.Segmenter` locale
+   segmentation.
 9. Continue `streamObject` parity with remaining output-strategy stream-result
    edge cases after the Gateway text/stream/UI path is stronger.
    The upstream object-output `result.fullStream` ordering case now has a named
@@ -3748,16 +5126,62 @@ focused tests for each portable behavior before changing rows to `verified`.
    cases for `generateObject`, `streamObject`, `generateText`, `streamText`,
    `embed`, `embedMany`, and `rerank` now have named Rust counterparts.
    The upstream `generateObject` `result.request`, `result.response`,
-   `result.providerMetadata`, `options.headers`, and `options.providerOptions`
-   cases now have named Rust counterparts. The upstream `generateObject`
-   warning logger spy cases now have named Rust counterparts in
+   `result.providerMetadata`, `result.toJsonResponse`, `options.headers`, and
+   `options.providerOptions` cases now have named Rust counterparts, including
+   `generate_object_result_to_json_response_returns_json_response` for the
+   default status, JSON content type, and compact JSON body. The upstream
+   `generateObject` direct warnings and warning logger spy cases now have
+   named Rust counterparts in `generate_object_result_returns_warnings`,
    `generate_object_calls_log_warnings_with_the_correct_warnings` and
    `generate_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
+   The upstream `generateObject` callback cases now have named Rust
+   counterparts in `generate_object_on_start_*`,
+   `generate_object_on_step_start_*`, `generate_object_on_step_finish_*`,
+   `generate_object_on_finish_*`, `generate_object_callbacks_fire_in_order`,
+   `generate_object_callbacks_correlate_events_with_same_call_id`, and
+   `generate_object_callbacks_should_not_break_generation_when_callback_panics`.
+   The portable upstream `generate-text.test-d.ts` output result type
+   assertions now have Rust typed-output accessor counterparts in
+   `generate_text_type_counterpart_should_infer_text_output_type_default`,
+   `generate_text_type_counterpart_should_infer_text_output_type`,
+   `generate_text_type_counterpart_should_infer_object_output_type`,
+   `generate_text_type_counterpart_should_infer_array_output_type`,
+   `generate_text_type_counterpart_should_infer_choice_output_type`, and
+   `generate_text_type_counterpart_should_infer_json_output_type`.
+   The portable upstream `stream-text.test-d.ts` output, partialOutputStream,
+   and elementStream result type assertions now have Rust typed accessor
+   counterparts in `stream_text_type_counterpart_should_infer_*`, covering
+   default text, explicit text, object, array, choice, JSON, partial-output,
+   array element output, and empty element streams for non-array outputs.
+   The upstream `streamText` `prepareStep` type-level shape now has a runtime
+   Rust counterpart in
+   `stream_text_prepare_step_overrides_step_settings_and_carries_contexts` and
+   `stream_text_prepare_step_sandbox_override_reaches_tool_execution`,
+   covering prepare-step access to messages, initial messages, accumulated
+   response messages, runtime/tool contexts, and per-step overrides for prompt,
+   runtime/tool contexts, tool choice, provider options, and sandbox execution.
+   The upstream `generate-object.test-d.ts` and `stream-object.test-d.ts`
+   unsupported timeout-option assertions now have named Rust counterparts in
+   `generate_object_type_counterpart_does_not_accept_timeout_option` and
+   `stream_object_type_counterpart_does_not_accept_timeout_option`.
+   The remaining portable upstream `generate-object.test-d.ts` result-type
+   assertions now have typed Rust accessor counterparts for enum, schema,
+   no-schema, and array output in
+   `generate_object_type_counterpart_supports_enum_types`,
+   `generate_object_type_counterpart_supports_schema_types`,
+   `generate_object_type_counterpart_supports_no_schema_output_mode`, and
+   `generate_object_type_counterpart_supports_array_output_mode`.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
    array output. The upstream `callback ordering` call-id correlation case now
    has the named Rust counterpart
    `stream_object_callbacks_correlate_all_events_with_same_call_id`.
+   The upstream `packages/ai/src/index.ts` root facade export shape now has the
+   named Rust counterpart `root_facade_reexports_upstream_index_surface`,
+   proving root access to Gateway, provider-utils helpers, high-level
+   generation APIs, prompt/registry/telemetry/text-stream/UI/upload/util
+   surfaces, and mock provider-v4 fixtures without moving package-owned
+   implementation code back into the root crate.
    The upstream callback error-handling case now has the named Rust counterpart
    `stream_object_callback_panics_do_not_break_stream`.
    The upstream warning logger spy cases now have named Rust counterparts in
@@ -3766,6 +5190,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    The upstream `partialObjectStream` provider-error suppression case now has
    the named Rust counterpart
    `stream_object_partial_object_stream_suppresses_provider_errors`.
+   The upstream `result.objectStream` `onError` callback case for a rejected
+   `doStream` call now has the named Rust counterpart
+   `stream_object_object_stream_invokes_on_error_callback_with_error`, with the
+   JavaScript promise rejection represented at Rust's typed provider boundary
+   as an error stream part.
    The upstream object-stream `schemaName`/`schemaDescription` case now has the
    named Rust counterpart
    `stream_object_object_stream_uses_schema_name_and_description`.

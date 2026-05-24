@@ -8,9 +8,9 @@
 //! to address comments through Linear's API.
 
 pub mod cards;
+pub mod linear_functions;
 pub mod markdown;
 pub mod thread_id;
-pub mod utils;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
@@ -837,7 +837,6 @@ mod tests {
     // 1:1 with upstream's helpers (channel = `linear:<issueId>`,
     // isDM always `false`). Uses the upstream-shape
     // `thread_id::decode_thread_id` so all 4 wire formats decode.
-
     // ---------- renderFormatted (1 upstream case) ----------
     #[test]
     fn linear_installation_constants_match_upstream() {

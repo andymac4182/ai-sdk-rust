@@ -803,13 +803,15 @@ pub type ExtractJsonTransformFunction = fn(&str) -> String;
 
 /// Removes common Markdown JSON code fences from generated text.
 pub fn default_extract_json_transform(text: &str) -> String {
-    let mut value = text;
+    let mut value = text.trim();
 
     if let Some(rest) = value.strip_prefix("```json") {
         value = rest.trim_start();
     } else if let Some(rest) = value.strip_prefix("```") {
         value = rest.trim_start();
     }
+
+    value = value.trim_end();
 
     if let Some(rest) = value.strip_suffix("```") {
         value = rest.trim_end();
@@ -1700,25 +1702,27 @@ fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -
 #[cfg(test)]
 mod tests {
     use super::{
-        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, ExtractReasoningMiddleware,
-        LanguageModelDefaultSettings, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
-        LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
-        LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
-        add_tool_input_examples_middleware, default_extract_json_transform,
-        default_settings_middleware, extract_json_middleware, extract_reasoning_middleware,
-        simulate_streaming_middleware, wrap_language_model,
+        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, ExtractJsonTransformFunction,
+        ExtractReasoningMiddleware, LanguageModelDefaultSettings, LanguageModelMiddleware,
+        LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
+        LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
+        LanguageModelWrapStreamOptions, add_tool_input_examples_middleware,
+        default_extract_json_transform, default_settings_middleware, extract_json_middleware,
+        extract_reasoning_middleware, simulate_streaming_middleware, wrap_language_model,
     };
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEnd,
-        LanguageModelReasoningStart, LanguageModelResponse, LanguageModelStreamFinish,
-        LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-        LanguageModelStreamStart, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool,
-        LanguageModelUsage,
+        FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions,
+        LanguageModelContent, LanguageModelFinishReason, LanguageModelFunctionTool,
+        LanguageModelGenerateResult, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+        LanguageModelResponse, LanguageModelStreamFinish, LanguageModelStreamPart,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult, LanguageModelStreamStart,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall,
+        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
+        LanguageModelUsage, OutputTokenUsage,
     };
-    use crate::provider::SpecificationVersion;
+    use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1940,10 +1944,18 @@ mod tests {
         }
 
         fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
-            let message = format!(
-                "stream raw {:?}",
-                options.include_raw_chunks.unwrap_or(false)
-            );
+            let message = if let Some(max_output_tokens) = options.max_output_tokens {
+                format!(
+                    "stream max {} raw {:?}",
+                    max_output_tokens,
+                    options.include_raw_chunks.unwrap_or(false)
+                )
+            } else {
+                format!(
+                    "stream raw {:?}",
+                    options.include_raw_chunks.unwrap_or(false)
+                )
+            };
             ready(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
                     Warning::Other { message },
@@ -2046,6 +2058,235 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct NoopLanguageMiddleware;
+
+    impl<M> LanguageModelMiddleware<M> for NoopLanguageMiddleware
+    where
+        M: LanguageModel,
+        M::Stream: Send,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<M::Stream>>
+        where
+            Self: 'a,
+            M: 'a;
+    }
+
+    #[derive(Clone, Copy)]
+    struct AddMaxOutputTokensMiddleware(u64);
+
+    impl<M> LanguageModelMiddleware<M> for AddMaxOutputTokensMiddleware
+    where
+        M: LanguageModel,
+        M::Stream: Send,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<M::Stream>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: LanguageModelTransformParamsOptions<'a, M>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            options.params.max_output_tokens =
+                Some(options.params.max_output_tokens.unwrap_or_default() + self.0);
+            Some(ready(options.params))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendGenerateWarningMiddleware(&'static str);
+
+    impl<M> LanguageModelMiddleware<M> for AppendGenerateWarningMiddleware
+    where
+        M: LanguageModel,
+        M::Stream: Send,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<M::Stream>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn wrap_generate<'a>(
+            &'a self,
+            options: LanguageModelWrapGenerateOptions<'a, M>,
+        ) -> Option<Self::WrapGenerateFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            Some(Box::pin(async move {
+                let mut result = (options.do_generate)().await;
+                result.warnings.push(Warning::Other {
+                    message: self.0.to_string(),
+                });
+                result
+            }))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendStreamWarningMiddleware(&'static str);
+
+    impl<M> LanguageModelMiddleware<M> for AppendStreamWarningMiddleware
+    where
+        M: LanguageModel<Stream = Vec<LanguageModelStreamPart>>,
+    {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapStreamFuture<'a>
+            = Pin<
+            Box<
+                dyn Future<Output = LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
+                    + Send
+                    + 'a,
+            >,
+        >
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn wrap_stream<'a>(
+            &'a self,
+            options: LanguageModelWrapStreamOptions<'a, M>,
+        ) -> Option<Self::WrapStreamFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            Some(Box::pin(async move {
+                let mut result = (options.do_stream)().await;
+                result.stream.push(LanguageModelStreamPart::StreamStart(
+                    LanguageModelStreamStart::new(vec![Warning::Other {
+                        message: self.0.to_string(),
+                    }]),
+                ));
+                result
+            }))
+        }
+    }
+
+    struct StatefulSupportedUrlsLanguageModel {
+        urls: LanguageModelSupportedUrls,
+    }
+
+    impl LanguageModel for StatefulSupportedUrlsLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "stateful-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "stateful-language"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(self.urls.clone())
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(language_result("stateful"))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
+        }
+    }
+
     fn language_result(text: &str) -> LanguageModelGenerateResult {
         LanguageModelGenerateResult::new(
             vec![LanguageModelContent::Text(LanguageModelText::new(text))],
@@ -2055,6 +2296,57 @@ mod tests {
             },
             LanguageModelUsage::default(),
         )
+    }
+
+    fn simulate_streaming_stream(
+        result: LanguageModelGenerateResult,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let model = StaticLanguageModel;
+        let middleware = simulate_streaming_middleware();
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(move || Box::pin(ready(result))),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("simulate streaming wrap-stream exists");
+
+        poll_boxed(wrapped_stream)
+    }
+
+    fn upstream_test_usage() -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(5),
+                no_cache: Some(5),
+                cache_read: Some(0),
+                cache_write: Some(0),
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(10),
+                text: Some(10),
+                reasoning: Some(3),
+            },
+            raw: None,
+        }
+    }
+
+    fn finish_reason(unified: FinishReason, raw: Option<&str>) -> LanguageModelFinishReason {
+        LanguageModelFinishReason {
+            unified,
+            raw: raw.map(ToString::to_string),
+        }
+    }
+
+    fn provider_metadata(provider: &str, value: serde_json::Value) -> ProviderMetadata {
+        BTreeMap::from([(
+            provider.to_string(),
+            value
+                .as_object()
+                .expect("metadata must be an object")
+                .clone(),
+        )])
     }
 
     fn object_schema() -> crate::json::JsonSchema {
@@ -2069,6 +2361,58 @@ mod tests {
 
     fn json_object(value: serde_json::Value) -> crate::json::JsonObject {
         value.as_object().expect("value is a JSON object").clone()
+    }
+
+    fn transform_default_settings(
+        settings: LanguageModelDefaultSettings,
+        params: LanguageModelCallOptions,
+    ) -> LanguageModelCallOptions {
+        let middleware = default_settings_middleware(settings);
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Generate,
+                params,
+                &StaticLanguageModel,
+            ))
+            .expect("default settings transform exists");
+
+        poll_ready(transformed)
+    }
+
+    fn provider_options(value: serde_json::Value) -> crate::provider::ProviderOptions {
+        serde_json::from_value(value).expect("provider options deserialize")
+    }
+
+    fn transform_tool_examples(
+        middleware: &AddToolInputExamplesMiddleware,
+        tools: Option<Vec<LanguageModelTool>>,
+    ) -> Option<Vec<LanguageModelTool>> {
+        let mut params = LanguageModelCallOptions::new(Vec::new());
+        params.tools = tools;
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Generate,
+                params,
+                &StaticLanguageModel,
+            ))
+            .expect("tool examples transform exists");
+
+        poll_ready(transformed).tools
+    }
+
+    fn transformed_function_tool(
+        middleware: &AddToolInputExamplesMiddleware,
+        tool: LanguageModelFunctionTool,
+    ) -> LanguageModelFunctionTool {
+        let tools =
+            transform_tool_examples(middleware, Some(vec![LanguageModelTool::Function(tool)]))
+                .expect("tools are retained");
+
+        let LanguageModelTool::Function(tool) = tools.into_iter().next().expect("one tool") else {
+            panic!("function tool should remain a function tool");
+        };
+
+        tool
     }
 
     fn poll_ready<T>(mut future: Ready<T>) -> T {
@@ -2089,6 +2433,151 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test future only awaits ready futures"),
         }
+    }
+
+    fn strip_prefix_suffix(text: &str) -> String {
+        text.replace("PREFIX", "").replace("SUFFIX", "")
+    }
+
+    fn extract_json_generate_content(
+        content: Vec<LanguageModelContent>,
+        transform: Option<ExtractJsonTransformFunction>,
+    ) -> Vec<LanguageModelContent> {
+        let model = StaticLanguageModel;
+        let middleware = if let Some(transform) = transform {
+            ExtractJsonMiddleware::new().with_transform(transform)
+        } else {
+            extract_json_middleware()
+        };
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(move || {
+                    Box::pin(ready(LanguageModelGenerateResult::new(
+                        content,
+                        LanguageModelFinishReason {
+                            unified: FinishReason::Stop,
+                            raw: None,
+                        },
+                        LanguageModelUsage::default(),
+                    )))
+                }),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract JSON wrap-generate exists");
+
+        poll_boxed(wrapped_generate).content
+    }
+
+    fn extract_json_generate_text(
+        text: impl Into<String>,
+        transform: Option<ExtractJsonTransformFunction>,
+    ) -> String {
+        let content = extract_json_generate_content(
+            vec![LanguageModelContent::Text(LanguageModelText::new(text))],
+            transform,
+        );
+
+        match &content[0] {
+            LanguageModelContent::Text(text) => text.text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    fn extract_json_stream_parts(
+        stream: Vec<LanguageModelStreamPart>,
+        transform: Option<ExtractJsonTransformFunction>,
+    ) -> Vec<LanguageModelStreamPart> {
+        let model = StaticLanguageModel;
+        let middleware = if let Some(transform) = transform {
+            ExtractJsonMiddleware::new().with_transform(transform)
+        } else {
+            extract_json_middleware()
+        };
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(move || Box::pin(ready(LanguageModelStreamResult::new(stream)))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract JSON wrap-stream exists");
+
+        poll_boxed(wrapped_stream).stream
+    }
+
+    fn text_stream(id: &str, deltas: &[&str]) -> Vec<LanguageModelStreamPart> {
+        let mut stream = vec![LanguageModelStreamPart::TextStart(
+            LanguageModelTextStart::new(id),
+        )];
+        stream.extend(deltas.iter().map(|delta| {
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(id, *delta))
+        }));
+        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+            id,
+        )));
+        stream
+    }
+
+    fn collect_text_deltas(stream: &[LanguageModelStreamPart]) -> String {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
+    fn extract_reasoning_generate_content(
+        text: impl Into<String>,
+        start_with_reasoning: bool,
+    ) -> Vec<LanguageModelContent> {
+        let model = StaticLanguageModel;
+        let source_text = text.into();
+        let middleware = ExtractReasoningMiddleware::new("think")
+            .with_start_with_reasoning(start_with_reasoning);
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(move || Box::pin(ready(language_result(&source_text)))),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-generate exists");
+
+        poll_boxed(wrapped_generate).content
+    }
+
+    fn extract_reasoning_stream_parts(
+        deltas: &[&str],
+        start_with_reasoning: bool,
+    ) -> Vec<LanguageModelStreamPart> {
+        let model = StaticLanguageModel;
+        let middleware = ExtractReasoningMiddleware::new("think")
+            .with_start_with_reasoning(start_with_reasoning);
+        let stream = text_stream("1", deltas);
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(move || Box::pin(ready(LanguageModelStreamResult::new(stream)))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-stream exists");
+
+        poll_boxed(wrapped_stream).stream
+    }
+
+    fn collect_reasoning_deltas(stream: &[LanguageModelStreamPart]) -> String {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
     }
 
     #[test]
@@ -2240,6 +2729,262 @@ mod tests {
     }
 
     #[test]
+    fn default_settings_middleware_should_apply_default_settings() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_temperature(0.7),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_give_precedence_to_user_provided_settings() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_temperature(0.7),
+            LanguageModelCallOptions::new(Vec::new()).with_temperature(0.5),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.5));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_merge_provider_metadata_with_default_settings() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new()
+                .with_temperature(0.7)
+                .with_provider_options(provider_options(json!({
+                    "anthropic": {
+                        "cacheControl": { "type": "ephemeral" }
+                    }
+                }))),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.7));
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_merge_complex_provider_metadata_objects() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_provider_options(provider_options(json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" },
+                    "feature": { "enabled": true }
+                },
+                "openai": {
+                    "logit_bias": { "50256": -100 }
+                }
+            }))),
+            LanguageModelCallOptions::new(Vec::new()).with_provider_options(provider_options(
+                json!({
+                    "anthropic": {
+                        "feature": { "enabled": false },
+                        "otherSetting": "value"
+                    }
+                }),
+            )),
+        );
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" },
+                    "feature": { "enabled": false },
+                    "otherSetting": "value"
+                },
+                "openai": {
+                    "logit_bias": { "50256": -100 }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_keep_zero_temperature_when_default_is_not_set() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new(),
+            LanguageModelCallOptions::new(Vec::new()).with_temperature(0.0),
+        );
+
+        assert_eq!(transformed.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_max_output_tokens() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_max_output_tokens(100),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.max_output_tokens, Some(100));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_prioritize_param_max_output_tokens() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_max_output_tokens(100),
+            LanguageModelCallOptions::new(Vec::new()).with_max_output_tokens(50),
+        );
+
+        assert_eq!(transformed.max_output_tokens, Some(50));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_stop_sequences() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_stop_sequence("stop"),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.stop_sequences, Some(vec!["stop".to_string()]));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_prioritize_param_stop_sequences() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_stop_sequence("stop"),
+            LanguageModelCallOptions::new(Vec::new()).with_stop_sequence("end"),
+        );
+
+        assert_eq!(transformed.stop_sequences, Some(vec!["end".to_string()]));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_apply_default_top_p() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_top_p(0.9),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_prioritize_param_top_p() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_top_p(0.9),
+            LanguageModelCallOptions::new(Vec::new()).with_top_p(0.5),
+        );
+
+        assert_eq!(transformed.top_p, Some(0.5));
+    }
+
+    #[test]
+    fn default_settings_middleware_should_merge_headers() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new()
+                .with_header("X-Custom-Header", "test")
+                .with_header("X-Another-Header", "test2"),
+            LanguageModelCallOptions::new(Vec::new()).with_header("X-Custom-Header", "test2"),
+        );
+
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([
+                ("X-Custom-Header".to_string(), "test2".to_string()),
+                ("X-Another-Header".to_string(), "test2".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_default_headers() {
+        let mut settings = LanguageModelDefaultSettings::new();
+        settings.headers = Some(BTreeMap::new());
+        let transformed = transform_default_settings(
+            settings,
+            LanguageModelCallOptions::new(Vec::new()).with_header("X-Param-Header", "param"),
+        );
+
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([(
+                "X-Param-Header".to_string(),
+                "param".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_param_headers() {
+        let mut params = LanguageModelCallOptions::new(Vec::new());
+        params.headers = Some(BTreeMap::new());
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_header("X-Default-Header", "default"),
+            params,
+        );
+
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([(
+                "X-Default-Header".to_string(),
+                "default".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_both_headers_being_undefined() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new(),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.headers, None);
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_default_provider_options() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_provider_options(provider_options(json!({}))),
+            LanguageModelCallOptions::new(Vec::new()).with_provider_options(provider_options(
+                json!({ "openai": { "user": "param-user" } }),
+            )),
+        );
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({ "openai": { "user": "param-user" } })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_empty_param_provider_options() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new().with_provider_options(provider_options(
+                json!({ "anthropic": { "user": "default-user" } }),
+            )),
+            LanguageModelCallOptions::new(Vec::new())
+                .with_provider_options(provider_options(json!({}))),
+        );
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options).expect("provider options serialize"),
+            json!({ "anthropic": { "user": "default-user" } })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_should_handle_both_provider_options_being_undefined() {
+        let transformed = transform_default_settings(
+            LanguageModelDefaultSettings::new(),
+            LanguageModelCallOptions::new(Vec::new()),
+        );
+
+        assert_eq!(transformed.provider_options, None);
+    }
+
+    #[test]
     fn add_tool_input_examples_middleware_appends_examples_and_removes_them_by_default() {
         let model = StaticLanguageModel;
         let middleware = add_tool_input_examples_middleware();
@@ -2321,6 +3066,124 @@ mod tests {
     }
 
     #[test]
+    fn add_tool_input_examples_middleware_handles_tool_without_existing_description() {
+        let tool = transformed_function_tool(
+            &add_tool_input_examples_middleware(),
+            LanguageModelFunctionTool::new("weather", object_schema())
+                .with_input_example(json_object(json!({ "city": "Berlin" }))),
+        );
+
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Input Examples:\n{\"city\":\"Berlin\"}")
+        );
+        assert_eq!(tool.input_examples, None);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_uses_default_json_stringify_format() {
+        let tool = transformed_function_tool(
+            &add_tool_input_examples_middleware(),
+            LanguageModelFunctionTool::new("search", object_schema())
+                .with_description("Search for items")
+                .with_input_example(json_object(json!({ "city": "test", "limit": 10 }))),
+        );
+
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Search for items\n\nInput Examples:\n{\"city\":\"test\",\"limit\":10}")
+        );
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_passes_through_tools_without_input_examples() {
+        let tool = LanguageModelFunctionTool::new("weather", object_schema())
+            .with_description("Get the weather");
+        let transformed =
+            transformed_function_tool(&add_tool_input_examples_middleware(), tool.clone());
+
+        assert_eq!(transformed, tool);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_passes_through_tools_with_empty_input_examples() {
+        let mut tool = LanguageModelFunctionTool::new("weather", object_schema())
+            .with_description("Get the weather");
+        tool.input_examples = Some(Vec::new());
+
+        let transformed =
+            transformed_function_tool(&add_tool_input_examples_middleware(), tool.clone());
+
+        assert_eq!(transformed, tool);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_passes_through_provider_tools_unchanged() {
+        let provider_tool = LanguageModelProviderTool::new(
+            "anthropic.web_search_20250305",
+            "web_search",
+            json_object(json!({ "maxUses": 5 })),
+        );
+
+        let tools = transform_tool_examples(
+            &add_tool_input_examples_middleware(),
+            Some(vec![LanguageModelTool::Provider(provider_tool.clone())]),
+        )
+        .expect("provider tool is retained");
+
+        assert_eq!(tools, vec![LanguageModelTool::Provider(provider_tool)]);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_multiple_tools_with_mixed_examples() {
+        let tools = transform_tool_examples(
+            &add_tool_input_examples_middleware(),
+            Some(vec![
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", object_schema())
+                        .with_description("Get the weather")
+                        .with_input_example(json_object(json!({ "city": "NYC" }))),
+                ),
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("time", object_schema())
+                        .with_description("Get the current time"),
+                ),
+            ]),
+        )
+        .expect("tools are retained");
+
+        let LanguageModelTool::Function(weather) = &tools[0] else {
+            panic!("first tool should be a function tool");
+        };
+        let LanguageModelTool::Function(time) = &tools[1] else {
+            panic!("second tool should be a function tool");
+        };
+
+        assert_eq!(
+            weather.description.as_deref(),
+            Some("Get the weather\n\nInput Examples:\n{\"city\":\"NYC\"}")
+        );
+        assert_eq!(weather.input_examples, None);
+        assert_eq!(time.description.as_deref(), Some("Get the current time"));
+        assert_eq!(time.input_examples, None);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_empty_tools_array() {
+        let tools =
+            transform_tool_examples(&add_tool_input_examples_middleware(), Some(Vec::new()));
+
+        assert_eq!(tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_handles_undefined_tools() {
+        let tools = transform_tool_examples(&add_tool_input_examples_middleware(), None);
+
+        assert_eq!(tools, None);
+    }
+
+    #[test]
     fn extract_json_middleware_default_transform_strips_markdown_fences() {
         assert_eq!(
             default_extract_json_transform("```json\n{\"ok\":true}\n```"),
@@ -2333,6 +3196,70 @@ mod tests {
         assert_eq!(
             default_extract_json_transform("{\"ok\":true}"),
             "{\"ok\":true}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_strip_markdown_json_fence_from_text_content() {
+        assert_eq!(
+            extract_json_generate_text("```json\n{\"value\": \"test\"}\n```", None),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_strip_markdown_fence_without_json_tag() {
+        assert_eq!(
+            extract_json_generate_text("```\n{\"value\": \"test\"}\n```", None),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_leave_text_without_fences_unchanged() {
+        assert_eq!(
+            extract_json_generate_text("{\"value\": \"test\"}", None),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_use_custom_transform_function_when_provided() {
+        assert_eq!(
+            extract_json_generate_text(
+                "PREFIX{\"value\": \"test\"}SUFFIX",
+                Some(strip_prefix_suffix),
+            ),
+            "{\"value\": \"test\"}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_generate_should_preserve_non_text_content_parts() {
+        let content = extract_json_generate_content(
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new(
+                    "```json\n{\"value\": \"test\"}\n```",
+                )),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    "{\"foo\": \"bar\"}",
+                )),
+            ],
+            None,
+        );
+
+        assert_eq!(
+            content,
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new("{\"value\": \"test\"}")),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    "{\"foo\": \"bar\"}",
+                )),
+            ]
         );
     }
 
@@ -2360,6 +3287,216 @@ mod tests {
                 "JSON TEXT"
             ))]
         );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_strip_markdown_json_fence_from_streamed_text() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```json\n", "{\"value\": \"test\"}", "\n```"]),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_strip_markdown_fence_without_json_tag() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```\n", "{\"value\": \"test\"}", "\n```"]),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_leave_text_without_fences_unchanged_in_stream() {
+        let result = extract_json_stream_parts(text_stream("1", &["{\"value\": \"test\"}"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_fence_split_across_multiple_deltas() {
+        let result = extract_json_stream_parts(
+            text_stream(
+                "1",
+                &["`", "``", "json\n", "{\"value\": \"test\"}", "\n`", "``"],
+            ),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_content_that_starts_with_backtick_but_is_not_a_fence()
+     {
+        let result = extract_json_stream_parts(text_stream("1", &["`code`"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "`code`");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_pass_through_non_text_chunks_unchanged() {
+        let mut stream = text_stream("1", &["```json\n", "{\"value\": \"test\"}", "\n```"]);
+        stream.push(LanguageModelStreamPart::ToolInputStart(
+            LanguageModelToolInputStart::new("tool-1", "testTool"),
+        ));
+        stream.push(LanguageModelStreamPart::ToolInputDelta(
+            LanguageModelToolInputDelta::new("tool-1", "{\"arg\": \"value\"}"),
+        ));
+        stream.push(LanguageModelStreamPart::ToolInputEnd(
+            LanguageModelToolInputEnd::new("tool-1"),
+        ));
+
+        let result = extract_json_stream_parts(stream, None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+        assert!(result.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolInputStart(start)
+                if start.id == "tool-1" && start.tool_name == "testTool"
+        )));
+        assert!(result.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolInputDelta(delta)
+                if delta.id == "tool-1" && delta.delta == "{\"arg\": \"value\"}"
+        )));
+        assert!(result.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolInputEnd(end) if end.id == "tool-1"
+        )));
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_multiple_text_blocks_with_different_ids() {
+        let mut stream = text_stream("1", &["```json\n", "{\"first\": true}", "\n```"]);
+        stream.extend(text_stream(
+            "2",
+            &["```json\n", "{\"second\": true}", "\n```"],
+        ));
+
+        let result = extract_json_stream_parts(stream, None);
+        let all_text = collect_text_deltas(&result);
+
+        assert!(all_text.contains("{\"first\": true}"));
+        assert!(all_text.contains("{\"second\": true}"));
+        assert!(!all_text.contains("```"));
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_text_delta_without_prior_text_start() {
+        let stream = vec![LanguageModelStreamPart::TextDelta(
+            LanguageModelTextDelta::new("unknown", "some text"),
+        )];
+
+        let result = extract_json_stream_parts(stream.clone(), None);
+
+        assert_eq!(result, stream);
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_emit_text_start_when_stream_ends_while_still_in_prefix_phase()
+     {
+        let result = extract_json_stream_parts(text_stream("1", &["``"]), None);
+
+        assert_eq!(
+            result,
+            vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "``")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_apply_custom_transform_to_streamed_content() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["PREFIX", "{\"value\": \"test\"}", "SUFFIX"]),
+            Some(strip_prefix_suffix),
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_large_content_exceeding_suffix_buffer() {
+        let large_json = format!(
+            "{{\"data\":\"{}\",\"nested\":{{\"values\":[0,1,2,3,4,5,6,7,8,9]}}}}",
+            "x".repeat(100)
+        );
+        let result =
+            extract_json_stream_parts(text_stream("1", &["```json\n", &large_json, "\n```"]), None);
+
+        assert_eq!(collect_text_deltas(&result), large_json);
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_content_arriving_character_by_character() {
+        let source = "```json\n{\"value\": \"test\"}\n```";
+        let deltas = source
+            .chars()
+            .map(|char| char.to_string())
+            .collect::<Vec<_>>();
+        let delta_refs = deltas.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let result = extract_json_stream_parts(text_stream("1", &delta_refs), None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_fence_with_extra_whitespace() {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```json  \n", "{\"value\": \"test\"}", "\n```  "]),
+            None,
+        );
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_verify_stream_output_matches_expected_structure()
+    {
+        let result = extract_json_stream_parts(
+            text_stream("1", &["```json\n", "{\"value\": \"test\"}", "\n```"]),
+            None,
+        );
+
+        assert!(matches!(
+            result.first(),
+            Some(LanguageModelStreamPart::TextStart(start)) if start.id == "1"
+        ));
+        assert!(matches!(
+            result.last(),
+            Some(LanguageModelStreamPart::TextEnd(end)) if end.id == "1"
+        ));
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_empty_content_between_fences() {
+        let result = extract_json_stream_parts(text_stream("1", &["```json\n```"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "");
+        assert_eq!(
+            result,
+            vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_wrap_stream_should_handle_content_starting_without_backtick_quickly_switching_to_streaming()
+     {
+        let result =
+            extract_json_stream_parts(text_stream("1", &["{", "\"value\": \"test\"", "}"]), None);
+
+        assert_eq!(collect_text_deltas(&result), "{\"value\": \"test\"}");
     }
 
     #[test]
@@ -2437,6 +3574,91 @@ mod tests {
     }
 
     #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_think_tags() {
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "<think>analyzing the request</think>Here is the response",
+                false,
+            ),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("Here is the response")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_think_tags_when_there_is_no_text()
+     {
+        assert_eq!(
+            extract_reasoning_generate_content("<think>analyzing the request\n</think>", false),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request\n"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_extract_reasoning_from_multiple_think_tags()
+     {
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "<think>analyzing the request</think>Here is the response<think>thinking about the response</think>more",
+                false,
+            ),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request\nthinking about the response"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("Here is the response\nmore")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_prepend_think_tag_iff_start_with_reasoning_is_true()
+     {
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "analyzing the request</think>Here is the response",
+                true
+            ),
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "analyzing the request"
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("Here is the response")),
+            ]
+        );
+        assert_eq!(
+            extract_reasoning_generate_content(
+                "analyzing the request</think>Here is the response",
+                false,
+            ),
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "analyzing the request</think>Here is the response"
+            ))]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_generate_should_preserve_reasoning_property_even_when_rest_contains_other_properties()
+     {
+        let content = extract_reasoning_generate_content(
+            "<think>analyzing the request</think>Here is the response",
+            false,
+        );
+
+        assert!(matches!(content[0], LanguageModelContent::Reasoning(_)));
+        assert!(matches!(content[1], LanguageModelContent::Text(_)));
+    }
+
+    #[test]
     fn extract_reasoning_middleware_supports_start_with_reasoning_for_generate() {
         let model = StaticLanguageModel;
         let middleware = ExtractReasoningMiddleware::new("think").with_start_with_reasoning(true);
@@ -2486,6 +3708,97 @@ mod tests {
                 "analyzing</think>Here"
             ))]
         );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_split_think_tags() {
+        let result = extract_reasoning_stream_parts(
+            &[
+                "<think>",
+                "ana",
+                "lyzing the request",
+                "</think>",
+                "Here",
+                " is the response",
+            ],
+            false,
+        );
+
+        assert_eq!(collect_reasoning_deltas(&result), "analyzing the request");
+        assert_eq!(collect_text_deltas(&result), "Here is the response");
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_single_chunk_with_multiple_think_tags()
+     {
+        let result = extract_reasoning_stream_parts(
+            &[
+                "<think>analyzing the request</think>Here is the response<think>thinking about the response</think>more",
+            ],
+            false,
+        );
+
+        assert_eq!(
+            collect_reasoning_deltas(&result),
+            "analyzing the request\nthinking about the response"
+        );
+        assert_eq!(collect_text_deltas(&result), "Here is the response\nmore");
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_extract_reasoning_from_think_when_there_is_no_text()
+     {
+        let result = extract_reasoning_stream_parts(
+            &["<think>", "ana", "lyzing the request\n", "</think>"],
+            false,
+        );
+
+        assert_eq!(collect_reasoning_deltas(&result), "analyzing the request\n");
+        assert_eq!(collect_text_deltas(&result), "");
+        assert!(
+            result
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::TextStart(_)))
+        );
+        assert!(
+            result
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::TextEnd(_)))
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_prepend_think_tag_if_start_with_reasoning_is_true()
+     {
+        let result_true = extract_reasoning_stream_parts(
+            &[
+                "ana",
+                "lyzing the request\n",
+                "</think>",
+                "this is the response",
+            ],
+            true,
+        );
+        let result_false = extract_reasoning_stream_parts(
+            &[
+                "ana",
+                "lyzing the request\n",
+                "</think>",
+                "this is the response",
+            ],
+            false,
+        );
+
+        assert_eq!(
+            collect_reasoning_deltas(&result_true),
+            "analyzing the request\n"
+        );
+        assert_eq!(collect_text_deltas(&result_true), "this is the response");
+        assert_eq!(
+            collect_text_deltas(&result_false),
+            "analyzing the request\n</think>this is the response"
+        );
+        assert_eq!(collect_reasoning_deltas(&result_false), "");
     }
 
     #[test]
@@ -2542,6 +3855,39 @@ mod tests {
     }
 
     #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_keep_original_text_when_think_tag_is_not_present()
+     {
+        let result = extract_reasoning_stream_parts(&["this is the response"], false);
+
+        assert_eq!(collect_text_deltas(&result), "this is the response");
+        assert_eq!(collect_reasoning_deltas(&result), "");
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_wrap_stream_should_handle_empty_think_tags_without_crashing() {
+        let result =
+            extract_reasoning_stream_parts(&["<think></think>", " This is the answer."], false);
+
+        let reasoning_start_index = result.iter().position(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ReasoningStart(start) if start.id == "reasoning-0"
+            )
+        });
+        let reasoning_end_index = result.iter().position(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ReasoningEnd(end) if end.id == "reasoning-0"
+            )
+        });
+
+        assert!(reasoning_start_index.is_some());
+        assert!(reasoning_end_index.is_some());
+        assert!(reasoning_end_index > reasoning_start_index);
+        assert_eq!(collect_text_deltas(&result), " This is the answer.");
+    }
+
+    #[test]
     fn extract_reasoning_middleware_separates_multiple_stream_tags() {
         let model = StaticLanguageModel;
         let middleware = extract_reasoning_middleware("think");
@@ -2591,6 +3937,324 @@ mod tests {
                 )),
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\nmore")),
                 LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_text_response() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "This is a test response",
+            ))],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_string() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "This is the reasoning process",
+                )),
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "This is the reasoning process",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_array_of_text_objects()
+     {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let signature_metadata = provider_metadata("testProvider", json!({ "signature": "abc" }));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "First reasoning step",
+                )),
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "Second reasoning step",
+                )),
+                LanguageModelContent::Reasoning(
+                    LanguageModelReasoning::new("")
+                        .with_provider_metadata(signature_metadata.clone()),
+                ),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1",
+                    "First reasoning step",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("2")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "2",
+                    "Second reasoning step",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("3")
+                        .with_provider_metadata(signature_metadata)
+                ),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new("3", "")),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("3")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_reasoning_as_array_of_mixed_objects()
+     {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let redacted_metadata = provider_metadata("testProvider", json!({ "isRedacted": true }));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                    "First reasoning step",
+                )),
+                LanguageModelContent::Reasoning(
+                    LanguageModelReasoning::new("data")
+                        .with_provider_metadata(redacted_metadata.clone()),
+                ),
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0",
+                    "First reasoning step",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("1").with_provider_metadata(redacted_metadata)
+                ),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1", "data",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "2",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_simulate_streaming_with_tool_calls() {
+        let finish_reason = finish_reason(FinishReason::ToolCalls, None);
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Text(LanguageModelText::new("This is a test response")),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "tool-1",
+                    "calculator",
+                    r#"{"expression": "2+2"}"#,
+                )),
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "tool-2",
+                    "weather",
+                    r#"{"location": "New York"}"#,
+                )),
+            ],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "tool-1",
+                    "calculator",
+                    r#"{"expression": "2+2"}"#,
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "tool-2",
+                    "weather",
+                    r#"{"location": "New York"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_preserve_additional_metadata_in_the_response() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let metadata = provider_metadata("custom", json!({ "key": "value" }));
+        let result = simulate_streaming_stream(
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "This is a test response",
+                ))],
+                finish_reason.clone(),
+                upstream_test_usage(),
+            )
+            .with_provider_metadata(metadata.clone()),
+        );
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(upstream_test_usage(), finish_reason)
+                        .with_provider_metadata(metadata)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_handle_empty_text_response() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(""))],
+            finish_reason.clone(),
+            upstream_test_usage(),
+        ));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_should_pass_through_warnings_from_the_model() {
+        let finish_reason = finish_reason(FinishReason::Stop, Some("stop"));
+        let result = simulate_streaming_stream(
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "This is a test response",
+                ))],
+                finish_reason.clone(),
+                upstream_test_usage(),
+            )
+            .with_warning(Warning::Other {
+                message: "Test warning".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "Test warning".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "This is a test response"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    upstream_test_usage(),
+                    finish_reason,
+                )),
             ]
         );
     }
@@ -2755,36 +4419,8 @@ mod tests {
 
     #[test]
     fn language_model_middleware_hooks_are_optional_by_default() {
-        struct NoopMiddleware;
-
-        impl LanguageModelMiddleware<StaticLanguageModel> for NoopMiddleware {
-            type OverrideSupportedUrlsFuture<'a>
-                = Ready<LanguageModelSupportedUrls>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-
-            type TransformParamsFuture<'a>
-                = Ready<LanguageModelCallOptions>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-
-            type WrapGenerateFuture<'a>
-                = Ready<LanguageModelGenerateResult>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-
-            type WrapStreamFuture<'a>
-                = Ready<LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
-            where
-                Self: 'a,
-                StaticLanguageModel: 'a;
-        }
-
         let model = StaticLanguageModel;
-        let middleware = NoopMiddleware;
+        let middleware = NoopLanguageMiddleware;
 
         assert_eq!(
             middleware.override_provider(LanguageModelMiddlewareModelOptions::new(&model)),
@@ -2848,6 +4484,259 @@ mod tests {
 
         assert_eq!(explicit.provider(), "explicit-provider");
         assert_eq!(explicit.model_id(), "explicit-language");
+    }
+
+    #[test]
+    fn wrap_language_model_model_property_should_pass_through_by_default() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware);
+
+        assert_eq!(wrapped.model_id(), "language-base");
+    }
+
+    #[test]
+    fn wrap_language_model_model_property_should_use_middleware_override_model_id_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(wrapped.model_id(), "language-base-wrapped");
+    }
+
+    #[test]
+    fn wrap_language_model_model_property_should_use_model_id_parameter_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware)
+            .with_model_id("override-model");
+
+        assert_eq!(wrapped.model_id(), "override-model");
+    }
+
+    #[test]
+    fn wrap_language_model_provider_property_should_pass_through_by_default() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider");
+    }
+
+    #[test]
+    fn wrap_language_model_provider_property_should_use_middleware_override_provider_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+    }
+
+    #[test]
+    fn wrap_language_model_provider_property_should_use_provider_id_parameter_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware)
+            .with_provider_id("override-provider");
+
+        assert_eq!(wrapped.provider(), "override-provider");
+    }
+
+    #[test]
+    fn wrap_language_model_supported_urls_property_should_pass_through_by_default() {
+        let wrapped = wrap_language_model(StaticLanguageModel, NoopLanguageMiddleware);
+
+        assert_eq!(
+            poll_boxed(wrapped.supported_urls()),
+            BTreeMap::from([(
+                "image/*".to_string(),
+                vec!["^https://base\\.example/images/".to_string()]
+            )])
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_supported_urls_property_should_use_middleware_override_if_provided() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(
+            poll_boxed(wrapped.supported_urls()),
+            BTreeMap::from([("application/pdf".to_string(), vec!["\\.pdf$".to_string()])])
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_transform_params_middleware_for_do_generate() {
+        let wrapped = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(5));
+
+        let result = poll_boxed(wrapped.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "generated max 5".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_wrap_generate_middleware() {
+        let wrapped = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendGenerateWarningMiddleware("wrapped generate"),
+        );
+
+        let result = poll_boxed(wrapped.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "generated max 0".to_string(),
+                },
+                Warning::Other {
+                    message: "wrapped generate".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_transform_params_middleware_for_do_stream() {
+        let wrapped = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(7));
+
+        let result = poll_boxed(wrapped.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![LanguageModelStreamPart::StreamStart(
+                LanguageModelStreamStart::new(vec![Warning::Other {
+                    message: "stream max 7 raw false".to_string(),
+                }])
+            )]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_wrap_stream_middleware() {
+        let wrapped = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendStreamWarningMiddleware("wrapped stream"),
+        );
+
+        let result = poll_boxed(wrapped.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "stream raw false".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrapped stream".to_string(),
+                    }
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_support_models_that_use_context_in_supported_urls() {
+        let supported_urls = BTreeMap::from([(
+            "image/*".to_string(),
+            vec!["^https://stateful\\.example/".to_string()],
+        )]);
+        let wrapped = wrap_language_model(
+            StatefulSupportedUrlsLanguageModel {
+                urls: supported_urls.clone(),
+            },
+            NoopLanguageMiddleware,
+        );
+
+        assert_eq!(poll_boxed(wrapped.supported_urls()), supported_urls);
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_generate()
+     {
+        let first = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(2));
+        let second = wrap_language_model(first, AddMaxOutputTokensMiddleware(3));
+
+        let result = poll_boxed(second.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "generated max 5".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_stream()
+     {
+        let first = wrap_language_model(ParamEchoLanguageModel, AddMaxOutputTokensMiddleware(2));
+        let second = wrap_language_model(first, AddMaxOutputTokensMiddleware(3));
+
+        let result = poll_boxed(second.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![LanguageModelStreamPart::StreamStart(
+                LanguageModelStreamStart::new(vec![Warning::Other {
+                    message: "stream max 5 raw false".to_string(),
+                }])
+            )]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_chain_multiple_wrap_generate_middlewares_in_the_correct_order() {
+        let first = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendGenerateWarningMiddleware("wrap1"),
+        );
+        let second = wrap_language_model(first, AppendGenerateWarningMiddleware("wrap2"));
+
+        let result = poll_boxed(second.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "generated max 0".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap1".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap2".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_should_chain_multiple_wrap_stream_middlewares_in_the_correct_order() {
+        let first = wrap_language_model(
+            ParamEchoLanguageModel,
+            AppendStreamWarningMiddleware("wrap1"),
+        );
+        let second = wrap_language_model(first, AppendStreamWarningMiddleware("wrap2"));
+
+        let result = poll_boxed(second.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "stream raw false".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrap1".to_string(),
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrap2".to_string(),
+                    }
+                ])),
+            ]
+        );
     }
 
     #[test]

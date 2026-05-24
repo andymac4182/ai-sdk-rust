@@ -9,10 +9,11 @@ use crate::generate_text::MissingToolResultsError;
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
-    LanguageModelAssistantContentPart, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelReasoningEffort, LanguageModelSystemMessage, LanguageModelTextPart,
-    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelUserContentPart,
-    LanguageModelUserMessage,
+    LanguageModelAssistantContentPart, LanguageModelFileData, LanguageModelMessage,
+    LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelSystemMessage,
+    LanguageModelTextPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+    LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+    LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
 use crate::provider_utils::{FilePartData, convert_to_base64};
@@ -464,12 +465,22 @@ fn convert_message_for_language_model_prompt(
     message: LanguageModelMessage,
 ) -> LanguageModelMessage {
     match message {
-        LanguageModelMessage::Assistant(mut message) => {
+        LanguageModelMessage::User(mut message) => {
             message.content.retain(|part| {
                 !matches!(
                     part,
-                    LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+                    LanguageModelUserContentPart::Text(text) if text.text.is_empty()
                 )
+            });
+            LanguageModelMessage::User(message)
+        }
+        LanguageModelMessage::Assistant(mut message) => {
+            message.content.retain(|part| match part {
+                LanguageModelAssistantContentPart::ToolApprovalRequest(_) => false,
+                LanguageModelAssistantContentPart::Text(text) => {
+                    !text.text.is_empty() || text.provider_options.is_some()
+                }
+                _ => true,
             });
             LanguageModelMessage::Assistant(message)
         }
@@ -909,10 +920,43 @@ pub(crate) fn prompt_has_url_files(prompt: &LanguageModelPrompt) -> bool {
             LanguageModelUserContentPart::File(file) => matches!(file.data, FileData::Url { .. }),
             LanguageModelUserContentPart::Text(_) => false,
         }),
-        LanguageModelMessage::System(_)
-        | LanguageModelMessage::Assistant(_)
-        | LanguageModelMessage::Tool(_) => false,
+        LanguageModelMessage::Assistant(message) => message.content.iter().any(|part| match part {
+            LanguageModelAssistantContentPart::File(file) => {
+                matches!(file.data, FileData::Url { .. })
+            }
+            LanguageModelAssistantContentPart::ReasoningFile(file) => {
+                matches!(file.data, LanguageModelFileData::Url { .. })
+            }
+            LanguageModelAssistantContentPart::ToolResult(result) => {
+                tool_result_output_has_url_files(&result.output)
+            }
+            LanguageModelAssistantContentPart::Text(_)
+            | LanguageModelAssistantContentPart::Custom(_)
+            | LanguageModelAssistantContentPart::Reasoning(_)
+            | LanguageModelAssistantContentPart::ToolCall(_)
+            | LanguageModelAssistantContentPart::ToolApprovalRequest(_) => false,
+        }),
+        LanguageModelMessage::Tool(message) => message.content.iter().any(|part| match part {
+            LanguageModelToolContentPart::ToolResult(result) => {
+                tool_result_output_has_url_files(&result.output)
+            }
+            LanguageModelToolContentPart::ToolApprovalResponse(_) => false,
+        }),
+        LanguageModelMessage::System(_) => false,
     })
+}
+
+fn tool_result_output_has_url_files(output: &LanguageModelToolResultOutput) -> bool {
+    match output {
+        LanguageModelToolResultOutput::Content { value } => value.iter().any(|part| {
+            matches!(part, LanguageModelToolResultContentPart::File(file) if matches!(file.data, FileData::Url { .. }))
+        }),
+        LanguageModelToolResultOutput::Text { .. }
+        | LanguageModelToolResultOutput::Json { .. }
+        | LanguageModelToolResultOutput::ExecutionDenied { .. }
+        | LanguageModelToolResultOutput::ErrorText { .. }
+        | LanguageModelToolResultOutput::ErrorJson { .. } => false,
+    }
 }
 
 /// Converts prompt data content to a base64-encoded string.
@@ -1201,13 +1245,16 @@ mod tests {
     use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::json::JsonValue;
     use crate::language_model::{
-        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelMessage,
-        LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCustomPart,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelPrompt,
+        LanguageModelReasoningEffort, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
+    use crate::provider::ProviderOptions;
     use crate::provider_utils::FilePartData;
 
     use super::{
@@ -1215,9 +1262,10 @@ mod tests {
         InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
         PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
         TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-        convert_to_language_model_prompt, convert_to_language_model_v4_file_part,
-        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
-        prepare_language_model_call_options, prepare_tool_choice, standardize_prompt,
+        convert_message_for_language_model_prompt, convert_to_language_model_prompt,
+        convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
+        get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
+        prepare_tool_choice, prompt_has_url_files, standardize_prompt,
     };
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
@@ -1688,6 +1736,1469 @@ mod tests {
                 LanguageModelMessage::System(system_message("Second instruction.")),
                 user_text_message("Hello"),
             ]
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_convert_a_string_system_message() {
+        let standardized = standardize_prompt(
+            Prompt::from_messages(vec![user_text_message("Hello, world!")])
+                .with_instructions("INSTRUCTIONS"),
+        )
+        .expect("prompt standardizes");
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_convert_a_system_model_message_system_message() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test": {
+                "value": "test"
+            }
+        }))
+        .expect("provider options deserialize");
+        let standardized = standardize_prompt(
+            Prompt::from_messages(vec![user_text_message("Hello, world!")]).with_instructions(
+                system_message("INSTRUCTIONS").with_provider_options(provider_options),
+            ),
+        )
+        .expect("prompt standardizes");
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS",
+                    "providerOptions": {
+                        "test": {
+                            "value": "test"
+                        }
+                    }
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_convert_an_array_of_system_model_message_system_messages()
+     {
+        let standardized = standardize_prompt(
+            Prompt::from_messages(vec![user_text_message("Hello, world!")]).with_instructions(
+                vec![
+                    system_message("INSTRUCTIONS"),
+                    system_message("INSTRUCTIONS 2"),
+                ],
+            ),
+        )
+        .expect("prompt standardizes");
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS"
+                },
+                {
+                    "role": "system",
+                    "content": "INSTRUCTIONS 2"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, world!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_pass_through_urls_when_the_model_supports_a_particular_url()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/document.pdf").expect("valid URL"),
+                        },
+                        "application/pdf",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/document.pdf"
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prompt_has_url_files_should_detect_url_content_in_tool_results() {
+        let prompt = vec![
+            assistant_message(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("toolCallId", "toolName", json!({})),
+            )]),
+            tool_message(vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/image.png")
+                                    .expect("valid URL"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                ),
+            )]),
+        ];
+
+        assert!(prompt_has_url_files(&prompt));
+    }
+
+    #[test]
+    fn prompt_has_url_files_should_detect_url_content_in_assistant_tool_results() {
+        let prompt = vec![assistant_message(vec![
+            LanguageModelAssistantContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/assistant-image.png")
+                                .expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                ]),
+            )),
+        ])];
+
+        assert!(prompt_has_url_files(&prompt));
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_handle_file_parts_with_base64_string_data() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("SGVsbG8sIFdvcmxkIQ==".to_string()),
+                        },
+                        "text/plain",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "data",
+                                "data": "SGVsbG8sIFdvcmxkIQ=="
+                            },
+                            "mediaType": "text/plain"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_handle_file_parts_with_uint8_array_data() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Bytes(vec![72, 101, 108, 108, 111]),
+                        },
+                        "text/plain",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "data",
+                                "data": [72, 101, 108, 108, 111]
+                            },
+                            "mediaType": "text/plain"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_pass_through_provider_reference_for_image_parts_without_conversion()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[
+                                ("anthropic", "file-xyz789"),
+                                ("openai", "file-abc123"),
+                            ]),
+                        },
+                        "image/png",
+                    ),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "anthropic": "file-xyz789",
+                                    "openai": "file-abc123"
+                                }
+                            },
+                            "mediaType": "image/png"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_handle_file_parts_with_filename() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("SGVsbG8sIFdvcmxkIQ==".to_string()),
+                        },
+                        "text/plain",
+                    )
+                    .with_filename("hello.txt"),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "filename": "hello.txt",
+                            "data": {
+                                "type": "data",
+                                "data": "SGVsbG8sIFdvcmxkIQ=="
+                            },
+                            "mediaType": "text/plain"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_pass_through_provider_reference_for_file_parts_without_conversion()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[
+                                ("anthropic", "file-xyz789"),
+                                ("openai", "file-abc123"),
+                            ]),
+                        },
+                        "application/pdf",
+                    )
+                    .with_filename("doc.pdf"),
+                )],
+            ))],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "filename": "doc.pdf",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "anthropic": "file-xyz789",
+                                    "openai": "file-abc123"
+                                }
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_add_provider_options_to_messages() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("hello, world!"),
+                )])
+                .with_provider_options(provider_options),
+            )],
+        );
+
+        let result =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "hello, world!"
+                        }
+                    ],
+                    "providerOptions": {
+                        "test-provider": {
+                            "key-a": "test-value-1",
+                            "key-b": "test-value-2"
+                        }
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_user_should_filter_out_empty_text_parts() {
+        let result = convert_message_for_language_model_prompt(LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new(""),
+            )]),
+        ));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "user",
+                "content": []
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_user_should_pass_through_non_empty_text_parts() {
+        let result = convert_message_for_language_model_prompt(LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("hello, world!"),
+            )]),
+        ));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "hello, world!"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_ignore_empty_text_parts_when_there_are_no_provider_options()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("")),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "toolCallId",
+                "toolName",
+                json!({}),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {}
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_include_empty_text_parts_when_there_are_provider_options()
+     {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Text(
+                LanguageModelTextPart::new("").with_provider_options(provider_options),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "toolCallId",
+                "toolName",
+                json!({}),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1"
+                            }
+                        }
+                    },
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {}
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_include_custom_parts() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "cmp_123"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Custom(
+                LanguageModelCustomPart::new("test-provider.compaction")
+                    .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "custom",
+                        "kind": "test-provider.compaction",
+                        "providerOptions": {
+                            "openai": {
+                                "itemId": "cmp_123"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_reasoning_should_pass_through_provider_options()
+    {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Reasoning(
+                LanguageModelReasoningPart::new("hello, world!")
+                    .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning",
+                        "text": "hello, world!",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_reasoning_should_support_a_mix_of_reasoning_redacted_reasoning_and_text_parts()
+     {
+        let redacted_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "redacted": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                "I'm thinking",
+            )),
+            LanguageModelAssistantContentPart::Reasoning(
+                LanguageModelReasoningPart::new("redacted-reasoning-data")
+                    .with_provider_options(redacted_options),
+            ),
+            LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                "more thinking",
+            )),
+            LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("hello, world!")),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning",
+                        "text": "I'm thinking"
+                    },
+                    {
+                        "type": "reasoning",
+                        "text": "redacted-reasoning-data",
+                        "providerOptions": {
+                            "test-provider": {
+                                "redacted": true
+                            }
+                        }
+                    },
+                    {
+                        "type": "reasoning",
+                        "text": "more thinking"
+                    },
+                    {
+                        "type": "text",
+                        "text": "hello, world!"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_pass_through_provider_reference_for_file_parts_without_conversion()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Reference {
+                        reference: provider_reference(&[
+                            ("anthropic", "file-xyz789"),
+                            ("openai", "file-abc123"),
+                        ]),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("doc.pdf"),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "file",
+                        "filename": "doc.pdf",
+                        "data": {
+                            "type": "reference",
+                            "reference": {
+                                "anthropic": "file-xyz789",
+                                "openai": "file-abc123"
+                            }
+                        },
+                        "mediaType": "application/pdf"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_base64_data()
+     {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ReasoningFile(
+                LanguageModelReasoningFilePart::new(
+                    LanguageModelFileData::Data {
+                        data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                    },
+                    "image/png",
+                )
+                .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning-file",
+                        "data": {
+                            "type": "data",
+                            "data": "iVBORw0KGgo="
+                        },
+                        "mediaType": "image/png",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_should_convert_reasoning_file_part_with_uint8_array_data()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ReasoningFile(LanguageModelReasoningFilePart::new(
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Bytes(vec![137, 80, 78, 71, 13, 10, 26, 10]),
+                },
+                "image/png",
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "reasoning-file",
+                        "data": {
+                            "type": "data",
+                            "data": [137, 80, 78, 71, 13, 10, 26, 10]
+                        },
+                        "mediaType": "image/png"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_tool_call_should_pass_through_provider_options()
+    {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("toolCallId", "toolName", json!({}))
+                    .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {},
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_tool_call_should_include_provider_executed_flag()
+    {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("toolCallId", "toolName", json!({}))
+                    .with_provider_executed(true),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {},
+                        "providerExecuted": true
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_tool_result_should_include_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+                )
+                .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        },
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_provider_executed_tool_calls_and_results_should_include_provider_executed_flag()
+     {
+        let call_provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result_provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("toolCallId", "toolName", json!({}))
+                    .with_provider_executed(true)
+                    .with_provider_options(call_provider_options),
+            ),
+            LanguageModelAssistantContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+                )
+                .with_provider_options(result_provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "input": {},
+                        "providerExecuted": true,
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    },
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        },
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_file_parts_should_convert_file_data_correctly() {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64("dGVzdA==".to_string()),
+                },
+                "application/pdf",
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "file",
+                        "data": {
+                            "type": "data",
+                            "data": "dGVzdA=="
+                        },
+                        "mediaType": "application/pdf"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_file_parts_should_preserve_filename_when_present()
+     {
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("dGVzdA==".to_string()),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("test-document.pdf"),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "file",
+                        "filename": "test-document.pdf",
+                        "data": {
+                            "type": "data",
+                            "data": "dGVzdA=="
+                        },
+                        "mediaType": "application/pdf"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_assistant_file_parts_should_handle_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(assistant_message(vec![
+            LanguageModelAssistantContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("dGVzdA==".to_string()),
+                    },
+                    "application/pdf",
+                )
+                .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "file",
+                        "data": {
+                            "type": "data",
+                            "data": "dGVzdA=="
+                        },
+                        "mediaType": "application/pdf",
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_convert_basic_tool_result_message() {
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_convert_tool_result_with_provider_metadata() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+                )
+                .with_provider_options(provider_options),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        },
+                        "providerOptions": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_include_error_flag() {
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "json",
+                            "value": {
+                                "some": "result"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_pass_the_new_file_shape_through_unchanged() {
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Base64("dGVzdA==".to_string()),
+                            },
+                            "image/png",
+                        )
+                        .with_filename("image.png"),
+                    ),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.png").expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[("test-provider", "fileId")]),
+                        },
+                        "application/pdf",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Text {
+                            text: "inline text".to_string(),
+                        },
+                        "text/plain",
+                    )),
+                ]),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "content",
+                            "value": [
+                                {
+                                    "type": "file",
+                                    "filename": "image.png",
+                                    "data": {
+                                        "type": "data",
+                                        "data": "dGVzdA=="
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "url",
+                                        "url": "https://example.com/image.png"
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "reference",
+                                        "reference": {
+                                            "test-provider": "fileId"
+                                        }
+                                    },
+                                    "mediaType": "application/pdf"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "text",
+                                        "text": "inline text"
+                                    },
+                                    "mediaType": "text/plain"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_message_tool_should_include_multipart_content() {
+        let custom_provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "key-a": "test-value-1",
+                "key-b": "test-value-2"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = convert_message_for_language_model_prompt(tool_message(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "toolCallId",
+                "toolName",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.png").expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("dGVzdA==".to_string()),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: provider_reference(&[("test-provider", "fileId")]),
+                        },
+                        "application",
+                    )),
+                    LanguageModelToolResultContentPart::Custom(
+                        LanguageModelToolResultCustomContent::new()
+                            .with_provider_options(custom_provider_options),
+                    ),
+                ]),
+            )),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "toolCallId",
+                        "toolName": "toolName",
+                        "output": {
+                            "type": "content",
+                            "value": [
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "url",
+                                        "url": "https://example.com/image.png"
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "data",
+                                        "data": "dGVzdA=="
+                                    },
+                                    "mediaType": "image/png"
+                                },
+                                {
+                                    "type": "file",
+                                    "data": {
+                                        "type": "reference",
+                                        "reference": {
+                                            "test-provider": "fileId"
+                                        }
+                                    },
+                                    "mediaType": "application"
+                                },
+                                {
+                                    "type": "custom",
+                                    "providerOptions": {
+                                        "test-provider": {
+                                            "key-a": "test-value-1",
+                                            "key-b": "test-value-2"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_combine_2_consecutive_tool_messages_into_a_single_tool_message()
+     {
+        let result =
+            convert_to_language_model_prompt(StandardizedPrompt::new(
+                None,
+                vec![
+                    assistant_message(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new("toolCallId", "toolName", json!({})),
+                        ),
+                        LanguageModelAssistantContentPart::ToolApprovalRequest(
+                            LanguageModelToolApprovalRequestPart::new("approvalId", "toolCallId"),
+                        ),
+                    ]),
+                    tool_message(vec![LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approvalId", true),
+                    )]),
+                    tool_message(vec![LanguageModelToolContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "toolCallId",
+                            "toolName",
+                            LanguageModelToolResultOutput::json(json!({ "some": "result" })),
+                        ),
+                    )]),
+                ],
+            ))
+            .expect("approval response and tool result satisfy validation");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "toolCallId",
+                            "toolName": "toolName",
+                            "input": {}
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "toolCallId",
+                            "toolName": "toolName",
+                            "output": {
+                                "type": "json",
+                                "value": {
+                                    "some": "result"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
         );
     }
 

@@ -984,6 +984,8 @@ struct TelemetryMetadata {
     record_inputs: Option<bool>,
     record_outputs: Option<bool>,
     function_id: Option<String>,
+    include_runtime_context: BTreeMap<String, bool>,
+    include_tools_context: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 /// Dispatcher that fans out lifecycle events to telemetry integrations.
@@ -1015,7 +1017,8 @@ impl TelemetryDispatcher {
             return;
         }
 
-        let event = serde_json::to_value(event).unwrap_or(JsonValue::Null);
+        let mut event = serde_json::to_value(event).unwrap_or(JsonValue::Null);
+        restrict_telemetry_contexts(&mut event, &self.metadata);
         let telemetry_event = TelemetryEvent::new(kind, event, &self.metadata);
         publish_telemetry_diagnostic_message(TelemetryDiagnosticMessage {
             kind,
@@ -1154,8 +1157,106 @@ pub fn create_telemetry_dispatcher(telemetry: Option<TelemetryOptions>) -> Telem
             record_inputs: telemetry.record_inputs,
             record_outputs: telemetry.record_outputs,
             function_id: telemetry.function_id,
+            include_runtime_context: telemetry.include_runtime_context,
+            include_tools_context: telemetry.include_tools_context,
         },
     }
+}
+
+fn restrict_telemetry_contexts(event: &mut JsonValue, metadata: &TelemetryMetadata) {
+    restrict_runtime_context(event, &metadata.include_runtime_context);
+    restrict_tools_context(event, &metadata.include_tools_context);
+
+    if let Some(steps) = event.get_mut("steps").and_then(JsonValue::as_array_mut) {
+        for step in steps {
+            restrict_runtime_context(step, &metadata.include_runtime_context);
+            restrict_tools_context(step, &metadata.include_tools_context);
+        }
+    }
+
+    restrict_tool_execution_context(event, &metadata.include_tools_context);
+}
+
+fn restrict_runtime_context(event: &mut JsonValue, include: &BTreeMap<String, bool>) {
+    let Some(context) = event.get_mut("runtimeContext") else {
+        return;
+    };
+
+    *context = filtered_object(context, include);
+}
+
+fn restrict_tools_context(
+    event: &mut JsonValue,
+    include: &BTreeMap<String, BTreeMap<String, bool>>,
+) {
+    let Some(tools_context) = event.get_mut("toolsContext") else {
+        return;
+    };
+
+    let Some(tools) = tools_context.as_object() else {
+        *tools_context = JsonValue::Object(Default::default());
+        return;
+    };
+
+    let mut filtered_tools = serde_json::Map::new();
+    for (tool_name, context) in tools {
+        let Some(tool_include) = include.get(tool_name) else {
+            continue;
+        };
+        let filtered_context = filtered_object(context, tool_include);
+        if filtered_context
+            .as_object()
+            .is_some_and(|object| !object.is_empty())
+        {
+            filtered_tools.insert(tool_name.clone(), filtered_context);
+        }
+    }
+
+    *tools_context = JsonValue::Object(filtered_tools);
+}
+
+fn restrict_tool_execution_context(
+    event: &mut JsonValue,
+    include: &BTreeMap<String, BTreeMap<String, bool>>,
+) {
+    let tool_name = event
+        .get("toolCall")
+        .and_then(|tool_call| tool_call.get("toolName"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            event
+                .get("toolName")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string)
+        });
+
+    let Some(tool_context) = event.get_mut("toolContext") else {
+        return;
+    };
+    let filtered = tool_name
+        .as_deref()
+        .and_then(|tool_name| include.get(tool_name))
+        .map_or_else(
+            || JsonValue::Object(Default::default()),
+            |tool_include| filtered_object(tool_context, tool_include),
+        );
+
+    *tool_context = filtered;
+}
+
+fn filtered_object(value: &JsonValue, include: &BTreeMap<String, bool>) -> JsonValue {
+    let Some(object) = value.as_object() else {
+        return JsonValue::Object(Default::default());
+    };
+
+    JsonValue::Object(
+        object
+            .iter()
+            .filter(|(key, _)| include.get(*key).copied().unwrap_or(false))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
 }
 
 static TELEMETRY_INTEGRATIONS: LazyLock<Mutex<Vec<Arc<TelemetryIntegration>>>> =
@@ -1228,7 +1329,17 @@ fn publish_telemetry_diagnostic_message(message: TelemetryDiagnosticMessage) {
 }
 
 #[cfg(test)]
-fn reset_telemetry_state_for_tests() {
+static TELEMETRY_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) fn telemetry_test_guard_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    TELEMETRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_telemetry_state_for_tests() {
     TELEMETRY_INTEGRATIONS
         .lock()
         .expect("telemetry registry mutex is not poisoned")
@@ -1241,7 +1352,7 @@ fn reset_telemetry_state_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex};
 
     use serde_json::json;
 
@@ -1251,12 +1362,84 @@ mod tests {
         Arc::new(Mutex::new(Vec::new()))
     }
 
-    static TELEMETRY_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    use super::telemetry_test_guard_for_tests as telemetry_test_guard;
 
-    fn telemetry_test_guard() -> MutexGuard<'static, ()> {
-        TELEMETRY_TEST_LOCK
+    fn restricted_runtime_options() -> TelemetryOptions {
+        TelemetryOptions::new().with_runtime_context_key("requestId", true)
+    }
+
+    fn restricted_tools_options() -> TelemetryOptions {
+        TelemetryOptions::new()
+            .with_tool_context_key("weather", "city", true)
+            .with_tool_context_key("stocks", "symbol", true)
+    }
+
+    fn restricted_runtime_and_tools_options() -> TelemetryOptions {
+        restricted_tools_options().with_runtime_context_key("requestId", true)
+    }
+
+    fn runtime_context() -> JsonValue {
+        json!({
+            "userId": "user-123",
+            "requestId": "request-123"
+        })
+    }
+
+    fn tools_context() -> JsonValue {
+        json!({
+            "weather": {
+                "apiKey": "secret-api-key",
+                "city": "Berlin"
+            },
+            "stocks": {
+                "symbol": "AI"
+            }
+        })
+    }
+
+    fn filtered_tools_context() -> JsonValue {
+        json!({
+            "weather": {
+                "city": "Berlin"
+            },
+            "stocks": {
+                "symbol": "AI"
+            }
+        })
+    }
+
+    fn create_restricted_step_result() -> JsonValue {
+        json!({
+            "callId": "call-1",
+            "stepNumber": 0,
+            "provider": "test-provider",
+            "modelId": "test-model",
+            "runtimeContext": runtime_context(),
+            "toolsContext": tools_context(),
+            "text": "Hello"
+        })
+    }
+
+    fn dispatch_and_capture(
+        kind: TelemetryEventKind,
+        options: TelemetryOptions,
+        payload: JsonValue,
+    ) -> TelemetryEvent {
+        let events = recorded_events();
+        let captured = Arc::clone(&events);
+        let dispatcher = create_telemetry_dispatcher(Some(options.with_integration(
+            TelemetryIntegration::new().with_callback(kind, move |event| {
+                captured.lock().expect("event lock").push(event);
+            }),
+        )));
+
+        dispatcher.dispatch(kind, payload);
+
+        events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("event lock")
+            .pop()
+            .expect("event captured")
     }
 
     #[test]
@@ -1300,6 +1483,298 @@ mod tests {
     }
 
     #[test]
+    fn restricted_telemetry_dispatcher_excludes_runtime_context_when_no_include_context_is_configured()
+     {
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStart,
+            TelemetryOptions::new(),
+            json!({ "runtimeContext": runtime_context() }),
+        );
+
+        assert_eq!(event.event["runtimeContext"], json!({}));
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_only_includes_runtime_context_properties_marked_as_true() {
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStart,
+            TelemetryOptions::new()
+                .with_runtime_context_key("userId", false)
+                .with_runtime_context_key("requestId", true),
+            json!({ "runtimeContext": runtime_context() }),
+        );
+
+        assert_eq!(
+            event.event["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_includes_configured_runtime_context_for_start_events_without_mutating_source_event()
+     {
+        let source = json!({ "runtimeContext": runtime_context() });
+
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStart,
+            restricted_runtime_options(),
+            source.clone(),
+        );
+
+        assert_eq!(
+            event.event["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(source["runtimeContext"], runtime_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_filters_tools_context_per_tool_for_start_events_without_mutating_source_event()
+     {
+        let source = json!({
+            "runtimeContext": runtime_context(),
+            "toolsContext": tools_context()
+        });
+
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStart,
+            restricted_tools_options(),
+            source.clone(),
+        );
+
+        assert_eq!(event.event["toolsContext"], filtered_tools_context());
+        assert_eq!(source["toolsContext"], tools_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_excludes_tools_context_properties_when_no_include_context_is_configured()
+     {
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStart,
+            TelemetryOptions::new(),
+            json!({
+                "runtimeContext": runtime_context(),
+                "toolsContext": tools_context()
+            }),
+        );
+
+        assert_eq!(event.event["toolsContext"], json!({}));
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_includes_configured_runtime_context_for_step_start_events_and_previous_steps()
+     {
+        let previous_step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStepStart,
+            restricted_runtime_options(),
+            json!({
+                "runtimeContext": runtime_context(),
+                "steps": [previous_step.clone()]
+            }),
+        );
+
+        assert_eq!(
+            event.event["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(
+            event.event["steps"][0]["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(event.event["steps"][0]["text"], json!("Hello"));
+        assert_eq!(previous_step["runtimeContext"], runtime_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_filters_tools_context_for_step_start_events_and_previous_steps()
+     {
+        let previous_step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStepStart,
+            restricted_tools_options(),
+            json!({
+                "runtimeContext": runtime_context(),
+                "toolsContext": tools_context(),
+                "steps": [previous_step.clone()]
+            }),
+        );
+
+        assert_eq!(event.event["toolsContext"], filtered_tools_context());
+        assert_eq!(
+            event.event["steps"][0]["toolsContext"],
+            filtered_tools_context()
+        );
+        assert_eq!(previous_step["toolsContext"], tools_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_includes_configured_runtime_context_for_step_finish_events_without_mutating_source_step()
+     {
+        let step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStepFinish,
+            restricted_runtime_options(),
+            step.clone(),
+        );
+
+        assert_eq!(
+            event.event["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(event.event["text"], json!("Hello"));
+        assert_eq!(step["runtimeContext"], runtime_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_filters_tools_context_for_step_finish_events_without_mutating_source_step()
+     {
+        let step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnStepFinish,
+            restricted_tools_options(),
+            step.clone(),
+        );
+
+        assert_eq!(event.event["toolsContext"], filtered_tools_context());
+        assert_eq!(event.event["text"], json!("Hello"));
+        assert_eq!(step["toolsContext"], tools_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_includes_configured_runtime_context_for_end_events_and_all_steps_without_mutating_source_steps()
+     {
+        let step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnEnd,
+            restricted_runtime_options(),
+            json!({
+                "text": "Hello",
+                "runtimeContext": runtime_context(),
+                "steps": [step.clone()]
+            }),
+        );
+
+        assert_eq!(
+            event.event["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(
+            event.event["steps"][0]["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(event.event["text"], json!("Hello"));
+        assert_eq!(step["runtimeContext"], runtime_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_filters_tools_context_for_end_events_and_all_steps_without_mutating_source_steps()
+     {
+        let step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnEnd,
+            restricted_tools_options(),
+            json!({
+                "text": "Hello",
+                "runtimeContext": runtime_context(),
+                "toolsContext": tools_context(),
+                "steps": [step.clone()]
+            }),
+        );
+
+        assert_eq!(event.event["toolsContext"], filtered_tools_context());
+        assert_eq!(
+            event.event["steps"][0]["toolsContext"],
+            filtered_tools_context()
+        );
+        assert_eq!(event.event["text"], json!("Hello"));
+        assert_eq!(step["toolsContext"], tools_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_filters_tool_execution_start_events_without_mutating_the_source_event()
+     {
+        let source = json!({
+            "callId": "call-1",
+            "messages": [],
+            "toolCall": {
+                "type": "tool-call",
+                "toolCallId": "tool-call-1",
+                "toolName": "weather",
+                "input": { "value": "input" }
+            },
+            "toolContext": tools_context()["weather"].clone()
+        });
+
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnToolExecutionStart,
+            restricted_runtime_and_tools_options(),
+            source.clone(),
+        );
+
+        assert_eq!(
+            event.event["toolContext"],
+            filtered_tools_context()["weather"].clone()
+        );
+        assert_eq!(source["toolContext"], tools_context()["weather"]);
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_filters_tool_execution_end_events_without_mutating_the_source_event()
+     {
+        let source = json!({
+            "callId": "call-1",
+            "toolExecutionMs": 10,
+            "messages": [],
+            "toolCall": {
+                "type": "tool-call",
+                "toolCallId": "tool-call-1",
+                "toolName": "weather",
+                "input": { "value": "input" }
+            },
+            "toolContext": tools_context()["weather"].clone(),
+            "toolOutput": {
+                "type": "tool-result",
+                "toolCallId": "tool-call-1",
+                "toolName": "weather",
+                "output": { "value": "output" }
+            }
+        });
+
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnToolExecutionEnd,
+            restricted_runtime_and_tools_options(),
+            source.clone(),
+        );
+
+        assert_eq!(
+            event.event["toolContext"],
+            filtered_tools_context()["weather"].clone()
+        );
+        assert_eq!(source["toolContext"], tools_context()["weather"]);
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_passes_through_execute_tool_without_filtering() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let called = Arc::new(Mutex::new(0usize));
+        let called_for_wrapper = Arc::clone(&called);
+        let integration = TelemetryIntegration::new().with_execute_tool(move |options| {
+            *called_for_wrapper.lock().expect("called lock") += 1;
+            (options.execute)()
+        });
+        let dispatcher = create_telemetry_dispatcher(Some(
+            restricted_runtime_options().with_integration(integration),
+        ));
+
+        let result = dispatcher.execute_tool("call-1", "tool-call-1", || json!("result"));
+
+        assert_eq!(result, json!("result"));
+        assert_eq!(*called.lock().expect("called lock"), 1);
+    }
+
+    #[test]
     fn telemetry_dispatcher_uses_global_integrations_when_local_integrations_are_absent() {
         let _guard = telemetry_test_guard();
         reset_telemetry_state_for_tests();
@@ -1323,16 +1798,18 @@ mod tests {
         )))
         .on_start(json!({ "callId": "local" }));
 
-        assert_eq!(global_events.lock().expect("event lock").len(), 1);
-        assert_eq!(
-            global_events.lock().expect("event lock")[0].event,
-            json!({ "callId": "global" })
+        let global_events = global_events.lock().expect("event lock");
+        assert!(
+            global_events
+                .iter()
+                .any(|event| event.event == json!({ "callId": "global" }))
         );
         assert_eq!(local_events.lock().expect("event lock").len(), 1);
         assert_eq!(
             local_events.lock().expect("event lock")[0].event,
             json!({ "callId": "local" })
         );
+        reset_telemetry_state_for_tests();
     }
 
     #[test]

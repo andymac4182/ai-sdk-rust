@@ -161,8 +161,8 @@ The implementation order is a hard two-phase gate:
    coverage, including Gateway's OpenAI-compatible and Open Responses routes.
 2. Only then resume unrelated standalone provider packages.
 
-The first phase includes `packages/ai`, `packages/provider`,
-`packages/provider-utils`, `packages/openai-compatible`,
+The first phase includes `packages/ai`, `packages/provider-utils`,
+`packages/provider`, `packages/openai-compatible`,
 `packages/open-responses`, `packages/gateway`, Vercel AI Gateway's
 OpenAI-compatible and Open Responses routes, and portable non-provider rows such
 as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
@@ -174,6 +174,21 @@ intentionally non-portable. This gate applies to the entire first-phase set as
 a group: do not use Gateway progress as a reason to resume Anthropic, Google,
 Bedrock, xAI, or any other unrelated provider while a common/core package row is
 still open.
+
+Within that first-phase gate, use this explicit package order unless upstream
+drift or a regression forces a narrower repair first. Treat this as the slice
+selection rule at the start of every iteration: inspect the progress table, pick
+the first package in this list that is not 100%, and keep working that package
+until it is verified or explicitly documented as intentionally non-portable.
+
+1. Finish `ai` (`packages/ai`) to 100%.
+2. Then finish `@ai-sdk/provider-utils` (`packages/provider-utils`).
+3. Then finish `@ai-sdk/provider` (`packages/provider`).
+4. Then continue the remaining first-phase rows in the most effective order.
+
+Do not advance to `packages/provider-utils` while portable `packages/ai`
+inventory remains open, and do not advance to `packages/provider` while
+portable `packages/provider-utils` inventory remains open.
 
 ## Priorities
 
@@ -317,8 +332,8 @@ still open.
     slice genuinely requires it.
 17. Work in this order as a hard gate: finish ALL common/core SDK packages
     together with Vercel AI Gateway provider coverage first, then return to the
-    remaining standalone providers. The first phase includes `packages/ai`,
-    `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
+    remaining standalone providers. The first phase begins with `packages/ai`,
+    `packages/provider-utils`, `packages/provider`, `packages/openai-compatible`,
     `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
     OpenAI-compatible and Open Responses routes, and portable non-provider
     package rows such as MCP, OTel, Workflow, telemetry, logger, UI transport,

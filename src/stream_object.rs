@@ -2004,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_object_result_text_stream_and_response_match_upstream_object_chunks() {
+    fn stream_object_result_text_stream_sends_text_stream() {
         let model = MockLanguageModel::new()
             .with_stream_result(LanguageModelStreamResult::new(object_stream()));
 
@@ -2020,6 +2020,16 @@ mod tests {
             " }".to_string(),
         ];
         assert_eq!(result.text_stream, expected_chunks);
+    }
+
+    #[test]
+    fn stream_object_result_to_text_stream_response_creates_response_with_text_stream() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
 
         let response = result.to_text_stream_response(TextStreamResponseInit::new());
         assert_eq!(response.status, 200);
@@ -2029,7 +2039,7 @@ mod tests {
         );
         assert_eq!(
             response.decoded_body().expect("response body decodes"),
-            expected_chunks
+            result.text_stream
         );
     }
 
@@ -2338,6 +2348,19 @@ mod tests {
         let finish_reason: FinishReason = result.finish_reason.clone();
 
         assert_eq!(finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn stream_object_type_counterpart_does_not_accept_timeout_option() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert!(model.stream_calls()[0].abort_signal.is_none());
     }
 
     #[test]
@@ -3196,6 +3219,43 @@ mod tests {
         assert!(result.partial_object_stream.is_empty());
         assert_eq!(result.finish_reason, FinishReason::Error);
         assert_eq!(result.error, Some(json!({"message": "test error"})));
+    }
+
+    #[test]
+    fn stream_object_object_stream_invokes_on_error_callback_with_error() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "test error"}),
+                )),
+            ]));
+        let callback_errors = Arc::new(Mutex::new(Vec::new()));
+        let errors_for_callback = Arc::clone(&callback_errors);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_error(move |event| {
+                    let errors = Arc::clone(&errors_for_callback);
+                    async move {
+                        errors
+                            .lock()
+                            .expect("callback errors lock")
+                            .push(event.error);
+                    }
+                }),
+        ));
+
+        assert!(result.partial_object_stream.is_empty());
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.error, Some(json!({"message": "test error"})));
+        assert_eq!(
+            callback_errors
+                .lock()
+                .expect("callback errors lock")
+                .as_slice(),
+            [json!({"message": "test error"})]
+        );
     }
 
     #[test]

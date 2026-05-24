@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_data::FileDataContent;
 use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
-use crate::provider::ProviderOptions;
+use crate::provider::{ProviderOptions, ProviderWithFiles};
 use crate::provider_utils::{convert_base64_to_bytes, detect_media_type};
 
 /// File data accepted by the high-level `upload_file` helper.
@@ -150,6 +150,18 @@ where
     api.upload_file(options.into_call_options()).await
 }
 
+/// Uploads a file by resolving the files interface from a provider-v4 provider.
+pub async fn upload_file_with_provider<P>(
+    provider: &P,
+    options: UploadFileOptions,
+) -> UploadFileResult
+where
+    P: ProviderWithFiles + ?Sized,
+{
+    let files = provider.files();
+    upload_file(&files, options).await
+}
+
 fn resolve_upload_file_media_type(
     data: &FilesUploadFileData,
     media_type: Option<String>,
@@ -210,12 +222,19 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
+    use super::{
+        UploadFileData, UploadFileOptions, UploadFileResult, upload_file, upload_file_with_provider,
+    };
     use crate::file_data::{FileDataContent, ProviderReference};
     use crate::files::{
         Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult,
     };
-    use crate::provider::ProviderOptions;
+    use crate::mock_models::{MockEmbeddingModel, MockImageModel, MockLanguageModel};
+    use crate::provider::{
+        ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
+    };
+    use crate::provider::{ProviderWithFiles, SpecificationVersion};
+    use crate::warning::Warning;
 
     #[derive(Clone, Default)]
     struct RecordingFiles {
@@ -229,6 +248,14 @@ mod tests {
                 .expect("recorded files calls mutex is not poisoned")
                 .clone()
         }
+    }
+
+    fn provider_reference(id: &str) -> ProviderReference {
+        ProviderReference::try_from(BTreeMap::from([(
+            "test-provider".to_string(),
+            id.to_string(),
+        )]))
+        .expect("provider reference is valid")
     }
 
     impl Files for RecordingFiles {
@@ -258,6 +285,76 @@ mod tests {
                     .with_media_type(options.media_type)
                     .with_filename(options.filename.unwrap_or_else(|| "uploaded".to_string())),
             )
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingFilesProvider {
+        files: RecordingFiles,
+    }
+
+    impl RecordingFilesProvider {
+        fn new(files: RecordingFiles) -> Self {
+            Self { files }
+        }
+    }
+
+    impl Provider for RecordingFilesProvider {
+        type LanguageModel = MockLanguageModel;
+        type EmbeddingModel = MockEmbeddingModel;
+        type ImageModel = MockImageModel;
+
+        fn specification_version(&self) -> SpecificationVersion {
+            SpecificationVersion::V4
+        }
+
+        fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::LanguageModel))
+        }
+
+        fn embedding_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+        }
+
+        fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+            Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+        }
+    }
+
+    impl ProviderWithFiles for RecordingFilesProvider {
+        type Files = RecordingFiles;
+
+        fn files(&self) -> Self::Files {
+            self.files.clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticResultFiles {
+        result: FilesUploadFileResult,
+    }
+
+    impl StaticResultFiles {
+        fn new(result: FilesUploadFileResult) -> Self {
+            Self { result }
+        }
+    }
+
+    impl Files for StaticResultFiles {
+        type UploadFileFuture<'a>
+            = Ready<FilesUploadFileResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn upload_file(&self, _options: FilesUploadFileCallOptions) -> Self::UploadFileFuture<'_> {
+            ready(self.result.clone())
         }
     }
 
@@ -329,6 +426,25 @@ mod tests {
     }
 
     #[test]
+    fn upload_file_passes_tagged_base64_string_data_through_to_files_upload_file() {
+        let files = RecordingFiles::default();
+
+        let _ = poll_ready(upload_file(
+            &files,
+            UploadFileOptions::new(FilesUploadFileData::data(FileDataContent::Base64(
+                "dGVzdA==".to_string(),
+            ))),
+        ));
+
+        let calls = files.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].data,
+            FilesUploadFileData::data(FileDataContent::Base64("dGVzdA==".to_string()))
+        );
+    }
+
+    #[test]
     fn upload_file_options_resolves_media_types_like_upstream_upload_file() {
         let pdf_options = UploadFileOptions::new("JVBERi0xLjQ=").into_call_options();
         assert_eq!(pdf_options.media_type, "application/pdf");
@@ -376,5 +492,115 @@ mod tests {
                 .with_media_type("application/pdf")
                 .with_filename("spec.pdf")
         );
+    }
+
+    #[test]
+    fn upload_file_forwards_provider_options_to_files_upload_file() {
+        let files = RecordingFiles::default();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "purpose": "assistants"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _ = poll_ready(upload_file(
+            &files,
+            UploadFileOptions::new(vec![1_u8]).with_provider_options(provider_options.clone()),
+        ));
+
+        let calls = files.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider_options, Some(provider_options));
+    }
+
+    #[test]
+    fn upload_file_passes_undefined_provider_options_when_not_provided() {
+        let files = RecordingFiles::default();
+
+        let _ = poll_ready(upload_file(&files, UploadFileOptions::new(vec![1_u8])));
+
+        let calls = files.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider_options, None);
+    }
+
+    #[test]
+    fn upload_file_passes_warnings_from_provider_result() {
+        let files = StaticResultFiles::new(
+            FilesUploadFileResult::new(provider_reference("file_abc")).with_warning(
+                Warning::Unsupported {
+                    feature: "filename".to_string(),
+                    details: None,
+                },
+            ),
+        );
+
+        let result = poll_ready(upload_file(
+            &files,
+            UploadFileOptions::new(vec![1_u8]).with_filename("test.pdf"),
+        ));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "filename".to_string(),
+                details: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn upload_file_returns_result_without_provider_metadata_when_not_provided() {
+        let files =
+            StaticResultFiles::new(FilesUploadFileResult::new(provider_reference("file_xyz")));
+
+        let result = poll_ready(upload_file(&files, UploadFileOptions::new(vec![1_u8])));
+
+        assert_eq!(result.provider_reference, provider_reference("file_xyz"));
+        assert_eq!(result.provider_metadata, None);
+    }
+
+    #[test]
+    fn upload_file_returns_provider_metadata_when_provided() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "test-provider": {
+                "size": 1024
+            }
+        }))
+        .expect("provider metadata deserialize");
+        let files = StaticResultFiles::new(
+            FilesUploadFileResult::new(provider_reference("file_abc123"))
+                .with_provider_metadata(provider_metadata.clone()),
+        );
+
+        let result = poll_ready(upload_file(&files, UploadFileOptions::new(vec![1_u8])));
+
+        assert_eq!(result.provider_reference, provider_reference("file_abc123"));
+        assert_eq!(result.provider_metadata, Some(provider_metadata));
+    }
+
+    #[test]
+    fn upload_file_resolves_files_v4_from_provider_v4_with_files_method() {
+        let files = RecordingFiles::default();
+        let provider = RecordingFilesProvider::new(files.clone());
+
+        let result = poll_ready(upload_file_with_provider(
+            &provider,
+            UploadFileOptions::new(vec![1_u8]).with_filename("test.pdf"),
+        ));
+
+        let calls = files.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            FilesUploadFileCallOptions::new(
+                FilesUploadFileData::data(FileDataContent::Bytes(vec![1])),
+                "application/octet-stream",
+            )
+            .with_filename("test.pdf")
+        );
+
+        assert_eq!(result.filename.as_deref(), Some("test.pdf"));
     }
 }

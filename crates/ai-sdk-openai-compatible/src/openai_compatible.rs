@@ -27,12 +27,12 @@ use ai_sdk_provider::language_model::{
     LanguageModelGenerateResult, LanguageModelMessage, LanguageModelRawStreamPart,
     LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEffort,
     LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice, LanguageModelUsage,
-    OutputTokenUsage,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
+    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+    LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
+    LanguageModelUrlSource, LanguageModelUsage, OutputTokenUsage,
 };
 use ai_sdk_provider::provider::{
     ApiCallError, ProviderMetadata, ProviderOptions, SpecificationVersion,
@@ -1267,6 +1267,7 @@ impl OpenAICompatibleCompletionLanguageModel {
         .await
         {
             Ok(response) => openai_compatible_completion_stream_result_from_response(
+                &self.config.settings.name,
                 response.value,
                 response.response_headers,
                 request_body_for_response,
@@ -1340,6 +1341,18 @@ impl OpenAICompatibleCompletionLanguageModel {
 
         if let Some(headers) = response_headers {
             response_metadata = with_response_headers(response_metadata, headers);
+        }
+
+        if let Some(logprobs) = choice
+            .and_then(|choice| choice.get("logprobs"))
+            .filter(|value| !value.is_null())
+        {
+            let mut provider_metadata = JsonObject::new();
+            provider_metadata.insert("logprobs".to_string(), logprobs.clone());
+            result = result.with_provider_metadata(ProviderMetadata::from([(
+                self.config.settings.name.clone(),
+                provider_metadata,
+            )]));
         }
 
         for warning in warnings {
@@ -1879,13 +1892,17 @@ fn openai_compatible_chat_request_body(
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut body = JsonObject::new();
     let mut warnings = Vec::new();
+    let provider_options =
+        openai_compatible_chat_provider_options(provider, options, &mut warnings);
     let OpenAICompatibleChatProviderOptions {
         user,
         reasoning_effort,
         text_verbosity,
         strict_json_schema,
+        force_reasoning: _,
+        system_message_mode: _,
         additional_body_options,
-    } = openai_compatible_chat_provider_options(provider, options, &mut warnings);
+    } = provider_options.clone();
 
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
 
@@ -1964,9 +1981,21 @@ fn openai_compatible_chat_request_body(
         body.insert("verbosity".to_string(), JsonValue::String(text_verbosity));
     }
 
+    apply_openai_chat_model_request_rules(
+        model_id,
+        provider,
+        options,
+        &provider_options,
+        &mut body,
+        &mut warnings,
+    );
+
     body.insert(
         "messages".to_string(),
-        JsonValue::Array(openai_compatible_messages(&prompt)?),
+        JsonValue::Array(openai_compatible_messages_with_system_mode(
+            &prompt,
+            openai_compatible_chat_system_message_mode(model_id, provider, &provider_options),
+        )?),
     );
 
     let (tools, tool_choice) =
@@ -2582,6 +2611,8 @@ struct OpenAICompatibleChatProviderOptions {
     reasoning_effort: Option<String>,
     text_verbosity: Option<String>,
     strict_json_schema: Option<bool>,
+    force_reasoning: Option<bool>,
+    system_message_mode: Option<String>,
     additional_body_options: JsonObject,
 }
 
@@ -2668,17 +2699,264 @@ fn merge_openai_compatible_chat_known_options(
     if let Some(strict_json_schema) = options.get("strictJsonSchema").and_then(JsonValue::as_bool) {
         resolved.strict_json_schema = Some(strict_json_schema);
     }
+
+    if let Some(force_reasoning) = options.get("forceReasoning").and_then(JsonValue::as_bool) {
+        resolved.force_reasoning = Some(force_reasoning);
+    }
+
+    if let Some(system_message_mode) = options.get("systemMessageMode").and_then(JsonValue::as_str)
+    {
+        resolved.system_message_mode = Some(system_message_mode.to_string());
+    }
 }
 
 fn merge_openai_compatible_chat_additional_options(body: &mut JsonObject, options: &JsonObject) {
     for (key, value) in options {
-        if !matches!(
-            key.as_str(),
+        match key.as_str() {
             "user" | "reasoningEffort" | "textVerbosity" | "strictJsonSchema"
-        ) {
-            body.insert(key.clone(), value.clone());
+            | "forceReasoning" | "systemMessageMode" => {}
+            "logprobs" => merge_openai_compatible_chat_logprobs(body, value),
+            _ => {
+                body.insert(
+                    openai_compatible_chat_body_option_name(key).to_string(),
+                    value.clone(),
+                );
+            }
         }
     }
+}
+
+fn openai_compatible_chat_body_option_name(name: &str) -> &str {
+    match name {
+        "logitBias" => "logit_bias",
+        "maxCompletionTokens" => "max_completion_tokens",
+        "parallelToolCalls" => "parallel_tool_calls",
+        "promptCacheKey" => "prompt_cache_key",
+        "promptCacheRetention" => "prompt_cache_retention",
+        "safetyIdentifier" => "safety_identifier",
+        "serviceTier" => "service_tier",
+        _ => name,
+    }
+}
+
+fn merge_openai_compatible_chat_logprobs(body: &mut JsonObject, value: &JsonValue) {
+    match value {
+        JsonValue::Bool(true) => {
+            body.insert("logprobs".to_string(), JsonValue::Bool(true));
+            body.insert("top_logprobs".to_string(), json!(0));
+        }
+        JsonValue::Number(_) => {
+            body.insert("logprobs".to_string(), JsonValue::Bool(true));
+            body.insert("top_logprobs".to_string(), value.clone());
+        }
+        _ => {}
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OpenAICompatibleChatModelCapabilities {
+    is_reasoning_model: bool,
+    supports_non_reasoning_parameters: bool,
+    supports_flex_processing: bool,
+    supports_priority_processing: bool,
+}
+
+fn openai_compatible_openai_chat_capabilities(
+    model_id: &str,
+) -> OpenAICompatibleChatModelCapabilities {
+    let is_reasoning_model = model_id.starts_with("o1")
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini")
+        || (model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat"));
+    let supports_non_reasoning_parameters = model_id.starts_with("gpt-5.1")
+        || model_id.starts_with("gpt-5.2")
+        || model_id.starts_with("gpt-5.3")
+        || model_id.starts_with("gpt-5.4")
+        || model_id.starts_with("gpt-5.5");
+    let supports_flex_processing = model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini")
+        || (model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat"));
+    let supports_priority_processing = model_id.starts_with("gpt-4")
+        || (model_id.starts_with("gpt-5")
+            && !model_id.starts_with("gpt-5-nano")
+            && !model_id.starts_with("gpt-5-chat")
+            && !model_id.starts_with("gpt-5.4-nano"))
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini");
+
+    OpenAICompatibleChatModelCapabilities {
+        is_reasoning_model,
+        supports_non_reasoning_parameters,
+        supports_flex_processing,
+        supports_priority_processing,
+    }
+}
+
+fn openai_compatible_openai_reasoning_effort(
+    options: &LanguageModelCallOptions,
+    provider_options: &OpenAICompatibleChatProviderOptions,
+) -> Option<String> {
+    provider_options
+        .reasoning_effort
+        .clone()
+        .or_else(|| match options.reasoning.as_ref()? {
+            LanguageModelReasoningEffort::ProviderDefault => None,
+            LanguageModelReasoningEffort::None => Some("none".to_string()),
+            LanguageModelReasoningEffort::Minimal => Some("minimal".to_string()),
+            LanguageModelReasoningEffort::Low => Some("low".to_string()),
+            LanguageModelReasoningEffort::Medium => Some("medium".to_string()),
+            LanguageModelReasoningEffort::High => Some("high".to_string()),
+            LanguageModelReasoningEffort::Xhigh => Some("xhigh".to_string()),
+        })
+}
+
+fn apply_openai_chat_model_request_rules(
+    model_id: &str,
+    provider: &str,
+    options: &LanguageModelCallOptions,
+    provider_options: &OpenAICompatibleChatProviderOptions,
+    body: &mut JsonObject,
+    warnings: &mut Vec<Warning>,
+) {
+    if openai_compatible_provider_options_name(provider) != "openai" {
+        return;
+    }
+
+    let capabilities = openai_compatible_openai_chat_capabilities(model_id);
+    let resolved_reasoning_effort =
+        openai_compatible_openai_reasoning_effort(options, provider_options);
+    let is_reasoning_model = provider_options
+        .force_reasoning
+        .unwrap_or(capabilities.is_reasoning_model);
+
+    if let Some(reasoning_effort) = resolved_reasoning_effort.as_ref() {
+        body.insert(
+            "reasoning_effort".to_string(),
+            JsonValue::String(reasoning_effort.clone()),
+        );
+    }
+
+    if is_reasoning_model {
+        let allow_non_reasoning_parameters = resolved_reasoning_effort.as_deref() == Some("none")
+            && capabilities.supports_non_reasoning_parameters;
+
+        if !allow_non_reasoning_parameters {
+            if body.remove("temperature").is_some() {
+                warnings.push(Warning::Unsupported {
+                    feature: "temperature".to_string(),
+                    details: Some("temperature is not supported for reasoning models".to_string()),
+                });
+            }
+            if body.remove("top_p").is_some() {
+                warnings.push(Warning::Unsupported {
+                    feature: "topP".to_string(),
+                    details: Some("topP is not supported for reasoning models".to_string()),
+                });
+            }
+            if body.remove("logprobs").is_some() {
+                warnings.push(Warning::Other {
+                    message: "logprobs is not supported for reasoning models".to_string(),
+                });
+            }
+        }
+
+        if body.remove("frequency_penalty").is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "frequencyPenalty".to_string(),
+                details: Some("frequencyPenalty is not supported for reasoning models".to_string()),
+            });
+        }
+        if body.remove("presence_penalty").is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "presencePenalty".to_string(),
+                details: Some("presencePenalty is not supported for reasoning models".to_string()),
+            });
+        }
+        if body.remove("logit_bias").is_some() {
+            warnings.push(Warning::Other {
+                message: "logitBias is not supported for reasoning models".to_string(),
+            });
+        }
+        if body.remove("top_logprobs").is_some() {
+            warnings.push(Warning::Other {
+                message: "topLogprobs is not supported for reasoning models".to_string(),
+            });
+        }
+
+        if let Some(max_tokens) = body.remove("max_tokens") {
+            body.entry("max_completion_tokens".to_string())
+                .or_insert(max_tokens);
+        }
+    } else if (model_id.starts_with("gpt-4o-search-preview")
+        || model_id.starts_with("gpt-4o-mini-search-preview"))
+        && body.remove("temperature").is_some()
+    {
+        warnings.push(Warning::Unsupported {
+            feature: "temperature".to_string(),
+            details: Some(
+                "temperature is not supported for the search preview models and has been removed."
+                    .to_string(),
+            ),
+        });
+    }
+
+    match body.get("service_tier").and_then(JsonValue::as_str) {
+        Some("flex") if !capabilities.supports_flex_processing => {
+            body.remove("service_tier");
+            warnings.push(Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                        .to_string(),
+                ),
+            });
+        }
+        Some("priority") if !capabilities.supports_priority_processing => {
+            body.remove("service_tier");
+            warnings.push(Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported"
+                        .to_string(),
+                ),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn openai_compatible_chat_system_message_mode(
+    model_id: &str,
+    provider: &str,
+    provider_options: &OpenAICompatibleChatProviderOptions,
+) -> OpenAICompatibleSystemMessageMode {
+    if openai_compatible_provider_options_name(provider) != "openai" {
+        return OpenAICompatibleSystemMessageMode::System;
+    }
+
+    match provider_options.system_message_mode.as_deref() {
+        Some("developer") => OpenAICompatibleSystemMessageMode::Developer,
+        Some("remove") => OpenAICompatibleSystemMessageMode::Remove,
+        Some("system") => OpenAICompatibleSystemMessageMode::System,
+        _ => {
+            let capabilities = openai_compatible_openai_chat_capabilities(model_id);
+            let is_reasoning_model = provider_options
+                .force_reasoning
+                .unwrap_or(capabilities.is_reasoning_model);
+            if is_reasoning_model {
+                OpenAICompatibleSystemMessageMode::Developer
+            } else {
+                OpenAICompatibleSystemMessageMode::System
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenAICompatibleSystemMessageMode {
+    System,
+    Developer,
+    Remove,
 }
 
 fn openai_compatible_reasoning_effort(
@@ -2837,14 +3115,32 @@ fn openai_compatible_json_instruction_options(
     }
 }
 
+#[cfg(test)]
 fn openai_compatible_messages(prompt: &[LanguageModelMessage]) -> Result<Vec<JsonValue>, String> {
+    openai_compatible_messages_with_system_mode(prompt, OpenAICompatibleSystemMessageMode::System)
+}
+
+fn openai_compatible_messages_with_system_mode(
+    prompt: &[LanguageModelMessage],
+    system_message_mode: OpenAICompatibleSystemMessageMode,
+) -> Result<Vec<JsonValue>, String> {
     let mut messages = Vec::new();
 
     for message in prompt {
         match message {
             LanguageModelMessage::System(message) => {
+                if system_message_mode == OpenAICompatibleSystemMessageMode::Remove {
+                    continue;
+                }
                 let mut object = JsonObject::new();
-                object.insert("role".to_string(), JsonValue::String("system".to_string()));
+                object.insert(
+                    "role".to_string(),
+                    JsonValue::String(match system_message_mode {
+                        OpenAICompatibleSystemMessageMode::System => "system".to_string(),
+                        OpenAICompatibleSystemMessageMode::Developer => "developer".to_string(),
+                        OpenAICompatibleSystemMessageMode::Remove => unreachable!(),
+                    }),
+                );
                 object.insert(
                     "content".to_string(),
                     JsonValue::String(message.content.clone()),
@@ -3302,6 +3598,10 @@ fn openai_compatible_response_content(
         content.push(LanguageModelContent::File(file));
     }
 
+    for source in openai_compatible_annotation_sources(message.get("annotations")) {
+        content.push(LanguageModelContent::Source(source));
+    }
+
     if let Some(tool_calls) = message.get("tool_calls").and_then(JsonValue::as_array) {
         for (index, tool_call) in tool_calls.iter().enumerate() {
             let Some(function) = tool_call.get("function") else {
@@ -3339,6 +3639,31 @@ fn openai_compatible_response_content(
     }
 
     content
+}
+
+fn openai_compatible_annotation_sources(value: Option<&JsonValue>) -> Vec<LanguageModelSource> {
+    value
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(openai_compatible_annotation_source)
+        .collect()
+}
+
+fn openai_compatible_annotation_source(value: &JsonValue) -> Option<LanguageModelSource> {
+    if value.get("type").and_then(JsonValue::as_str) != Some("url_citation") {
+        return None;
+    }
+
+    let citation = value.get("url_citation")?;
+    let url = citation.get("url").and_then(JsonValue::as_str)?;
+    let mut source = LanguageModelUrlSource::new(generate_id(), url);
+
+    if let Some(title) = citation.get("title").and_then(JsonValue::as_str) {
+        source = source.with_title(title);
+    }
+
+    Some(LanguageModelSource::Url(source))
 }
 
 fn openai_compatible_image_files(value: Option<&JsonValue>) -> Vec<LanguageModelFile> {
@@ -3523,11 +3848,13 @@ async fn openai_compatible_provider_metadata(
         response.get("usage"),
         true,
     );
+    add_openai_compatible_chat_logprobs_metadata(provider_name, &mut metadata, response);
 
     metadata
 }
 
 fn openai_compatible_completion_stream_result_from_response(
+    provider_name: &str,
     events: Vec<ParseJsonResult<JsonValue>>,
     response_headers: Option<Headers>,
     request_body: JsonValue,
@@ -3544,6 +3871,7 @@ fn openai_compatible_completion_stream_result_from_response(
     let mut usage = None::<JsonValue>;
     let mut is_first_chunk = true;
     let mut is_active_text = false;
+    let mut logprobs = None::<JsonValue>;
 
     for event in events {
         match event {
@@ -3594,6 +3922,12 @@ fn openai_compatible_completion_stream_result_from_response(
                     finish_reason = openai_compatible_finish_reason(Some(raw_finish_reason));
                 }
 
+                if let Some(choice_logprobs) =
+                    choice.get("logprobs").filter(|value| !value.is_null())
+                {
+                    logprobs = Some(choice_logprobs.clone());
+                }
+
                 if let Some(text) = choice.get("text").and_then(JsonValue::as_str) {
                     stream.push(LanguageModelStreamPart::TextDelta(
                         LanguageModelTextDelta::new("0", text),
@@ -3619,12 +3953,19 @@ fn openai_compatible_completion_stream_result_from_response(
         )));
     }
 
-    stream.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(
-            openai_compatible_completion_usage(usage.as_ref()),
-            finish_reason,
-        ),
-    ));
+    let mut finish = LanguageModelStreamFinish::new(
+        openai_compatible_completion_usage(usage.as_ref()),
+        finish_reason,
+    );
+    if let Some(logprobs) = logprobs {
+        let mut provider_metadata = JsonObject::new();
+        provider_metadata.insert("logprobs".to_string(), logprobs);
+        finish = finish.with_provider_metadata(ProviderMetadata::from([(
+            provider_name.to_string(),
+            provider_metadata,
+        )]));
+    }
+    stream.push(LanguageModelStreamPart::Finish(finish));
 
     let mut result = LanguageModelStreamResult::new(stream)
         .with_request(LanguageModelRequest::new().with_body(request_body));
@@ -3656,6 +3997,7 @@ fn openai_compatible_stream_result_from_response(
         raw: None,
     };
     let mut usage = None::<JsonValue>;
+    let mut logprobs = None::<JsonValue>;
     let mut is_first_chunk = true;
     let mut is_active_reasoning = false;
     let mut is_active_text = false;
@@ -3718,6 +4060,11 @@ fn openai_compatible_stream_result_from_response(
                     finish_reason = openai_compatible_finish_reason(Some(raw_finish_reason));
                 }
 
+                if let Some(choice_logprobs) = openai_compatible_chat_logprobs_content(Some(choice))
+                {
+                    logprobs = Some(choice_logprobs);
+                }
+
                 let Some(delta) = choice.get("delta") else {
                     continue;
                 };
@@ -3762,6 +4109,17 @@ fn openai_compatible_stream_result_from_response(
                     stream.push(LanguageModelStreamPart::TextDelta(
                         LanguageModelTextDelta::new("txt-0", text),
                     ));
+                }
+
+                for source in openai_compatible_annotation_sources(delta.get("annotations")) {
+                    if is_active_reasoning {
+                        stream.push(LanguageModelStreamPart::ReasoningEnd(
+                            LanguageModelReasoningEnd::new("reasoning-0"),
+                        ));
+                        is_active_reasoning = false;
+                    }
+
+                    stream.push(LanguageModelStreamPart::Source(source));
                 }
 
                 let files = openai_compatible_image_files(delta.get("images"));
@@ -3880,6 +4238,7 @@ fn openai_compatible_stream_result_from_response(
                 provider_name,
                 usage.as_ref(),
                 extracted_metadata,
+                logprobs,
             )),
     ));
 
@@ -4013,10 +4372,43 @@ fn openai_compatible_stream_provider_metadata(
     provider_name: &str,
     usage: Option<&JsonValue>,
     extracted_metadata: Option<ProviderMetadata>,
+    logprobs: Option<JsonValue>,
 ) -> ProviderMetadata {
     let mut metadata = extracted_metadata.unwrap_or_default();
     add_openai_compatible_provider_prediction_metadata(provider_name, &mut metadata, usage, true);
+    if let Some(logprobs) = logprobs {
+        metadata
+            .entry(provider_name.to_string())
+            .or_default()
+            .insert("logprobs".to_string(), logprobs);
+    }
     metadata
+}
+
+fn add_openai_compatible_chat_logprobs_metadata(
+    provider_name: &str,
+    metadata: &mut ProviderMetadata,
+    response: &JsonValue,
+) {
+    let choice = response
+        .get("choices")
+        .and_then(JsonValue::as_array)
+        .and_then(|choices| choices.first());
+
+    if let Some(logprobs) = openai_compatible_chat_logprobs_content(choice) {
+        metadata
+            .entry(provider_name.to_string())
+            .or_default()
+            .insert("logprobs".to_string(), logprobs);
+    }
+}
+
+fn openai_compatible_chat_logprobs_content(choice: Option<&JsonValue>) -> Option<JsonValue> {
+    choice?
+        .get("logprobs")?
+        .get("content")
+        .filter(|value| !value.is_null())
+        .cloned()
 }
 
 fn add_openai_compatible_provider_prediction_metadata(

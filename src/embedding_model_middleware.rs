@@ -520,6 +520,7 @@ mod tests {
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
@@ -768,6 +769,122 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct NoopEmbeddingMiddleware;
+
+    impl<M: EmbeddingModel> EmbeddingModelMiddleware<M> for NoopEmbeddingMiddleware {
+        type OverrideMaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type OverrideSupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<EmbeddingModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapEmbedFuture<'a>
+            = Ready<EmbeddingModelResult>
+        where
+            Self: 'a,
+            M: 'a;
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendEmbeddingValueMiddleware(&'static str);
+
+    impl<M: EmbeddingModel> EmbeddingModelMiddleware<M> for AppendEmbeddingValueMiddleware {
+        type OverrideMaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type OverrideSupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<EmbeddingModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapEmbedFuture<'a>
+            = Ready<EmbeddingModelResult>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: EmbeddingModelTransformParamsOptions<'a, M>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            options.params.values.push(self.0.to_string());
+            Some(ready(options.params))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct AppendEmbeddingWarningMiddleware(&'static str);
+
+    impl<M: EmbeddingModel> EmbeddingModelMiddleware<M> for AppendEmbeddingWarningMiddleware {
+        type OverrideMaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type OverrideSupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<EmbeddingModelCallOptions>
+        where
+            Self: 'a,
+            M: 'a;
+
+        type WrapEmbedFuture<'a>
+            = Pin<Box<dyn Future<Output = EmbeddingModelResult> + Send + 'a>>
+        where
+            Self: 'a,
+            M: 'a;
+
+        fn wrap_embed<'a>(
+            &'a self,
+            options: EmbeddingModelWrapEmbedOptions<'a, M>,
+        ) -> Option<Self::WrapEmbedFuture<'a>>
+        where
+            Self: 'a,
+            M: 'a,
+        {
+            Some(Box::pin(async move {
+                let mut result = (options.do_embed)().await;
+                result.warnings.push(Warning::Other {
+                    message: self.0.to_string(),
+                });
+                result
+            }))
+        }
+    }
+
     fn poll_ready<T>(mut future: Ready<T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -786,6 +903,25 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test future only awaits ready futures"),
         }
+    }
+
+    fn embedding_provider_options(value: serde_json::Value) -> crate::provider::ProviderOptions {
+        serde_json::from_value(value).expect("provider options deserialize")
+    }
+
+    fn transform_default_embedding_settings(
+        settings: EmbeddingModelDefaultSettings,
+        params: EmbeddingModelCallOptions,
+    ) -> EmbeddingModelCallOptions {
+        let middleware = default_embedding_settings_middleware(settings);
+        let transformed = middleware
+            .transform_params(EmbeddingModelTransformParamsOptions::new(
+                params,
+                &StaticEmbeddingModel,
+            ))
+            .expect("default settings implements transform params");
+
+        poll_ready(transformed)
     }
 
     #[test]
@@ -844,36 +980,8 @@ mod tests {
 
     #[test]
     fn embedding_model_middleware_hooks_are_optional_by_default() {
-        struct NoopMiddleware;
-
-        impl EmbeddingModelMiddleware<StaticEmbeddingModel> for NoopMiddleware {
-            type OverrideMaxEmbeddingsPerCallFuture<'a>
-                = Ready<Option<usize>>
-            where
-                Self: 'a,
-                StaticEmbeddingModel: 'a;
-
-            type OverrideSupportsParallelCallsFuture<'a>
-                = Ready<bool>
-            where
-                Self: 'a,
-                StaticEmbeddingModel: 'a;
-
-            type TransformParamsFuture<'a>
-                = Ready<EmbeddingModelCallOptions>
-            where
-                Self: 'a,
-                StaticEmbeddingModel: 'a;
-
-            type WrapEmbedFuture<'a>
-                = Ready<EmbeddingModelResult>
-            where
-                Self: 'a,
-                StaticEmbeddingModel: 'a;
-        }
-
         let model = StaticEmbeddingModel;
-        let middleware = NoopMiddleware;
+        let middleware = NoopEmbeddingMiddleware;
 
         assert_eq!(
             middleware.override_provider(EmbeddingModelMiddlewareModelOptions::new(&model)),
@@ -947,6 +1055,176 @@ mod tests {
                 },
                 Warning::Other {
                     message: "wrapped echo-embedding".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_embedding_model_model_property_should_pass_through_by_default() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, NoopEmbeddingMiddleware);
+
+        assert_eq!(wrapped.model_id(), "embed-base");
+    }
+
+    #[test]
+    fn wrap_embedding_model_model_property_should_use_middleware_override_model_id_if_provided() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware);
+
+        assert_eq!(wrapped.model_id(), "embed-base-wrapped");
+    }
+
+    #[test]
+    fn wrap_embedding_model_model_property_should_use_model_id_parameter_if_provided() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware)
+            .with_model_id("override-model");
+
+        assert_eq!(wrapped.model_id(), "override-model");
+    }
+
+    #[test]
+    fn wrap_embedding_model_provider_property_should_pass_through_by_default() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, NoopEmbeddingMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider");
+    }
+
+    #[test]
+    fn wrap_embedding_model_provider_property_should_use_middleware_override_provider_if_provided()
+    {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware);
+
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+    }
+
+    #[test]
+    fn wrap_embedding_model_provider_property_should_use_provider_id_parameter_if_provided() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware)
+            .with_provider_id("override-provider");
+
+        assert_eq!(wrapped.provider(), "override-provider");
+    }
+
+    #[test]
+    fn wrap_embedding_model_max_embeddings_per_call_property_should_pass_through_by_default() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, NoopEmbeddingMiddleware);
+
+        assert_eq!(poll_boxed(wrapped.max_embeddings_per_call()), Some(4));
+    }
+
+    #[test]
+    fn wrap_embedding_model_max_embeddings_per_call_property_should_use_middleware_override_if_provided()
+     {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware);
+
+        assert_eq!(poll_boxed(wrapped.max_embeddings_per_call()), Some(8));
+    }
+
+    #[test]
+    fn wrap_embedding_model_supports_parallel_calls_property_should_pass_through_by_default() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, NoopEmbeddingMiddleware);
+
+        assert!(poll_boxed(wrapped.supports_parallel_calls()));
+    }
+
+    #[test]
+    fn wrap_embedding_model_supports_parallel_calls_property_should_use_middleware_override_if_provided()
+     {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware);
+
+        assert!(!poll_boxed(wrapped.supports_parallel_calls()));
+    }
+
+    #[test]
+    fn wrap_embedding_model_should_call_transform_params_middleware_for_do_embed() {
+        let wrapped = wrap_embedding_model(
+            ParamEchoEmbeddingModel,
+            AppendEmbeddingValueMiddleware("step"),
+        );
+
+        let result =
+            poll_boxed(wrapped.do_embed(EmbeddingModelCallOptions::new(vec!["input".to_string()])));
+
+        assert_eq!(result.embeddings, vec![vec![2.0]]);
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "input|step".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_embedding_model_should_call_wrap_embed_middleware() {
+        let wrapped = wrap_embedding_model(
+            ParamEchoEmbeddingModel,
+            AppendEmbeddingWarningMiddleware("wrap"),
+        );
+
+        let result =
+            poll_boxed(wrapped.do_embed(EmbeddingModelCallOptions::new(vec!["input".to_string()])));
+
+        assert_eq!(result.embeddings, vec![vec![1.0]]);
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "input".to_string(),
+                },
+                Warning::Other {
+                    message: "wrap".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_embedding_model_should_call_multiple_transform_params_middlewares_in_sequence_for_do_embed()
+     {
+        let wrapped = wrap_embedding_model(
+            wrap_embedding_model(
+                ParamEchoEmbeddingModel,
+                AppendEmbeddingValueMiddleware("step-1"),
+            ),
+            AppendEmbeddingValueMiddleware("step-2"),
+        );
+
+        let result =
+            poll_boxed(wrapped.do_embed(EmbeddingModelCallOptions::new(vec!["input".to_string()])));
+
+        assert_eq!(result.embeddings, vec![vec![3.0]]);
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "input|step-2|step-1".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn wrap_embedding_model_should_chain_multiple_wrap_embed_middlewares_in_the_correct_order() {
+        let wrapped = wrap_embedding_model(
+            wrap_embedding_model(
+                ParamEchoEmbeddingModel,
+                AppendEmbeddingWarningMiddleware("inner"),
+            ),
+            AppendEmbeddingWarningMiddleware("outer"),
+        );
+
+        let result =
+            poll_boxed(wrapped.do_embed(EmbeddingModelCallOptions::new(vec!["input".to_string()])));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "input".to_string(),
+                },
+                Warning::Other {
+                    message: "inner".to_string(),
+                },
+                Warning::Other {
+                    message: "outer".to_string(),
                 }
             ]
         );
@@ -1084,6 +1362,116 @@ mod tests {
         let params = poll_ready(transformed);
 
         assert_eq!(params.headers, None);
+        assert_eq!(params.provider_options, None);
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_merge_headers() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new()
+                .with_header("X-Custom-Header", "test")
+                .with_header("X-Another-Header", "test2"),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                .with_header("X-Custom-Header", "test2"),
+        );
+
+        assert_eq!(
+            params.headers,
+            Some(BTreeMap::from([
+                ("X-Custom-Header".to_string(), "test2".to_string()),
+                ("X-Another-Header".to_string(), "test2".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_default_headers() {
+        let mut settings = EmbeddingModelDefaultSettings::new();
+        settings.headers = Some(BTreeMap::new());
+
+        let params = transform_default_embedding_settings(
+            settings,
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                .with_header("X-Param-Header", "param"),
+        );
+
+        assert_eq!(
+            params.headers,
+            Some(BTreeMap::from([(
+                "X-Param-Header".to_string(),
+                "param".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_param_headers() {
+        let mut call_options = EmbeddingModelCallOptions::new(vec!["hello world".to_string()]);
+        call_options.headers = Some(BTreeMap::new());
+
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new().with_header("X-Default-Header", "default"),
+            call_options,
+        );
+
+        assert_eq!(
+            params.headers,
+            Some(BTreeMap::from([(
+                "X-Default-Header".to_string(),
+                "default".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_both_headers_being_undefined() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new(),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()]),
+        );
+
+        assert_eq!(params.headers, None);
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_default_provider_options() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new()
+                .with_provider_options(embedding_provider_options(json!({}))),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()]).with_provider_options(
+                embedding_provider_options(json!({ "openai": { "user": "param-user" } })),
+            ),
+        );
+
+        assert_eq!(
+            serde_json::to_value(params.provider_options).expect("provider options serialize"),
+            json!({ "openai": { "user": "param-user" } })
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_empty_param_provider_options() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new().with_provider_options(embedding_provider_options(
+                json!({ "anthropic": { "user": "default-user" } }),
+            )),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                .with_provider_options(embedding_provider_options(json!({}))),
+        );
+
+        assert_eq!(
+            serde_json::to_value(params.provider_options).expect("provider options serialize"),
+            json!({ "anthropic": { "user": "default-user" } })
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_should_handle_both_provider_options_being_undefined() {
+        let params = transform_default_embedding_settings(
+            EmbeddingModelDefaultSettings::new(),
+            EmbeddingModelCallOptions::new(vec!["hello world".to_string()]),
+        );
+
         assert_eq!(params.provider_options, None);
     }
 }

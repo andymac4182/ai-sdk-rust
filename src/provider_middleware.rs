@@ -80,6 +80,79 @@ where
     }
 }
 
+/// Provider wrapper that applies image model middleware to every image lookup.
+///
+/// This mirrors the upstream `imageModelMiddleware` option for provider
+/// registry use without requiring a language-model middleware value.
+#[derive(Clone, Debug)]
+pub struct WrappedProviderWithImageModelMiddleware<P, IW> {
+    provider: P,
+    image_model_middleware: IW,
+}
+
+impl<P, IW> WrappedProviderWithImageModelMiddleware<P, IW> {
+    /// Creates a provider wrapper that applies middleware to image models.
+    pub fn new(provider: P, image_model_middleware: IW) -> Self {
+        Self {
+            provider,
+            image_model_middleware,
+        }
+    }
+
+    /// Returns the wrapped provider.
+    pub fn provider(&self) -> &P {
+        &self.provider
+    }
+
+    /// Returns the image model middleware applied by this wrapper.
+    pub fn image_model_middleware(&self) -> &IW {
+        &self.image_model_middleware
+    }
+
+    /// Consumes the wrapper into the provider and image middleware.
+    pub fn into_parts(self) -> (P, IW) {
+        (self.provider, self.image_model_middleware)
+    }
+}
+
+/// Wraps a provider with image model middleware.
+pub fn wrap_provider_with_image_model_middleware<P, IW>(
+    provider: P,
+    image_model_middleware: IW,
+) -> WrappedProviderWithImageModelMiddleware<P, IW> {
+    WrappedProviderWithImageModelMiddleware::new(provider, image_model_middleware)
+}
+
+impl<P, IW> Provider for WrappedProviderWithImageModelMiddleware<P, IW>
+where
+    P: Provider,
+    P::ImageModel: Sync,
+    IW: ImageModelMiddleware<P::ImageModel> + Clone + Sync,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = WrappedImageModel<P::ImageModel, IW>;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        Ok(wrap_image_model(
+            self.provider.image_model(model_id)?,
+            self.image_model_middleware.clone(),
+        ))
+    }
+}
+
 /// Provider wrapper that applies language and image model middleware.
 ///
 /// This mirrors the upstream `imageModelMiddleware` option on `wrapProvider`.

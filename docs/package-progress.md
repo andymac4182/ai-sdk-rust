@@ -3,8 +3,8 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 56
-- Average estimated completion: 50.4%
-- Portable package average: 39.6%
+- Average estimated completion: 51.1%
+- Portable package average: 40.4%
 - Closed package rows: 13 / 56
 - Strict portable verified rows: 3 / 46
 - In-progress rows: 28
@@ -33,9 +33,9 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `ai` | 98% | In progress | core package | Core surface is broad; model resolution plus abort, callback, serial job, token metric, response-message, portable... |
-| `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
 | `@ai-sdk/provider-utils` | 82% | In progress | provider support library | Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod... |
-| `@ai-sdk/openai` | 65% | In progress | provider package | OpenAI/Open Responses foundations exist; broader Responses, files, speech, transcription, and provider surfaces remain. |
+| `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
+| `@ai-sdk/openai` | 99% | In progress | provider package | OpenAI/Open Responses foundations, provider base URL precedence, language-model capability matrix, hosted... |
 | `@ai-sdk/open-responses` | 88% | In progress | provider package | Most fixture, tool, prompt, request, metadata, and stream slices are mapped; remaining... |
 | `@ai-sdk/assemblyai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
@@ -59,7 +59,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/voyage` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/mcp` | 90% | In progress | protocol/client package | Protocol, transports, OAuth, examples, and Gateway tool bridge are broad; protected live auth validation and hosted... |
 | `@ai-sdk/otel` | 82% | In progress | telemetry package | Package helpers, span lifecycle, local OTLP export, and Gateway live telemetry proof exist; broader provider live... |
-| `@ai-sdk/workflow` | 72% | In progress | agent/workflow package | WorkflowAgent and iterator callback/continuation coverage is substantial; real model execution, HTTP/SSE adapters, and... |
+| `@ai-sdk/workflow` | 76% | In progress | agent/workflow package | WorkflowAgent and iterator callback/continuation coverage is substantial, including named providerMetadata/OpenAI... |
 
 ## Not Started
 

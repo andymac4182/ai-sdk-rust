@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use crate::agent::{ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings};
 use crate::file_data::{FileData, ProviderReference};
@@ -6,21 +7,22 @@ use crate::generate_text::{GenerateTextTool, ToolModelOutputErrorMode, create_to
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    LanguageModel, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
-    LanguageModelCustomPart, LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage,
-    LanguageModelPrompt, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
-    LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-    LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-    LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
-    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
-    LanguageModelUserMessage,
+    FinishReason, LanguageModel, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
+    LanguageModelAssistantMessage, LanguageModelCustomPart, LanguageModelFileData,
+    LanguageModelFilePart, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelStreamPart,
+    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
+    LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolContentPart,
+    LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+    LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::prompt::Prompt;
 use crate::provider::ProviderOptions;
 use crate::provider_utils::{ParseJsonResult, Tool, normalize_headers, parse_json_event_stream};
 use crate::stream_text::StreamTextUiMessageStreamOptions;
 use crate::ui_message_stream::{
-    UiMessage, UiMessageChunk, UiMessageRole, transform_text_to_ui_message_stream,
+    StreamingUiMessageState, UiMessage, UiMessageChunk, UiMessageRole, process_ui_message_stream,
+    transform_text_to_ui_message_stream,
 };
 
 /// Credentials mode used by upstream browser fetch transports.
@@ -90,7 +92,7 @@ impl ChatRequestOptions {
 }
 
 /// Options passed to [`ChatTransport::send_messages`].
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatTransportSendOptions {
     pub trigger: ChatTransportTrigger,
@@ -104,6 +106,9 @@ pub struct ChatTransportSendOptions {
 
     #[serde(default)]
     pub request: ChatRequestOptions,
+
+    #[serde(skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl ChatTransportSendOptions {
@@ -114,6 +119,7 @@ impl ChatTransportSendOptions {
             message_id: None,
             messages: Vec::new(),
             request: ChatRequestOptions::default(),
+            abort_signal: None,
         }
     }
 
@@ -130,6 +136,26 @@ impl ChatTransportSendOptions {
     pub fn with_request(mut self, request: ChatRequestOptions) -> Self {
         self.request = request;
         self
+    }
+
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+}
+
+impl PartialEq for ChatTransportSendOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.trigger == other.trigger
+            && self.chat_id == other.chat_id
+            && self.message_id == other.message_id
+            && self.messages == other.messages
+            && self.request == other.request
+            && match (&self.abort_signal, &other.abort_signal) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.is_same_signal(right),
+                _ => false,
+            }
     }
 }
 
@@ -158,10 +184,22 @@ impl ChatTransportReconnectOptions {
 }
 
 /// Error returned by Rust chat transport implementations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ChatTransportError {
     Fetch(String),
-    ResponseStatus { status: u16, body: String },
+    StreamDisconnect {
+        message: String,
+        chunks: Vec<UiMessageChunk>,
+    },
+    StreamAbort {
+        message: String,
+        chunks: Vec<UiMessageChunk>,
+        reason: Option<JsonValue>,
+    },
+    ResponseStatus {
+        status: u16,
+        body: String,
+    },
     EmptyBody,
     InvalidMessage(String),
     Agent(String),
@@ -171,6 +209,9 @@ impl fmt::Display for ChatTransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fetch(message) => formatter.write_str(message),
+            Self::StreamDisconnect { message, .. } | Self::StreamAbort { message, .. } => {
+                formatter.write_str(message)
+            }
             Self::ResponseStatus { status, body } => {
                 write!(formatter, "chat transport returned status {status}: {body}")
             }
@@ -193,6 +234,509 @@ pub trait ChatTransport {
         &self,
         options: ChatTransportReconnectOptions,
     ) -> Result<Option<Vec<UiMessageChunk>>, ChatTransportError>;
+}
+
+/// Status of a portable Rust [`Chat`] session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatStatus {
+    Ready,
+    Submitted,
+    Streaming,
+    Error,
+}
+
+/// Error returned by the portable Rust [`Chat`] state manager.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatError {
+    Transport(ChatTransportError),
+    Stream(String),
+}
+
+impl fmt::Display for ChatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "{error}"),
+            Self::Stream(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ChatError {}
+
+impl From<ChatTransportError> for ChatError {
+    fn from(error: ChatTransportError) -> Self {
+        Self::Transport(error)
+    }
+}
+
+/// Text-message input accepted by [`Chat::send_message`].
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+
+    pub text: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
+
+    #[serde(default)]
+    pub request: ChatRequestOptions,
+}
+
+impl ChatMessageInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            message_id: None,
+            text: text.into(),
+            metadata: None,
+            request: ChatRequestOptions::default(),
+        }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.message_id = Some(id.into());
+        self
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: impl Into<JsonValue>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
+
+    pub fn with_request(mut self, request: ChatRequestOptions) -> Self {
+        self.request = request;
+        self
+    }
+}
+
+/// Finish payload recorded by the Rust equivalent of upstream `Chat.onFinish`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatFinishEvent {
+    pub finish_reason: Option<FinishReason>,
+    pub is_abort: bool,
+    pub is_disconnect: bool,
+    pub is_error: bool,
+    pub message: Option<UiMessage>,
+    pub messages: Vec<UiMessage>,
+}
+
+struct FoldedChatResponse {
+    states: Vec<UiMessage>,
+    assistant_message: Option<UiMessage>,
+    finish_reason: Option<FinishReason>,
+}
+
+/// Portable Rust state manager for upstream `Chat` submit-message flows.
+pub struct Chat<T: ChatTransport> {
+    id: String,
+    transport: T,
+    messages: Vec<UiMessage>,
+    status: ChatStatus,
+    error: Option<String>,
+    is_aborted: bool,
+    abort_reason: Option<JsonValue>,
+    last_finish_event: Option<ChatFinishEvent>,
+    next_message_index: usize,
+}
+
+impl<T: ChatTransport> Chat<T> {
+    pub fn new(id: impl Into<String>, transport: T) -> Self {
+        Self {
+            id: id.into(),
+            transport,
+            messages: Vec::new(),
+            status: ChatStatus::Ready,
+            error: None,
+            is_aborted: false,
+            abort_reason: None,
+            last_finish_event: None,
+            next_message_index: 0,
+        }
+    }
+
+    pub fn with_messages(mut self, messages: impl IntoIterator<Item = UiMessage>) -> Self {
+        self.messages = messages.into_iter().collect();
+        self.next_message_index = self.messages.len();
+        self
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn status(&self) -> ChatStatus {
+        self.status
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.is_aborted
+    }
+
+    pub fn abort_reason(&self) -> Option<&JsonValue> {
+        self.abort_reason.as_ref()
+    }
+
+    pub fn last_finish_event(&self) -> Option<&ChatFinishEvent> {
+        self.last_finish_event.as_ref()
+    }
+
+    pub fn messages(&self) -> &[UiMessage] {
+        &self.messages
+    }
+
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        if self.status == ChatStatus::Error {
+            self.status = ChatStatus::Ready;
+        }
+    }
+
+    pub fn send_message(&mut self, input: ChatMessageInput) -> Result<Vec<UiMessage>, ChatError> {
+        let message_id = input
+            .message_id
+            .unwrap_or_else(|| self.generate_message_id());
+        let mut user_message = UiMessage::new(message_id.clone(), UiMessageRole::User)
+            .with_part(json_text_part(input.text));
+        if let Some(metadata) = input.metadata {
+            user_message = user_message.with_metadata(metadata);
+        }
+
+        if let Some(index) = self
+            .messages
+            .iter()
+            .position(|message| message.role == UiMessageRole::User && message.id == message_id)
+        {
+            self.messages.truncate(index);
+        }
+        self.messages.push(user_message);
+        self.status = ChatStatus::Submitted;
+        self.error = None;
+        self.is_aborted = false;
+        self.abort_reason = None;
+        self.last_finish_event = None;
+
+        let send_options =
+            ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, self.id.clone())
+                .with_message_id(message_id)
+                .with_messages(self.messages.clone())
+                .with_request(input.request);
+
+        self.status = ChatStatus::Streaming;
+        match self.transport.send_messages(send_options) {
+            Ok(chunks) => self.apply_response_chunks(chunks),
+            Err(ChatTransportError::StreamDisconnect { message, chunks }) => {
+                self.apply_disconnected_response_chunks(chunks, message)
+            }
+            Err(ChatTransportError::StreamAbort {
+                message: _,
+                chunks,
+                reason,
+            }) => self.apply_aborted_response_chunks(chunks, reason),
+            Err(error) => {
+                self.status = ChatStatus::Error;
+                let message = error.to_string();
+                self.error = Some(message);
+                self.last_finish_event = None;
+                Err(error.into())
+            }
+        }
+    }
+
+    pub fn add_tool_output(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        output: impl Into<JsonValue>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::tool_output_available(
+            tool_call_id,
+            output,
+        )])
+    }
+
+    pub fn add_tool_result(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        output: impl Into<JsonValue>,
+    ) -> Result<(), ChatError> {
+        self.add_tool_output(tool_call_id, output)
+    }
+
+    pub fn add_dynamic_tool_output(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        output: impl Into<JsonValue>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::ToolOutputAvailable {
+            tool_call_id: tool_call_id.into(),
+            output: output.into(),
+            provider_executed: None,
+            provider_metadata: None,
+            tool_metadata: None,
+            preliminary: None,
+            dynamic: Some(true),
+        }])
+    }
+
+    pub fn add_tool_error(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        error_text: impl Into<String>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::tool_output_error(
+            tool_call_id,
+            error_text,
+        )])
+    }
+
+    pub fn add_tool_approval_response(
+        &mut self,
+        approval_id: impl Into<String>,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<(), ChatError> {
+        self.update_last_assistant_with_chunks([UiMessageChunk::ToolApprovalResponse {
+            approval_id: approval_id.into(),
+            approved,
+            reason,
+            provider_executed: None,
+        }])
+    }
+
+    pub fn submit_latest_assistant_message(
+        &mut self,
+        request: ChatRequestOptions,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let assistant_index = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == UiMessageRole::Assistant)
+            .ok_or_else(|| ChatError::Stream("No assistant message exists.".to_string()))?;
+        let message_id = self.messages[assistant_index].id.clone();
+
+        self.status = ChatStatus::Submitted;
+        self.error = None;
+        self.is_aborted = false;
+        self.abort_reason = None;
+        self.last_finish_event = None;
+
+        let send_options =
+            ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, self.id.clone())
+                .with_message_id(message_id)
+                .with_messages(self.messages.clone())
+                .with_request(request);
+
+        self.status = ChatStatus::Streaming;
+        match self.transport.send_messages(send_options) {
+            Ok(chunks) => self.apply_response_chunks_to_existing_assistant(assistant_index, chunks),
+            Err(error) => {
+                self.status = ChatStatus::Error;
+                let message = error.to_string();
+                self.error = Some(message);
+                self.last_finish_event = None;
+                Err(error.into())
+            }
+        }
+    }
+
+    fn generate_message_id(&mut self) -> String {
+        self.next_message_index += 1;
+        format!("msg-{}", self.next_message_index)
+    }
+
+    fn update_last_assistant_with_chunks(
+        &mut self,
+        chunks: impl IntoIterator<Item = UiMessageChunk>,
+    ) -> Result<(), ChatError> {
+        let assistant_index = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == UiMessageRole::Assistant)
+            .ok_or_else(|| ChatError::Stream("No assistant message exists.".to_string()))?;
+
+        let last_message = self.messages[assistant_index].clone();
+        let mut state = StreamingUiMessageState::new(last_message.id.clone(), Some(last_message));
+        process_ui_message_stream(&mut state, chunks, false)
+            .map_err(|error| ChatError::Stream(error.to_string()))?;
+        self.messages[assistant_index] = state.message;
+        Ok(())
+    }
+
+    fn apply_response_chunks_to_existing_assistant(
+        &mut self,
+        assistant_index: usize,
+        chunks: Vec<UiMessageChunk>,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let has_error_chunk = chunks.iter().find_map(|chunk| match chunk {
+            UiMessageChunk::Error { error_text } => Some(error_text.clone()),
+            _ => None,
+        });
+        if let Some(error_text) = has_error_chunk {
+            self.status = ChatStatus::Error;
+            self.error = Some(error_text.clone());
+            self.is_aborted = false;
+            self.abort_reason = None;
+            self.last_finish_event = None;
+            return Err(ChatError::Stream(error_text));
+        }
+
+        let last_message = self.messages[assistant_index].clone();
+        let mut state = StreamingUiMessageState::new(last_message.id.clone(), Some(last_message));
+        let states = process_ui_message_stream(&mut state, chunks, false).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        let assistant_message = state.message.clone();
+        self.messages[assistant_index] = assistant_message.clone();
+        self.status = ChatStatus::Ready;
+        self.is_aborted = state.aborted;
+        self.abort_reason = state.abort_reason;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: state.finish_reason,
+            is_abort: self.is_aborted,
+            is_disconnect: false,
+            is_error: false,
+            message: Some(assistant_message),
+            messages: self.messages.clone(),
+        });
+        Ok(states)
+    }
+
+    fn apply_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let has_error_chunk = chunks.iter().find_map(|chunk| match chunk {
+            UiMessageChunk::Error { error_text } => Some(error_text.clone()),
+            _ => None,
+        });
+        if let Some(error_text) = has_error_chunk {
+            self.status = ChatStatus::Error;
+            self.error = Some(error_text.clone());
+            self.is_aborted = false;
+            self.abort_reason = None;
+            self.last_finish_event = None;
+            return Err(ChatError::Stream(error_text));
+        }
+
+        let folded = self.fold_response_chunks(chunks, false).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        self.status = ChatStatus::Ready;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: folded.finish_reason,
+            is_abort: self.is_aborted,
+            is_disconnect: false,
+            is_error: false,
+            message: folded.assistant_message,
+            messages: self.messages.clone(),
+        });
+        Ok(folded.states)
+    }
+
+    fn apply_disconnected_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+        message: String,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let original_chunks = chunks.clone();
+        let folded = self.fold_response_chunks(chunks, true).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        self.status = ChatStatus::Error;
+        self.error = Some(message.clone());
+        self.is_aborted = false;
+        self.abort_reason = None;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: folded.finish_reason,
+            is_abort: false,
+            is_disconnect: true,
+            is_error: true,
+            message: folded.assistant_message,
+            messages: self.messages.clone(),
+        });
+        Err(ChatError::Transport(ChatTransportError::StreamDisconnect {
+            message,
+            chunks: original_chunks,
+        }))
+    }
+
+    fn apply_aborted_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+        reason: Option<JsonValue>,
+    ) -> Result<Vec<UiMessage>, ChatError> {
+        let folded = self.fold_response_chunks(chunks, true).map_err(|error| {
+            self.last_finish_event = None;
+            ChatError::Stream(error.to_string())
+        })?;
+        self.status = ChatStatus::Ready;
+        self.error = None;
+        self.is_aborted = true;
+        self.abort_reason = reason;
+        self.last_finish_event = Some(ChatFinishEvent {
+            finish_reason: folded.finish_reason,
+            is_abort: true,
+            is_disconnect: false,
+            is_error: false,
+            message: folded.assistant_message,
+            messages: self.messages.clone(),
+        });
+        Ok(folded.states)
+    }
+
+    fn fold_response_chunks(
+        &mut self,
+        chunks: Vec<UiMessageChunk>,
+        keep_active_parts_streaming: bool,
+    ) -> Result<FoldedChatResponse, ChatTransportError> {
+        let mut state = StreamingUiMessageState::new("", None);
+        let states = process_ui_message_stream(&mut state, chunks, keep_active_parts_streaming)
+            .map_err(|error| ChatTransportError::InvalidMessage(error.to_string()))?;
+
+        let has_assistant_message = !state.message.id.is_empty()
+            || !state.message.parts.is_empty()
+            || state.message.metadata.is_some();
+        let assistant_message = if has_assistant_message {
+            Some(state.message.clone())
+        } else {
+            None
+        };
+        if let Some(message) = &assistant_message {
+            self.messages.push(message.clone());
+        }
+        self.is_aborted = state.aborted;
+        self.abort_reason = state.abort_reason;
+        Ok(FoldedChatResponse {
+            states,
+            assistant_message,
+            finish_reason: state.finish_reason,
+        })
+    }
+}
+
+fn json_text_part(text: impl Into<String>) -> JsonValue {
+    let mut part = JsonObject::new();
+    part.insert("type".to_string(), JsonValue::String("text".to_string()));
+    part.insert("text".to_string(), JsonValue::String(text.into()));
+    JsonValue::Object(part)
 }
 
 /// Constructor options for the Rust equivalent of upstream `DirectChatTransport`.
@@ -275,8 +819,11 @@ impl<'transport, 'agent, M: LanguageModel + ?Sized> DirectChatTransport<'transpo
     {
         let model_messages = convert_ui_messages_to_model_messages(&options.messages)?;
         let prompt = Prompt::from_messages(model_messages).with_allow_system_in_messages(true);
-        let call_options =
+        let mut call_options =
             ToolLoopAgentCallOptions::new(prompt).with_model_settings(self.model_settings.clone());
+        if let Some(abort_signal) = options.abort_signal {
+            call_options = call_options.with_abort_signal(abort_signal);
+        }
         let result = self
             .agent
             .stream(call_options)
@@ -1380,12 +1927,14 @@ pub struct HttpChatTransportRequest {
 }
 
 /// Constructor options for the Rust equivalent of upstream `HttpChatTransport`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct HttpChatTransportOptions {
     pub api: String,
     pub credentials: Option<RequestCredentials>,
     pub headers: Headers,
+    pub header_callback: Option<Arc<dyn Fn() -> Headers + Send + Sync>>,
     pub body: Option<JsonObject>,
+    pub body_callback: Option<Arc<dyn Fn() -> JsonObject + Send + Sync>>,
 }
 
 impl Default for HttpChatTransportOptions {
@@ -1394,8 +1943,35 @@ impl Default for HttpChatTransportOptions {
             api: "/api/chat".to_string(),
             credentials: None,
             headers: Headers::new(),
+            header_callback: None,
             body: None,
+            body_callback: None,
         }
+    }
+}
+
+impl fmt::Debug for HttpChatTransportOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpChatTransportOptions")
+            .field("api", &self.api)
+            .field("credentials", &self.credentials)
+            .field("headers", &self.headers)
+            .field("has_header_callback", &self.header_callback.is_some())
+            .field("body", &self.body)
+            .field("has_body_callback", &self.body_callback.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for HttpChatTransportOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.api == other.api
+            && self.credentials == other.credentials
+            && self.headers == other.headers
+            && self.header_callback.is_some() == other.header_callback.is_some()
+            && self.body == other.body
+            && self.body_callback.is_some() == other.body_callback.is_some()
     }
 }
 
@@ -1419,8 +1995,18 @@ impl HttpChatTransportOptions {
         self
     }
 
+    pub fn with_header_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> Headers + Send + Sync + 'static,
+    {
+        self.headers = Headers::new();
+        self.header_callback = Some(Arc::new(callback));
+        self
+    }
+
     pub fn with_body(mut self, body: JsonObject) -> Self {
         self.body = Some(body);
+        self.body_callback = None;
         self
     }
 
@@ -1432,7 +2018,33 @@ impl HttpChatTransportOptions {
         self.body
             .get_or_insert_with(JsonObject::new)
             .insert(name.into(), value.into());
+        self.body_callback = None;
         self
+    }
+
+    pub fn with_body_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> JsonObject + Send + Sync + 'static,
+    {
+        self.body = None;
+        self.body_callback = Some(Arc::new(callback));
+        self
+    }
+
+    fn resolved_headers(&self) -> Headers {
+        if let Some(callback) = &self.header_callback {
+            callback()
+        } else {
+            self.headers.clone()
+        }
+    }
+
+    fn resolved_body(&self) -> Option<JsonObject> {
+        if let Some(callback) = &self.body_callback {
+            Some(callback())
+        } else {
+            self.body.clone()
+        }
     }
 }
 
@@ -1563,7 +2175,9 @@ impl HttpChatTransport {
         &self,
         options: &ChatTransportSendOptions,
     ) -> PrepareSendMessagesRequestOptions {
-        let body = merged_body(self.options.body.as_ref(), options.request.body.as_ref());
+        let transport_body = self.options.resolved_body();
+        let transport_headers = self.options.resolved_headers();
+        let body = merged_body(transport_body.as_ref(), options.request.body.as_ref());
 
         PrepareSendMessagesRequestOptions {
             api: self.options.api.clone(),
@@ -1571,7 +2185,7 @@ impl HttpChatTransport {
             messages: options.messages.clone(),
             request_metadata: options.request.metadata.clone(),
             body,
-            headers: merged_headers(&self.options.headers, &options.request.headers),
+            headers: merged_headers(&transport_headers, &options.request.headers),
             credentials: self.options.credentials,
             trigger: options.trigger,
             message_id: options.message_id.clone(),
@@ -1617,12 +2231,15 @@ impl HttpChatTransport {
         &self,
         options: &ChatTransportReconnectOptions,
     ) -> PrepareReconnectToStreamRequestOptions {
+        let transport_body = self.options.resolved_body();
+        let transport_headers = self.options.resolved_headers();
+
         PrepareReconnectToStreamRequestOptions {
             api: self.options.api.clone(),
             id: options.chat_id.clone(),
             request_metadata: options.request.metadata.clone(),
-            body: merged_body(self.options.body.as_ref(), options.request.body.as_ref()),
-            headers: merged_headers(&self.options.headers, &options.request.headers),
+            body: merged_body(transport_body.as_ref(), options.request.body.as_ref()),
+            headers: merged_headers(&transport_headers, &options.request.headers),
             credentials: self.options.credentials,
         }
     }
@@ -1882,17 +2499,20 @@ fn default_send_messages_body(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
     use super::*;
     use crate::agent::{ToolLoopAgent, ToolLoopAgentSettings};
     use crate::language_model::{
-        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelReasoningDelta,
-        LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelStreamFinish,
-        LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelTextDelta,
-        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelAbortController, LanguageModelFinishReason,
+        LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+        LanguageModelStreamFinish, LanguageModelStreamResult, LanguageModelStreamStart,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage,
+        OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use serde_json::json;
@@ -1930,6 +2550,93 @@ mod tests {
             unified: FinishReason::Stop,
             raw: Some("stop".to_string()),
         }
+    }
+
+    fn chat_disconnected_partial_chunks() -> Vec<UiMessageChunk> {
+        vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+        ]
+    }
+
+    fn chat_disconnected_expected_messages() -> JsonValue {
+        json!([
+            {
+                "id": "user-1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            }
+        ])
+    }
+
+    fn chat_aborted_partial_chunks() -> Vec<UiMessageChunk> {
+        vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+        ]
+    }
+
+    fn chat_aborted_expected_messages() -> JsonValue {
+        json!([
+            {
+                "id": "user-1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            }
+        ])
+    }
+
+    fn chat_simple_response_chunks() -> Vec<UiMessageChunk> {
+        vec![
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]
+    }
+
+    fn chat_simple_expected_messages() -> JsonValue {
+        json!([
+            {
+                "id": "user-1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello, world.", "state": "done" }
+                ]
+            }
+        ])
     }
 
     fn text_stream_result(
@@ -1974,6 +2681,1576 @@ mod tests {
 
     fn user_text_message(id: &str, text: &str) -> UiMessage {
         UiMessage::new(id, UiMessageRole::User).with_part(json!({ "type": "text", "text": text }))
+    }
+
+    #[derive(Debug)]
+    struct RecordingChatTransport {
+        responses: Mutex<VecDeque<Result<Vec<UiMessageChunk>, ChatTransportError>>>,
+        captured_sends: Mutex<Vec<ChatTransportSendOptions>>,
+    }
+
+    impl RecordingChatTransport {
+        fn new(response: impl IntoIterator<Item = UiMessageChunk>) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from([Ok(response.into_iter().collect())])),
+                captured_sends: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_responses(responses: impl IntoIterator<Item = Vec<UiMessageChunk>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(Ok).collect()),
+                captured_sends: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_send_results(
+            responses: impl IntoIterator<Item = Result<Vec<UiMessageChunk>, ChatTransportError>>,
+        ) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                captured_sends: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_error(error: ChatTransportError) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from([Err(error)])),
+                captured_sends: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn captured_send(&self) -> ChatTransportSendOptions {
+            self.captured_sends
+                .lock()
+                .expect("captured send mutex is not poisoned")
+                .last()
+                .cloned()
+                .expect("send was captured")
+        }
+
+        fn captured_sends(&self) -> Vec<ChatTransportSendOptions> {
+            self.captured_sends
+                .lock()
+                .expect("captured send mutex is not poisoned")
+                .clone()
+        }
+    }
+
+    impl ChatTransport for RecordingChatTransport {
+        fn send_messages(
+            &self,
+            options: ChatTransportSendOptions,
+        ) -> Result<Vec<UiMessageChunk>, ChatTransportError> {
+            self.captured_sends
+                .lock()
+                .expect("captured send mutex is not poisoned")
+                .push(options);
+            self.responses
+                .lock()
+                .expect("responses mutex is not poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Ok(Vec::new()))
+        }
+
+        fn reconnect_to_stream(
+            &self,
+            _options: ChatTransportReconnectOptions,
+        ) -> Result<Option<Vec<UiMessageChunk>>, ChatTransportError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn chat_should_send_the_messages_to_the_api() {
+        let transport = RecordingChatTransport::new(chat_simple_response_chunks());
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(captured.chat_id, "chat-1");
+        assert_eq!(captured.message_id, Some("user-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_return_the_correct_final_messages() {
+        let transport = RecordingChatTransport::new(chat_simple_response_chunks());
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_simple_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_should_include_the_metadata_of_text_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(
+                ChatMessageInput::text("Hello")
+                    .with_id("user-1")
+                    .with_metadata(json!({ "test": "metadata" }))
+                    .with_request(
+                        ChatRequestOptions::new().with_body_property("session", json!("s1")),
+                    ),
+            )
+            .expect("message sends");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(captured.chat_id, "chat-1");
+        assert_eq!(captured.message_id, Some("user-1".to_string()));
+        assert_eq!(
+            captured.request.body,
+            Some(JsonObject::from_iter([(
+                "session".to_string(),
+                json!("s1")
+            )]))
+        );
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "metadata": { "test": "metadata" },
+                    "parts": [{ "type": "text", "text": "Hello" }]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "metadata": { "test": "metadata" },
+                    "parts": [{ "type": "text", "text": "Hello" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello.", "state": "done" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            states.last().and_then(|message| message.parts.last()),
+            Some(&json!({ "type": "text", "text": "Hello.", "state": "done" }))
+        );
+    }
+
+    #[test]
+    fn chat_should_call_on_finish_with_message_and_messages() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, Some(FinishReason::Stop));
+        assert!(!event.is_abort);
+        assert!(!event.is_disconnect);
+        assert!(!event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello, world.", "state": "done" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello, world.", "state": "done" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_handle_error_parts() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start(),
+            UiMessageChunk::error("test-error"),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let error = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("error chunk fails chat send");
+
+        assert_eq!(error, ChatError::Stream("test-error".to_string()));
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(chat.error(), Some("test-error"));
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_clear_the_error_and_set_the_status_to_ready() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start(),
+            UiMessageChunk::error("test-error"),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("error chunk fails chat send");
+
+        assert_eq!(chat.error(), Some("test-error"));
+        assert_eq!(chat.status(), ChatStatus::Error);
+
+        chat.clear_error();
+
+        assert_eq!(chat.error(), None);
+        assert_eq!(chat.status(), ChatStatus::Ready);
+    }
+
+    #[test]
+    fn chat_should_set_error_status_when_transport_send_fails() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::ResponseStatus {
+            status: 500,
+            body: "Internal Server Error".to_string(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        let error = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("transport failure is surfaced");
+
+        assert_eq!(
+            error.to_string(),
+            "chat transport returned status 500: Internal Server Error"
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(
+            chat.error(),
+            Some("chat transport returned status 500: Internal Server Error")
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_handle_a_disconnected_response_stream() {
+        let partial_chunks = chat_disconnected_partial_chunks();
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: partial_chunks.clone(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        let error = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        assert_eq!(
+            error,
+            ChatError::Transport(ChatTransportError::StreamDisconnect {
+                message: "fetch failed".to_string(),
+                chunks: partial_chunks
+            })
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(chat.error(), Some("fetch failed"));
+        assert!(!chat.is_aborted());
+        assert_eq!(chat.abort_reason(), None);
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.is_abort);
+        assert!(event.is_disconnect);
+        assert!(event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_disconnected_expected_messages()
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            serde_json::to_value(chat.messages()).expect("history serializes")
+        );
+    }
+
+    #[test]
+    fn chat_disconnected_should_call_on_finish_with_message_and_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: chat_disconnected_partial_chunks(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.is_abort);
+        assert!(event.is_disconnect);
+        assert!(event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            chat_disconnected_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_disconnected_should_return_the_correct_final_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: chat_disconnected_partial_chunks(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_disconnected_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_disconnected_should_update_the_messages_during_streaming() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamDisconnect {
+            message: "fetch failed".to_string(),
+            chunks: chat_disconnected_partial_chunks(),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect_err("disconnect is surfaced");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(chat.error(), Some("fetch failed"));
+    }
+
+    #[test]
+    fn chat_should_handle_a_stop_and_an_aborted_response_stream() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::abort_with_reason(json!({ "source": "client" })),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("abort chunk does not fail chat send");
+
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(chat.error(), None);
+        assert!(chat.is_aborted());
+        assert_eq!(chat.abort_reason(), Some(&json!({ "source": "client" })));
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(event.is_abort);
+        assert!(!event.is_disconnect);
+        assert!(!event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "done" }
+                ]
+            })
+        );
+        assert_eq!(
+            states.last().and_then(|message| message.parts.last()),
+            Some(&json!({ "type": "text", "text": "Hello", "state": "done" }))
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "done" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_aborted_should_have_been_aborted() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: Some(json!("manual abort")),
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        assert!(chat.is_aborted());
+        assert_eq!(chat.abort_reason(), Some(&json!("manual abort")));
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(chat.error(), None);
+    }
+
+    #[test]
+    fn chat_aborted_should_call_on_finish_with_message_and_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: None,
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, None);
+        assert!(event.is_abort);
+        assert!(!event.is_disconnect);
+        assert!(!event.is_error);
+        assert_eq!(
+            serde_json::to_value(event.message.as_ref().expect("assistant message exists"))
+                .expect("message serializes"),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "streaming" }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&event.messages).expect("messages serialize"),
+            chat_aborted_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_aborted_should_return_the_correct_final_messages() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: None,
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_aborted_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_aborted_should_update_the_messages_during_streaming() {
+        let transport = RecordingChatTransport::with_error(ChatTransportError::StreamAbort {
+            message: "Aborted".to_string(),
+            chunks: chat_aborted_partial_chunks(),
+            reason: None,
+        });
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("stopped stream resolves without surfacing an error");
+
+        assert_eq!(
+            serde_json::to_value(&states).expect("states serialize"),
+            json!([
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": []
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "", "state": "streaming" }
+                    ]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "streaming" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            chat_aborted_expected_messages()
+        );
+    }
+
+    #[test]
+    fn chat_should_add_tool_output_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "tool-call-0",
+                "test-tool",
+                json!({ "testArg": "test-value" }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        chat.add_tool_output("tool-call-0", json!("test-output"))
+            .expect("tool output is added");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    fn assert_chat_tool_output_forwards_follow_up_options() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-0",
+                    "test-tool",
+                    json!({ "testArg": "test-value" }),
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![UiMessageChunk::finish()],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_output("tool-call-0", json!("test-output"))
+            .expect("tool output is added");
+        chat.submit_latest_assistant_message(
+            ChatRequestOptions::new()
+                .with_header("x-custom", "test-value")
+                .with_body_property("session", json!("s1")),
+        )
+        .expect("assistant message submits after tool output");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        let follow_up = &captured_sends[1];
+        assert_eq!(follow_up.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(follow_up.chat_id, "chat-1");
+        assert_eq!(follow_up.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            follow_up.request.headers.get("x-custom"),
+            Some(&"test-value".to_string())
+        );
+        assert_eq!(
+            follow_up.request.body,
+            Some(JsonObject::from_iter([(
+                "session".to_string(),
+                json!("s1")
+            )]))
+        );
+        assert_eq!(
+            serde_json::to_value(&follow_up.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            serde_json::to_value(&follow_up.messages).expect("messages serialize")
+        );
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(
+            event.message.as_ref().map(|message| message.id.as_str()),
+            Some("assistant-1")
+        );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_output_is_added() {
+        assert_chat_tool_output_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_add_tool_output_should_forward_options_to_make_request_when_auto_sending() {
+        assert_chat_tool_output_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_result_is_added() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-0",
+                    "test-tool",
+                    json!({ "testArg": "test-value" }),
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![UiMessageChunk::finish()],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_result("tool-call-0", json!("test-output"))
+            .expect("tool result is added");
+        chat.submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect("assistant message submits after tool result");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        let follow_up = &captured_sends[1];
+        assert_eq!(follow_up.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(follow_up.chat_id, "chat-1");
+        assert_eq!(follow_up.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&follow_up.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+    }
+
+    fn assert_chat_tool_output_does_not_submit_without_follow_up() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "tool-call-0",
+                "test-tool",
+                json!({ "testArg": "test-value" }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_output("tool-call-0", json!("test-output"))
+            .expect("tool output is added");
+
+        assert_eq!(chat.transport().captured_sends().len(), 1);
+        assert_eq!(chat.status(), ChatStatus::Ready);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_not_submit_message_when_tool_output_is_added_without_follow_up() {
+        assert_chat_tool_output_does_not_submit_without_follow_up();
+    }
+
+    #[test]
+    fn chat_should_delay_tool_output_submission_until_the_stream_is_finished() {
+        assert_chat_tool_output_does_not_submit_without_follow_up();
+    }
+
+    #[test]
+    fn chat_should_not_send_message_when_send_automatically_when_returns_false_via_promise() {
+        assert_chat_tool_output_does_not_submit_without_follow_up();
+    }
+
+    #[test]
+    fn chat_should_add_tool_error_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "tool-call-0",
+                "test-tool",
+                json!({ "testArg": "test-value" }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        chat.add_tool_error("tool-call-0", "test-error")
+            .expect("tool error is added");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-error",
+                            "input": { "testArg": "test-value" },
+                            "errorText": "test-error"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_error_result_is_added() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-0",
+                    "test-tool",
+                    json!({ "testArg": "test-value" }),
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![UiMessageChunk::finish()],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_tool_error("tool-call-0", "test-error")
+            .expect("tool error is added");
+        chat.submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect("assistant message submits after tool error");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        let follow_up = &captured_sends[1];
+        assert_eq!(follow_up.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(follow_up.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&follow_up.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-error",
+                            "input": { "testArg": "test-value" },
+                            "errorText": "test-error"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
+    }
+
+    #[test]
+    fn chat_should_add_dynamic_tool_output_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::ToolInputAvailable {
+                tool_call_id: "tool-call-0".to_string(),
+                tool_name: "test-tool".to_string(),
+                input: json!({ "testArg": "test-value" }),
+                provider_executed: None,
+                provider_metadata: None,
+                tool_metadata: None,
+                dynamic: Some(true),
+                title: None,
+            },
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
+            .expect("dynamic tool output is added");
+
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_dynamic_tool_output_is_added() {
+        let transport = RecordingChatTransport::with_responses([
+            vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "test-tool".to_string(),
+                    input: json!({ "testArg": "test-value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            vec![
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "test-delta"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish_with_reason(FinishReason::Stop),
+            ],
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
+            .expect("dynamic tool output is added");
+        chat.submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect("assistant message submits after dynamic tool output");
+
+        let captured_sends = chat.transport().captured_sends();
+        assert_eq!(captured_sends.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&captured_sends[1].messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        },
+                        { "type": "step-start" },
+                        { "type": "text", "text": "test-delta", "state": "done" }
+                    ]
+                }
+            ])
+        );
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            event.message.as_ref().map(|message| message.parts.len()),
+            Some(4)
+        );
+    }
+
+    fn assert_chat_server_error_follow_up_is_not_applied() {
+        let transport = RecordingChatTransport::with_send_results([
+            Ok(vec![
+                UiMessageChunk::start_with_message_id("assistant-1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "test-tool".to_string(),
+                    input: json!({ "testArg": "test-value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ]),
+            Err(ChatTransportError::ResponseStatus {
+                status: 500,
+                body: "Internal Server Error".to_string(),
+            }),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+        chat.add_dynamic_tool_output("tool-call-0", json!("test-output"))
+            .expect("dynamic tool output is added");
+
+        let error = chat
+            .submit_latest_assistant_message(ChatRequestOptions::default())
+            .expect_err("follow-up transport failure is surfaced");
+
+        assert_eq!(
+            error.to_string(),
+            "chat transport returned status 500: Internal Server Error"
+        );
+        assert_eq!(chat.status(), ChatStatus::Error);
+        assert_eq!(
+            chat.error(),
+            Some("chat transport returned status 500: Internal Server Error")
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "dynamic-tool",
+                            "toolName": "test-tool",
+                            "toolCallId": "tool-call-0",
+                            "state": "output-available",
+                            "input": { "testArg": "test-value" },
+                            "output": "test-output"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_keep_tool_output_state_when_follow_up_send_fails() {
+        assert_chat_server_error_follow_up_is_not_applied();
+    }
+
+    #[test]
+    fn chat_should_not_send_message_when_the_server_responded_with_an_error() {
+        assert_chat_server_error_follow_up_is_not_applied();
+    }
+
+    #[test]
+    fn chat_should_add_tool_approval_response_to_the_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            user_text_message("user-1", "What is the weather in Tokyo?"),
+            UiMessage::new("assistant-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "toolCallId": "call-1",
+                    "state": "approval-requested",
+                    "input": { "city": "Tokyo" },
+                    "approval": { "id": "approval-1" }
+                })),
+        ]);
+
+        chat.add_tool_approval_response("approval-1", true, None)
+            .expect("approval response is added");
+
+        assert_eq!(chat.transport().captured_sends().len(), 0);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "approval-responded",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": true
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_add_denied_tool_approval_response_with_reason_to_latest_assistant_message() {
+        let transport = RecordingChatTransport::new([]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            user_text_message("user-1", "What is the weather in Tokyo?"),
+            UiMessage::new("assistant-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "toolCallId": "call-1",
+                    "state": "approval-requested",
+                    "input": { "city": "Tokyo" },
+                    "approval": { "id": "approval-1" }
+                })),
+        ]);
+
+        chat.add_tool_approval_response(
+            "approval-1",
+            false,
+            Some("User denied weather lookup".to_string()),
+        )
+        .expect("approval response is added");
+
+        assert_eq!(chat.transport().captured_sends().len(), 0);
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "approval-responded",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": false,
+                                "reason": "User denied weather lookup"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    fn assert_chat_tool_approval_response_forwards_follow_up_options() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::tool_output_available(
+                "call-1",
+                json!({ "temperature": 72, "weather": "sunny" }),
+            ),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "The weather in Tokyo is sunny."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            user_text_message("user-1", "What is the weather in Tokyo?"),
+            UiMessage::new("assistant-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "toolCallId": "call-1",
+                    "state": "approval-requested",
+                    "input": { "city": "Tokyo" },
+                    "approval": { "id": "approval-1" }
+                })),
+        ]);
+
+        chat.add_tool_approval_response("approval-1", true, None)
+            .expect("approval response is added");
+        chat.submit_latest_assistant_message(
+            ChatRequestOptions::new()
+                .with_header("x-custom", "test-value")
+                .with_body_property("extra", json!("data")),
+        )
+        .expect("assistant message submits after approval response");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.trigger, ChatTransportTrigger::SubmitMessage);
+        assert_eq!(captured.chat_id, "chat-1");
+        assert_eq!(captured.message_id, Some("assistant-1".to_string()));
+        assert_eq!(
+            captured.request.headers.get("x-custom"),
+            Some(&"test-value".to_string())
+        );
+        assert_eq!(
+            captured.request.body,
+            Some(JsonObject::from_iter([(
+                "extra".to_string(),
+                json!("data")
+            )]))
+        );
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "approval-responded",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": true
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "What is the weather in Tokyo?" }]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "tool-weather",
+                            "toolCallId": "call-1",
+                            "state": "output-available",
+                            "input": { "city": "Tokyo" },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": true
+                            },
+                            "output": {
+                                "temperature": 72,
+                                "weather": "sunny"
+                            }
+                        },
+                        { "type": "step-start" },
+                        {
+                            "type": "text",
+                            "text": "The weather in Tokyo is sunny.",
+                            "state": "done"
+                        }
+                    ]
+                }
+            ])
+        );
+        let event = chat.last_finish_event().expect("finish event is recorded");
+        assert_eq!(event.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn chat_should_submit_message_when_a_tool_approval_response_is_added() {
+        assert_chat_tool_approval_response_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_approved_auto_send_should_update_tool_invocation_to_show_approval_response() {
+        assert_chat_tool_approval_response_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_add_tool_approval_response_should_forward_options_to_make_request_when_auto_sending() {
+        assert_chat_tool_approval_response_forwards_follow_up_options();
+    }
+
+    #[test]
+    fn chat_should_replace_an_existing_user_message() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-new"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport).with_messages([
+            UiMessage::new("user-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hi!" })),
+            UiMessage::new("assistant-old", UiMessageRole::Assistant).with_part(
+                json!({ "type": "text", "text": "How can I help you?", "state": "done" }),
+            ),
+        ]);
+
+        chat.send_message(ChatMessageInput::text("Hello, world!").with_message_id("user-1"))
+            .expect("message sends");
+
+        let captured = chat.transport().captured_send();
+        assert_eq!(captured.message_id, Some("user-1".to_string()));
+        assert_eq!(
+            serde_json::to_value(&captured.messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(chat.messages()).expect("history serializes"),
+            json!([
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                },
+                {
+                    "id": "assistant-new",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello, world.", "state": "done" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_should_update_the_messages_during_streaming() {
+        let transport = RecordingChatTransport::new([
+            UiMessageChunk::start_with_message_id("assistant-1"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", ","),
+            UiMessageChunk::text_delta("text-1", " world"),
+            UiMessageChunk::text_delta("text-1", "."),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]);
+        let mut chat = Chat::new("chat-1", transport);
+
+        let states = chat
+            .send_message(ChatMessageInput::text("Hello, world!").with_id("user-1"))
+            .expect("message sends");
+
+        assert_eq!(
+            serde_json::to_value(&states[..3]).expect("states serialize"),
+            json!([
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": []
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "", "state": "streaming" }
+                    ]
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "text": "Hello", "state": "streaming" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            states.last().and_then(|message| message.parts.last()),
+            Some(&json!({ "type": "text", "text": "Hello, world.", "state": "done" }))
+        );
+        assert_eq!(chat.status(), ChatStatus::Ready);
     }
 
     #[test]
@@ -2043,6 +4320,62 @@ mod tests {
                 "someData": true,
                 "trigger": "submit-message"
             }))
+        );
+    }
+
+    #[test]
+    fn http_chat_transport_includes_body_in_request_when_function_is_provided() {
+        let transport = HttpChatTransport::with_options(
+            HttpChatTransportOptions::new()
+                .with_api("https://example.test/api/chat")
+                .with_body_callback(|| {
+                    JsonObject::from_iter([("someData".to_string(), json!(true))])
+                }),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "c123")
+            .with_message_id("m123")
+            .with_messages([UiMessage::new("m123", crate::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello, world!" }))]);
+
+        let request = transport.build_send_messages_request(&send, None);
+
+        assert_eq!(
+            request.body,
+            Some(json!({
+                "id": "c123",
+                "messageId": "m123",
+                "messages": [
+                    {
+                        "id": "m123",
+                        "role": "user",
+                        "parts": [{ "type": "text", "text": "Hello, world!" }]
+                    }
+                ],
+                "someData": true,
+                "trigger": "submit-message"
+            }))
+        );
+    }
+
+    #[test]
+    fn http_chat_transport_includes_headers_in_request_when_function_is_provided() {
+        let transport = HttpChatTransport::with_options(
+            HttpChatTransportOptions::new()
+                .with_api("https://example.test/api/chat")
+                .with_header_callback(|| {
+                    Headers::from([("X-Test-Header".to_string(), "test-value-fn".to_string())])
+                }),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "c123")
+            .with_message_id("m123")
+            .with_messages([UiMessage::new("m123", crate::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello, world!" }))]);
+
+        let request = transport.build_send_messages_request(&send, None);
+
+        assert_eq!(
+            request.headers.get("x-test-header").map(String::as_str),
+            Some("test-value-fn")
         );
     }
 
@@ -2295,6 +4628,32 @@ mod tests {
     }
 
     #[test]
+    fn direct_chat_transport_passes_abort_signal_to_agent() {
+        let model = MockLanguageModel::new().with_stream_result(text_stream_result(["test"]));
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::new(&agent);
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+
+        poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")])
+                    .with_abort_signal(abort_signal.clone()),
+            ),
+        )
+        .expect("direct transport streams");
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        let captured_signal = calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("abort signal is forwarded");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+    }
+
+    #[test]
     fn direct_chat_transport_passes_prepared_agent_options() {
         let model = MockLanguageModel::new().with_stream_result(text_stream_result(["test"]));
         let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
@@ -2353,6 +4712,39 @@ mod tests {
         assert!(chunks.iter().any(
             |chunk| matches!(chunk, UiMessageChunk::TextDelta { delta, .. } if delta == "result")
         ));
+    }
+
+    #[test]
+    fn direct_chat_transport_sends_reasoning_when_enabled() {
+        let model = MockLanguageModel::new().with_stream_result(reasoning_stream_result());
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::with_options(
+            DirectChatTransportOptions::new(&agent).with_ui_message_stream_options(
+                StreamTextUiMessageStreamOptions::new().with_send_reasoning(true),
+            ),
+        );
+
+        let chunks = poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")]),
+            ),
+        )
+        .expect("direct transport streams");
+
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk, UiMessageChunk::ReasoningStart { id, .. } if id == "r1")
+            )
+        );
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, UiMessageChunk::ReasoningDelta { id, delta, .. } if id == "r1" && delta == "thinking...")
+        ));
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk, UiMessageChunk::ReasoningEnd { id, .. } if id == "r1")
+            )
+        );
     }
 
     #[test]
@@ -6050,6 +8442,23 @@ mod tests {
             ChatTransportError::InvalidMessage(
                 "UI text part must include a string text field.".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_rejects_unknown_roles_at_json_boundary() {
+        let error = serde_json::from_value::<UiMessage>(json!({
+            "id": "msg-1",
+            "role": "unknown",
+            "parts": [
+                { "type": "text", "text": "unknown role message" }
+            ]
+        }))
+        .expect_err("unknown UI message roles are rejected before conversion");
+
+        assert!(
+            error.to_string().contains("unknown variant `unknown`"),
+            "{error}"
         );
     }
 

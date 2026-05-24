@@ -1,10 +1,24 @@
-use std::fmt;
+use std::{fmt, marker::PhantomData};
 
+use crate::files::Files;
+use crate::image_model::ImageModel;
+use crate::image_model_middleware::ImageModelMiddleware;
+use crate::language_model::LanguageModel;
+use crate::language_model_middleware::LanguageModelMiddleware;
 use crate::provider::{
     ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
     ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
     ProviderWithVideoModel,
 };
+use crate::provider_middleware::{
+    WrappedProvider, WrappedProviderWithImageModelMiddleware, wrap_provider,
+    wrap_provider_with_image_model_middleware,
+};
+use crate::reranking_model::RerankingModel;
+use crate::skills::Skills;
+use crate::speech_model::SpeechModel;
+use crate::transcription_model::TranscriptionModel;
+use crate::video_model::VideoModel;
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,6 +120,751 @@ impl From<NoSuchProviderError> for ProviderRegistryError {
 pub struct ProviderRegistry<P> {
     providers: Vec<(String, P)>,
     options: ProviderRegistryOptions,
+}
+
+/// Rust equivalent of upstream `customProvider` for direct v4 model maps.
+///
+/// Rust resolves string aliases through the configured fallback provider
+/// instead of JavaScript's ambient `globalThis.AI_SDK_DEFAULT_PROVIDER`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProvider<LM, EM, IM, FP = NoFallbackProvider<LM, EM, IM>> {
+    language_models: Vec<(String, LM)>,
+    language_model_aliases: Vec<(String, String)>,
+    embedding_models: Vec<(String, EM)>,
+    embedding_model_aliases: Vec<(String, String)>,
+    image_models: Vec<(String, IM)>,
+    image_model_aliases: Vec<(String, String)>,
+    transcription_model_aliases: Vec<(String, String)>,
+    speech_model_aliases: Vec<(String, String)>,
+    reranking_model_aliases: Vec<(String, String)>,
+    video_model_aliases: Vec<(String, String)>,
+    fallback_provider: FP,
+}
+
+/// Default `custom_provider` fallback that reports missing models.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoFallbackProvider<LM, EM, IM> {
+    _models: PhantomData<(LM, EM, IM)>,
+}
+
+/// Custom provider wrapper that exposes a direct files interface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithFiles<P, F> {
+    provider: P,
+    files: F,
+}
+
+/// Custom provider wrapper that exposes a direct skills interface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithSkills<P, S> {
+    provider: P,
+    skills: S,
+}
+
+/// Custom provider wrapper that exposes direct transcription model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithTranscriptionModel<P, TM> {
+    provider: P,
+    transcription_models: Vec<(String, TM)>,
+}
+
+/// Custom provider wrapper that exposes direct speech model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithSpeechModel<P, SM> {
+    provider: P,
+    speech_models: Vec<(String, SM)>,
+}
+
+/// Custom provider wrapper that exposes direct reranking model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithRerankingModel<P, RM> {
+    provider: P,
+    reranking_models: Vec<(String, RM)>,
+}
+
+/// Custom provider wrapper that exposes direct video model maps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomProviderWithVideoModel<P, VM> {
+    provider: P,
+    video_models: Vec<(String, VM)>,
+}
+
+impl<LM, EM, IM> Default for NoFallbackProvider<LM, EM, IM> {
+    fn default() -> Self {
+        Self {
+            _models: PhantomData,
+        }
+    }
+}
+
+impl<LM, EM, IM> Provider for NoFallbackProvider<LM, EM, IM>
+where
+    LM: LanguageModel,
+    EM: crate::embedding_model::EmbeddingModel,
+    IM: ImageModel,
+{
+    type LanguageModel = LM;
+    type EmbeddingModel = EM;
+    type ImageModel = IM;
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::LanguageModel))
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::EmbeddingModel))
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+    }
+}
+
+impl<LM, EM, IM> CustomProvider<LM, EM, IM> {
+    /// Creates an empty custom provider.
+    pub fn new() -> Self {
+        Self {
+            language_models: Vec::new(),
+            language_model_aliases: Vec::new(),
+            embedding_models: Vec::new(),
+            embedding_model_aliases: Vec::new(),
+            image_models: Vec::new(),
+            image_model_aliases: Vec::new(),
+            transcription_model_aliases: Vec::new(),
+            speech_model_aliases: Vec::new(),
+            reranking_model_aliases: Vec::new(),
+            video_model_aliases: Vec::new(),
+            fallback_provider: NoFallbackProvider::default(),
+        }
+    }
+}
+
+impl<LM, EM, IM, FP> CustomProvider<LM, EM, IM, FP> {
+    /// Registers a language model by model id.
+    pub fn with_language_model(mut self, model_id: impl Into<String>, model: LM) -> Self {
+        self.language_models.push((model_id.into(), model));
+        self
+    }
+
+    /// Registers a language model alias resolved through the fallback provider.
+    pub fn with_language_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.language_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
+    /// Registers an embedding model by model id.
+    pub fn with_embedding_model(mut self, model_id: impl Into<String>, model: EM) -> Self {
+        self.embedding_models.push((model_id.into(), model));
+        self
+    }
+
+    /// Registers an embedding model alias resolved through the fallback provider.
+    pub fn with_embedding_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.embedding_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
+    /// Registers an image model by model id.
+    pub fn with_image_model(mut self, model_id: impl Into<String>, model: IM) -> Self {
+        self.image_models.push((model_id.into(), model));
+        self
+    }
+
+    /// Registers an image model alias resolved through the fallback provider.
+    pub fn with_image_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.image_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
+    /// Sets a fallback provider used when a model id is not registered locally.
+    pub fn with_fallback_provider<NewFP>(
+        self,
+        fallback_provider: NewFP,
+    ) -> CustomProvider<LM, EM, IM, NewFP> {
+        CustomProvider {
+            language_models: self.language_models,
+            language_model_aliases: self.language_model_aliases,
+            embedding_models: self.embedding_models,
+            embedding_model_aliases: self.embedding_model_aliases,
+            image_models: self.image_models,
+            image_model_aliases: self.image_model_aliases,
+            transcription_model_aliases: self.transcription_model_aliases,
+            speech_model_aliases: self.speech_model_aliases,
+            reranking_model_aliases: self.reranking_model_aliases,
+            video_model_aliases: self.video_model_aliases,
+            fallback_provider,
+        }
+    }
+
+    /// Exposes a direct files interface on this custom provider.
+    pub fn with_files<F>(self, files: F) -> CustomProviderWithFiles<Self, F> {
+        CustomProviderWithFiles {
+            provider: self,
+            files,
+        }
+    }
+
+    /// Exposes a direct skills interface on this custom provider.
+    pub fn with_skills<S>(self, skills: S) -> CustomProviderWithSkills<Self, S> {
+        CustomProviderWithSkills {
+            provider: self,
+            skills,
+        }
+    }
+
+    /// Registers a transcription model by model id.
+    pub fn with_transcription_model<TM>(
+        self,
+        model_id: impl Into<String>,
+        model: TM,
+    ) -> CustomProviderWithTranscriptionModel<Self, TM> {
+        CustomProviderWithTranscriptionModel {
+            provider: self,
+            transcription_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a transcription model alias resolved through the fallback provider.
+    pub fn with_transcription_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.transcription_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
+    /// Registers a speech model by model id.
+    pub fn with_speech_model<SM>(
+        self,
+        model_id: impl Into<String>,
+        model: SM,
+    ) -> CustomProviderWithSpeechModel<Self, SM> {
+        CustomProviderWithSpeechModel {
+            provider: self,
+            speech_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a speech model alias resolved through the fallback provider.
+    pub fn with_speech_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.speech_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
+    /// Registers a reranking model by model id.
+    pub fn with_reranking_model<RM>(
+        self,
+        model_id: impl Into<String>,
+        model: RM,
+    ) -> CustomProviderWithRerankingModel<Self, RM> {
+        CustomProviderWithRerankingModel {
+            provider: self,
+            reranking_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a reranking model alias resolved through the fallback provider.
+    pub fn with_reranking_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.reranking_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+
+    /// Registers a video model by model id.
+    pub fn with_video_model<VM>(
+        self,
+        model_id: impl Into<String>,
+        model: VM,
+    ) -> CustomProviderWithVideoModel<Self, VM> {
+        CustomProviderWithVideoModel {
+            provider: self,
+            video_models: vec![(model_id.into(), model)],
+        }
+    }
+
+    /// Registers a video model alias resolved through the fallback provider.
+    pub fn with_video_model_alias(
+        mut self,
+        model_id: impl Into<String>,
+        target_model_id: impl Into<String>,
+    ) -> Self {
+        self.video_model_aliases
+            .push((model_id.into(), target_model_id.into()));
+        self
+    }
+}
+
+impl<P, F> CustomProviderWithFiles<P, F> {
+    /// Exposes a direct skills interface while retaining the files interface.
+    pub fn with_skills<S>(self, skills: S) -> CustomProviderWithSkills<Self, S> {
+        CustomProviderWithSkills {
+            provider: self,
+            skills,
+        }
+    }
+}
+
+impl<P, S> CustomProviderWithSkills<P, S> {
+    /// Exposes a direct files interface while retaining the skills interface.
+    pub fn with_files<F>(self, files: F) -> CustomProviderWithFiles<Self, F> {
+        CustomProviderWithFiles {
+            provider: self,
+            files,
+        }
+    }
+}
+
+impl<LM, EM, IM> Default for CustomProvider<LM, EM, IM> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<LM, EM, IM, FP> Provider for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: Provider<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type LanguageModel = LM;
+    type EmbeddingModel = EM;
+    type ImageModel = IM;
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        if let Some(model) = self
+            .language_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+        {
+            return Ok(model);
+        }
+
+        if let Some(target_model_id) = lookup_model_alias(&self.language_model_aliases, model_id) {
+            return self.fallback_provider.language_model(target_model_id);
+        }
+
+        self.fallback_provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        if let Some(model) = self
+            .embedding_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+        {
+            return Ok(model);
+        }
+
+        if let Some(target_model_id) = lookup_model_alias(&self.embedding_model_aliases, model_id) {
+            return self.fallback_provider.embedding_model(target_model_id);
+        }
+
+        self.fallback_provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        if let Some(model) = self
+            .image_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+        {
+            return Ok(model);
+        }
+
+        if let Some(target_model_id) = lookup_model_alias(&self.image_model_aliases, model_id) {
+            return self.fallback_provider.image_model(target_model_id);
+        }
+
+        self.fallback_provider.image_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithTranscriptionModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithTranscriptionModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type TranscriptionModel = FP::TranscriptionModel;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        if let Some(target_model_id) =
+            lookup_model_alias(&self.transcription_model_aliases, model_id)
+        {
+            return self.fallback_provider.transcription_model(target_model_id);
+        }
+
+        self.fallback_provider.transcription_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithSpeechModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithSpeechModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type SpeechModel = FP::SpeechModel;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        if let Some(target_model_id) = lookup_model_alias(&self.speech_model_aliases, model_id) {
+            return self.fallback_provider.speech_model(target_model_id);
+        }
+
+        self.fallback_provider.speech_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithRerankingModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithRerankingModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type RerankingModel = FP::RerankingModel;
+
+    fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError> {
+        if let Some(target_model_id) = lookup_model_alias(&self.reranking_model_aliases, model_id) {
+            return self.fallback_provider.reranking_model(target_model_id);
+        }
+
+        self.fallback_provider.reranking_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithVideoModel for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithVideoModel<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type VideoModel = FP::VideoModel;
+
+    fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+        if let Some(target_model_id) = lookup_model_alias(&self.video_model_aliases, model_id) {
+            return self.fallback_provider.video_model(target_model_id);
+        }
+
+        self.fallback_provider.video_model(model_id)
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithFiles for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithFiles<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type Files = FP::Files;
+
+    fn files(&self) -> Self::Files {
+        self.fallback_provider.files()
+    }
+}
+
+impl<LM, EM, IM, FP> ProviderWithSkills for CustomProvider<LM, EM, IM, FP>
+where
+    LM: LanguageModel + Clone,
+    EM: crate::embedding_model::EmbeddingModel + Clone,
+    IM: ImageModel + Clone,
+    FP: ProviderWithSkills<LanguageModel = LM, EmbeddingModel = EM, ImageModel = IM>,
+{
+    type Skills = FP::Skills;
+
+    fn skills(&self) -> Self::Skills {
+        self.fallback_provider.skills()
+    }
+}
+
+impl<P, TM> Provider for CustomProviderWithTranscriptionModel<P, TM>
+where
+    P: Provider,
+    TM: TranscriptionModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, TM> ProviderWithTranscriptionModel for CustomProviderWithTranscriptionModel<P, TM>
+where
+    P: Provider,
+    TM: TranscriptionModel + Clone,
+{
+    type TranscriptionModel = TM;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        self.transcription_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::TranscriptionModel))
+    }
+}
+
+impl<P, SM> Provider for CustomProviderWithSpeechModel<P, SM>
+where
+    P: Provider,
+    SM: SpeechModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, SM> ProviderWithSpeechModel for CustomProviderWithSpeechModel<P, SM>
+where
+    P: Provider,
+    SM: SpeechModel + Clone,
+{
+    type SpeechModel = SM;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        self.speech_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::SpeechModel))
+    }
+}
+
+impl<P, RM> Provider for CustomProviderWithRerankingModel<P, RM>
+where
+    P: Provider,
+    RM: RerankingModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, RM> ProviderWithRerankingModel for CustomProviderWithRerankingModel<P, RM>
+where
+    P: Provider,
+    RM: RerankingModel + Clone,
+{
+    type RerankingModel = RM;
+
+    fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError> {
+        self.reranking_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::RerankingModel))
+    }
+}
+
+impl<P, VM> Provider for CustomProviderWithVideoModel<P, VM>
+where
+    P: Provider,
+    VM: VideoModel + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, VM> ProviderWithVideoModel for CustomProviderWithVideoModel<P, VM>
+where
+    P: Provider,
+    VM: VideoModel + Clone,
+{
+    type VideoModel = VM;
+
+    fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+        self.video_models
+            .iter()
+            .find_map(|(id, model)| (id == model_id).then(|| model.clone()))
+            .ok_or_else(|| NoSuchModelError::new(model_id, ModelType::VideoModel))
+    }
+}
+
+impl<P, F> Provider for CustomProviderWithFiles<P, F>
+where
+    P: Provider,
+    F: Files + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, F> ProviderWithFiles for CustomProviderWithFiles<P, F>
+where
+    P: Provider,
+    F: Files + Clone,
+{
+    type Files = F;
+
+    fn files(&self) -> Self::Files {
+        self.files.clone()
+    }
+}
+
+impl<P, F, S> ProviderWithFiles for CustomProviderWithSkills<CustomProviderWithFiles<P, F>, S>
+where
+    P: Provider,
+    F: Files + Clone,
+    S: Skills + Clone,
+{
+    type Files = F;
+
+    fn files(&self) -> Self::Files {
+        self.provider.files()
+    }
+}
+
+impl<P, S> Provider for CustomProviderWithSkills<P, S>
+where
+    P: Provider,
+    S: Skills + Clone,
+{
+    type LanguageModel = P::LanguageModel;
+    type EmbeddingModel = P::EmbeddingModel;
+    type ImageModel = P::ImageModel;
+
+    fn specification_version(&self) -> crate::provider::SpecificationVersion {
+        self.provider.specification_version()
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        self.provider.language_model(model_id)
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        self.provider.embedding_model(model_id)
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        self.provider.image_model(model_id)
+    }
+}
+
+impl<P, S> ProviderWithSkills for CustomProviderWithSkills<P, S>
+where
+    P: Provider,
+    S: Skills + Clone,
+{
+    type Skills = S;
+
+    fn skills(&self) -> Self::Skills {
+        self.skills.clone()
+    }
 }
 
 impl<P> ProviderRegistry<P> {
@@ -273,6 +1032,92 @@ where
     ProviderRegistry::with_options(providers, options)
 }
 
+/// Deprecated alias for [`create_provider_registry`].
+pub fn experimental_create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+{
+    create_provider_registry(providers)
+}
+
+/// Deprecated alias for [`create_provider_registry_with_options`].
+pub fn experimental_create_provider_registry_with_options<I, K, P>(
+    providers: I,
+    options: ProviderRegistryOptions,
+) -> ProviderRegistry<P>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+{
+    create_provider_registry_with_options(providers, options)
+}
+
+/// Creates an empty custom provider with direct v4 model maps.
+pub fn custom_provider<LM, EM, IM>() -> CustomProvider<LM, EM, IM> {
+    CustomProvider::new()
+}
+
+fn lookup_model_alias<'a>(aliases: &'a [(String, String)], model_id: &str) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find_map(|(id, target)| (id == model_id).then_some(target.as_str()))
+}
+
+/// Creates a provider registry that wraps every language model lookup with middleware.
+///
+/// This mirrors upstream `createProviderRegistry(..., { languageModelMiddleware })`
+/// while keeping the Rust return type explicit.
+pub fn create_provider_registry_with_language_model_middleware<I, K, P, LW>(
+    providers: I,
+    language_model_middleware: LW,
+    options: ProviderRegistryOptions,
+) -> ProviderRegistry<WrappedProvider<P, LW>>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+    P: Provider,
+    P::LanguageModel: LanguageModel + Sync,
+    LW: LanguageModelMiddleware<P::LanguageModel> + Clone + Sync,
+{
+    ProviderRegistry::with_options(
+        providers.into_iter().map(|(id, provider)| {
+            (
+                id,
+                wrap_provider(provider, language_model_middleware.clone()),
+            )
+        }),
+        options,
+    )
+}
+
+/// Creates a provider registry that wraps every image model lookup with middleware.
+///
+/// This mirrors upstream `createProviderRegistry(..., { imageModelMiddleware })`
+/// while keeping the Rust return type explicit.
+pub fn create_provider_registry_with_image_model_middleware<I, K, P, IW>(
+    providers: I,
+    image_model_middleware: IW,
+    options: ProviderRegistryOptions,
+) -> ProviderRegistry<WrappedProviderWithImageModelMiddleware<P, IW>>
+where
+    I: IntoIterator<Item = (K, P)>,
+    K: Into<String>,
+    P: Provider,
+    P::ImageModel: ImageModel + Sync,
+    IW: ImageModelMiddleware<P::ImageModel> + Clone + Sync,
+{
+    ProviderRegistry::with_options(
+        providers.into_iter().map(|(id, provider)| {
+            (
+                id,
+                wrap_provider_with_image_model_middleware(provider, image_model_middleware.clone()),
+            )
+        }),
+        options,
+    )
+}
+
 /// Splits a registry model id into its provider id and provider-specific model id.
 pub fn split_registry_model_id<'a>(
     id: &'a str,
@@ -403,7 +1248,11 @@ fn no_such_provider_default_message(provider_id: &str, available_providers: &[St
 mod tests {
     use super::{
         NoSuchProviderError, ProviderRegistryOptions, create_provider_registry,
-        create_provider_registry_with_options, split_registry_model_id,
+        create_provider_registry_with_image_model_middleware,
+        create_provider_registry_with_language_model_middleware,
+        create_provider_registry_with_options, custom_provider,
+        experimental_create_provider_registry, experimental_create_provider_registry_with_options,
+        split_registry_model_id,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
     use crate::file_data::{FileDataContent, ProviderReference};
@@ -411,11 +1260,15 @@ mod tests {
     use crate::image_model::{
         ImageModel, ImageModelCallOptions, ImageModelResponse, ImageModelResult,
     };
+    use crate::image_model_middleware::{ImageModelMiddleware, ImageModelMiddlewareModelOptions};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamPart,
         LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
         LanguageModelUsage,
+    };
+    use crate::language_model_middleware::{
+        LanguageModelMiddleware, LanguageModelMiddlewareModelOptions,
     };
     use crate::provider::{
         ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
@@ -857,6 +1710,526 @@ mod tests {
     }
 
     #[test]
+    fn custom_provider_language_model_should_return_the_language_model_if_it_exists() {
+        let model = StaticLanguageModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-language-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_language_model("test-model", model.clone());
+
+        assert_eq!(provider.language_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_language_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+        let error = provider
+            .language_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::LanguageModel);
+    }
+
+    #[test]
+    fn custom_provider_language_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.language_model("test-model"),
+            Ok(StaticLanguageModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_embedding_model_should_return_the_embedding_model_if_it_exists() {
+        let model = StaticEmbeddingModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-embedding-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_embedding_model("test-model", model.clone());
+
+        assert_eq!(provider.embedding_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_embedding_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+        let error = provider
+            .embedding_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::EmbeddingModel);
+    }
+
+    #[test]
+    fn custom_provider_embedding_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.embedding_model("test-model"),
+            Ok(StaticEmbeddingModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_image_model_should_return_the_image_model_if_it_exists() {
+        let model = StaticImageModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-image-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_image_model("test-model", model.clone());
+
+        assert_eq!(provider.image_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_image_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+        let error = provider
+            .image_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::ImageModel);
+    }
+
+    #[test]
+    fn custom_provider_image_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.image_model("test-model"),
+            Ok(StaticImageModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_should_resolve_string_model_ids_through_the_explicit_default_provider() {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_language_model_alias("alias", "language")
+                .with_embedding_model_alias("alias", "embedding")
+                .with_image_model_alias("alias", "image")
+                .with_transcription_model_alias("alias", "transcription")
+                .with_speech_model_alias("alias", "speech")
+                .with_reranking_model_alias("alias", "reranking")
+                .with_video_model_alias("alias", "video")
+                .with_fallback_provider(StaticProvider {
+                    id: "default-provider",
+                });
+
+        assert_eq!(
+            provider.language_model("alias"),
+            Ok(StaticLanguageModel {
+                provider: "default-provider".to_string(),
+                model_id: "language".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.embedding_model("alias"),
+            Ok(StaticEmbeddingModel {
+                provider: "default-provider".to_string(),
+                model_id: "embedding".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.image_model("alias"),
+            Ok(StaticImageModel {
+                provider: "default-provider".to_string(),
+                model_id: "image".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.transcription_model("alias"),
+            Ok(StaticTranscriptionModel {
+                provider: "default-provider".to_string(),
+                model_id: "transcription".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.speech_model("alias"),
+            Ok(StaticSpeechModel {
+                provider: "default-provider".to_string(),
+                model_id: "speech".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.reranking_model("alias"),
+            Ok(StaticRerankingModel {
+                provider: "default-provider".to_string(),
+                model_id: "reranking".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.video_model("alias"),
+            Ok(StaticVideoModel {
+                provider: "default-provider".to_string(),
+                model_id: "video".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_files_should_return_the_files_interface_if_it_exists() {
+        let files = StaticFiles {
+            provider: "mock-provider".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_files(files.clone());
+
+        assert_eq!(ProviderWithFiles::files(&provider), files);
+    }
+
+    #[test]
+    fn custom_provider_skills_should_return_the_skills_interface_if_it_exists() {
+        let skills = StaticSkills {
+            provider: "mock-provider".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_skills(skills.clone());
+
+        assert_eq!(ProviderWithSkills::skills(&provider), skills);
+    }
+
+    #[test]
+    fn custom_provider_files_and_skills_should_expose_both_interfaces_when_both_exist() {
+        let files = StaticFiles {
+            provider: "mock-provider".to_string(),
+        };
+        let skills = StaticSkills {
+            provider: "mock-provider".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_files(files.clone())
+                .with_skills(skills.clone());
+
+        assert_eq!(ProviderWithFiles::files(&provider), files);
+        assert_eq!(ProviderWithSkills::skills(&provider), skills);
+    }
+
+    #[test]
+    fn custom_provider_files_should_use_fallback_provider_files_if_files_is_not_configured_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            ProviderWithFiles::files(&provider),
+            StaticFiles {
+                provider: "fallback".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn custom_provider_skills_should_use_fallback_provider_skills_if_skills_is_not_configured_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            ProviderWithSkills::skills(&provider),
+            StaticSkills {
+                provider: "fallback".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn custom_provider_transcription_model_should_return_the_transcription_model_if_it_exists() {
+        let model = StaticTranscriptionModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-transcription-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_transcription_model("test-model", model.clone());
+
+        assert_eq!(provider.transcription_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_transcription_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_transcription_model(
+                    "other-model",
+                    StaticTranscriptionModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-transcription-model".to_string(),
+                    },
+                );
+        let error = provider
+            .transcription_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::TranscriptionModel);
+    }
+
+    #[test]
+    fn custom_provider_transcription_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.transcription_model("test-model"),
+            Ok(StaticTranscriptionModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_speech_model_should_return_the_speech_model_if_it_exists() {
+        let model = StaticSpeechModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-speech-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_speech_model("test-model", model.clone());
+
+        assert_eq!(provider.speech_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_speech_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_speech_model(
+                    "other-model",
+                    StaticSpeechModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-speech-model".to_string(),
+                    },
+                );
+        let error = provider
+            .speech_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::SpeechModel);
+    }
+
+    #[test]
+    fn custom_provider_speech_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.speech_model("test-model"),
+            Ok(StaticSpeechModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_reranking_model_should_return_the_reranking_model_if_it_exists() {
+        let model = StaticRerankingModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-reranking-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_reranking_model("test-model", model.clone());
+
+        assert_eq!(provider.reranking_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_reranking_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_reranking_model(
+                    "other-model",
+                    StaticRerankingModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-reranking-model".to_string(),
+                    },
+                );
+        let error = provider
+            .reranking_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::RerankingModel);
+    }
+
+    #[test]
+    fn custom_provider_reranking_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.reranking_model("test-model"),
+            Ok(StaticRerankingModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn custom_provider_video_model_should_return_the_video_model_if_it_exists() {
+        let model = StaticVideoModel {
+            provider: "mock-provider".to_string(),
+            model_id: "actual-video-model".to_string(),
+        };
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_video_model("test-model", model.clone());
+
+        assert_eq!(provider.video_model("test-model"), Ok(model));
+    }
+
+    #[test]
+    fn custom_provider_video_model_should_throw_no_such_model_error_if_model_not_found_and_no_fallback()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_video_model(
+                    "other-model",
+                    StaticVideoModel {
+                        provider: "mock-provider".to_string(),
+                        model_id: "actual-video-model".to_string(),
+                    },
+                );
+        let error = provider
+            .video_model("test-model")
+            .expect_err("missing model should error");
+
+        assert_eq!(error.model_id(), "test-model");
+        assert_eq!(error.model_type(), ModelType::VideoModel);
+    }
+
+    #[test]
+    fn custom_provider_video_model_should_use_fallback_provider_if_model_not_found_and_fallback_exists()
+     {
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>()
+                .with_fallback_provider(StaticProvider { id: "fallback" });
+
+        assert_eq!(
+            provider.video_model("test-model"),
+            Ok(StaticVideoModel {
+                provider: "fallback".to_string(),
+                model_id: "test-model".to_string(),
+            })
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct PrefixLanguageModelIdMiddleware;
+
+    impl LanguageModelMiddleware<StaticLanguageModel> for PrefixLanguageModelIdMiddleware {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+        type WrapGenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+        type WrapStreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
+        where
+            Self: 'a,
+            StaticLanguageModel: 'a;
+
+        fn override_model_id(
+            &self,
+            options: LanguageModelMiddlewareModelOptions<'_, StaticLanguageModel>,
+        ) -> Option<String> {
+            Some(format!("override-{}", options.model.model_id()))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PrefixImageModelIdMiddleware;
+
+    impl ImageModelMiddleware<StaticImageModel> for PrefixImageModelIdMiddleware {
+        type OverrideMaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            StaticImageModel: 'a;
+        type TransformParamsFuture<'a>
+            = Ready<ImageModelCallOptions>
+        where
+            Self: 'a,
+            StaticImageModel: 'a;
+        type WrapGenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a,
+            StaticImageModel: 'a;
+
+        fn override_model_id(
+            &self,
+            options: ImageModelMiddlewareModelOptions<'_, StaticImageModel>,
+        ) -> Option<String> {
+            Some(format!("override-{}", options.model.model_id()))
+        }
+    }
+
+    #[test]
     fn registry_options_default_to_upstream_separator() {
         assert_eq!(ProviderRegistryOptions::new().separator(), ":");
         assert_eq!(
@@ -1018,6 +2391,108 @@ mod tests {
 
         assert_eq!(registry.options().separator(), "::");
         assert_eq!(model.model_id(), "chat");
+    }
+
+    #[test]
+    fn experimental_create_provider_registry_is_a_deprecated_alias() {
+        let registry = experimental_create_provider_registry([(
+            "provider",
+            StaticProvider { id: "provider" },
+        )]);
+
+        let model = registry
+            .language_model("provider:chat")
+            .expect("language model resolves");
+
+        assert_eq!(registry.options().separator(), ":");
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "chat");
+    }
+
+    #[test]
+    fn experimental_create_provider_registry_with_options_is_a_deprecated_alias() {
+        let registry = experimental_create_provider_registry_with_options(
+            [("provider", StaticProvider { id: "provider" })],
+            ProviderRegistryOptions::new().with_separator(" > "),
+        );
+
+        let model = registry
+            .language_model("provider > chat")
+            .expect("language model resolves");
+
+        assert_eq!(registry.options().separator(), " > ");
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "chat");
+    }
+
+    #[test]
+    fn create_provider_registry_should_wrap_all_language_models_accessed_through_the_provider_registry()
+     {
+        let registry = create_provider_registry_with_language_model_middleware(
+            [
+                ("provider1", StaticProvider { id: "provider1" }),
+                ("provider2", StaticProvider { id: "provider2" }),
+            ],
+            PrefixLanguageModelIdMiddleware,
+            ProviderRegistryOptions::new(),
+        );
+
+        assert_eq!(
+            registry
+                .language_model("provider1:model-1")
+                .expect("first provider model resolves")
+                .model_id(),
+            "override-model-1"
+        );
+        assert_eq!(
+            registry
+                .language_model("provider1:model-2")
+                .expect("second model resolves")
+                .model_id(),
+            "override-model-2"
+        );
+        assert_eq!(
+            registry
+                .language_model("provider2:model-3")
+                .expect("second provider model resolves")
+                .model_id(),
+            "override-model-3"
+        );
+    }
+
+    #[test]
+    fn create_provider_registry_should_wrap_all_image_models_accessed_through_the_provider_registry()
+     {
+        let registry = create_provider_registry_with_image_model_middleware(
+            [
+                ("provider1", StaticProvider { id: "provider1" }),
+                ("provider2", StaticProvider { id: "provider2" }),
+            ],
+            PrefixImageModelIdMiddleware,
+            ProviderRegistryOptions::new(),
+        );
+
+        assert_eq!(
+            registry
+                .image_model("provider1:model-1")
+                .expect("first provider image model resolves")
+                .model_id(),
+            "override-model-1"
+        );
+        assert_eq!(
+            registry
+                .image_model("provider1:model-2")
+                .expect("second image model resolves")
+                .model_id(),
+            "override-model-2"
+        );
+        assert_eq!(
+            registry
+                .image_model("provider2:model-3")
+                .expect("second provider image model resolves")
+                .model_id(),
+            "override-model-3"
+        );
     }
 
     #[test]

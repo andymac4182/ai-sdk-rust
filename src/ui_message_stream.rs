@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::FinishReason;
-use crate::provider::ProviderMetadata;
-use crate::provider_utils::normalize_headers;
-use crate::util::merge_objects;
+use crate::provider::{ProviderMetadata, TypeValidationContext, TypeValidationError};
+use crate::provider_utils::{FlexibleSchema, normalize_headers, validate_types};
+use crate::util::{InvalidArgumentError, merge_objects};
 
 /// Default content type used by upstream UI-message stream response helpers.
 pub const UI_MESSAGE_STREAM_CONTENT_TYPE: &str = "text/event-stream";
@@ -19,21 +19,14 @@ pub const UI_MESSAGE_STREAM_VERSION_HEADER: &str = "x-vercel-ai-ui-message-strea
 pub const UI_MESSAGE_STREAM_VERSION: &str = "v1";
 
 /// A subset of upstream UI-message stream chunks.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(
-    tag = "type",
-    rename_all = "kebab-case",
-    rename_all_fields = "camelCase"
-)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UiMessageChunk {
     /// Start of a UI-message stream.
     Start {
         /// Optional message identifier to assign to the response.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
 
         /// Optional metadata to merge into the UI message.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_metadata: Option<JsonValue>,
     },
 
@@ -46,7 +39,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the text part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -59,7 +51,6 @@ pub enum UiMessageChunk {
         delta: String,
 
         /// Provider-specific metadata for the text delta.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -69,7 +60,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the text part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -79,7 +69,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the reasoning part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -92,7 +81,6 @@ pub enum UiMessageChunk {
         delta: String,
 
         /// Provider-specific metadata for the reasoning delta.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -102,7 +90,6 @@ pub enum UiMessageChunk {
         id: String,
 
         /// Provider-specific metadata for the reasoning part.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -115,7 +102,6 @@ pub enum UiMessageChunk {
         url: String,
 
         /// Provider-specific metadata for the file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -128,7 +114,6 @@ pub enum UiMessageChunk {
         url: String,
 
         /// Provider-specific metadata for the reasoning file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -141,11 +126,9 @@ pub enum UiMessageChunk {
         url: String,
 
         /// Optional source title.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
 
         /// Provider-specific metadata for the source.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -161,11 +144,9 @@ pub enum UiMessageChunk {
         title: String,
 
         /// Optional source document filename.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
 
         /// Provider-specific metadata for the source.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -178,19 +159,15 @@ pub enum UiMessageChunk {
         tool_name: String,
 
         /// Whether the provider executes the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
 
         /// Optional display title for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
 
@@ -215,23 +192,18 @@ pub enum UiMessageChunk {
         input: JsonValue,
 
         /// Whether the provider executes the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
 
         /// Optional display title for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
 
@@ -250,23 +222,18 @@ pub enum UiMessageChunk {
         error_text: String,
 
         /// Whether the provider executes the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
 
         /// Optional display title for the tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
 
@@ -279,23 +246,18 @@ pub enum UiMessageChunk {
         output: JsonValue,
 
         /// Whether the provider executed the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool output is preliminary.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         preliminary: Option<bool>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
 
@@ -308,19 +270,15 @@ pub enum UiMessageChunk {
         error_text: String,
 
         /// Whether the provider executed the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Provider-specific metadata for the tool result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
 
         /// High-level metadata from the matched tool definition.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_metadata: Option<JsonObject>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
 
@@ -333,11 +291,9 @@ pub enum UiMessageChunk {
         tool_call_id: String,
 
         /// Whether the approval status was decided automatically.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         is_automatic: Option<bool>,
 
         /// Provider-specific metadata for the approval request.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
     },
 
@@ -350,11 +306,9 @@ pub enum UiMessageChunk {
         approved: bool,
 
         /// Optional approval or denial reason.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
 
         /// Whether the approval is for a provider-executed tool call.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
     },
 
@@ -363,15 +317,13 @@ pub enum UiMessageChunk {
         /// Tool call identifier.
         tool_call_id: String,
 
-        /// Tool name.
-        tool_name: String,
+        /// Optional tool name.
+        tool_name: Option<String>,
 
         /// Whether the provider would execute the tool.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
 
         /// Whether the tool was dynamically defined.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
     },
 
@@ -381,8 +333,27 @@ pub enum UiMessageChunk {
         kind: String,
 
         /// Provider-specific metadata for the custom chunk.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Data UI part chunk.
+    ///
+    /// Upstream represents this as a dynamic `type: "data-*"` chunk. The Rust
+    /// variant stores the dynamic type separately and emits the upstream part
+    /// shape while processing the stream.
+    Data {
+        /// Full upstream data part type, e.g. `data-weather`.
+        data_type: String,
+
+        /// Optional data part identifier used for replacement updates.
+        id: Option<String>,
+
+        /// Data payload.
+        data: JsonValue,
+
+        /// Transient data parts are delivered to callbacks but not persisted in
+        /// the final UI message.
+        transient: Option<bool>,
     },
 
     /// Error chunk sent to UI-message stream consumers.
@@ -394,7 +365,6 @@ pub enum UiMessageChunk {
     /// Abort notification for a UI-message stream.
     Abort {
         /// Optional abort reason supplied by the caller/runtime.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<JsonValue>,
     },
 
@@ -404,11 +374,9 @@ pub enum UiMessageChunk {
     /// End of a UI-message stream.
     Finish {
         /// Optional finish reason reported by the model.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
 
         /// Optional metadata to merge into the UI message.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message_metadata: Option<JsonValue>,
     },
 
@@ -417,6 +385,799 @@ pub enum UiMessageChunk {
         /// Metadata to merge into the UI message.
         message_metadata: JsonValue,
     },
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+enum UiMessageChunkTagged {
+    Start {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_metadata: Option<JsonValue>,
+    },
+    StartStep,
+    TextStart {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    TextDelta {
+        id: String,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    TextEnd {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningStart {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningDelta {
+        id: String,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningEnd {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    File {
+        media_type: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningFile {
+        media_type: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    SourceUrl {
+        source_id: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    SourceDocument {
+        source_id: String,
+        media_type: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ToolInputStart {
+        tool_call_id: String,
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    ToolInputDelta {
+        tool_call_id: String,
+        input_text_delta: String,
+    },
+    ToolInputAvailable {
+        tool_call_id: String,
+        tool_name: String,
+        input: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    ToolInputError {
+        tool_call_id: String,
+        tool_name: String,
+        input: JsonValue,
+        error_text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    ToolOutputAvailable {
+        tool_call_id: String,
+        output: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preliminary: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+    },
+    ToolOutputError {
+        tool_call_id: String,
+        error_text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+    },
+    ToolApprovalRequest {
+        approval_id: String,
+        tool_call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_automatic: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ToolApprovalResponse {
+        approval_id: String,
+        approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+    },
+    ToolOutputDenied {
+        tool_call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+    },
+    Custom {
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    Data {
+        data_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        data: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transient: Option<bool>,
+    },
+    Error {
+        error_text: String,
+    },
+    Abort {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<JsonValue>,
+    },
+    FinishStep,
+    Finish {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<FinishReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_metadata: Option<JsonValue>,
+    },
+    MessageMetadata {
+        message_metadata: JsonValue,
+    },
+}
+
+impl From<UiMessageChunkTagged> for UiMessageChunk {
+    fn from(chunk: UiMessageChunkTagged) -> Self {
+        match chunk {
+            UiMessageChunkTagged::Start {
+                message_id,
+                message_metadata,
+            } => Self::Start {
+                message_id,
+                message_metadata,
+            },
+            UiMessageChunkTagged::StartStep => Self::StartStep,
+            UiMessageChunkTagged::TextStart {
+                id,
+                provider_metadata,
+            } => Self::TextStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::TextEnd {
+                id,
+                provider_metadata,
+            } => Self::TextEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningStart {
+                id,
+                provider_metadata,
+            } => Self::ReasoningStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningEnd {
+                id,
+                provider_metadata,
+            } => Self::ReasoningEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::File {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::File {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            } => Self::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            } => Self::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunkTagged::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            } => Self::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            },
+            UiMessageChunkTagged::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunkTagged::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunkTagged::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            } => Self::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            },
+            UiMessageChunkTagged::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            } => Self::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            },
+            UiMessageChunkTagged::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            } => Self::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            } => Self::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            },
+            UiMessageChunkTagged::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            } => Self::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            },
+            UiMessageChunkTagged::Custom {
+                kind,
+                provider_metadata,
+            } => Self::Custom {
+                kind,
+                provider_metadata,
+            },
+            UiMessageChunkTagged::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            } => Self::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            },
+            UiMessageChunkTagged::Error { error_text } => Self::Error { error_text },
+            UiMessageChunkTagged::Abort { reason } => Self::Abort { reason },
+            UiMessageChunkTagged::FinishStep => Self::FinishStep,
+            UiMessageChunkTagged::Finish {
+                finish_reason,
+                message_metadata,
+            } => Self::Finish {
+                finish_reason,
+                message_metadata,
+            },
+            UiMessageChunkTagged::MessageMetadata { message_metadata } => {
+                Self::MessageMetadata { message_metadata }
+            }
+        }
+    }
+}
+
+impl From<UiMessageChunk> for UiMessageChunkTagged {
+    fn from(chunk: UiMessageChunk) -> Self {
+        match chunk {
+            UiMessageChunk::Start {
+                message_id,
+                message_metadata,
+            } => Self::Start {
+                message_id,
+                message_metadata,
+            },
+            UiMessageChunk::StartStep => Self::StartStep,
+            UiMessageChunk::TextStart {
+                id,
+                provider_metadata,
+            } => Self::TextStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunk::TextEnd {
+                id,
+                provider_metadata,
+            } => Self::TextEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningStart {
+                id,
+                provider_metadata,
+            } => Self::ReasoningStart {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => Self::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningEnd {
+                id,
+                provider_metadata,
+            } => Self::ReasoningEnd {
+                id,
+                provider_metadata,
+            },
+            UiMessageChunk::File {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::File {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunk::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            } => Self::ReasoningFile {
+                media_type,
+                url,
+                provider_metadata,
+            },
+            UiMessageChunk::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            } => Self::SourceUrl {
+                source_id,
+                url,
+                title,
+                provider_metadata,
+            },
+            UiMessageChunk::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            } => Self::SourceDocument {
+                source_id,
+                media_type,
+                title,
+                filename,
+                provider_metadata,
+            },
+            UiMessageChunk::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunk::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            } => Self::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            },
+            UiMessageChunk::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunk::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => Self::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            },
+            UiMessageChunk::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            } => Self::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            },
+            UiMessageChunk::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            } => Self::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            },
+            UiMessageChunk::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            } => Self::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            },
+            UiMessageChunk::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            } => Self::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            },
+            UiMessageChunk::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            } => Self::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            },
+            UiMessageChunk::Custom {
+                kind,
+                provider_metadata,
+            } => Self::Custom {
+                kind,
+                provider_metadata,
+            },
+            UiMessageChunk::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            } => Self::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            },
+            UiMessageChunk::Error { error_text } => Self::Error { error_text },
+            UiMessageChunk::Abort { reason } => Self::Abort { reason },
+            UiMessageChunk::FinishStep => Self::FinishStep,
+            UiMessageChunk::Finish {
+                finish_reason,
+                message_metadata,
+            } => Self::Finish {
+                finish_reason,
+                message_metadata,
+            },
+            UiMessageChunk::MessageMetadata { message_metadata } => {
+                Self::MessageMetadata { message_metadata }
+            }
+        }
+    }
+}
+
+impl serde::Serialize for UiMessageChunk {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if let Self::Data {
+            data_type,
+            id,
+            data,
+            transient,
+        } = self
+        {
+            let mut object = JsonObject::new();
+            object.insert("type".to_string(), JsonValue::String(data_type.clone()));
+            if let Some(id) = id {
+                object.insert("id".to_string(), JsonValue::String(id.clone()));
+            }
+            object.insert("data".to_string(), data.clone());
+            if let Some(transient) = transient {
+                object.insert("transient".to_string(), JsonValue::Bool(*transient));
+            }
+            return JsonValue::Object(object).serialize(serializer);
+        }
+
+        UiMessageChunkTagged::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UiMessageChunk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = JsonValue::deserialize(deserializer)?;
+        if let Some(data_type) = value
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .filter(|part_type| part_type.starts_with("data-"))
+            .map(ToString::to_string)
+        {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct DataWireChunk {
+                #[serde(default)]
+                id: Option<String>,
+                data: JsonValue,
+                #[serde(default)]
+                transient: Option<bool>,
+            }
+
+            let data =
+                serde_json::from_value::<DataWireChunk>(value).map_err(serde::de::Error::custom)?;
+            return Ok(Self::Data {
+                data_type,
+                id: data.id,
+                data: data.data,
+                transient: data.transient,
+            });
+        }
+
+        serde_json::from_value::<UiMessageChunkTagged>(value)
+            .map(Self::from)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Role of an upstream UI message.
@@ -540,6 +1301,676 @@ pub fn is_dynamic_tool_ui_part(part: &JsonValue) -> bool {
 /// Checks whether a UI message part is a static or dynamic tool part.
 pub fn is_tool_ui_part(part: &JsonValue) -> bool {
     is_static_tool_ui_part(part) || is_dynamic_tool_ui_part(part)
+}
+
+/// Returns the tool name after the static `tool-` UI part prefix.
+pub fn get_static_tool_name(part: &JsonValue) -> Option<&str> {
+    ui_message_part_type(part)?.strip_prefix("tool-")
+}
+
+/// Checks whether a UI message part is provider-specific custom content.
+pub fn is_custom_content_ui_part(part: &JsonValue) -> bool {
+    ui_message_part_type(part) == Some("custom")
+}
+
+/// Checks whether a UI message part is a data part.
+pub fn is_data_ui_part(part: &JsonValue) -> bool {
+    ui_message_part_type(part).is_some_and(|part_type| part_type.starts_with("data-"))
+}
+
+/// Tool schemas used by [`validate_ui_messages`] to validate UI tool input and output parts.
+#[derive(Clone, Debug)]
+pub struct UiMessageValidationTool {
+    /// Schema used to validate available tool input values.
+    pub input_schema: FlexibleSchema<JsonValue>,
+
+    /// Optional schema used to validate output values in `output-available` parts.
+    pub output_schema: Option<FlexibleSchema<JsonValue>>,
+}
+
+impl UiMessageValidationTool {
+    /// Creates validation schemas for one UI tool.
+    pub fn new(input_schema: impl Into<FlexibleSchema<JsonValue>>) -> Self {
+        Self {
+            input_schema: input_schema.into(),
+            output_schema: None,
+        }
+    }
+
+    /// Adds an output schema for `output-available` parts.
+    pub fn with_output_schema(
+        mut self,
+        output_schema: impl Into<FlexibleSchema<JsonValue>>,
+    ) -> Self {
+        self.output_schema = Some(output_schema.into());
+        self
+    }
+}
+
+/// Options accepted by [`validate_ui_messages`] and [`safe_validate_ui_messages`].
+#[derive(Clone, Debug, Default)]
+pub struct UiMessageValidationOptions {
+    /// UI messages to validate. `None` mirrors upstream's nullish parameter error.
+    pub messages: Option<JsonValue>,
+
+    /// Optional schema used to validate each message metadata value.
+    pub metadata_schema: Option<FlexibleSchema<JsonValue>>,
+
+    /// Optional schemas keyed by the suffix of `data-*` UI parts.
+    pub data_schemas: BTreeMap<String, FlexibleSchema<JsonValue>>,
+
+    /// Optional tool schemas keyed by static `tool-*` names.
+    pub tools: BTreeMap<String, UiMessageValidationTool>,
+}
+
+/// Error returned by [`validate_ui_messages`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum UiMessageValidationError {
+    /// The top-level `messages` argument was missing.
+    InvalidArgument(InvalidArgumentError),
+
+    /// A message, part, metadata value, data value, tool input, or tool output failed validation.
+    TypeValidation(TypeValidationError),
+}
+
+impl fmt::Display for UiMessageValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidArgument(error) => error.fmt(formatter),
+            Self::TypeValidation(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for UiMessageValidationError {}
+
+impl From<InvalidArgumentError> for UiMessageValidationError {
+    fn from(error: InvalidArgumentError) -> Self {
+        Self::InvalidArgument(error)
+    }
+}
+
+impl From<TypeValidationError> for UiMessageValidationError {
+    fn from(error: TypeValidationError) -> Self {
+        Self::TypeValidation(error)
+    }
+}
+
+/// Result returned by [`safe_validate_ui_messages`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum SafeValidateUiMessagesResult {
+    /// Validation succeeded and returns the original normalized JSON messages.
+    Success { data: Vec<JsonValue> },
+
+    /// Validation failed and returns the upstream-style error.
+    Failure { error: UiMessageValidationError },
+}
+
+impl SafeValidateUiMessagesResult {
+    /// Returns whether validation succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    /// Returns whether validation failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure { .. })
+    }
+}
+
+/// Validates UI messages using the portable runtime rules from upstream `validateUIMessages`.
+pub fn validate_ui_messages(
+    options: UiMessageValidationOptions,
+) -> Result<Vec<JsonValue>, UiMessageValidationError> {
+    match safe_validate_ui_messages(options) {
+        SafeValidateUiMessagesResult::Success { data } => Ok(data),
+        SafeValidateUiMessagesResult::Failure { error } => Err(error),
+    }
+}
+
+/// Validates UI messages and returns an explicit success/failure result.
+pub fn safe_validate_ui_messages(
+    options: UiMessageValidationOptions,
+) -> SafeValidateUiMessagesResult {
+    match validate_ui_messages_inner(options) {
+        Ok(data) => SafeValidateUiMessagesResult::Success { data },
+        Err(error) => SafeValidateUiMessagesResult::Failure { error },
+    }
+}
+
+fn validate_ui_messages_inner(
+    options: UiMessageValidationOptions,
+) -> Result<Vec<JsonValue>, UiMessageValidationError> {
+    let Some(messages) = options.messages else {
+        return Err(InvalidArgumentError::new(
+            "messages",
+            JsonValue::Null,
+            "messages parameter must be provided",
+        )
+        .into());
+    };
+
+    let messages_array = messages.as_array().ok_or_else(|| {
+        TypeValidationError::with_cause_message(messages.clone(), "messages must be an array", None)
+    })?;
+
+    if messages_array.is_empty() {
+        return Err(TypeValidationError::with_cause_message(
+            messages.clone(),
+            "Messages array must not be empty",
+            None,
+        )
+        .into());
+    }
+
+    for (message_index, message) in messages_array.iter().enumerate() {
+        validate_ui_message_structure(message)?;
+
+        let message_object = message.as_object().expect("message structure validates");
+        let message_id = message_object
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .expect("message id validates");
+
+        if let Some(metadata_schema) = &options.metadata_schema {
+            let metadata = message_object
+                .get("metadata")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            validate_types(
+                metadata,
+                metadata_schema.clone(),
+                Some(
+                    TypeValidationContext::new()
+                        .with_field(format!("messages[{message_index}].metadata"))
+                        .with_entity_id(message_id),
+                ),
+            )?;
+        }
+
+        let parts = message_object
+            .get("parts")
+            .and_then(JsonValue::as_array)
+            .expect("message parts validate");
+
+        for (part_index, part) in parts.iter().enumerate() {
+            validate_ui_message_part_structure(part)?;
+            validate_ui_message_part_schema(
+                part,
+                message_index,
+                part_index,
+                &options.data_schemas,
+                &options.tools,
+            )?;
+        }
+    }
+
+    Ok(messages_array.clone())
+}
+
+fn validate_ui_message_structure(message: &JsonValue) -> Result<(), TypeValidationError> {
+    let object = require_object(message, message, "message must be an object")?;
+    require_string(object, "id", message)?;
+    require_enum(object, "role", &["system", "user", "assistant"], message)?;
+
+    let parts = object
+        .get("parts")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| {
+            TypeValidationError::with_cause_message(message.clone(), "parts must be an array", None)
+        })?;
+
+    if parts.is_empty() {
+        return Err(TypeValidationError::with_cause_message(
+            message.clone(),
+            "Message must contain at least one part",
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_ui_message_part_structure(part: &JsonValue) -> Result<(), TypeValidationError> {
+    let object = require_object(part, part, "message part must be an object")?;
+    let part_type = require_string(object, "type", part)?;
+
+    match part_type {
+        "text" | "reasoning" => {
+            require_string(object, "text", part)?;
+            optional_enum(object, "state", &["streaming", "done"], part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "custom" => {
+            require_string(object, "kind", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "source-url" => {
+            require_string(object, "sourceId", part)?;
+            require_string(object, "url", part)?;
+            optional_string(object, "title", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "source-document" => {
+            require_string(object, "sourceId", part)?;
+            require_string(object, "mediaType", part)?;
+            require_string(object, "title", part)?;
+            optional_string(object, "filename", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "file" => {
+            require_string(object, "mediaType", part)?;
+            optional_string(object, "filename", part)?;
+            require_string(object, "url", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "reasoning-file" => {
+            require_string(object, "mediaType", part)?;
+            require_string(object, "url", part)?;
+            optional_object(object, "providerMetadata", part)?;
+        }
+        "step-start" => {}
+        "dynamic-tool" => validate_ui_tool_part_structure(object, part, true)?,
+        part_type if part_type.starts_with("data-") => {
+            require_key(object, "data", part)?;
+        }
+        part_type if part_type.starts_with("tool-") => {
+            validate_ui_tool_part_structure(object, part, false)?
+        }
+        _ => {
+            return Err(TypeValidationError::with_cause_message(
+                part.clone(),
+                format!("Unsupported UI message part type {part_type}"),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ui_tool_part_structure(
+    object: &JsonObject,
+    part: &JsonValue,
+    dynamic: bool,
+) -> Result<(), TypeValidationError> {
+    if dynamic {
+        require_string(object, "toolName", part)?;
+    }
+    require_string(object, "toolCallId", part)?;
+    optional_object(object, "toolMetadata", part)?;
+    optional_bool(object, "providerExecuted", part)?;
+    optional_object(object, "callProviderMetadata", part)?;
+    let state = require_string(object, "state", part)?;
+
+    match state {
+        "input-streaming" => {
+            reject_keys(object, &["output", "errorText", "approval"], part)?;
+        }
+        "input-available" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText", "approval"], part)?;
+        }
+        "approval-requested" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText"], part)?;
+            validate_approval(object.get("approval"), part, ApprovalKind::Requested)?;
+        }
+        "approval-responded" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText"], part)?;
+            validate_approval(object.get("approval"), part, ApprovalKind::Responded)?;
+        }
+        "output-available" => {
+            require_key(object, "input", part)?;
+            require_key(object, "output", part)?;
+            reject_keys(object, &["errorText"], part)?;
+            optional_object(object, "resultProviderMetadata", part)?;
+            optional_bool(object, "preliminary", part)?;
+            if object.contains_key("approval") {
+                validate_approval(object.get("approval"), part, ApprovalKind::ApprovedOutput)?;
+            }
+        }
+        "output-error" => {
+            optional_object(object, "resultProviderMetadata", part)?;
+            optional_string(object, "errorText", part)?;
+            require_string(object, "errorText", part)?;
+            reject_keys(object, &["output"], part)?;
+            if object.contains_key("approval") {
+                validate_approval(object.get("approval"), part, ApprovalKind::ApprovedOutput)?;
+            }
+        }
+        "output-denied" => {
+            require_key(object, "input", part)?;
+            reject_keys(object, &["output", "errorText"], part)?;
+            validate_approval(object.get("approval"), part, ApprovalKind::DeniedOutput)?;
+        }
+        _ => {
+            return Err(TypeValidationError::with_cause_message(
+                part.clone(),
+                format!("Unsupported tool part state {state}"),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ui_message_part_schema(
+    part: &JsonValue,
+    message_index: usize,
+    part_index: usize,
+    data_schemas: &BTreeMap<String, FlexibleSchema<JsonValue>>,
+    tools: &BTreeMap<String, UiMessageValidationTool>,
+) -> Result<(), TypeValidationError> {
+    let object = part.as_object().expect("part structure validates");
+    let part_type = object
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .expect("part type validates");
+
+    if part_type.starts_with("data-") && !data_schemas.is_empty() {
+        let data_name = part_type.trim_start_matches("data-");
+        let data = object.get("data").cloned().unwrap_or(JsonValue::Null);
+        let data_id = object.get("id").and_then(JsonValue::as_str);
+        let context = TypeValidationContext::new()
+            .with_field(format!(
+                "messages[{message_index}].parts[{part_index}].data"
+            ))
+            .with_entity_name(data_name);
+        let context = match data_id {
+            Some(id) => context.with_entity_id(id),
+            None => context,
+        };
+
+        let Some(data_schema) = data_schemas.get(data_name) else {
+            return Err(TypeValidationError::new(
+                data,
+                format!("No data schema found for data part {data_name}"),
+                Some(context),
+            ));
+        };
+
+        validate_types(data, data_schema.clone(), Some(context))?;
+    }
+
+    if part_type.starts_with("tool-") && !tools.is_empty() {
+        let tool_name = part_type.trim_start_matches("tool-");
+        let state = object
+            .get("state")
+            .and_then(JsonValue::as_str)
+            .expect("tool state validates");
+        let tool_call_id = object
+            .get("toolCallId")
+            .and_then(JsonValue::as_str)
+            .expect("tool call id validates");
+
+        let Some(tool) = tools.get(tool_name) else {
+            if matches!(state, "output-available" | "output-error" | "output-denied") {
+                return Ok(());
+            }
+
+            return Err(TypeValidationError::new(
+                object.get("input").cloned().unwrap_or(JsonValue::Null),
+                format!("No tool schema found for tool part {tool_name}"),
+                Some(
+                    TypeValidationContext::new()
+                        .with_field(format!(
+                            "messages[{message_index}].parts[{part_index}].input"
+                        ))
+                        .with_entity_name(tool_name)
+                        .with_entity_id(tool_call_id),
+                ),
+            ));
+        };
+
+        if matches!(state, "input-available" | "output-available")
+            || (state == "output-error" && object.contains_key("input"))
+        {
+            validate_types(
+                object.get("input").cloned().unwrap_or(JsonValue::Null),
+                tool.input_schema.clone(),
+                Some(
+                    TypeValidationContext::new()
+                        .with_field(format!(
+                            "messages[{message_index}].parts[{part_index}].input"
+                        ))
+                        .with_entity_name(tool_name)
+                        .with_entity_id(tool_call_id),
+                ),
+            )?;
+        }
+
+        if state == "output-available" {
+            if let Some(output_schema) = &tool.output_schema {
+                validate_types(
+                    object.get("output").cloned().unwrap_or(JsonValue::Null),
+                    output_schema.clone(),
+                    Some(
+                        TypeValidationContext::new()
+                            .with_field(format!(
+                                "messages[{message_index}].parts[{part_index}].output"
+                            ))
+                            .with_entity_name(tool_name)
+                            .with_entity_id(tool_call_id),
+                    ),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalKind {
+    Requested,
+    Responded,
+    ApprovedOutput,
+    DeniedOutput,
+}
+
+fn validate_approval(
+    approval: Option<&JsonValue>,
+    part: &JsonValue,
+    kind: ApprovalKind,
+) -> Result<(), TypeValidationError> {
+    let approval = approval.ok_or_else(|| {
+        TypeValidationError::with_cause_message(part.clone(), "approval must be provided", None)
+    })?;
+    let approval_object = require_object(approval, part, "approval must be an object")?;
+    require_string(approval_object, "id", part)?;
+    optional_bool(approval_object, "isAutomatic", part)?;
+    optional_string(approval_object, "reason", part)?;
+
+    match kind {
+        ApprovalKind::Requested => {
+            reject_keys(approval_object, &["approved", "reason"], part)?;
+        }
+        ApprovalKind::Responded => {
+            require_bool(approval_object, "approved", part)?;
+        }
+        ApprovalKind::ApprovedOutput => {
+            require_bool_value(approval_object, "approved", true, part)?;
+        }
+        ApprovalKind::DeniedOutput => {
+            require_bool_value(approval_object, "approved", false, part)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn require_object<'a>(
+    value: &'a JsonValue,
+    whole_value: &JsonValue,
+    message: impl Into<String>,
+) -> Result<&'a JsonObject, TypeValidationError> {
+    value
+        .as_object()
+        .ok_or_else(|| TypeValidationError::with_cause_message(whole_value.clone(), message, None))
+}
+
+fn require_key<'a>(
+    object: &'a JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<&'a JsonValue, TypeValidationError> {
+    object.get(key).ok_or_else(|| {
+        TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be provided"),
+            None,
+        )
+    })
+}
+
+fn require_string<'a>(
+    object: &'a JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<&'a str, TypeValidationError> {
+    require_key(object, key, whole_value)?
+        .as_str()
+        .ok_or_else(|| {
+            TypeValidationError::with_cause_message(
+                whole_value.clone(),
+                format!("{key} must be a string"),
+                None,
+            )
+        })
+}
+
+fn optional_string(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.get(key).is_some_and(|value| !value.is_string()) {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be a string"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_bool(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<bool, TypeValidationError> {
+    require_key(object, key, whole_value)?
+        .as_bool()
+        .ok_or_else(|| {
+            TypeValidationError::with_cause_message(
+                whole_value.clone(),
+                format!("{key} must be a boolean"),
+                None,
+            )
+        })
+}
+
+fn require_bool_value(
+    object: &JsonObject,
+    key: &str,
+    expected: bool,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    let value = require_bool(object, key, whole_value)?;
+    if value != expected {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be {expected}"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn optional_bool(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.get(key).is_some_and(|value| !value.is_boolean()) {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be a boolean"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn optional_object(
+    object: &JsonObject,
+    key: &str,
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.get(key).is_some_and(|value| !value.is_object()) {
+        return Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be an object"),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_enum<'a>(
+    object: &'a JsonObject,
+    key: &str,
+    variants: &[&str],
+    whole_value: &JsonValue,
+) -> Result<&'a str, TypeValidationError> {
+    let value = require_string(object, key, whole_value)?;
+    if variants.contains(&value) {
+        Ok(value)
+    } else {
+        Err(TypeValidationError::with_cause_message(
+            whole_value.clone(),
+            format!("{key} must be one of {}", variants.join(", ")),
+            None,
+        ))
+    }
+}
+
+fn optional_enum(
+    object: &JsonObject,
+    key: &str,
+    variants: &[&str],
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    if object.contains_key(key) {
+        require_enum(object, key, variants, whole_value)?;
+    }
+
+    Ok(())
+}
+
+fn reject_keys(
+    object: &JsonObject,
+    keys: &[&str],
+    whole_value: &JsonValue,
+) -> Result<(), TypeValidationError> {
+    for key in keys {
+        if object.contains_key(*key) {
+            return Err(TypeValidationError::with_cause_message(
+                whole_value.clone(),
+                format!("{key} must not be present"),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Checks whether the last assistant message has complete non-provider tool calls.
@@ -861,7 +2292,7 @@ impl UiMessageChunk {
     ) -> Self {
         Self::ToolOutputDenied {
             tool_call_id: tool_call_id.into(),
-            tool_name: tool_name.into(),
+            tool_name: Some(tool_name.into()),
             provider_executed: None,
             dynamic: None,
         }
@@ -873,6 +2304,36 @@ impl UiMessageChunk {
             kind: kind.into(),
             provider_metadata: None,
         }
+    }
+
+    /// Creates a data UI-message chunk.
+    pub fn data(data_type: impl Into<String>, data: impl Into<JsonValue>) -> Self {
+        Self::Data {
+            data_type: data_type.into(),
+            id: None,
+            data: data.into(),
+            transient: None,
+        }
+    }
+
+    /// Sets the id for a data UI-message chunk.
+    pub fn with_data_id(mut self, id: impl Into<String>) -> Self {
+        if let Self::Data { id: data_id, .. } = &mut self {
+            *data_id = Some(id.into());
+        }
+        self
+    }
+
+    /// Marks a data UI-message chunk as transient or persistent.
+    pub fn with_transient(mut self, transient: bool) -> Self {
+        if let Self::Data {
+            transient: is_transient,
+            ..
+        } = &mut self
+        {
+            *is_transient = Some(transient);
+        }
+        self
     }
 
     /// Creates an error UI-message chunk.
@@ -986,6 +2447,11 @@ pub struct StreamingUiMessageState {
 
     active_text_parts: BTreeMap<String, usize>,
     active_reasoning_parts: BTreeMap<String, usize>,
+    active_tool_input_parts: BTreeSet<String>,
+    tool_part_indices: BTreeMap<String, usize>,
+    tool_input_text: BTreeMap<String, String>,
+    approval_tool_call_ids: BTreeMap<String, String>,
+    data_part_indices: BTreeMap<String, usize>,
 }
 
 impl StreamingUiMessageState {
@@ -996,13 +2462,50 @@ impl StreamingUiMessageState {
             _ => UiMessage::new(message_id, UiMessageRole::Assistant),
         };
 
-        Self {
+        let mut state = Self {
             message,
             finish_reason: None,
             aborted: false,
             abort_reason: None,
             active_text_parts: BTreeMap::new(),
             active_reasoning_parts: BTreeMap::new(),
+            active_tool_input_parts: BTreeSet::new(),
+            tool_part_indices: BTreeMap::new(),
+            tool_input_text: BTreeMap::new(),
+            approval_tool_call_ids: BTreeMap::new(),
+            data_part_indices: BTreeMap::new(),
+        };
+        state.seed_existing_part_indices();
+        state
+    }
+
+    fn seed_existing_part_indices(&mut self) {
+        for (index, part) in self.message.parts.iter().enumerate() {
+            let part_type = ui_message_part_type(part);
+
+            if matches!(part_type, Some("dynamic-tool"))
+                || part_type.is_some_and(|part_type| part_type.starts_with("tool-"))
+            {
+                if let Some(tool_call_id) = part.get("toolCallId").and_then(JsonValue::as_str) {
+                    self.tool_part_indices
+                        .insert(tool_call_id.to_string(), index);
+
+                    if let Some(approval_id) = part
+                        .get("approval")
+                        .and_then(|approval| approval.get("id"))
+                        .and_then(JsonValue::as_str)
+                    {
+                        self.approval_tool_call_ids
+                            .insert(approval_id.to_string(), tool_call_id.to_string());
+                    }
+                }
+            }
+
+            if part_type.is_some_and(|part_type| part_type.starts_with("data-")) {
+                if let Some(id) = part.get("id").and_then(JsonValue::as_str) {
+                    self.data_part_indices.insert(id.to_string(), index);
+                }
+            }
         }
     }
 }
@@ -1246,6 +2749,18 @@ where
     chunks
 }
 
+/// Decodes byte text-stream chunks and calls the provided text-part callback.
+pub fn process_text_stream<I, B, F>(stream: I, mut on_text_part: F)
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: FnMut(String),
+{
+    for chunk in stream {
+        on_text_part(String::from_utf8_lossy(chunk.as_ref()).into_owned());
+    }
+}
+
 /// Applies UI-message stream chunks and returns cloned message states after writes.
 pub fn process_ui_message_stream<I>(
     state: &mut StreamingUiMessageState,
@@ -1394,24 +2909,310 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                 state.active_reasoning_parts.remove(&id);
                 updates.push(state.message.clone());
             }
+            UiMessageChunk::ToolInputStart {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                provider_metadata,
+                dynamic,
+                title,
+            } => {
+                state.active_tool_input_parts.insert(tool_call_id.clone());
+                state.tool_input_text.remove(&tool_call_id);
+                let index = upsert_tool_part(
+                    state,
+                    &tool_call_id,
+                    Some(&tool_name),
+                    dynamic,
+                    provider_executed,
+                    title,
+                );
+                update_tool_part_input_streaming(
+                    &mut state.message.parts[index],
+                    provider_metadata,
+                    None,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolInputDelta {
+                tool_call_id,
+                input_text_delta,
+            } => {
+                if !state.active_tool_input_parts.contains(&tool_call_id) {
+                    return Err(UiMessageStreamProcessError::new(
+                        "tool-input-delta",
+                        tool_call_id.clone(),
+                        format!(
+                            "Received tool-input-delta for missing tool call with ID \"{tool_call_id}\". \
+Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chunks."
+                        ),
+                    ));
+                }
+
+                let buffer = state
+                    .tool_input_text
+                    .entry(tool_call_id.clone())
+                    .or_default();
+                buffer.push_str(&input_text_delta);
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    let parsed_input = serde_json::from_str::<JsonValue>(buffer).ok();
+                    update_tool_part_input_streaming(
+                        &mut state.message.parts[index],
+                        None,
+                        parsed_input.or_else(|| Some(JsonValue::String(buffer.clone()))),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolInputAvailable {
+                tool_call_id,
+                tool_name,
+                input,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => {
+                state.active_tool_input_parts.remove(&tool_call_id);
+                state.tool_input_text.remove(&tool_call_id);
+                let index = upsert_tool_part(
+                    state,
+                    &tool_call_id,
+                    Some(&tool_name),
+                    dynamic,
+                    provider_executed,
+                    title,
+                );
+                update_tool_part_input_available(
+                    &mut state.message.parts[index],
+                    input,
+                    provider_metadata,
+                    tool_metadata,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolInputError {
+                tool_call_id,
+                tool_name,
+                input,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+                title,
+            } => {
+                state.active_tool_input_parts.remove(&tool_call_id);
+                state.tool_input_text.remove(&tool_call_id);
+                let index = upsert_tool_part(
+                    state,
+                    &tool_call_id,
+                    Some(&tool_name),
+                    dynamic,
+                    provider_executed,
+                    title,
+                );
+                update_tool_part_input_error(
+                    &mut state.message.parts[index],
+                    input,
+                    error_text,
+                    provider_metadata,
+                    tool_metadata,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolOutputAvailable {
+                tool_call_id,
+                output,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                preliminary,
+                dynamic,
+            } => {
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_output_available(
+                        &mut state.message.parts[index],
+                        output,
+                        provider_executed,
+                        provider_metadata,
+                        tool_metadata,
+                        preliminary,
+                        dynamic,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolOutputAvailable {
+                            tool_call_id,
+                            output,
+                            provider_executed,
+                            provider_metadata,
+                            tool_metadata,
+                            preliminary,
+                            dynamic,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolOutputError {
+                tool_call_id,
+                error_text,
+                provider_executed,
+                provider_metadata,
+                tool_metadata,
+                dynamic,
+            } => {
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_output_error(
+                        &mut state.message.parts[index],
+                        error_text,
+                        provider_executed,
+                        provider_metadata,
+                        tool_metadata,
+                        dynamic,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolOutputError {
+                            tool_call_id,
+                            error_text,
+                            provider_executed,
+                            provider_metadata,
+                            tool_metadata,
+                            dynamic,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolApprovalRequest {
+                approval_id,
+                tool_call_id,
+                is_automatic,
+                provider_metadata,
+            } => {
+                state
+                    .approval_tool_call_ids
+                    .insert(approval_id.clone(), tool_call_id.clone());
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_approval_requested(
+                        &mut state.message.parts[index],
+                        approval_id,
+                        is_automatic,
+                        provider_metadata,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolApprovalRequest {
+                            approval_id,
+                            tool_call_id,
+                            is_automatic,
+                            provider_metadata,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolApprovalResponse {
+                approval_id,
+                approved,
+                reason,
+                provider_executed,
+            } => {
+                if let Some(tool_call_id) = state.approval_tool_call_ids.get(&approval_id) {
+                    if let Some(index) = state.tool_part_indices.get(tool_call_id).copied() {
+                        update_tool_part_approval_responded(
+                            &mut state.message.parts[index],
+                            approval_id,
+                            approved,
+                            reason,
+                            provider_executed,
+                        );
+                    }
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolApprovalResponse {
+                            approval_id,
+                            approved,
+                            reason,
+                            provider_executed,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ToolOutputDenied {
+                tool_call_id,
+                tool_name,
+                provider_executed,
+                dynamic,
+            } => {
+                if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
+                    update_tool_part_output_denied(
+                        &mut state.message.parts[index],
+                        provider_executed,
+                    );
+                } else {
+                    state.message.parts.push(
+                        serde_json::to_value(UiMessageChunk::ToolOutputDenied {
+                            tool_call_id,
+                            tool_name,
+                            provider_executed,
+                            dynamic,
+                        })
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                    );
+                }
+                updates.push(state.message.clone());
+            }
             chunk @ (UiMessageChunk::File { .. }
             | UiMessageChunk::ReasoningFile { .. }
             | UiMessageChunk::SourceUrl { .. }
             | UiMessageChunk::SourceDocument { .. }
-            | UiMessageChunk::ToolInputStart { .. }
-            | UiMessageChunk::ToolInputDelta { .. }
-            | UiMessageChunk::ToolInputAvailable { .. }
-            | UiMessageChunk::ToolInputError { .. }
-            | UiMessageChunk::ToolOutputAvailable { .. }
-            | UiMessageChunk::ToolOutputError { .. }
-            | UiMessageChunk::ToolApprovalRequest { .. }
-            | UiMessageChunk::ToolApprovalResponse { .. }
-            | UiMessageChunk::ToolOutputDenied { .. }
             | UiMessageChunk::Custom { .. }) => {
                 state.message.parts.push(
                     serde_json::to_value(&chunk)
                         .expect("ui-message stream chunk serializes to a JSON part"),
                 );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::Data {
+                data_type,
+                id,
+                data,
+                transient,
+            } => {
+                if transient.unwrap_or(false) {
+                    continue;
+                }
+
+                let mut part = JsonObject::new();
+                part.insert("type".to_string(), JsonValue::String(data_type));
+                if let Some(id) = id.clone() {
+                    part.insert("id".to_string(), JsonValue::String(id));
+                }
+                part.insert("data".to_string(), data);
+
+                if let Some(id) = id {
+                    if let Some(index) = state.data_part_indices.get(&id).copied() {
+                        if let Some(existing_part) = state.message.parts.get_mut(index) {
+                            *existing_part = JsonValue::Object(part);
+                        }
+                    } else {
+                        let index = state.message.parts.len();
+                        state.data_part_indices.insert(id, index);
+                        state.message.parts.push(JsonValue::Object(part));
+                    }
+                } else {
+                    state.message.parts.push(JsonValue::Object(part));
+                }
+
                 updates.push(state.message.clone());
             }
             UiMessageChunk::Error { error_text } => {
@@ -1433,8 +3234,6 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                     }
                 }
 
-                state.active_text_parts.clear();
-                state.active_reasoning_parts.clear();
                 state.aborted = true;
                 state.abort_reason = reason;
 
@@ -1445,6 +3244,8 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
             UiMessageChunk::FinishStep => {
                 state.active_text_parts.clear();
                 state.active_reasoning_parts.clear();
+                state.active_tool_input_parts.clear();
+                state.tool_input_text.clear();
             }
             UiMessageChunk::Finish {
                 finish_reason,
@@ -1958,6 +3759,277 @@ fn streaming_text_like_part(
     JsonValue::Object(object)
 }
 
+fn upsert_tool_part(
+    state: &mut StreamingUiMessageState,
+    tool_call_id: &str,
+    tool_name: Option<&str>,
+    dynamic: Option<bool>,
+    provider_executed: Option<bool>,
+    title: Option<String>,
+) -> usize {
+    if let Some(index) = state.tool_part_indices.get(tool_call_id).copied() {
+        let part = &mut state.message.parts[index];
+        update_tool_part_identity(part, tool_name, dynamic, provider_executed, title);
+        return index;
+    }
+
+    let mut object = JsonObject::new();
+    let is_dynamic = dynamic.unwrap_or(false);
+    let part_type = if is_dynamic {
+        "dynamic-tool".to_string()
+    } else {
+        format!("tool-{}", tool_name.unwrap_or(""))
+    };
+    object.insert("type".to_string(), JsonValue::String(part_type));
+    object.insert(
+        "toolCallId".to_string(),
+        JsonValue::String(tool_call_id.to_string()),
+    );
+    if is_dynamic {
+        if let Some(tool_name) = tool_name {
+            object.insert(
+                "toolName".to_string(),
+                JsonValue::String(tool_name.to_string()),
+            );
+        }
+    }
+    insert_optional_bool(&mut object, "providerExecuted", provider_executed);
+    insert_optional_string(&mut object, "title", title);
+
+    let index = state.message.parts.len();
+    state.message.parts.push(JsonValue::Object(object));
+    state
+        .tool_part_indices
+        .insert(tool_call_id.to_string(), index);
+    index
+}
+
+fn update_tool_part_identity(
+    part: &mut JsonValue,
+    tool_name: Option<&str>,
+    _dynamic: Option<bool>,
+    provider_executed: Option<bool>,
+    title: Option<String>,
+) {
+    let is_dynamic_part = ui_message_part_type(part) == Some("dynamic-tool");
+    if let Some(object) = ui_message_part_object_mut(part) {
+        if is_dynamic_part {
+            if let Some(tool_name) = tool_name {
+                object.insert(
+                    "toolName".to_string(),
+                    JsonValue::String(tool_name.to_string()),
+                );
+            }
+        }
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+        insert_optional_string(object, "title", title);
+    }
+}
+
+fn update_tool_part_input_streaming(
+    part: &mut JsonValue,
+    provider_metadata: Option<ProviderMetadata>,
+    input: Option<JsonValue>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("input-streaming".to_string()),
+        );
+        if let Some(input) = input {
+            object.insert("input".to_string(), input);
+            object.remove("rawInput");
+        }
+        insert_call_provider_metadata(object, provider_metadata);
+    }
+}
+
+fn update_tool_part_input_available(
+    part: &mut JsonValue,
+    input: JsonValue,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("input-available".to_string()),
+        );
+        object.insert("input".to_string(), input);
+        object.remove("rawInput");
+        object.remove("errorText");
+        insert_call_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+    }
+}
+
+fn update_tool_part_input_error(
+    part: &mut JsonValue,
+    input: JsonValue,
+    error_text: String,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-error".to_string()),
+        );
+        object.insert("rawInput".to_string(), input);
+        object.remove("input");
+        object.insert("errorText".to_string(), JsonValue::String(error_text));
+        insert_call_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+    }
+}
+
+fn update_tool_part_output_available(
+    part: &mut JsonValue,
+    output: JsonValue,
+    provider_executed: Option<bool>,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+    preliminary: Option<bool>,
+    _dynamic: Option<bool>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-available".to_string()),
+        );
+        object.insert("output".to_string(), output);
+        object.remove("errorText");
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+        insert_result_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+        if let Some(preliminary) = preliminary {
+            object.insert("preliminary".to_string(), JsonValue::Bool(preliminary));
+        } else {
+            object.remove("preliminary");
+        }
+    }
+}
+
+fn update_tool_part_output_error(
+    part: &mut JsonValue,
+    error_text: String,
+    provider_executed: Option<bool>,
+    provider_metadata: Option<ProviderMetadata>,
+    tool_metadata: Option<JsonObject>,
+    _dynamic: Option<bool>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-error".to_string()),
+        );
+        object.insert("errorText".to_string(), JsonValue::String(error_text));
+        object.remove("output");
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+        insert_result_provider_metadata(object, provider_metadata);
+        insert_optional_object(object, "toolMetadata", tool_metadata);
+    }
+}
+
+fn update_tool_part_approval_requested(
+    part: &mut JsonValue,
+    approval_id: String,
+    is_automatic: Option<bool>,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("approval-requested".to_string()),
+        );
+        object.remove("output");
+        object.remove("errorText");
+        let mut approval = JsonObject::new();
+        approval.insert("id".to_string(), JsonValue::String(approval_id));
+        insert_optional_bool(&mut approval, "isAutomatic", is_automatic);
+        object.insert("approval".to_string(), JsonValue::Object(approval));
+        insert_call_provider_metadata(object, provider_metadata);
+    }
+}
+
+fn update_tool_part_approval_responded(
+    part: &mut JsonValue,
+    approval_id: String,
+    approved: bool,
+    reason: Option<String>,
+    provider_executed: Option<bool>,
+) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("approval-responded".to_string()),
+        );
+        let approval = object
+            .entry("approval".to_string())
+            .or_insert_with(|| JsonValue::Object(JsonObject::new()));
+        if let JsonValue::Object(approval) = approval {
+            approval.insert("id".to_string(), JsonValue::String(approval_id));
+            approval.insert("approved".to_string(), JsonValue::Bool(approved));
+            insert_optional_string(approval, "reason", reason);
+        }
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+    }
+}
+
+fn update_tool_part_output_denied(part: &mut JsonValue, provider_executed: Option<bool>) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert(
+            "state".to_string(),
+            JsonValue::String("output-denied".to_string()),
+        );
+        object.remove("output");
+        object.remove("errorText");
+        insert_optional_bool(object, "providerExecuted", provider_executed);
+    }
+}
+
+fn insert_call_provider_metadata(
+    object: &mut JsonObject,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let Some(provider_metadata) = provider_metadata {
+        object.insert(
+            "callProviderMetadata".to_string(),
+            provider_metadata_to_json(provider_metadata),
+        );
+    }
+}
+
+fn insert_result_provider_metadata(
+    object: &mut JsonObject,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let Some(provider_metadata) = provider_metadata {
+        object.insert(
+            "resultProviderMetadata".to_string(),
+            provider_metadata_to_json(provider_metadata),
+        );
+    }
+}
+
+fn insert_optional_bool(object: &mut JsonObject, key: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::Bool(value));
+    }
+}
+
+fn insert_optional_string(object: &mut JsonObject, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::String(value));
+    }
+}
+
+fn insert_optional_object(object: &mut JsonObject, key: &str, value: Option<JsonObject>) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), JsonValue::Object(value));
+    }
+}
+
 fn append_ui_message_part_text(part: &mut JsonValue, delta: &str) {
     if let Some(object) = ui_message_part_object_mut(part) {
         match object.get_mut("text") {
@@ -2077,8 +4149,43 @@ impl UiMessageStreamResponseInit {
     }
 }
 
+/// Consumer callback used to observe encoded UI-message SSE chunks.
+pub type UiMessageSseConsumerFunction =
+    dyn Fn(Vec<Vec<u8>>) -> Result<(), String> + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `consumeSseStream`.
+#[derive(Clone)]
+pub struct UiMessageSseConsumer {
+    callback: Arc<UiMessageSseConsumerFunction>,
+}
+
+impl UiMessageSseConsumer {
+    /// Creates an encoded SSE stream consumer.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(Vec<Vec<u8>>) -> Result<(), String> + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Runs the consumer with a cloned encoded SSE body.
+    pub fn consume(&self, body: Vec<Vec<u8>>) -> Result<(), String> {
+        (self.callback)(body)
+    }
+}
+
+impl fmt::Debug for UiMessageSseConsumer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UiMessageSseConsumer")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options shared by UI-message stream response helpers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct UiMessageStreamResponseOptions {
     /// UI-message chunks to encode as server-sent events.
     pub stream: Vec<UiMessageChunk>,
@@ -2091,6 +4198,9 @@ pub struct UiMessageStreamResponseOptions {
 
     /// Optional response headers.
     pub headers: Option<Headers>,
+
+    /// Optional observer for a cloned encoded SSE body.
+    pub consume_sse_stream: Option<UiMessageSseConsumer>,
 }
 
 impl UiMessageStreamResponseOptions {
@@ -2112,6 +4222,7 @@ impl UiMessageStreamResponseOptions {
             status: init.status,
             status_text: init.status_text,
             headers: init.headers,
+            consume_sse_stream: None,
         }
     }
 
@@ -2138,6 +4249,21 @@ impl UiMessageStreamResponseOptions {
         self.headers
             .get_or_insert_with(Headers::new)
             .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets a consumer callback that receives a cloned encoded SSE body.
+    pub fn with_consume_sse_stream<F>(mut self, consume_sse_stream: F) -> Self
+    where
+        F: Fn(Vec<Vec<u8>>) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.consume_sse_stream = Some(UiMessageSseConsumer::new(consume_sse_stream));
+        self
+    }
+
+    /// Sets a pre-built encoded SSE stream consumer.
+    pub fn with_sse_consumer(mut self, consume_sse_stream: UiMessageSseConsumer) -> Self {
+        self.consume_sse_stream = Some(consume_sse_stream);
         self
     }
 }
@@ -2179,13 +4305,20 @@ pub fn create_ui_message_stream_response(
         status,
         status_text,
         headers,
+        consume_sse_stream,
     } = options;
+
+    let body = encode_ui_message_sse_stream(stream);
+
+    if let Some(consume_sse_stream) = consume_sse_stream {
+        let _ = consume_sse_stream.consume(body.clone());
+    }
 
     UiMessageStreamResponse {
         status: status.unwrap_or(200),
         status_text,
         headers: prepare_ui_message_stream_headers(headers),
-        body: encode_ui_message_sse_stream(stream),
+        body,
     }
 }
 
@@ -2225,6 +4358,7 @@ where
         status,
         status_text,
         headers,
+        consume_sse_stream: _,
     } = options;
 
     let status = status.unwrap_or(200);
@@ -2290,6 +4424,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::provider_utils::{Schema, ValidationResult};
     use serde_json::json;
 
     #[test]
@@ -2378,6 +4513,216 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_response_calls_consume_sse_stream_with_teed_stream() {
+        let consumed_body = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let consumed_body_for_callback = Arc::clone(&consumed_body);
+
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([
+                UiMessageChunk::text_delta("1", "test-data-1"),
+                UiMessageChunk::text_delta("1", "test-data-2"),
+            ])
+            .with_consume_sse_stream(move |body| {
+                *consumed_body_for_callback
+                    .lock()
+                    .expect("consumed body lock") = body;
+                Ok(())
+            }),
+        );
+
+        let response_body = response.decoded_body().expect("response body decodes");
+        assert_eq!(
+            response_body,
+            vec![
+                r#"data: {"type":"text-delta","id":"1","delta":"test-data-1"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"text-delta","id":"1","delta":"test-data-2"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
+        );
+
+        let consumed = consumed_body.lock().expect("consumed body lock").clone();
+        let consumed = consumed
+            .into_iter()
+            .map(String::from_utf8)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("consumed body decodes");
+        assert_eq!(consumed, response_body);
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_does_not_block_response_for_consume_sse_stream() {
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([UiMessageChunk::text_delta("1", "test-data")])
+                .with_consume_sse_stream(|body| {
+                    assert_eq!(body.len(), 2);
+                    Ok(())
+                }),
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            vec![
+                r#"data: {"type":"text-delta","id":"1","delta":"test-data"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_handles_synchronous_consume_sse_stream() {
+        let consumed_body = Arc::new(Mutex::new(Vec::<String>::new()));
+        let consumed_body_for_callback = Arc::clone(&consumed_body);
+
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([UiMessageChunk::text_delta("1", "sync-test")])
+                .with_consume_sse_stream(move |body| {
+                    *consumed_body_for_callback
+                        .lock()
+                        .expect("consumed body lock") = body
+                        .into_iter()
+                        .map(String::from_utf8)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                }),
+        );
+
+        let response_body = response.decoded_body().expect("response body decodes");
+        assert_eq!(
+            consumed_body.lock().expect("consumed body lock").as_slice(),
+            response_body.as_slice()
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_response_handles_consume_sse_stream_errors_gracefully() {
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new([UiMessageChunk::text_delta("1", "error-test")])
+                .with_consume_sse_stream(|_| Err("consumeSseStream error".to_string())),
+        );
+
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            vec![
+                r#"data: {"type":"text-delta","id":"1","delta":"error-test"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_should_send_data_stream_part_and_close_the_stream() {
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            writer.write(UiMessageChunk::text_start("1"));
+            writer.write(UiMessageChunk::text_delta("1", "1a"));
+            writer.write(UiMessageChunk::text_end("1"));
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-start",
+                    "id": "1"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-end",
+                    "id": "1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_should_forward_a_single_stream_with_two_elements() {
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            writer.merge([
+                UiMessageChunk::text_delta("1", "1a"),
+                UiMessageChunk::text_delta("1", "1b"),
+            ]);
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1b"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_should_add_error_parts_when_stream_errors() {
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
+            |writer| {
+                writer.merge_result::<_, &str>([
+                    Ok(UiMessageChunk::text_delta("1", "1a")),
+                    Err("1-error"),
+                ]);
+                writer.merge([
+                    UiMessageChunk::text_delta("2", "2a"),
+                    UiMessageChunk::text_delta("2", "2b"),
+                ]);
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2b"
+                },
+                {
+                    "type": "error",
+                    "errorText": "error-message"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn ui_message_chunk_serializes_portable_tool_source_and_file_chunks() {
         let chunks = vec![
             UiMessageChunk::file("text/plain", "data:text/plain;base64,aGk="),
@@ -2431,7 +4776,109 @@ mod tests {
     }
 
     #[test]
-    fn process_ui_message_stream_preserves_portable_non_text_chunks_as_parts() {
+    fn ui_message_chunk_deserializes_tool_output_denied_without_tool_name() {
+        let chunk = serde_json::from_value::<UiMessageChunk>(json!({
+            "type": "tool-output-denied",
+            "toolCallId": "call-1"
+        }))
+        .expect("tool-output-denied chunk deserializes without toolName");
+
+        assert_eq!(
+            chunk,
+            UiMessageChunk::ToolOutputDenied {
+                tool_call_id: "call-1".to_string(),
+                tool_name: None,
+                provider_executed: None,
+                dynamic: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(chunk).expect("chunk serializes"),
+            json!({
+                "type": "tool-output-denied",
+                "toolCallId": "call-1"
+            })
+        );
+    }
+
+    #[test]
+    fn ui_message_chunk_deserializes_dynamic_data_wire_chunk() {
+        let chunk = serde_json::from_value::<UiMessageChunk>(json!({
+            "type": "data-weather",
+            "id": "weather-1",
+            "data": { "temperature": 22 },
+            "transient": true
+        }))
+        .expect("dynamic data chunk deserializes");
+
+        assert_eq!(
+            chunk,
+            UiMessageChunk::Data {
+                data_type: "data-weather".to_string(),
+                id: Some("weather-1".to_string()),
+                data: json!({ "temperature": 22 }),
+                transient: Some(true)
+            }
+        );
+    }
+
+    #[test]
+    fn ui_message_chunk_serializes_dynamic_data_wire_chunk() {
+        let chunk = UiMessageChunk::data("data-weather", json!({ "temperature": 22 }))
+            .with_data_id("weather-1")
+            .with_transient(true);
+
+        assert_eq!(
+            serde_json::to_value(chunk).expect("data chunk serializes"),
+            json!({
+                "type": "data-weather",
+                "id": "weather-1",
+                "data": { "temperature": 22 },
+                "transient": true
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_accepts_dynamic_data_wire_chunks() {
+        let chunk = serde_json::from_value::<UiMessageChunk>(json!({
+            "type": "data-weather",
+            "id": "weather-1",
+            "data": { "temperature": 22 }
+        }))
+        .expect("dynamic data chunk deserializes");
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                chunk,
+                serde_json::from_value::<UiMessageChunk>(json!({
+                    "type": "data-weather",
+                    "id": "weather-1",
+                    "data": { "temperature": 24 }
+                }))
+                .expect("replacement data chunk deserializes"),
+            ],
+            false,
+        )
+        .expect("dynamic data chunks process");
+
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                {
+                    "type": "data-weather",
+                    "id": "weather-1",
+                    "data": { "temperature": 24 }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_folds_tool_chunks_into_ui_tool_parts() {
         let messages = read_ui_message_stream(ReadUiMessageStreamOptions::new([
             UiMessageChunk::start_with_message_id("msg-123"),
             UiMessageChunk::start_step(),
@@ -2451,16 +4898,1050 @@ mod tests {
             Some(vec![
                 json!({ "type": "step-start" }),
                 json!({
-                    "type": "tool-input-available",
+                    "type": "tool-getWeather",
                     "toolCallId": "call-1",
-                    "toolName": "getWeather",
-                    "input": { "city": "Brisbane" }
-                }),
-                json!({
-                    "type": "tool-output-available",
-                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "city": "Brisbane" },
                     "output": { "temperature": 22 }
                 }),
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_folds_provider_executed_static_tools() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::tool_input_delta("tool-call-1", r#"{ "query": "test" }"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    output: json!({ "result": "provider-result" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: None,
+                },
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-2".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id: "tool-call-2".to_string(),
+                    error_text: "error-text".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("provider-executed static tools process");
+
+        assert_eq!(messages.len(), 6);
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool-name",
+                    "toolCallId": "tool-call-1",
+                    "state": "output-available",
+                    "input": { "query": "test" },
+                    "output": { "result": "provider-result" },
+                    "providerExecuted": true
+                },
+                {
+                    "type": "tool-tool-name",
+                    "toolCallId": "tool-call-2",
+                    "state": "output-error",
+                    "input": { "query": "test" },
+                    "errorText": "error-text",
+                    "providerExecuted": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_folds_provider_executed_dynamic_tools() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::tool_input_delta("tool-call-1", r#"{ "query": "test" }"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    output: json!({ "result": "provider-result" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: Some(true),
+                },
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-2".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id: "tool-call-2".to_string(),
+                    error_text: "error-text".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("provider-executed dynamic tools process");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool-name",
+                    "toolCallId": "tool-call-1",
+                    "state": "output-available",
+                    "input": { "query": "test" },
+                    "output": { "result": "provider-result" },
+                    "providerExecuted": true
+                },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool-name",
+                    "toolCallId": "tool-call-2",
+                    "state": "output-error",
+                    "input": { "query": "test" },
+                    "errorText": "error-text",
+                    "providerExecuted": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_tool_call_and_result_metadata() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let mut call_metadata = ProviderMetadata::new();
+        call_metadata.insert(
+            "testProvider".to_string(),
+            JsonObject::from_iter([("itemId".to_string(), json!("call-item"))]),
+        );
+        let mut result_metadata = ProviderMetadata::new();
+        result_metadata.insert(
+            "testProvider".to_string(),
+            JsonObject::from_iter([("itemId".to_string(), json!("result-item"))]),
+        );
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: Some(true),
+                    provider_metadata: Some(call_metadata),
+                    tool_metadata: Some(JsonObject::from_iter([(
+                        "clientName".to_string(),
+                        json!("MyMCPClient"),
+                    )])),
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id: "tool-call-1".to_string(),
+                    error_text: "error-text".to_string(),
+                    provider_executed: Some(true),
+                    provider_metadata: Some(result_metadata),
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                },
+            ],
+            false,
+        )
+        .expect("tool metadata processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool-name",
+                "toolCallId": "tool-call-1",
+                "state": "output-error",
+                "input": { "query": "test" },
+                "errorText": "error-text",
+                "providerExecuted": true,
+                "toolMetadata": { "clientName": "MyMCPClient" },
+                "callProviderMetadata": { "testProvider": { "itemId": "call-item" } },
+                "resultProviderMetadata": { "testProvider": { "itemId": "result-item" } }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_retains_tool_metadata_during_input_streaming() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let mut provider_metadata = ProviderMetadata::new();
+        provider_metadata.insert(
+            "testProvider".to_string(),
+            JsonObject::from_iter([("someKey".to_string(), json!("someValue"))]),
+        );
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-id".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    provider_executed: None,
+                    provider_metadata: Some(provider_metadata),
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::tool_input_delta("tool-call-id", r#"{"query":"#),
+                UiMessageChunk::tool_input_delta("tool-call-id", r#""test"}"#),
+                UiMessageChunk::tool_input_available(
+                    "tool-call-id",
+                    "tool-name",
+                    json!({ "query": "test" }),
+                ),
+            ],
+            false,
+        )
+        .expect("provider metadata during input-streaming processes");
+
+        assert_eq!(
+            messages[0].parts[1],
+            json!({
+                "type": "tool-tool-name",
+                "toolCallId": "tool-call-id",
+                "state": "input-streaming",
+                "callProviderMetadata": { "testProvider": { "someKey": "someValue" } }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-tool-name",
+                "toolCallId": "tool-call-id",
+                "state": "input-available",
+                "input": { "query": "test" },
+                "callProviderMetadata": { "testProvider": { "someKey": "someValue" } }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_maps_tool_input_error_to_raw_input_output_error() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_start("call-1", "cityAttractions"),
+                UiMessageChunk::tool_input_delta("call-1", r#"{ "cities": "San Francisco" }"#),
+                UiMessageChunk::ToolInputError {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "cityAttractions".to_string(),
+                    input: json!(r#"{ "cities": "San Francisco" }"#),
+                    error_text: "Invalid input for tool cityAttractions".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::tool_output_error(
+                    "call-1",
+                    "Invalid input for tool cityAttractions",
+                ),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("tool input error processes");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-cityAttractions",
+                    "toolCallId": "call-1",
+                    "state": "output-error",
+                    "rawInput": r#"{ "cities": "San Francisco" }"#,
+                    "errorText": "Invalid input for tool cityAttractions"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_keeps_static_tool_type_on_dynamic_error_mismatch() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_start("call-1", "nonExistentTool"),
+                UiMessageChunk::tool_input_delta("call-1", r#"{ "foo": "bar" }"#),
+                UiMessageChunk::ToolInputError {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "nonExistentTool".to_string(),
+                    input: json!(r#"{ "foo": "bar" }"#),
+                    error_text: "Model tried to call unavailable tool 'nonExistentTool'."
+                        .to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::tool_output_error(
+                    "call-1",
+                    "Model tried to call unavailable tool 'nonExistentTool'.",
+                ),
+            ],
+            false,
+        )
+        .expect("dynamic mismatch tool input error processes");
+
+        let tool_parts = state
+            .message
+            .parts
+            .iter()
+            .filter(|part| part.get("toolCallId").and_then(JsonValue::as_str) == Some("call-1"))
+            .collect::<Vec<_>>();
+        assert_eq!(tool_parts.len(), 1);
+        assert_eq!(
+            serde_json::to_value(tool_parts[0]).expect("part serializes"),
+            json!({
+                "type": "tool-nonExistentTool",
+                "toolCallId": "call-1",
+                "state": "output-error",
+                "rawInput": r#"{ "foo": "bar" }"#,
+                "errorText": "Model tried to call unavailable tool 'nonExistentTool'."
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_preliminary_tool_results_until_final_output() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "call-1",
+                    "cityAttractions",
+                    json!({ "city": "San Francisco" }),
+                ),
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!({
+                        "status": "loading",
+                        "text": "Getting weather for San Francisco"
+                    }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!({
+                        "status": "success",
+                        "temperature": 72,
+                        "text": "The weather in San Francisco is 72F"
+                    }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::tool_output_available(
+                    "call-1",
+                    json!({
+                        "status": "success",
+                        "temperature": 72,
+                        "text": "The weather in San Francisco is 72F"
+                    }),
+                ),
+            ],
+            false,
+        )
+        .expect("preliminary tool results process");
+
+        assert_eq!(
+            messages[1].parts[1].get("preliminary"),
+            Some(&JsonValue::Bool(true))
+        );
+        assert_eq!(
+            messages[2].parts[1].get("preliminary"),
+            Some(&JsonValue::Bool(true))
+        );
+        assert!(state.message.parts[1].get("preliminary").is_none());
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-cityAttractions",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "city": "San Francisco" },
+                    "output": {
+                        "status": "success",
+                        "temperature": 72,
+                        "text": "The weather in San Francisco is 72F"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_static_tool_title_through_output() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "weatherTool".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    dynamic: None,
+                    title: Some("Weather Information".to_string()),
+                },
+                UiMessageChunk::tool_input_delta("tool-call-0", r#"{"location":"Paris"}"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "weatherTool".to_string(),
+                    input: json!({ "location": "Paris" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: Some("Weather Information".to_string()),
+                },
+                UiMessageChunk::tool_output_available("tool-call-0", json!("Sunny, 22C")),
+            ],
+            false,
+        )
+        .expect("static tool title processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-weatherTool",
+                "toolCallId": "tool-call-0",
+                "title": "Weather Information",
+                "state": "output-available",
+                "input": { "location": "Paris" },
+                "output": "Sunny, 22C"
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_dynamic_tool_title_through_output() {
+        let mut state = StreamingUiMessageState::new("msg-456", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "calculate".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    dynamic: Some(true),
+                    title: Some("Calculator".to_string()),
+                },
+                UiMessageChunk::tool_input_delta("tool-call-1", r#"{"a":5,"b":3}"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "calculate".to_string(),
+                    input: json!({ "a": 5, "b": 3 }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: Some("Calculator".to_string()),
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    output: json!({ "result": 8 }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: Some(true),
+                },
+            ],
+            false,
+        )
+        .expect("dynamic tool title processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "calculate",
+                "toolCallId": "tool-call-1",
+                "title": "Calculator",
+                "state": "output-available",
+                "input": { "a": 5, "b": 3 },
+                "output": { "result": 8 }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_tool_title_in_error_state() {
+        let mut state = StreamingUiMessageState::new("msg-error", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-error".to_string(),
+                    tool_name: "errorTool".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    dynamic: None,
+                    title: Some("Error Tool".to_string()),
+                },
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-error".to_string(),
+                    tool_name: "errorTool".to_string(),
+                    input: json!({ "invalid": "data" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: Some("Error Tool".to_string()),
+                },
+                UiMessageChunk::tool_output_error("tool-call-error", "Tool execution failed"),
+            ],
+            false,
+        )
+        .expect("tool title error state processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-errorTool",
+                "toolCallId": "tool-call-error",
+                "title": "Error Tool",
+                "state": "output-error",
+                "input": { "invalid": "data" },
+                "errorText": "Tool execution failed"
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_maps_static_tool_approval_request() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                ),
+                UiMessageChunk::tool_approval_request("id-1", "call-1"),
+            ],
+            false,
+        )
+        .expect("static approval request processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-requested",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1" }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_maps_dynamic_tool_approval_request() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "tool1".to_string(),
+                    input: json!({ "value": "value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::tool_approval_request("id-1", "call-1"),
+            ],
+            false,
+        )
+        .expect("dynamic approval request processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "approval-requested",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1" }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_automatic_approval_metadata_through_denial() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                ),
+                UiMessageChunk::ToolApprovalRequest {
+                    approval_id: "id-1".to_string(),
+                    tool_call_id: "call-1".to_string(),
+                    is_automatic: Some(true),
+                    provider_metadata: None,
+                },
+                UiMessageChunk::ToolApprovalResponse {
+                    approval_id: "id-1".to_string(),
+                    approved: false,
+                    reason: Some("Policy denied execution".to_string()),
+                    provider_executed: None,
+                },
+                UiMessageChunk::tool_output_denied("call-1", "tool1"),
+            ],
+            false,
+        )
+        .expect("automatic denial processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "output-denied",
+                "input": { "value": "value" },
+                "approval": {
+                    "id": "id-1",
+                    "isAutomatic": true,
+                    "approved": false,
+                    "reason": "Policy denied execution"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_automatic_approval_metadata_through_execution() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "tool1".to_string(),
+                    input: json!({ "value": "value" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::ToolApprovalRequest {
+                    approval_id: "id-1".to_string(),
+                    tool_call_id: "call-1".to_string(),
+                    is_automatic: Some(true),
+                    provider_metadata: None,
+                },
+                UiMessageChunk::ToolApprovalResponse {
+                    approval_id: "id-1".to_string(),
+                    approved: true,
+                    reason: Some("trusted internal tool".to_string()),
+                    provider_executed: None,
+                },
+                UiMessageChunk::tool_output_available("call-1", json!("result1")),
+            ],
+            false,
+        )
+        .expect("automatic approval execution processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "output-available",
+                "input": { "value": "value" },
+                "output": "result1",
+                "approval": {
+                    "id": "id-1",
+                    "isAutomatic": true,
+                    "approved": true,
+                    "reason": "trusted internal tool"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_existing_static_tool_after_approval() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": true }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        let updates = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::tool_output_available("call-1", json!("result1")),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "Hello, world!"),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed static tool execution processes");
+
+        assert_eq!(
+            serde_json::to_value(&updates[0].parts[1]).expect("part serializes"),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "output-available",
+                "input": { "value": "value" },
+                "output": "result1",
+                "approval": { "id": "id-1", "approved": true }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "value" },
+                    "output": "result1",
+                    "approval": { "id": "id-1", "approved": true }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "Hello, world!", "state": "done" }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_existing_dynamic_tool_after_approval() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": true }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!("result1"),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: Some(true),
+                },
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "Hello, world!"),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed dynamic tool execution processes");
+
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "value" },
+                    "output": "result1",
+                    "approval": { "id": "id-1", "approved": true }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "Hello, world!", "state": "done" }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_replaces_existing_preliminary_tool_outputs_after_approval() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": true }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        let updates = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!("preliminary-result"),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!("final-result"),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::tool_output_available("call-1", json!("final-result")),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "Hello, world!"),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed preliminary tool execution processes");
+
+        assert_eq!(updates[0].parts[1]["preliminary"], json!(true));
+        assert_eq!(updates[0].parts[1]["output"], json!("preliminary-result"));
+        assert_eq!(updates[1].parts[1]["preliminary"], json!(true));
+        assert_eq!(updates[1].parts[1]["output"], json!("final-result"));
+        assert!(updates[2].parts[1].get("preliminary").is_none());
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "value" },
+                    "output": "final-result",
+                    "approval": { "id": "id-1", "approved": true }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "Hello, world!", "state": "done" }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_existing_tool_denial_after_approval_response() {
+        let mut original = UiMessage::new("original-id", UiMessageRole::Assistant);
+        original.parts = vec![
+            json!({ "type": "step-start" }),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "input": { "value": "value" },
+                "approval": { "id": "id-1", "approved": false }
+            }),
+        ];
+        let mut state = StreamingUiMessageState::new("msg-123", Some(original));
+
+        let updates = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::tool_output_denied("call-1", "tool1"),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("1"),
+                UiMessageChunk::text_delta("1", "I did not execute the tool."),
+                UiMessageChunk::text_end("1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+        )
+        .expect("resumed denied dynamic tool execution processes");
+
+        assert_eq!(updates[0].parts[1]["state"], json!("output-denied"));
+        assert_eq!(
+            serde_json::to_value(&state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool",
+                    "toolName": "tool1",
+                    "toolCallId": "call-1",
+                    "state": "output-denied",
+                    "input": { "value": "value" },
+                    "approval": { "id": "id-1", "approved": false }
+                },
+                { "type": "step-start" },
+                { "type": "text", "text": "I did not execute the tool.", "state": "done" }
             ])
         );
     }
@@ -2511,6 +5992,30 @@ mod tests {
     }
 
     #[test]
+    fn pipe_ui_message_stream_to_response_should_handle_errors_in_the_stream() {
+        let mut response = MockUiMessageStreamResponse::default();
+
+        pipe_ui_message_stream_to_response(
+            &mut response,
+            UiMessageStreamResponseOptions::new([UiMessageChunk::error("Custom error message")])
+                .with_status(200),
+        )
+        .expect("mock response writes");
+
+        assert_eq!(response.status, Some(200));
+        assert_eq!(
+            response.decoded_chunks(),
+            vec![
+                r#"data: {"type":"error","errorText":"Custom error message"}
+
+"#,
+                "data: [DONE]\n\n"
+            ]
+        );
+        assert!(response.ended);
+    }
+
+    #[test]
     fn transform_text_to_ui_message_stream_emits_upstream_sequence() {
         let chunks = transform_text_to_ui_message_stream(["Hello", " ", "World"]);
 
@@ -2523,6 +6028,24 @@ mod tests {
                 { "type": "text-delta", "id": "text-1", "delta": "Hello" },
                 { "type": "text-delta", "id": "text-1", "delta": " " },
                 { "type": "text-delta", "id": "text-1", "delta": "World" },
+                { "type": "text-end", "id": "text-1" },
+                { "type": "finish-step" },
+                { "type": "finish" }
+            ])
+        );
+    }
+
+    #[test]
+    fn transform_text_to_ui_message_stream_should_handle_single_chunk_streams() {
+        let chunks = transform_text_to_ui_message_stream(["Complete message"]);
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "text-1" },
+                { "type": "text-delta", "id": "text-1", "delta": "Complete message" },
                 { "type": "text-end", "id": "text-1" },
                 { "type": "finish-step" },
                 { "type": "finish" }
@@ -2545,6 +6068,32 @@ mod tests {
                 { "type": "finish" }
             ])
         );
+    }
+
+    #[test]
+    fn process_text_stream_should_process_stream_chunks_correctly() {
+        let mut chunks = Vec::new();
+
+        process_text_stream(
+            [b"Hello".as_slice(), b" ".as_slice(), b"World".as_slice()],
+            |chunk| {
+                chunks.push(chunk);
+            },
+        );
+
+        assert_eq!(chunks, vec!["Hello", " ", "World"]);
+    }
+
+    #[test]
+    fn process_text_stream_should_handle_empty_streams() {
+        let calls = Rc::new(Cell::new(0usize));
+        let callback_calls = Rc::clone(&calls);
+
+        process_text_stream(Vec::<Vec<u8>>::new(), move |_| {
+            callback_calls.set(callback_calls.get() + 1);
+        });
+
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]
@@ -2703,6 +6252,477 @@ mod tests {
     }
 
     #[test]
+    fn handle_ui_message_stream_finish_passes_through_chunks_without_callbacks() {
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-123"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello"),
+            UiMessageChunk::text_delta("text-1", " World"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone())
+                .with_message_id("unused-message-id")
+                .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)]),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_empty_original_messages_array() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-789"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Response"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].messages.len(), 1);
+        assert_eq!(
+            finish_events[0].messages[0],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_continuation_when_last_message_is_assistant() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Continue this" })),
+            UiMessage::new("assistant-msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "This is" })),
+        ];
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("assistant-msg-1"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", " continued"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_message_id("ignored-new-message-id")
+            .with_original_messages(original_messages.clone())
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "assistant-msg-1");
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0], original_messages[0]);
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_does_not_treat_user_message_as_continuation() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Question" })),
+            UiMessage::new("user-msg-2", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Another question" })),
+        ];
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-001"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "New response"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_original_messages(original_messages)
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "msg-001");
+        assert_eq!(finish_events[0].messages.len(), 3);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_sets_is_aborted_when_abort_chunk_is_encountered() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-abort-1"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Starting text"),
+            UiMessageChunk::abort(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone())
+                .with_original_messages([UiMessage::new("user-msg-1", UiMessageRole::User)])
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_aborted);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "msg-abort-1");
+        assert_eq!(finish_events[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_sets_is_aborted_false_without_abort_chunk() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-normal"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Complete text"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish(),
+            ])
+            .with_original_messages([UiMessage::new("user-msg-1", UiMessageRole::User)])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_aborted);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].response_message.id, "msg-normal");
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_passes_through_abort_chunk_without_callbacks() {
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-abort-passthrough"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Text before abort"),
+            UiMessageChunk::abort(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(HandleUiMessageStreamFinishOptions::new(
+            chunks.clone(),
+        ))
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_multiple_abort_chunks() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-multiple-abort"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::abort(),
+            UiMessageChunk::text_delta("text-1", "Some text"),
+            UiMessageChunk::abort_with_reason("manual abort"),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone()).with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_aborted);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_on_step_finish_when_finish_step_chunk_is_encountered()
+    {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello" })),
+        ];
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-step-1"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Step 1 text"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone())
+                .with_original_messages(original_messages.clone())
+                .with_on_step_finish(move |event| {
+                    step_events_for_callback
+                        .lock()
+                        .expect("step events lock")
+                        .push(event);
+                }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert!(!step_events[0].is_continuation);
+        assert_eq!(step_events[0].response_message.id, "msg-step-1");
+        assert_eq!(
+            step_events[0].response_message.role,
+            UiMessageRole::Assistant
+        );
+        assert_eq!(step_events[0].messages.len(), 2);
+        assert_eq!(step_events[0].messages[0], original_messages[0]);
+        assert_eq!(step_events[0].messages[1].id, "msg-step-1");
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_on_step_finish_multiple_times_for_multiple_steps() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-multi-step"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Step 1"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-2"),
+                UiMessageChunk::text_delta("text-2", "Step 2"),
+                UiMessageChunk::text_end("text-2"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-3"),
+                UiMessageChunk::text_delta("text-3", "Step 3"),
+                UiMessageChunk::text_end("text-3"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_step_finish(move |event| {
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 3);
+        assert_eq!(step_events[0].response_message.parts.len(), 1);
+        assert_eq!(step_events[1].response_message.parts.len(), 3);
+        assert_eq!(step_events[2].response_message.parts.len(), 5);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_both_on_step_finish_and_on_finish() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-both"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_step_finish(move |event| {
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            })
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(step_events.lock().expect("step events lock").len(), 1);
+        assert_eq!(finish_events.lock().expect("finish events lock").len(), 1);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_handles_continuation_scenario_with_on_step_finish() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let original_messages = vec![
+            UiMessage::new("user-msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Continue this" })),
+            UiMessage::new("assistant-msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "This is" })),
+        ];
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("assistant-msg-1"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", " continued"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_message_id("ignored-new-message-id")
+            .with_original_messages(original_messages)
+            .with_on_step_finish(move |event| {
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert!(step_events[0].is_continuation);
+        assert_eq!(step_events[0].response_message.id, "assistant-msg-1");
+        assert_eq!(step_events[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_provides_cloned_messages_to_on_step_finish() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-clone"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ])
+            .with_on_step_finish(move |mut event| {
+                event
+                    .response_message
+                    .parts
+                    .push(json!({ "type": "text", "text": "MUTATION!" }));
+                step_events_for_callback
+                    .lock()
+                    .expect("step events lock")
+                    .push(event);
+            })
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert_eq!(step_events[0].response_message.parts.len(), 2);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].response_message.parts.len(), 1);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_does_not_process_stream_when_no_callbacks_are_provided() {
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-passthrough"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Test"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(HandleUiMessageStreamFinishOptions::new(
+            chunks.clone(),
+        ))
+        .expect("stream finish is handled");
+
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
     fn create_ui_message_stream_invokes_step_and_finish_callbacks() {
         let step_events = Arc::new(Mutex::new(
             Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
@@ -2786,6 +6806,46 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_keeps_existing_message_id_from_start_chunk() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_message_id("response-message-id")
+                .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)
+                    .with_part(json!({ "type": "text", "text": "0a" }))])
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::start_with_message_id("existing-message-id"));
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(&chunks).expect("chunks serialize"),
+            json!([{ "type": "start", "messageId": "existing-message-id" }])
+        );
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "user-1");
+        assert_eq!(finish_events[0].response_message.id, "existing-message-id");
+        assert!(finish_events[0].response_message.parts.is_empty());
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
     fn create_ui_message_stream_adds_error_chunk_when_execute_returns_error() {
         let chunks = create_ui_message_stream_with_result(
             CreateUiMessageStreamOptions::new().with_on_error(|error| format!("masked {error}")),
@@ -2802,6 +6862,20 @@ mod tests {
                 { "type": "text-delta", "id": "text-1", "delta": "before-error" },
                 { "type": "error", "errorText": "masked execute-error" }
             ])
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_should_add_error_parts_when_execute_throws() {
+        let chunks = create_ui_message_stream_with_result(
+            CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
+            |_| Err("execute-error"),
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([{ "type": "error", "errorText": "error-message" }])
         );
     }
 
@@ -2945,6 +7019,140 @@ mod tests {
     }
 
     #[test]
+    fn process_ui_message_stream_appends_data_parts() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything")),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "data-test",
+                        "data": "example-data-can-be-anything"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_skips_transient_data_parts() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything"))
+                    .with_transient(true),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 0);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [{ "type": "step-start" }]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_replaces_data_parts_with_matching_id() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything"))
+                    .with_data_id("data-part-id"),
+                UiMessageChunk::data("data-test", json!("or-something-else"))
+                    .with_data_id("data-part-id"),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "data-test",
+                        "id": "data-part-id",
+                        "data": "or-something-else"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_replaces_object_data_parts_with_matching_id() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!({ "a": "a1", "b": "b1" }))
+                    .with_data_id("data-part-id"),
+                UiMessageChunk::data("data-test", json!({ "b": "b2", "c": "c2" }))
+                    .with_data_id("data-part-id"),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "data-test",
+                        "id": "data-part-id",
+                        "data": {
+                            "b": "b2",
+                            "c": "c2"
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn process_ui_message_stream_reports_missing_text_delta() {
         let mut state = StreamingUiMessageState::new("msg-123", None);
 
@@ -2961,6 +7169,86 @@ mod tests {
             error.message(),
             "Received text-delta for missing text part with ID \"missing-id\". \
 Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_reasoning_delta() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::reasoning_delta(
+                "reasoning-1",
+                "Thinking...",
+            )],
+            false,
+        )
+        .expect_err("missing reasoning start fails");
+
+        assert_eq!(error.chunk_type(), "reasoning-delta");
+        assert_eq!(error.chunk_id(), "reasoning-1");
+        assert_eq!(
+            error.message(),
+            "Received reasoning-delta for missing reasoning part with ID \"reasoning-1\". \
+Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_tool_input_delta() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::tool_input_delta("tool-1", "{\"key\":")],
+            false,
+        )
+        .expect_err("missing tool input start fails");
+
+        assert_eq!(error.chunk_type(), "tool-input-delta");
+        assert_eq!(error.chunk_id(), "tool-1");
+        assert_eq!(
+            error.message(),
+            "Received tool-input-delta for missing tool call with ID \"tool-1\". \
+Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_text_end() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error =
+            process_ui_message_stream(&mut state, [UiMessageChunk::text_end("text-1")], false)
+                .expect_err("missing text start fails");
+
+        assert_eq!(error.chunk_type(), "text-end");
+        assert_eq!(error.chunk_id(), "text-1");
+        assert_eq!(
+            error.message(),
+            "Received text-end for missing text part with ID \"text-1\". \
+Ensure a \"text-start\" chunk is sent before any \"text-end\" chunks."
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_reasoning_end() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::reasoning_end("reasoning-1")],
+            false,
+        )
+        .expect_err("missing reasoning start fails");
+
+        assert_eq!(error.chunk_type(), "reasoning-end");
+        assert_eq!(error.chunk_id(), "reasoning-1");
+        assert_eq!(
+            error.message(),
+            "Received reasoning-end for missing reasoning part with ID \"reasoning-1\". \
+Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
         );
     }
 
@@ -3097,6 +7385,1331 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
             "type": "text",
             "state": "done"
         })));
+    }
+
+    #[test]
+    fn get_static_tool_name_should_return_the_tool_name_after_the_tool_prefix() {
+        assert_eq!(
+            get_static_tool_name(&json!({
+                "type": "tool-getLocation",
+                "toolCallId": "tool1",
+                "state": "output-available",
+                "input": {},
+                "output": "some result"
+            })),
+            Some("getLocation")
+        );
+    }
+
+    #[test]
+    fn get_static_tool_name_should_return_the_tool_name_for_tools_that_contains_a_dash() {
+        assert_eq!(
+            get_static_tool_name(&json!({
+                "type": "tool-get-location",
+                "toolCallId": "tool1",
+                "state": "output-available",
+                "input": {},
+                "output": "some result"
+            })),
+            Some("get-location")
+        );
+    }
+
+    #[test]
+    fn is_custom_content_ui_part_should_return_true_for_a_custom_part() {
+        assert!(is_custom_content_ui_part(&json!({
+            "type": "custom",
+            "kind": "test-provider.compaction",
+            "providerMetadata": {
+                "openai": { "itemId": "cmp_123" }
+            }
+        })));
+    }
+
+    #[test]
+    fn is_custom_content_ui_part_should_return_true_for_a_custom_part_without_provider_metadata() {
+        assert!(is_custom_content_ui_part(&json!({
+            "type": "custom",
+            "kind": "openai.compaction"
+        })));
+    }
+
+    #[test]
+    fn is_custom_content_ui_part_should_return_false_for_a_text_part() {
+        assert!(!is_custom_content_ui_part(&json!({
+            "type": "text",
+            "text": "some text"
+        })));
+    }
+
+    #[test]
+    fn is_data_ui_part_should_return_true_if_the_part_is_a_data_part() {
+        assert!(is_data_ui_part(&json!({
+            "type": "data-someDataPart",
+            "data": "some data"
+        })));
+    }
+
+    #[test]
+    fn is_data_ui_part_should_return_false_if_the_part_is_not_a_data_part() {
+        assert!(!is_data_ui_part(&json!({
+            "type": "text",
+            "text": "some text"
+        })));
+    }
+
+    fn schema_named(name: &'static str) -> FlexibleSchema<JsonValue> {
+        Schema::new(JsonObject::new())
+            .with_validator(move |value| {
+                let valid = match name {
+                    "metadata" => value.get("foo").and_then(JsonValue::as_str).is_some(),
+                    "string" => value.is_string(),
+                    "number" => value.is_number(),
+                    "input-location" => value.get("location").and_then(JsonValue::as_str).is_some(),
+                    "output-weather" => value.get("weather").and_then(JsonValue::as_str).is_some(),
+                    _ => true,
+                };
+
+                if valid {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure(format!("{name} schema mismatch"))
+                }
+            })
+            .into()
+    }
+
+    fn validate_messages(messages: JsonValue) -> Result<Vec<JsonValue>, UiMessageValidationError> {
+        validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_invalid_argument_error_when_messages_parameter_is_null() {
+        let error = validate_ui_messages(UiMessageValidationOptions::default())
+            .expect_err("missing messages should fail");
+
+        assert!(matches!(
+            error,
+            UiMessageValidationError::InvalidArgument(_)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Invalid argument for parameter messages: messages parameter must be provided"
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_invalid_argument_error_when_messages_parameter_is_undefined()
+     {
+        let error = validate_ui_messages(UiMessageValidationOptions::default())
+            .expect_err("undefined messages should fail");
+
+        assert!(matches!(
+            error,
+            UiMessageValidationError::InvalidArgument(_)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Invalid argument for parameter messages: messages parameter must be provided"
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_messages_array_is_empty() {
+        let error = validate_messages(json!([])).expect_err("empty array should fail");
+
+        assert!(matches!(error, UiMessageValidationError::TypeValidation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("Messages array must not be empty")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_message_has_empty_parts_array()
+    {
+        let error = validate_messages(json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": []
+            }
+        ]))
+        .expect_err("empty parts should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Message must contain at least one part")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_user_message_with_metadata_when_no_metadata_schema_is_provided()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "metadata": { "foo": "bar" },
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_user_message_with_metadata() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "metadata": { "foo": "bar" },
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            }
+        ]);
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            metadata_schema: Some(schema_named("metadata")),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_metadata_is_invalid() {
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "metadata": { "foo": 123 },
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])),
+            metadata_schema: Some(schema_named("metadata")),
+            ..Default::default()
+        })
+        .expect_err("invalid metadata should fail");
+
+        assert!(error.to_string().contains("messages[0].metadata"));
+        assert!(error.to_string().contains("id: \"1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_text_part_with_provider_metadata() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": [{
+                    "type": "text",
+                    "text": "Hello, world!",
+                    "providerMetadata": {
+                        "someProvider": { "custom": "metadata" }
+                    }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_user_message_with_a_text_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": [{ "type": "text", "text": "Hello, world!" }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_custom_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "custom",
+                    "kind": "test-provider.compaction",
+                    "providerMetadata": {
+                        "openai": { "itemId": "cmp_123" }
+                    }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_custom_part_without_provider_metadata()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "custom",
+                    "kind": "openai.compaction"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_reasoning_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "reasoning",
+                    "text": "The answer needs weather data.",
+                    "state": "done"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_source_url_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "source-url",
+                    "sourceId": "source-1",
+                    "url": "https://example.com",
+                    "title": "Example"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_source_document_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "source-document",
+                    "sourceId": "source-1",
+                    "mediaType": "text/plain",
+                    "title": "Example",
+                    "filename": "example.txt"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_file_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "filename": "image.png",
+                    "url": "data:image/png;base64,AA=="
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_step_start_part() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{ "type": "step-start" }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_two_data_parts() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [
+                    { "type": "data-city", "id": "city-1", "data": "Brisbane" },
+                    { "type": "data-temperature", "id": "temp-1", "data": 27 }
+                ]
+            }
+        ]);
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("city".to_string(), schema_named("string"));
+        data_schemas.insert("temperature".to_string(), schema_named("number"));
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            data_schemas,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_data_is_invalid() {
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("city".to_string(), schema_named("string"));
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{ "type": "data-city", "id": "city-1", "data": 123 }]
+                }
+            ])),
+            data_schemas,
+            ..Default::default()
+        })
+        .expect_err("invalid data should fail");
+
+        assert!(error.to_string().contains("messages[0].parts[0].data"));
+        assert!(error.to_string().contains("city"));
+        assert!(error.to_string().contains("id: \"city-1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_type_validation_error_when_there_is_no_data_schema_for_a_data_part()
+     {
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("other".to_string(), schema_named("string"));
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{ "type": "data-city", "id": "city-1", "data": "Brisbane" }]
+                }
+            ])),
+            data_schemas,
+            ..Default::default()
+        })
+        .expect_err("missing data schema should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("No data schema found for data part city")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_output_error_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "errorText": "failed"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_input_streaming_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-streaming"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_input_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-available",
+                    "input": { "location": "Brisbane" }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_dynamic_tool_part_in_output_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_dynamic_tool_part_in_output_error_state_when_input_key_is_absent()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "errorText": "failed"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_input_streaming_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-streaming",
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_input_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-available",
+                    "input": { "location": "Brisbane" },
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_output_available_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" },
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_an_assistant_message_with_a_tool_part_in_output_error_state()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "input": { "location": "Brisbane" },
+                    "errorText": "Tool execution failed",
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_tool_input_when_state_is_input_available() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-available",
+                    "input": { "location": "Brisbane" }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_tool_input_and_output_when_state_is_output_available() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location"))
+                .with_output_schema(schema_named("output-weather")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_preserve_result_provider_metadata_when_state_is_output_available()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" },
+                    "resultProviderMetadata": {
+                        "testProvider": { "itemId": "result-item" }
+                    }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location"))
+                .with_output_schema(schema_named("output-weather")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_tool_input_when_state_is_output_error_and_there_is_input()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "input": { "location": "Brisbane" },
+                    "errorText": "Tool execution failed",
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_preserve_result_provider_metadata_when_state_is_output_error() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "input": { "location": "Brisbane" },
+                    "errorText": "Tool execution failed",
+                    "providerExecuted": true,
+                    "resultProviderMetadata": {
+                        "testProvider": { "itemId": "result-item" }
+                    }
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_tool_input_validation_when_state_is_output_error_and_there_is_no_input()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "errorText": "failed"
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(messages),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_a_tool_part_in_output_error_state_when_input_key_is_absent()
+     {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "rawInput": { "location": "Brisbane" },
+                    "errorText": "Tool input validation failed"
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_preserve_raw_input_when_state_is_output_error() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-error",
+                    "rawInput": { "location": "Brisbane" },
+                    "errorText": "Tool input validation failed",
+                    "providerExecuted": false
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_error_when_no_tool_schema_is_found() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "input-available",
+                        "input": { "location": "Brisbane" }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        })
+        .expect_err("missing tool schema should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("No tool schema found for tool part weather")
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_validation_for_tool_part_in_output_available_state_when_tool_schema_is_missing()
+     {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(json!([
+                    {
+                        "id": "1",
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool-weather",
+                            "toolCallId": "tool-1",
+                            "state": "output-available",
+                            "input": { "unexpected": true },
+                            "output": { "anything": true }
+                        }]
+                    }
+                ])),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_validation_for_tool_part_in_output_error_state_when_tool_schema_is_missing()
+     {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(json!([
+                    {
+                        "id": "1",
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool-weather",
+                            "toolCallId": "tool-1",
+                            "state": "output-error",
+                            "input": { "unexpected": true },
+                            "errorText": "Tool execution failed",
+                            "providerExecuted": true
+                        }]
+                    }
+                ])),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_skip_validation_for_tool_part_in_output_denied_state_when_tool_schema_is_missing()
+     {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "other".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        assert!(
+            validate_ui_messages(UiMessageValidationOptions {
+                messages: Some(json!([
+                    {
+                        "id": "1",
+                        "role": "assistant",
+                        "parts": [{
+                            "type": "tool-weather",
+                            "toolCallId": "tool-1",
+                            "state": "output-denied",
+                            "input": { "unexpected": true },
+                            "approval": {
+                                "id": "approval-1",
+                                "approved": false
+                            }
+                        }]
+                    }
+                ])),
+                tools,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ui_messages_should_validate_automatic_approval_reasons_on_output_parts() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "output-available",
+                    "input": { "location": "Brisbane" },
+                    "output": { "weather": "sunny" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true,
+                        "reason": "automatic",
+                        "isAutomatic": true
+                    }
+                }]
+            }
+        ]);
+
+        assert!(validate_messages(messages).is_ok());
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_error_when_tool_input_validation_fails() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "input-available",
+                        "input": { "city": "Brisbane" }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        })
+        .expect_err("invalid tool input should fail");
+
+        assert!(error.to_string().contains("messages[0].parts[0].input"));
+        assert!(error.to_string().contains("weather"));
+        assert!(error.to_string().contains("id: \"tool-1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_throw_error_when_tool_output_validation_fails() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location"))
+                .with_output_schema(schema_named("output-weather")),
+        );
+
+        let error = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "output-available",
+                        "input": { "location": "Brisbane" },
+                        "output": { "temperature": 27 }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        })
+        .expect_err("invalid tool output should fail");
+
+        assert!(error.to_string().contains("messages[0].parts[0].output"));
+        assert!(error.to_string().contains("weather"));
+        assert!(error.to_string().contains("id: \"tool-1\""));
+    }
+
+    #[test]
+    fn validate_ui_messages_should_not_validate_input_in_input_streaming_state() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "assistant",
+                "parts": [{
+                    "type": "tool-weather",
+                    "toolCallId": "tool-1",
+                    "state": "input-streaming",
+                    "input": { "city": "Brisbane" },
+                    "providerExecuted": true
+                }]
+            }
+        ]);
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(messages.clone()),
+            tools,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(result, messages.as_array().unwrap().clone());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_success_result_for_valid_messages() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])),
+            ..Default::default()
+        });
+
+        assert!(result.is_success());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_messages_parameter_is_null() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions::default());
+
+        assert!(matches!(
+            result,
+            SafeValidateUiMessagesResult::Failure {
+                error: UiMessageValidationError::InvalidArgument(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_messages_array_is_empty() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([])),
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            SafeValidateUiMessagesResult::Failure {
+                error: UiMessageValidationError::TypeValidation(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_message_has_empty_parts_array() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "parts": []
+                }
+            ])),
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_metadata_validation_fails() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "user",
+                    "metadata": { "foo": 123 },
+                    "parts": [{ "type": "text", "text": "Hello, world!" }]
+                }
+            ])),
+            metadata_schema: Some(schema_named("metadata")),
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_tool_input_validation_fails() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "weather".to_string(),
+            UiMessageValidationTool::new(schema_named("input-location")),
+        );
+
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{
+                        "type": "tool-weather",
+                        "toolCallId": "tool-1",
+                        "state": "input-available",
+                        "input": { "city": "Brisbane" }
+                    }]
+                }
+            ])),
+            tools,
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_when_data_schema_is_missing() {
+        let mut data_schemas = BTreeMap::new();
+        data_schemas.insert("other".to_string(), schema_named("string"));
+
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([
+                {
+                    "id": "1",
+                    "role": "assistant",
+                    "parts": [{ "type": "data-city", "data": "Brisbane" }]
+                }
+            ])),
+            data_schemas,
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            SafeValidateUiMessagesResult::Failure {
+                error: UiMessageValidationError::TypeValidation(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn safe_validate_ui_messages_should_return_failure_result_for_invalid_message_structure() {
+        let result = safe_validate_ui_messages(UiMessageValidationOptions {
+            messages: Some(json!([{ "role": "user" }])),
+            ..Default::default()
+        });
+
+        assert!(result.is_failure());
     }
 
     #[test]
