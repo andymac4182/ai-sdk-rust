@@ -2655,6 +2655,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   `reasoningSummary` including upstream's full `nonReasoningModelIds` matrix, dedicated `store: false`/`store: true` encrypted reasoning include request tests, unsupported
   OpenAI Responses presence/frequency penalties, dedicated `forceReasoning`/Codex Max `xhigh` tests, and
   flex/priority `serviceTier` validation.
+- 2026-05-24: OpenAI language-model capability matrix parity added
+  `openai_language_model_capabilities_is_reasoning_model_matches_upstream_matrix`
+  and
+  `openai_language_model_capabilities_supports_non_reasoning_parameters_matches_upstream_matrix`,
+  mapping upstream `openai-language-model-capabilities.test.ts` table rows
+  directly for reasoning-model detection and GPT-5.1+ non-reasoning-parameter
+  compatibility.
 - 2026-05-20: OpenAI Responses hosted tool include parity added
   `open_responses_provider_adds_hosted_tool_include_options` now covers
   upstream automatic `include` additions for hosted web-search action sources
