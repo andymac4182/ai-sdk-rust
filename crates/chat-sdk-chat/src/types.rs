@@ -1598,6 +1598,28 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported("schedule_message"))
     }
 
+    /// Schedule a typed PostableMessage (raw / markdown / AST shape)
+    /// for future delivery. 1:1 with the upstream
+    /// `scheduleMessage(threadId, message: PostableMessage, options)`
+    /// overload that accepts non-string message shapes. The Rust
+    /// port keeps the string-only [`Self::schedule_message`] for
+    /// the common case (slices 403..405) and adds this sibling for
+    /// the typed-message variants (slice 484): the message value is
+    /// the upstream JSON shape `{raw} | {markdown} | {ast}` passed
+    /// through opaquely. Adapters that want to handle typed inputs
+    /// override this; the default returns `Err(Unsupported)` and
+    /// [`crate::thread::Thread::schedule_postable`] surfaces
+    /// `ChatError::NotImplemented("scheduling")` to match upstream's
+    /// `NotImplementedError`.
+    async fn schedule_message_postable(
+        &self,
+        _thread_id: &str,
+        _message: &serde_json::Value,
+        _post_at_unix_ms: u64,
+    ) -> AdapterResult<ScheduledMessage> {
+        Err(AdapterError::Unsupported("schedule_message_postable"))
+    }
+
     /// Optional native modal-open dispatch. 1:1 with upstream
     /// optional `openModal?(triggerId, modal, contextId):
     /// Promise<{ viewId: string } | undefined>`. Opens a modal

@@ -475,6 +475,41 @@ impl Thread {
         }
     }
 
+    /// Schedule a typed PostableMessage for future delivery. 1:1
+    /// with the upstream `thread.schedule(message: PostableMessage,
+    /// options)` overload accepting non-string message shapes
+    /// (`{raw} | {markdown} | {ast}` — see slice 484). Dispatches
+    /// through [`crate::types::Adapter::schedule_message_postable`]
+    /// which receives the JSON shape opaquely. Surfaces
+    /// `NotImplementedError("scheduling")` when the adapter doesn't
+    /// override the trait method.
+    pub async fn schedule_postable(
+        &self,
+        message: serde_json::Value,
+        post_at_unix_ms: u64,
+    ) -> Result<ScheduledMessageHandle, crate::errors::ChatError> {
+        match self
+            .adapter
+            .schedule_message_postable(&self.thread_id, &message, post_at_unix_ms)
+            .await
+        {
+            Ok(scheduled) => Ok(ScheduledMessageHandle {
+                scheduled,
+                adapter: self.adapter.clone(),
+            }),
+            Err(crate::types::AdapterError::Unsupported(_)) => {
+                Err(crate::errors::ChatError::not_implemented_feature(
+                    "Scheduled messages are not supported by this adapter",
+                    "scheduling",
+                ))
+            }
+            Err(other) => Err(crate::errors::ChatError::new(
+                format!("{other}"),
+                "ADAPTER_ERROR",
+            )),
+        }
+    }
+
     /// 1:1 port of upstream `Thread.createSentMessageFromMessage(msg)`.
     /// Wraps an existing [`crate::message::Message`] as a
     /// [`SentMessage`] with edit/delete/add-reaction/remove-reaction
@@ -2285,16 +2320,90 @@ mod tests {
     #[test]
     fn thread_schedule_should_pass_string_messages_through_directly() {
         // 1:1 with upstream "should pass string messages through
-        // directly". Rust port currently only accepts &str, which
-        // matches this case exactly — the other 3 upstream cases
-        // (raw/markdown/ast message-object passthrough) require a
-        // PostableMessage input enum and are deferred.
+        // directly". The other 3 upstream variants
+        // (raw/markdown/ast message-object passthrough) land in
+        // slice 484 via `Thread::schedule_postable` + the sibling
+        // `Adapter::schedule_message_postable` trait method.
         let adapter = Arc::new(SchedulingAndPostingAdapter::default());
         let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
         block_on(thread.schedule("Plain text", FUTURE_UNIX_MS)).unwrap();
         let calls = adapter.schedule_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, "Plain text");
+    }
+
+    /// Adapter that records every `schedule_message_postable` call —
+    /// used by the slice-484 PostableMessage-variant tests.
+    #[derive(Debug, Default)]
+    struct PostableSchedulingAdapter {
+        calls: Mutex<Vec<(String, serde_json::Value, u64)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for PostableSchedulingAdapter {
+        fn name(&self) -> &str {
+            "postable-scheduling"
+        }
+        async fn schedule_message_postable(
+            &self,
+            thread_id: &str,
+            message: &serde_json::Value,
+            post_at_unix_ms: u64,
+        ) -> AdapterResult<crate::types::ScheduledMessage> {
+            self.calls.lock().unwrap().push((
+                thread_id.to_string(),
+                message.clone(),
+                post_at_unix_ms,
+            ));
+            Ok(crate::types::ScheduledMessage {
+                scheduled_message_id: "Q-PM".to_string(),
+                channel_id: "slack:C123".to_string(),
+                post_at_unix_ms,
+                raw: serde_json::json!({}),
+            })
+        }
+    }
+
+    #[test]
+    fn thread_schedule_postable_should_pass_raw_message_objects_through() {
+        // 1:1 with upstream `thread.test.ts > schedule() > "should
+        // pass raw message objects through"`. The JSON `{raw}`
+        // envelope reaches the adapter unchanged (slice 484).
+        let adapter = Arc::new(PostableSchedulingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let raw = serde_json::json!({"raw": "raw text"});
+        block_on(thread.schedule_postable(raw.clone(), FUTURE_UNIX_MS)).unwrap();
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123:1234.5678");
+        assert_eq!(calls[0].1, raw);
+        assert_eq!(calls[0].2, FUTURE_UNIX_MS);
+    }
+
+    #[test]
+    fn thread_schedule_postable_should_pass_markdown_message_objects_through() {
+        // 1:1 with upstream `thread.test.ts > schedule() > "should
+        // pass markdown message objects through"` (slice 484).
+        let adapter = Arc::new(PostableSchedulingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let md = serde_json::json!({"markdown": "**bold** text"});
+        block_on(thread.schedule_postable(md.clone(), FUTURE_UNIX_MS)).unwrap();
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, md);
+    }
+
+    #[test]
+    fn thread_schedule_postable_should_pass_ast_message_objects_through() {
+        // 1:1 with upstream `thread.test.ts > schedule() > "should
+        // pass AST message objects through"` (slice 484).
+        let adapter = Arc::new(PostableSchedulingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let ast = serde_json::json!({"ast": {"type": "root", "children": []}});
+        block_on(thread.schedule_postable(ast.clone(), FUTURE_UNIX_MS)).unwrap();
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, ast);
     }
 
     // ---------- describe("schedule()") cancel() — slice 405 ----------
