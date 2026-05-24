@@ -90,6 +90,30 @@ impl fmt::Display for OpenDmError {
 
 impl std::error::Error for OpenDmError {}
 
+/// Errors returned by [`Chat::get_user`]. 1:1 with upstream's
+/// `throw new ChatError(...)` cases in `chat.getUser`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetUserError {
+    /// No adapter pattern matched the user id.
+    UnknownUserIdFormat(String),
+    /// The inferred adapter rejected `get_user` (most often
+    /// `AdapterError::Unsupported("get_user")`).
+    AdapterError(String),
+}
+
+impl fmt::Display for GetUserError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownUserIdFormat(id) => {
+                write!(f, "Cannot infer adapter from userId \"{id}\"")
+            }
+            Self::AdapterError(msg) => write!(f, "get_user failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for GetUserError {}
+
 /// Default TTL the chat singleton uses for the per-thread lock the
 /// concurrency layer acquires before invoking each handler. 1:1
 /// with upstream's private `DEFAULT_LOCK_TTL_MS = 30_000` (30 s).
@@ -436,6 +460,27 @@ impl Chat {
             .await
             .map_err(|err| OpenDmError::AdapterError(format!("{err:?}")))?;
         Ok(Thread::new(adapter, thread_id))
+    }
+
+    /// 1:1 port of upstream `Chat.getUser(user)`. Infers the adapter
+    /// from `user_id` via [`Self::infer_adapter_for_user_id`] and
+    /// delegates to `adapter.get_user(user_id)`. Returns `Ok(None)`
+    /// when the user isn't found at the platform; returns
+    /// `Err(GetUserError::UnknownUserIdFormat)` when no adapter
+    /// pattern matches; returns `Err(GetUserError::AdapterError)`
+    /// when the inferred adapter rejects `get_user`
+    /// (most often `AdapterError::Unsupported("get_user")`).
+    pub async fn get_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::types::UserInfo>, GetUserError> {
+        let adapter = self
+            .infer_adapter_for_user_id(user_id)
+            .ok_or_else(|| GetUserError::UnknownUserIdFormat(user_id.to_string()))?;
+        adapter
+            .get_user(user_id)
+            .await
+            .map_err(|err| GetUserError::AdapterError(format!("{err:?}")))
     }
 
     /// Infer the adapter most likely to own this user id. 1:1 with
@@ -1293,6 +1338,117 @@ mod tests {
         let (chat, _adapter) = chat_with_open_dm_adapter("slack");
         let err = futures_executor::block_on(chat.open_dm("invalid-user-id")).unwrap_err();
         assert!(matches!(err, OpenDmError::UnknownUserIdFormat(ref id) if id == "invalid-user-id"));
+        assert!(err.to_string().contains("Cannot infer adapter from userId"));
+    }
+
+    // ---------- describe("getUser") (4 of 10 upstream cases) ----------
+    // 1:1 with upstream `chat.test.ts > describe("getUser")`. The 6
+    // deferred cases need Author-object Into trait impl, or
+    // multi-adapter inference ambiguity testing, or numeric-id
+    // adapter-priority testing — each ports as its own slice.
+
+    use crate::types::UserInfo;
+
+    #[derive(Debug)]
+    struct GetUserAdapter {
+        name: String,
+        result: Mutex<Option<UserInfo>>,
+        unsupported: bool,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl GetUserAdapter {
+        fn new(name: &str, result: Option<UserInfo>) -> Self {
+            Self {
+                name: name.to_string(),
+                result: Mutex::new(result),
+                unsupported: false,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn unsupported(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                result: Mutex::new(None),
+                unsupported: true,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for GetUserAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn get_user(&self, user_id: &str) -> AdapterResult<Option<UserInfo>> {
+            self.calls.lock().unwrap().push(user_id.to_string());
+            if self.unsupported {
+                return Err(AdapterError::Unsupported("get_user"));
+            }
+            Ok(self.result.lock().unwrap().clone())
+        }
+    }
+
+    fn chat_with_get_user_adapter(adapter: GetUserAdapter) -> (Chat, Arc<GetUserAdapter>) {
+        let adapter = Arc::new(adapter);
+        let state: Arc<dyn StateAdapter> = Arc::new(NullState);
+        let adapters: Vec<Arc<dyn Adapter>> = vec![adapter.clone() as Arc<dyn Adapter>];
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters,
+            ..Default::default()
+        });
+        (chat, adapter)
+    }
+
+    fn alice() -> UserInfo {
+        UserInfo {
+            user_id: "U123456".to_string(),
+            user_name: "alice".to_string(),
+            full_name: "Alice Smith".to_string(),
+            email: Some("alice@example.com".to_string()),
+            avatar_url: Some("https://example.com/alice.png".to_string()),
+            is_bot: false,
+        }
+    }
+
+    #[test]
+    fn chat_get_user_should_return_user_info_from_adapter() {
+        let (chat, adapter) =
+            chat_with_get_user_adapter(GetUserAdapter::new("slack", Some(alice())));
+        let user = futures_executor::block_on(chat.get_user("U123456"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(user.full_name, "Alice Smith");
+        let calls = adapter.calls.lock().unwrap();
+        assert_eq!(calls.as_slice(), &["U123456".to_string()]);
+    }
+
+    #[test]
+    fn chat_get_user_should_throw_when_adapter_does_not_support_get_user() {
+        let (chat, _adapter) =
+            chat_with_get_user_adapter(GetUserAdapter::unsupported("slack"));
+        let err = futures_executor::block_on(chat.get_user("U123456")).unwrap_err();
+        assert!(matches!(err, GetUserError::AdapterError(ref msg) if msg.contains("get_user")));
+    }
+
+    #[test]
+    fn chat_get_user_should_return_null_when_user_is_not_found() {
+        let (chat, _adapter) = chat_with_get_user_adapter(GetUserAdapter::new("slack", None));
+        let user = futures_executor::block_on(chat.get_user("U999999")).unwrap();
+        assert!(user.is_none());
+    }
+
+    #[test]
+    fn chat_get_user_should_throw_error_for_unknown_user_id_format() {
+        let (chat, _adapter) =
+            chat_with_get_user_adapter(GetUserAdapter::new("slack", Some(alice())));
+        let err = futures_executor::block_on(chat.get_user("invalid-user-id")).unwrap_err();
+        assert!(
+            matches!(err, GetUserError::UnknownUserIdFormat(ref id) if id == "invalid-user-id")
+        );
         assert!(err.to_string().contains("Cannot infer adapter from userId"));
     }
 
