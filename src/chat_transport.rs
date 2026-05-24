@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use crate::agent::{ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings};
 use crate::file_data::{FileData, ProviderReference};
@@ -1407,12 +1408,14 @@ pub struct HttpChatTransportRequest {
 }
 
 /// Constructor options for the Rust equivalent of upstream `HttpChatTransport`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct HttpChatTransportOptions {
     pub api: String,
     pub credentials: Option<RequestCredentials>,
     pub headers: Headers,
+    pub header_callback: Option<Arc<dyn Fn() -> Headers + Send + Sync>>,
     pub body: Option<JsonObject>,
+    pub body_callback: Option<Arc<dyn Fn() -> JsonObject + Send + Sync>>,
 }
 
 impl Default for HttpChatTransportOptions {
@@ -1421,8 +1424,35 @@ impl Default for HttpChatTransportOptions {
             api: "/api/chat".to_string(),
             credentials: None,
             headers: Headers::new(),
+            header_callback: None,
             body: None,
+            body_callback: None,
         }
+    }
+}
+
+impl fmt::Debug for HttpChatTransportOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpChatTransportOptions")
+            .field("api", &self.api)
+            .field("credentials", &self.credentials)
+            .field("headers", &self.headers)
+            .field("has_header_callback", &self.header_callback.is_some())
+            .field("body", &self.body)
+            .field("has_body_callback", &self.body_callback.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for HttpChatTransportOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.api == other.api
+            && self.credentials == other.credentials
+            && self.headers == other.headers
+            && self.header_callback.is_some() == other.header_callback.is_some()
+            && self.body == other.body
+            && self.body_callback.is_some() == other.body_callback.is_some()
     }
 }
 
@@ -1446,8 +1476,18 @@ impl HttpChatTransportOptions {
         self
     }
 
+    pub fn with_header_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> Headers + Send + Sync + 'static,
+    {
+        self.headers = Headers::new();
+        self.header_callback = Some(Arc::new(callback));
+        self
+    }
+
     pub fn with_body(mut self, body: JsonObject) -> Self {
         self.body = Some(body);
+        self.body_callback = None;
         self
     }
 
@@ -1459,7 +1499,33 @@ impl HttpChatTransportOptions {
         self.body
             .get_or_insert_with(JsonObject::new)
             .insert(name.into(), value.into());
+        self.body_callback = None;
         self
+    }
+
+    pub fn with_body_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> JsonObject + Send + Sync + 'static,
+    {
+        self.body = None;
+        self.body_callback = Some(Arc::new(callback));
+        self
+    }
+
+    fn resolved_headers(&self) -> Headers {
+        if let Some(callback) = &self.header_callback {
+            callback()
+        } else {
+            self.headers.clone()
+        }
+    }
+
+    fn resolved_body(&self) -> Option<JsonObject> {
+        if let Some(callback) = &self.body_callback {
+            Some(callback())
+        } else {
+            self.body.clone()
+        }
     }
 }
 
@@ -1590,7 +1656,9 @@ impl HttpChatTransport {
         &self,
         options: &ChatTransportSendOptions,
     ) -> PrepareSendMessagesRequestOptions {
-        let body = merged_body(self.options.body.as_ref(), options.request.body.as_ref());
+        let transport_body = self.options.resolved_body();
+        let transport_headers = self.options.resolved_headers();
+        let body = merged_body(transport_body.as_ref(), options.request.body.as_ref());
 
         PrepareSendMessagesRequestOptions {
             api: self.options.api.clone(),
@@ -1598,7 +1666,7 @@ impl HttpChatTransport {
             messages: options.messages.clone(),
             request_metadata: options.request.metadata.clone(),
             body,
-            headers: merged_headers(&self.options.headers, &options.request.headers),
+            headers: merged_headers(&transport_headers, &options.request.headers),
             credentials: self.options.credentials,
             trigger: options.trigger,
             message_id: options.message_id.clone(),
@@ -1644,12 +1712,15 @@ impl HttpChatTransport {
         &self,
         options: &ChatTransportReconnectOptions,
     ) -> PrepareReconnectToStreamRequestOptions {
+        let transport_body = self.options.resolved_body();
+        let transport_headers = self.options.resolved_headers();
+
         PrepareReconnectToStreamRequestOptions {
             api: self.options.api.clone(),
             id: options.chat_id.clone(),
             request_metadata: options.request.metadata.clone(),
-            body: merged_body(self.options.body.as_ref(), options.request.body.as_ref()),
-            headers: merged_headers(&self.options.headers, &options.request.headers),
+            body: merged_body(transport_body.as_ref(), options.request.body.as_ref()),
+            headers: merged_headers(&transport_headers, &options.request.headers),
             credentials: self.options.credentials,
         }
     }
@@ -2071,6 +2142,62 @@ mod tests {
                 "someData": true,
                 "trigger": "submit-message"
             }))
+        );
+    }
+
+    #[test]
+    fn http_chat_transport_includes_body_in_request_when_function_is_provided() {
+        let transport = HttpChatTransport::with_options(
+            HttpChatTransportOptions::new()
+                .with_api("https://example.test/api/chat")
+                .with_body_callback(|| {
+                    JsonObject::from_iter([("someData".to_string(), json!(true))])
+                }),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "c123")
+            .with_message_id("m123")
+            .with_messages([UiMessage::new("m123", crate::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello, world!" }))]);
+
+        let request = transport.build_send_messages_request(&send, None);
+
+        assert_eq!(
+            request.body,
+            Some(json!({
+                "id": "c123",
+                "messageId": "m123",
+                "messages": [
+                    {
+                        "id": "m123",
+                        "role": "user",
+                        "parts": [{ "type": "text", "text": "Hello, world!" }]
+                    }
+                ],
+                "someData": true,
+                "trigger": "submit-message"
+            }))
+        );
+    }
+
+    #[test]
+    fn http_chat_transport_includes_headers_in_request_when_function_is_provided() {
+        let transport = HttpChatTransport::with_options(
+            HttpChatTransportOptions::new()
+                .with_api("https://example.test/api/chat")
+                .with_header_callback(|| {
+                    Headers::from([("X-Test-Header".to_string(), "test-value-fn".to_string())])
+                }),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "c123")
+            .with_message_id("m123")
+            .with_messages([UiMessage::new("m123", crate::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello, world!" }))]);
+
+        let request = transport.build_send_messages_request(&send, None);
+
+        assert_eq!(
+            request.headers.get("x-test-header").map(String::as_str),
+            Some("test-value-fn")
         );
     }
 
