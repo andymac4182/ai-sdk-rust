@@ -4070,3 +4070,100 @@ the trait surface.
   chatApi client.
 - **State-backend client wire-up** — still blocked on workspace
   runtime decision.
+
+## Slices 368..379 refinement cycle (1:1 mapping sweep + serialization cases + adapter trait sweep)
+
+**Scope:** slices 368..379 (12 merges). Major themes:
+
+1. **Bundled-test split pattern** (slices 368) — splits a single
+   Rust test that bundled N upstream `it()` cases into N
+   individual 1:1 tests. GitHub `emoji_to_github_reaction` test
+   split into 16 separate cases (+15 tests in one slice).
+2. **Normalize-helper pattern** (slice 369) — Messenger
+   `normalize_thread_id` ports the 5th `thread ID encoding`
+   case via a pure helper that adds the `messenger:` prefix to
+   bare PSIDs.
+3. **Trait-impl sweep pattern continuation** (slices 370) —
+   `Adapter::open_dm` trait impls added across WhatsApp,
+   Messenger, Telegram (3 adapters with non-HTTP open_dm
+   helpers).
+4. **Serialization-case ports** (slices 371-378) — 14 cases
+   ported across Thread.toJSON/fromJSON + Message.toJSON/fromJSON
+   + standalone reviver + chat.reviver. Significant: slice 374
+   added `revive_walk(Value) -> Value` recursive helper matching
+   upstream's `JSON.parse(text, reviver)` recursive visit
+   semantics.
+5. **Edge-case 1:1 mapping** (slices 363, 379) — Discord
+   truncateContent missing exactly-2000 / exactly-2001 / empty
+   cases + adapter-shared buffer_utils handles-image-mime-types
+   + handles-empty-buffer cases.
+
+**Pattern observations**
+
+- The **revive_walk recursive helper** unblocks all reviver-
+  family describe blocks (chat.reviver + standalone reviver)
+  for the chat:Message branch. Thread/Channel reviver branches
+  remain gated on the singleton-resolved adapter lookup. This
+  is the second cross-cutting helper this refinement cycle
+  (the first was Adapter trait impl sweep at slice 366/370).
+- The **type-system-impossible upstream case** category
+  (e.g. "returns null for null input" when the Rust signature
+  takes a non-Option `T` parameter, or "fetchMessage callback
+  not preserved" when the Rust LinkPreview has no callback
+  field by construction) requires explicit documentation in
+  the test mapping rather than a Rust test. Mark these as
+  "1:1 via type system — case is unreachable in Rust".
+- The **stripped-attachment serialize variant** (slice 377)
+  uses `to_serialized_stripped()` to verify upstream's
+  `JSON.stringify` semantics around binary attachment fields.
+  Document the explicit dual `to_serialized` /
+  `to_serialized_stripped` surfaces — the latter is the
+  wire-shape used at HTTP/state-backend boundaries; the
+  former preserves inline data for in-process round-trips.
+- The **pace is consistent**: ~3-9 cases/slice with 1-2 minute
+  merge cycles. At 12 slices/cycle × ~5 cases each = ~60
+  cases/cycle. Still ~10× more cycles needed for the ~1200
+  portable upstream cases. **The terminal Done clause's
+  highest-leverage remaining lever continues to be the
+  chat-sdk-chat handleIncomingMessage + event dispatcher
+  port** (one slice unblocks ~80 cases).
+
+**Brief tightening applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md` documents the
+  **type-system-impossible upstream case** category —
+  upstream cases that test null/undefined input or callback
+  preservation are 1:1 by construction in Rust when the type
+  signature makes the test unreachable. Don't waste a test
+  slot on these; document the mapping in the module header
+  or test-section comment.
+
+**Done condition gap analysis**
+
+The terminal Done clause remains unsatisfied — 13 in-progress
+packages still need substantial work. This cycle ported ~40
+cases (~3% additional). Cumulative: ~135 cases across slices
+354..379 (~10% of the ~1200 portable upstream target).
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- `scripts/codex-goal-chat/port-chat-sdk.md`: documents the
+  type-system-impossible upstream-case category.
+
+**Open refinements deferred**
+
+- **chat-sdk-chat handleIncomingMessage + dispatcher** —
+  highest-leverage remaining work; unblocks ~80 chat.test.ts +
+  thread.test.ts cases.
+- **post_object across 9 adapters** — biggest remaining
+  cross-cutting work.
+- **parse_message across 9 adapters**.
+- **post_ephemeral across 7 remaining adapters** (Discord/
+  Teams/Telegram/WhatsApp/Messenger/Linear/GitHub default to
+  Unsupported sentinel; document this as a sweep slice).
+- **GitHub remove_reaction** — multi-step list/match/delete.
+- **GChat remove_reaction** — multi-step list/match/delete via
+  chatApi client.
+- **State-backend client wire-up** — still blocked on workspace
+  runtime decision.

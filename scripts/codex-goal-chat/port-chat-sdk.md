@@ -1247,3 +1247,48 @@ boundary.
 Reference port: slice 366 sweep added `Adapter::channel_id_from_thread_id`
 + `Adapter::is_dm` impls across 8 adapters (Slack, Discord, GChat,
 WhatsApp, Messenger, Telegram, Linear, GitHub) in one commit.
+
+## Type-system-impossible upstream cases (added slice 380)
+
+Some upstream tests assert behavior that's impossible-by-construction
+in idiomatic Rust:
+
+- Upstream tests `it("returns null for null input")` when the JS
+  signature is `extractCard(message: ChatElement | null | undefined)`.
+  In Rust the equivalent is `pub fn extract_card(message:
+  &AdapterPostableMessage) -> Option<&CardElement>` — `message`
+  cannot be null, so the test case is unreachable.
+- Upstream tests `it("does not preserve fetchMessage callback")`
+  when the JS `LinkPreview` interface has an optional async
+  `fetchMessage` callback. In Rust the equivalent
+  `LinkPreview` struct has no callback field at all by
+  construction, so the absence is enforced at compile time.
+- Upstream tests `it("rejects unsupported type at runtime")` when
+  the JS function takes `unknown`. In Rust the equivalent is a
+  typed enum that lists exactly the supported variants; the
+  unsupported case can't be constructed.
+
+The brief mandates a matching Rust test for every portable upstream
+case. **Type-system-impossible cases satisfy the parity contract
+via the type system itself** — don't bypass the rule with a fake
+Rust test that asserts a tautology. Instead, document the mapping
+in the module header or test-section comment so the parity audit
+can verify the case is intentionally not portable:
+
+```rust
+// ---------- describe("extractCard") (14 upstream cases, 10 portable) ----------
+// Upstream's "returns null for null input" / "returns null for
+// undefined input" / "returns null for object without card or type"
+// cases are 1:1 via the type system: the Rust signature takes
+// `&AdapterPostableMessage` (a typed enum, not `unknown | null |
+// undefined`), so the cases are unreachable.
+```
+
+Reference ports:
+- `Message::to_serialized` slice 377 — `fetchMessage` / `data`
+  callback fields don't exist on the Rust `LinkPreview` /
+  `Attachment` types.
+- `chat_sdk_adapter_shared::buffer_utils` slice 379 — the
+  TS-runtime-only `Buffer` / `ArrayBuffer` / `Blob` cases
+  collapse to a single Rust `FileBytes` (`Vec<u8>`) round-trip
+  case.
