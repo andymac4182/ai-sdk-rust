@@ -3050,7 +3050,11 @@ fn update_tool_part_output_available(
         insert_optional_bool(object, "providerExecuted", provider_executed);
         insert_result_provider_metadata(object, provider_metadata);
         insert_optional_object(object, "toolMetadata", tool_metadata);
-        insert_optional_bool(object, "preliminary", preliminary);
+        if let Some(preliminary) = preliminary {
+            object.insert("preliminary".to_string(), JsonValue::Bool(preliminary));
+        } else {
+            object.remove("preliminary");
+        }
     }
 }
 
@@ -4281,6 +4285,235 @@ mod tests {
                 "state": "output-error",
                 "rawInput": r#"{ "foo": "bar" }"#,
                 "errorText": "Model tried to call unavailable tool 'nonExistentTool'."
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_updates_preliminary_tool_results_until_final_output() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::tool_input_available(
+                    "call-1",
+                    "cityAttractions",
+                    json!({ "city": "San Francisco" }),
+                ),
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!({
+                        "status": "loading",
+                        "text": "Getting weather for San Francisco"
+                    }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "call-1".to_string(),
+                    output: json!({
+                        "status": "success",
+                        "temperature": 72,
+                        "text": "The weather in San Francisco is 72F"
+                    }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: Some(true),
+                    dynamic: None,
+                },
+                UiMessageChunk::tool_output_available(
+                    "call-1",
+                    json!({
+                        "status": "success",
+                        "temperature": 72,
+                        "text": "The weather in San Francisco is 72F"
+                    }),
+                ),
+            ],
+            false,
+        )
+        .expect("preliminary tool results process");
+
+        assert_eq!(
+            messages[1].parts[1].get("preliminary"),
+            Some(&JsonValue::Bool(true))
+        );
+        assert_eq!(
+            messages[2].parts[1].get("preliminary"),
+            Some(&JsonValue::Bool(true))
+        );
+        assert!(state.message.parts[1].get("preliminary").is_none());
+        assert_eq!(
+            serde_json::to_value(state.message.parts).expect("parts serialize"),
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-cityAttractions",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "city": "San Francisco" },
+                    "output": {
+                        "status": "success",
+                        "temperature": 72,
+                        "text": "The weather in San Francisco is 72F"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_static_tool_title_through_output() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "weatherTool".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    dynamic: None,
+                    title: Some("Weather Information".to_string()),
+                },
+                UiMessageChunk::tool_input_delta("tool-call-0", r#"{"location":"Paris"}"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-0".to_string(),
+                    tool_name: "weatherTool".to_string(),
+                    input: json!({ "location": "Paris" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: Some("Weather Information".to_string()),
+                },
+                UiMessageChunk::tool_output_available("tool-call-0", json!("Sunny, 22C")),
+            ],
+            false,
+        )
+        .expect("static tool title processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-weatherTool",
+                "toolCallId": "tool-call-0",
+                "title": "Weather Information",
+                "state": "output-available",
+                "input": { "location": "Paris" },
+                "output": "Sunny, 22C"
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_dynamic_tool_title_through_output() {
+        let mut state = StreamingUiMessageState::new("msg-456", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "calculate".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    dynamic: Some(true),
+                    title: Some("Calculator".to_string()),
+                },
+                UiMessageChunk::tool_input_delta("tool-call-1", r#"{"a":5,"b":3}"#),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    tool_name: "calculate".to_string(),
+                    input: json!({ "a": 5, "b": 3 }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: Some("Calculator".to_string()),
+                },
+                UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: "tool-call-1".to_string(),
+                    output: json!({ "result": 8 }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    preliminary: None,
+                    dynamic: Some(true),
+                },
+            ],
+            false,
+        )
+        .expect("dynamic tool title processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "dynamic-tool",
+                "toolName": "calculate",
+                "toolCallId": "tool-call-1",
+                "title": "Calculator",
+                "state": "output-available",
+                "input": { "a": 5, "b": 3 },
+                "output": { "result": 8 }
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_tool_title_in_error_state() {
+        let mut state = StreamingUiMessageState::new("msg-error", None);
+
+        process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputStart {
+                    tool_call_id: "tool-call-error".to_string(),
+                    tool_name: "errorTool".to_string(),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    dynamic: None,
+                    title: Some("Error Tool".to_string()),
+                },
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-error".to_string(),
+                    tool_name: "errorTool".to_string(),
+                    input: json!({ "invalid": "data" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: Some("Error Tool".to_string()),
+                },
+                UiMessageChunk::tool_output_error("tool-call-error", "Tool execution failed"),
+            ],
+            false,
+        )
+        .expect("tool title error state processes");
+
+        assert_eq!(
+            serde_json::to_value(state.message.parts.last()).expect("part serializes"),
+            json!({
+                "type": "tool-errorTool",
+                "toolCallId": "tool-call-error",
+                "title": "Error Tool",
+                "state": "output-error",
+                "input": { "invalid": "data" },
+                "errorText": "Tool execution failed"
             })
         );
     }
