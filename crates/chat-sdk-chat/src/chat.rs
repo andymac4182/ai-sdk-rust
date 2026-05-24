@@ -4694,6 +4694,60 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
+    /// Recording adapter that captures `post_message` calls for the
+    /// action `event.thread.post(...)` test (slice 474).
+    #[derive(Debug, Default)]
+    struct ActionThreadPostAdapter {
+        post_message_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for ActionThreadPostAdapter {
+        fn name(&self) -> &str {
+            "slack"
+        }
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_message_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            Ok("msg-id".to_string())
+        }
+    }
+
+    #[test]
+    fn on_action_event_thread_post_routes_to_adapter_post_message() {
+        // 1:1 with upstream `chat.test.ts > describe("Actions") > "should
+        // allow posting from action thread"`. The action handler calls
+        // `event.thread.post(text)` which routes through `Thread::post`
+        // → `Adapter::post_message` with the event's `thread_id`.
+        let recorder: Arc<ActionThreadPostAdapter> = Arc::new(ActionThreadPostAdapter::default());
+        let adapter: Arc<dyn Adapter> = recorder.clone();
+        let state: Arc<dyn StateAdapter> = Arc::new(InMemoryState::default());
+        let chat = Chat::new(ChatOptions {
+            state,
+            adapters: vec![adapter.clone()],
+            ..Default::default()
+        });
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let i = invoked.clone();
+        chat.on_action(move |event| {
+            let i = i.clone();
+            let thread = event.thread.clone();
+            Box::pin(async move {
+                let _ = thread.post("Action received!").await;
+                i.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let event = make_action_event("approve", None, false);
+        futures_executor::block_on(chat.process_action(adapter.as_ref(), event));
+        assert_eq!(invoked.load(AtomicOrdering::SeqCst), 1);
+        let calls = recorder.post_message_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "slack:C123:1234.5678");
+        assert_eq!(calls[0].1, "Action received!");
+    }
+
     // ---------- describe("Slash Commands") — slice 422 ----------
     //
     // 1:1 with upstream `chat.test.ts > describe("Slash Commands")`.
