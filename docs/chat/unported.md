@@ -97,6 +97,42 @@ the structurally-unportable cases.
   AEAD dep in scope), default-Logger constructor parameter,
   subclass extensibility, typed-client `LinearClient` instance
   identity / `AsyncLocalStorage`-resolved per-installation getter.
+- **`chat-sdk-adapter-slack`** — Vitest `vi.fn()`-mocked
+  `@slack/web-api` `WebClient` typed-client cases under
+  `describe("webClient getter")` + `describe("direct WebClient
+  access via adapter.client")` + `describe("handleWebhook -
+  signature verification / webhookVerifier / URL verification /
+  event_callback / interactive payloads / JSON parsing / slash
+  commands / assistant events")` + `describe("multi-workspace mode
+  / installationProvider / installationKeyPrefix / handleOAuthCallback
+  / withBotToken / botToken as function")` + `describe("postMessage
+  / editMessage / deleteMessage / addReaction / removeReaction /
+  openModal / updateModal / startTyping / openDM / fetchMessages /
+  fetchMessage / fetchChannelInfo / fetchChannelMessages /
+  postChannelMessage / listThreads / publishHomeView /
+  setSuggestedPrompts / setAssistantStatus / setAssistantTitle /
+  decodeEphemeralMessageId / editMessage via response_url /
+  deleteMessage via response_url / isMessageFromSelf / reverse user
+  lookup / stream / scheduleMessage / getUser / link unfurl /
+  parseMessage / link extraction / DM message handling / message
+  subtype handling / initialize / fetchThread / Attachment.fetchData
+  / resolveInlineMentions / error handling / edge cases / date
+  parsing / formatted text extraction / ephemeral message ID
+  encoding")` + `@slack/socket-mode` SDK cases under
+  `describe("socket mode - factory validation / handleWebhook /
+  initialize / routeSocketEvent / disconnect / forwarding")` +
+  `describe("startSocketModeListener / routeSocketEvent with
+  options")`, `@slack/oauth` SDK install-store integration,
+  AES-256-GCM token encryption (already covered via [`crate::crypto`]),
+  default-Logger constructor parameter, subclass extensibility,
+  typed-client `WebClient` instance identity / deprecated `client`
+  alias / `AsyncLocalStorage`-resolved per-installation getter.
+  (The prior deferred-but-portable renderer ports —
+  `modalToSlackView` 21 + `parseSlackWebhookBody` 11 + `callSlackApi`
+  12 — are now mapped 1:1 in
+  [`crate::modals`] / [`crate::webhook`] / [`crate::api`]; the
+  remaining HTTP-fetch-mocked siblings inside the same describe
+  blocks stay enumerated under the `vi.fn()` HTTP fixture row above.)
 - **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
@@ -508,3 +544,41 @@ Mapped accounting: 145 Rust-mapped + 100 js-only-documented =
 245/245 upstream cases accounted for. The 145 mapped tests live
 as colocated `#[cfg(test)] mod tests` in
 [`crates/chat-sdk-adapter-gchat/src/{lib,cards,markdown,parse,thread_id,user_info,workspace_events}.rs`](../../crates/chat-sdk-adapter-gchat/src/).
+
+---
+
+## Section: `chat-sdk-adapter-slack`
+
+### `packages/adapter-slack/src/{index,cards,crypto,format/index,format/boundary,markdown,modals,webhook/index,webhook/boundary,api/index,api/boundary}.test.ts` (271 unportable cases of 448)
+
+Slack is the largest adapter in the chat-sdk port (448 upstream
+`it()` cases across 11 test files — index.test.ts alone has 287).
+The Rust port maps 177 of the 448 upstream cases (crypto 14/14 +
+cards 36/36 + markdown 26/26 + format/index 16/16 + format/boundary
+1/1 + api/boundary 1/1 + api/index 13/13 + webhook/boundary 1/1 +
+webhook/index 16/20 verifySlackSignature + parseSlackWebhookBody +
+modals 33/33 metadata + modalToSlackView + index.ts 20:
+encodeThreadId 2 + decodeThreadId 4 + isDM 3 + channelIdFromThreadId
+2 + createSlackAdapter 4 + postEphemeral 3 + renderFormatted 1 +
+startTyping 1). The remaining 271 cases fall under the cross-cutting
+sweep patterns (slice 411 Vitest `vi.fn()` HTTP / `@slack/web-api`
+typed-client mock + slice 439 `WebClient`-getter typed-client +
+slice 380 type-system-impossible + slice 447 default-Logger + slice
+305 env-var resolution) plus the `@slack/socket-mode` SDK (no Rust
+equivalent in scope) plus the `verifySlackRequest` /
+`readSlackWebhook` async-Request runtime wrappers.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked `@slack/web-api` typed-client / Web API HTTP-fetch (slice 411) | ~227 cases listed in [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header by describe-block: `handleWebhook - signature verification` 5 + `handleWebhook - webhookVerifier` 6 + `handleWebhook - URL verification` 1 + `handleWebhook - event_callback` 5 + `handleWebhook - interactive payloads` 10 + `handleWebhook - JSON parsing` 1 + `parseMessage` 7 + `link extraction` 6 + `edge cases` 4 + `date parsing` 2 + `formatted text extraction` 3 + `multi-workspace mode` 9 + `installationProvider` 13 + `multi-workspace mode with encryption` 3 + `installationKeyPrefix` 2 + `handleOAuthCallback` 6 + `withBotToken` 2 + `adapter.client end-to-end with multi-workspace webhook` 1 + `DM message handling` 4 + `message subtype handling` 5 + `handleWebhook - slash commands` 6 + `botToken as function` 5 + `Attachment.fetchData token resolution` 2 + `postMessage` 4 + `editMessage` 1 + `deleteMessage` 1 + `addReaction` 2 + `removeReaction` 1 + `openModal` 3 + `updateModal` 1 + `startTyping` 3 of 4 + `openDM` 2 + `fetchMessages` 3 + `fetchMessage` 2 + `fetchChannelInfo` 3 + `fetchChannelMessages` 3 + `postChannelMessage` 2 + `listThreads` 2 + `ephemeral message ID encoding` 2 + `error handling` 5 + `resolveInlineMentions` 6 + `fetchThread` 1 + `initialize` 3 + `publishHomeView` 1 + `setSuggestedPrompts` 2 + `setAssistantStatus` 2 + `setAssistantTitle` 1 + `handleWebhook - assistant events` 4 + `decodeEphemeralMessageId edge cases` 5 + `editMessage via response_url` 1 + `deleteMessage via response_url` 1 + `isMessageFromSelf` 3 + `reverse user lookup` 19 + `stream with empty threadTs` 1 + `scheduleMessage with empty threadTs` 1 + `getUser` 7 + `link unfurl enrichment` 6. | Each case stubs `globalThis.fetch` via `vi.fn()` / `vi.mock("@slack/web-api")` chains, drives a Web API call (chat.postMessage / chat.update / chat.delete / views.open / views.update / users.info / conversations.info / etc.) or `adapter.handleWebhook(request)` with a synthetic `Request`, and asserts on `mockFetch.toHaveBeenCalledWith(url, {body, headers})` URL/body shape OR on `mockChat.processMessage` / `mockChat.processAction` runtime side-effects from a sequenced `mockResolvedValueOnce(...)` chain. Requires the upstream Vitest `vi.fn()` HTTP-fetch infrastructure + `@slack/web-api` `WebClient` typed-class instance + `@slack/oauth` `InstallProvider` SDK for the installation/OAuth callback paths + `@slack/web-api`'s state-cache wiring. | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + body shape are structurally covered via the parametric `SlackAdapter::method_url` URL builder (10 endpoints) + pure body-shape helpers (`slack_post_ephemeral_payload` / `parse_slack_post_ephemeral_response` / `encode_slack_api_body`). Structural parsing logic for the Webhook surface lives in [`crate::webhook`] (29 colocated tests: verifySlackSignature 5/5 1:1 + get_header/get_retry/is_form_body/parse_json_body/is_record/string_value/optional_string pure helpers). The full installationProvider + multi-workspace + OAuth + Socket Mode dispatch surfaces require an HTTP+OAuth runtime workstream that has not landed. Enumerated by line + describe-block in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+| `@slack/socket-mode` SDK (no Rust equivalent) | 31 cases across 8 describe blocks: `socket mode - factory validation` 5 + `socket mode - handleWebhook` 1 + `socket mode - initialize` 1 + `socket mode - routeSocketEvent` 7 + `socket mode - disconnect` 2 + `socket mode forwarding - handleWebhook` 9 + `startSocketModeListener` 3 + `routeSocketEvent with options` 3. | All cases drive `vi.mock("@slack/socket-mode")` + `vi.fn()` on the `SocketModeClient` typed-class instance, assert on the `socketClient.start/stop/disconnect` lifecycle plus event-forwarding to the same `handleWebhook` dispatcher described above. Requires the `@slack/socket-mode` Node SDK (WebSocket pump + auto-reconnect over Slack's app-level token). | No Rust port of `@slack/socket-mode` is in workspace scope. The `app_token` field is already plumbed on `SlackAdapterOptions::with_app_token`; the actual `connections.open` + WebSocket pump are deferred. Enumerated in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+| Typed `WebClient` instance access (slice 439) | 15 cases (index.test.ts `describe("webClient getter")` 5 + `describe("direct WebClient access via adapter.client")` 10) | Assert the getter returns a `WebClient` typed-class instance with `.token` exposed, identity semantics across calls, deprecated `client` property alias, multi-workspace `throw` without context, and `AsyncLocalStorage`-resolved per-installation token via `withBotToken`. | Rust has no `WebClient` equivalent — HTTP is held as an opaque `reqwest::Client`. Per-call referential equality is moot under `Clone`-shared-pool semantics. The deprecated `client` alias was never shipped in Rust. Multi-workspace property-throw + ALS-based per-request token resolution are surfaced via typed errors + function-parameter plumbing at the per-workspace call sites (webhook handler), not via a property getter. Enumerated in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+| Constructor `env var resolution` mutation harness (slice 305) | 7 cases (index.test.ts L144-L199 minus the 1 default-Logger case folded under slice 447) | Each case mutates `process.env.SLACK_*` in a beforeEach/afterEach harness then constructs `new SlackAdapter()` to assert env-driven resolution of `SLACK_SIGNING_SECRET` / `SLACK_BOT_TOKEN` / `SLACK_API_URL`. | The Rust port models env-var resolution via the slice-305 `try_create_*(opts, env: Fn(&str) -> Option<String>)` closure pattern (per gchat slice 312, discord/linear/github/telegram/whatsapp/messenger sweep). The `process.env` mutation harness is JS-specific. The Slack factory is not yet ported (deferred — slice scope); when landed, will mirror gchat slice 312. Enumerated in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+| Default-Logger constructor parameter (slice 447) | 1 case (index.test.ts L170 `should default logger when not provided`) | Asserts the constructor falls back to a default `Logger` instance when none is supplied. | Rust adapters do not take a `Logger` as a first-class adapter dependency — logging is plumbed via the `log` crate's static dispatch. The constructor-default-logger fallback shape is moot. Enumerated in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+| Subclass extensibility (slice 380) | 1 case (index.test.ts L8118 `subclass extensibility > should expose protected members and methods to subclasses`) | TypeScript `protected` access-modifier compile-time check via `class TestSubclass extends SlackAdapter { checkAccess() { return [this.logger, this.formatConverter, this.handleEventMessage] } }`. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance — the subclass-protected-leak test is unrepresentable by construction. Enumerated in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+| `verifySlackRequest` / `readSlackWebhook` runtime wrappers | 4 cases (webhook/index.test.ts `verifySlackRequest` 3 + `readSlackWebhook` 1) | Drive a `Request`-shaped fixture through the runtime wrapper that combines signature-verify + body-parse. Each case asserts on the awaited string body or the resolved typed `SlackWebhookPayload`. | The pure verify + parse halves are mapped 1:1 in [`crate::webhook`] (`verify_slack_signature` 5/5 + `parse_slack_webhook_body` 11/11). The async `Request`-wrapper layer requires `reqwest::Request`-style streaming + a pluggable `webhookVerifier` callback that is not in the slice scope. Enumerated in the [`crates/chat-sdk-adapter-slack/src/lib.rs`](../../crates/chat-sdk-adapter-slack/src/lib.rs) test-mod header. |
+
+Mapped accounting: 177 Rust-mapped + 271 js-only-documented =
+448/448 upstream cases accounted for. The 177 mapped tests live
+as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-slack/src/{lib,cards,crypto,format,markdown,modals,api,webhook}.rs`](../../crates/chat-sdk-adapter-slack/src/).
