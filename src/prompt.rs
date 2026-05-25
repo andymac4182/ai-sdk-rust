@@ -1,23 +1,32 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use url::Url;
 
 use crate::file_data::{FileData, FileDataContent};
 use crate::generate_text::MissingToolResultsError;
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
-    LanguageModelAssistantContentPart, LanguageModelFileData, LanguageModelMessage,
-    LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelSystemMessage,
+    LanguageModelAssistantContentPart, LanguageModelFileData, LanguageModelFilePart,
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
+    LanguageModelReasoningFilePart, LanguageModelSupportedUrls, LanguageModelSystemMessage,
     LanguageModelTextPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-    LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelToolResultPart,
     LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
-use crate::provider_utils::{FilePartData, convert_to_base64};
+use crate::provider_utils::{
+    DownloadError, DownloadedBlob, FilePartData, convert_to_base64, is_full_media_type,
+    is_url_supported,
+};
 use crate::util::InvalidArgumentError;
+use crate::util::{CreateDownloadOptions, create_download};
 
 /// Timeout configuration for high-level model and tool requests.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -374,6 +383,379 @@ impl StandardizedPrompt {
     ) -> Result<LanguageModelPrompt, MissingToolResultsError> {
         convert_to_language_model_prompt(self)
     }
+}
+
+/// Future returned by a prompt asset download function.
+pub type PromptDownloadFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<Option<DownloadedBlob>>, DownloadError>> + Send>>;
+
+/// Function used to download URL-backed prompt assets before a model call.
+pub type PromptDownloadFunction =
+    dyn Fn(Vec<PromptDownloadRequest>) -> PromptDownloadFuture + Send + Sync + 'static;
+
+/// Request passed to a prompt asset download callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromptDownloadRequest {
+    /// URL to download or pass through.
+    pub url: Url,
+
+    /// Whether the model already supports this URL for the part's media type.
+    pub is_url_supported_by_model: bool,
+}
+
+/// Runtime download callback used by `generate_text` and `stream_text`.
+#[derive(Clone)]
+pub struct PromptDownload {
+    download: Arc<PromptDownloadFunction>,
+}
+
+impl PromptDownload {
+    /// Creates a prompt asset download callback.
+    pub fn new<F, Fut>(download: F) -> Self
+    where
+        F: Fn(Vec<PromptDownloadRequest>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Option<DownloadedBlob>>, DownloadError>> + Send + 'static,
+    {
+        Self {
+            download: Arc::new(move |requests| Box::pin(download(requests))),
+        }
+    }
+
+    /// Downloads a batch of prompt assets.
+    pub fn download(&self, requests: Vec<PromptDownloadRequest>) -> PromptDownloadFuture {
+        (self.download)(requests)
+    }
+}
+
+impl fmt::Debug for PromptDownload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PromptDownload")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for PromptDownload {
+    fn default() -> Self {
+        Self::new(|requests| async move {
+            let download = create_download(CreateDownloadOptions::new());
+            let mut downloads = Vec::with_capacity(requests.len());
+
+            for request in requests {
+                if request.is_url_supported_by_model {
+                    downloads.push(None);
+                } else {
+                    downloads.push(Some(download.download(request.url, None).await?));
+                }
+            }
+
+            Ok(downloads)
+        })
+    }
+}
+
+/// Downloads prompt URL file parts that the model does not support.
+pub async fn download_prompt_assets(
+    prompt: &LanguageModelPrompt,
+    supported_urls: &LanguageModelSupportedUrls,
+    download: Option<&PromptDownload>,
+) -> Result<BTreeMap<String, DownloadedBlob>, DownloadError> {
+    let requests = collect_prompt_download_requests(prompt, supported_urls);
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let Some(download) = download else {
+        return Ok(BTreeMap::new());
+    };
+
+    let downloaded_files = download.download(requests.clone()).await?;
+    let mut downloaded_assets = BTreeMap::new();
+
+    for (request, asset) in requests.into_iter().zip(downloaded_files) {
+        if let Some(asset) = asset {
+            downloaded_assets.insert(request.url.to_string(), asset);
+        }
+    }
+
+    Ok(downloaded_assets)
+}
+
+fn collect_prompt_download_requests(
+    prompt: &LanguageModelPrompt,
+    supported_urls: &LanguageModelSupportedUrls,
+) -> Vec<PromptDownloadRequest> {
+    let mut requests = Vec::new();
+
+    for message in prompt {
+        match message {
+            LanguageModelMessage::User(message) => {
+                for part in &message.content {
+                    if let LanguageModelUserContentPart::File(file) = part {
+                        collect_file_download_request(
+                            &file.data,
+                            &file.media_type,
+                            supported_urls,
+                            &mut requests,
+                        );
+                    }
+                }
+            }
+            LanguageModelMessage::Assistant(message) => {
+                for part in &message.content {
+                    match part {
+                        LanguageModelAssistantContentPart::ToolResult(result) => {
+                            collect_tool_result_download_requests(
+                                &result.output,
+                                supported_urls,
+                                &mut requests,
+                            );
+                        }
+                        LanguageModelAssistantContentPart::Text(_)
+                        | LanguageModelAssistantContentPart::File(_)
+                        | LanguageModelAssistantContentPart::Custom(_)
+                        | LanguageModelAssistantContentPart::Reasoning(_)
+                        | LanguageModelAssistantContentPart::ReasoningFile(_)
+                        | LanguageModelAssistantContentPart::ToolCall(_)
+                        | LanguageModelAssistantContentPart::ToolApprovalRequest(_) => {}
+                    }
+                }
+            }
+            LanguageModelMessage::Tool(message) => {
+                for part in &message.content {
+                    if let LanguageModelToolContentPart::ToolResult(result) = part {
+                        collect_tool_result_download_requests(
+                            &result.output,
+                            supported_urls,
+                            &mut requests,
+                        );
+                    }
+                }
+            }
+            LanguageModelMessage::System(_) => {}
+        }
+    }
+
+    requests
+}
+
+fn collect_tool_result_download_requests(
+    output: &LanguageModelToolResultOutput,
+    supported_urls: &LanguageModelSupportedUrls,
+    requests: &mut Vec<PromptDownloadRequest>,
+) {
+    let LanguageModelToolResultOutput::Content { value } = output else {
+        return;
+    };
+
+    for part in value {
+        if let LanguageModelToolResultContentPart::File(file) = part {
+            collect_file_download_request(&file.data, &file.media_type, supported_urls, requests);
+        }
+    }
+}
+
+fn collect_file_download_request(
+    file_data: &FileData,
+    media_type: &str,
+    supported_urls: &LanguageModelSupportedUrls,
+    requests: &mut Vec<PromptDownloadRequest>,
+) {
+    let FileData::Url { url } = file_data else {
+        return;
+    };
+
+    requests.push(PromptDownloadRequest {
+        url: url.clone(),
+        is_url_supported_by_model: is_url_supported(media_type, url.as_str(), supported_urls),
+    });
+}
+
+/// Applies downloaded prompt assets to the matching URL file parts.
+pub fn apply_downloaded_prompt_assets(
+    prompt: LanguageModelPrompt,
+    downloaded_assets: &BTreeMap<String, DownloadedBlob>,
+) -> LanguageModelPrompt {
+    prompt
+        .into_iter()
+        .map(|message| apply_downloaded_prompt_assets_to_message(message, downloaded_assets))
+        .collect()
+}
+
+fn apply_downloaded_prompt_assets_to_message(
+    message: LanguageModelMessage,
+    downloaded_assets: &BTreeMap<String, DownloadedBlob>,
+) -> LanguageModelMessage {
+    match message {
+        LanguageModelMessage::User(mut message) => {
+            message.content = message
+                .content
+                .into_iter()
+                .map(|part| match part {
+                    LanguageModelUserContentPart::File(file) => LanguageModelUserContentPart::File(
+                        apply_downloaded_prompt_assets_to_file_part(file, downloaded_assets),
+                    ),
+                    other => other,
+                })
+                .collect();
+            LanguageModelMessage::User(message)
+        }
+        LanguageModelMessage::Assistant(mut message) => {
+            message.content = message
+                .content
+                .into_iter()
+                .map(|part| match part {
+                    LanguageModelAssistantContentPart::File(file) => {
+                        LanguageModelAssistantContentPart::File(
+                            apply_downloaded_prompt_assets_to_file_part(file, downloaded_assets),
+                        )
+                    }
+                    LanguageModelAssistantContentPart::ReasoningFile(file) => {
+                        LanguageModelAssistantContentPart::ReasoningFile(
+                            apply_downloaded_prompt_assets_to_reasoning_file_part(
+                                file,
+                                downloaded_assets,
+                            ),
+                        )
+                    }
+                    LanguageModelAssistantContentPart::ToolResult(result) => {
+                        LanguageModelAssistantContentPart::ToolResult(
+                            apply_downloaded_prompt_assets_to_tool_result_part(
+                                result,
+                                downloaded_assets,
+                            ),
+                        )
+                    }
+                    other => other,
+                })
+                .collect();
+            LanguageModelMessage::Assistant(message)
+        }
+        LanguageModelMessage::Tool(mut message) => {
+            message.content = message
+                .content
+                .into_iter()
+                .map(|part| match part {
+                    LanguageModelToolContentPart::ToolResult(result) => {
+                        LanguageModelToolContentPart::ToolResult(
+                            apply_downloaded_prompt_assets_to_tool_result_part(
+                                result,
+                                downloaded_assets,
+                            ),
+                        )
+                    }
+                    other => other,
+                })
+                .collect();
+            LanguageModelMessage::Tool(message)
+        }
+        LanguageModelMessage::System(message) => LanguageModelMessage::System(message),
+    }
+}
+
+fn apply_downloaded_prompt_assets_to_file_part(
+    file: LanguageModelFilePart,
+    downloaded_assets: &BTreeMap<String, DownloadedBlob>,
+) -> LanguageModelFilePart {
+    let url = match &file.data {
+        FileData::Url { url } => url,
+        _ => return file,
+    };
+
+    let Some(downloaded_file) = downloaded_assets.get(url.as_str()) else {
+        return file;
+    };
+
+    let mut media_type = file.media_type.clone();
+    if downloaded_file
+        .media_type
+        .as_ref()
+        .is_some_and(|_downloaded_media_type| !is_full_media_type(&media_type))
+    {
+        media_type = downloaded_file.media_type.clone().unwrap();
+    }
+
+    let mut converted = LanguageModelFilePart::new(
+        FileData::Data {
+            data: FileDataContent::Bytes(downloaded_file.data.clone()),
+        },
+        media_type,
+    );
+
+    if let Some(filename) = file.filename {
+        converted = converted.with_filename(filename);
+    }
+    if let Some(provider_options) = file.provider_options {
+        converted = converted.with_provider_options(provider_options);
+    }
+
+    converted
+}
+
+fn apply_downloaded_prompt_assets_to_reasoning_file_part(
+    file: LanguageModelReasoningFilePart,
+    downloaded_assets: &BTreeMap<String, DownloadedBlob>,
+) -> LanguageModelReasoningFilePart {
+    let url = match &file.data {
+        LanguageModelFileData::Url { url } => url,
+        _ => return file,
+    };
+
+    let Some(downloaded_file) = downloaded_assets.get(url.as_str()) else {
+        return file;
+    };
+
+    let mut media_type = file.media_type.clone();
+    if downloaded_file
+        .media_type
+        .as_ref()
+        .is_some_and(|_downloaded_media_type| !is_full_media_type(&media_type))
+    {
+        media_type = downloaded_file.media_type.clone().unwrap();
+    }
+
+    let mut converted = LanguageModelReasoningFilePart::new(
+        LanguageModelFileData::Data {
+            data: FileDataContent::Bytes(downloaded_file.data.clone()),
+        },
+        media_type,
+    );
+
+    if let Some(provider_options) = file.provider_options {
+        converted = converted.with_provider_options(provider_options);
+    }
+
+    converted
+}
+
+fn apply_downloaded_prompt_assets_to_tool_result_part(
+    part: LanguageModelToolResultPart,
+    downloaded_assets: &BTreeMap<String, DownloadedBlob>,
+) -> LanguageModelToolResultPart {
+    let result = match part.output {
+        LanguageModelToolResultOutput::Content { value } => {
+            let value = value
+                .into_iter()
+                .map(|item| match item {
+                    LanguageModelToolResultContentPart::File(file) => {
+                        LanguageModelToolResultContentPart::File(
+                            apply_downloaded_prompt_assets_to_file_part(file, downloaded_assets),
+                        )
+                    }
+                    other => other,
+                })
+                .collect();
+            LanguageModelToolResultOutput::Content { value }
+        }
+        other => other,
+    };
+
+    let mut converted = LanguageModelToolResultPart::new(part.tool_call_id, part.tool_name, result);
+    if let Some(provider_options) = part.provider_options {
+        converted = converted.with_provider_options(provider_options);
+    }
+
+    converted
 }
 
 /// Converts a standardized prompt into the provider-facing language model

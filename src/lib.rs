@@ -321,6 +321,7 @@ pub use openai_compatible::{
 pub use prompt::{
     ConvertedLanguageModelV4FilePart, Instructions, InvalidDataContentError,
     InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
+    PromptDownload, PromptDownloadFunction, PromptDownloadFuture, PromptDownloadRequest,
     PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
     TimeoutConfigurationOptions, convert_data_content_to_base64_string,
     convert_to_language_model_prompt, convert_to_language_model_v4_file_part, get_chunk_timeout_ms,

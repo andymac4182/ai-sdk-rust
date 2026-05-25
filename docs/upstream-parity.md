@@ -2960,6 +2960,13 @@ focused tests for each portable behavior before changing rows to `verified`.
 - 2026-05-25: `streamText` runtimeContext callback parity added
   `stream_text_passes_full_runtime_context_to_callbacks`, proving the
   configured runtimeContext value is forwarded intact to all stream callbacks.
+- 2026-05-25: `packages/ai` `generateText` and `streamText` prepare-step
+  URL-file model-switch download-decision parity added
+  `generate_text_prepare_step_model_switch_uses_step_model_supported_urls` and
+  `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
+  proving URL-file support checks are run against the model selected by
+  `prepareStep` rather than the original model and that unsupported
+  URL-backed prompt assets are downloaded before the switched-model call.
 - 2026-05-25: `packages/ai` `streamText` prepare-step URL-file model-switch
   parity added
   `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
@@ -5252,12 +5259,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_messages_support_models_that_use_context_in_supported_urls`,
    proving the `supportedUrls()` hook can read `self.model_id()` while still
    accepting URL-backed message files.
-   The upstream `streamText` prepare-step model switch with image URLs case now
-   has the named Rust counterpart
-   `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
+   The upstream `generateText` and `streamText` prepare-step URL-file
+   model-switch download-decision cases now have named Rust counterparts in
+   `generate_text_prepare_step_model_switch_uses_step_model_supported_urls`
+   and `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
    proving URL-file support checks are performed against the model selected by
-   `prepareStep` rather than the original model before the provider stream
-   call.
+   `prepareStep` rather than the original model and that unsupported
+   URL-backed prompt assets are downloaded before the switched-model call.
    The upstream `generateText` prepare-step initial approved-tool
    responseMessages and model-switch image-URL cases now have named Rust
    counterparts in
