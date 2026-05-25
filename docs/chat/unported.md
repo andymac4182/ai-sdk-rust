@@ -53,6 +53,14 @@ the structurally-unportable cases.
   createDiscordThread 160004 recovery / getUser")`, default-Logger
   constructor parameter, subclass extensibility, discord.js `Client`
   partials.
+- **`chat-sdk-adapter-teams`** — Vitest `vi.fn()`-mocked HTTP-fetch
+  cases under `describe("constructor env var resolution")` +
+  `describe("createTeamsAdapter factory")` + `describe("handleWebhook")`
+  + `describe("initialize")` + `describe("postMessage / editMessage /
+  deleteMessage / startTyping / openDM / getUser")`, default-Logger
+  constructor parameter, ESM compatibility subprocess assertion,
+  `createTeamsAdapter` function-export typeof check, subclass
+  extensibility.
 - **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
@@ -327,3 +335,31 @@ Mapped accounting: 166 Rust-mapped + 68 js-only-documented =
 234/234 upstream cases accounted for. Remaining 166 cases are
 ported as colocated `#[cfg(test)] mod tests` in
 [`crates/chat-sdk-adapter-discord/src/{lib,parse,cards,markdown,webhook}.rs`](../../crates/chat-sdk-adapter-discord/src/).
+
+---
+
+## Section: `chat-sdk-adapter-teams`
+
+### `packages/adapter-teams/src/{errors,markdown,cards,modals,graph-api,index}.test.ts` (25 unportable cases of 154)
+
+The Rust port maps 129 of the 154 upstream cases (errors 12/12 +
+markdown 39/39 + cards 19/19 + modals 16/16 + graph-api 15/15 +
+index 28/53). The remaining 25 cases fall under the cross-cutting
+js-only-documented sweep patterns (slice 380 type-system-impossible
++ slice 411 Vitest `vi.fn()` HTTP-fetch mock + slice 414 ESM
+compatibility subprocess + slice 447 default-Logger constructor +
+slice 458 createXxx-function-export typeof check) and are
+enumerated below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked HTTP fetch + env-var resolution | 21 listed in [`crates/chat-sdk-adapter-teams/src/lib.rs`](../../crates/chat-sdk-adapter-teams/src/lib.rs) test-mod header: `describe("constructor env var resolution")` (6 non-default-logger cases — appId/appPassword/appTenantId/apiUrl env var resolution + config-prefers-env + apiUrl-config) + `describe("createTeamsAdapter factory")` (delegate-to-constructor + federated-auth) + `describe("handleWebhook")` (invalid-JSON 400) + `describe("initialize")` (store-chat-and-initialize-app) + `describe("postMessage")` (2 cases — call-app.send + handleTeamsError-on-failure) + `describe("editMessage")` (call-api.conversations.activities.update) + `describe("deleteMessage")` (call-api.conversations.activities.delete) + `describe("startTyping")` (send-typing-via-app.send) + `describe("openDM")` (throw-ValidationError-no-tenantId) + `describe("getUser")` (5 cases — cached/uncached/Graph-fail/missing-mail/uninitialized). | Each case asserts on `mockApp.send.mock.calls` / `mockUpdate.mock.calls` / `mockApp.graph.call(...)` / `mockState.get(...)` / `mockChat.processMessage(...)` Vitest `vi.fn()`-spy state, or drives a synthetic `Request` -> `Response` through `adapter.handleWebhook` -> `bridgeAdapter.dispatch`. Requires the upstream `vi.fn()` fetch-spy + `process.env` mutation infrastructure (Rust 2024 makes `set_var` `unsafe` and parallel tests race). | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + body shape are structurally covered via `build_message_body` / `build_edit_message_body` / `build_typing_body` pure helpers + the existing `activity_url` / `activities_url` URL builders. Env-var resolution is delegated to the adopter via the `TeamsAdapterOptions` struct's `with_app_tenant_id` / `with_user_name` / `with_api_url` builders. The Bot Framework `bridgeAdapter` + Teams `@microsoft/teams.apps` SDK have no Rust port — adopters wire their own HTTP server. |
+| ESM compatibility (subprocess spawn) | `describe("ESM compatibility") > all subpath imports resolve in Node.js ESM (no bare directory imports)` (index.test.ts L32-L75) (1 case) | Spawns a real `node --input-type=module` subprocess and checks that every non-relative `from "<pkg>"` import in `index.ts` resolves under Node.js ESM rules. | Rust's module system is statically resolved at compile time via Cargo + `mod` declarations; bare directory imports don't exist as a concept. Adapter-teams is the only upstream adapter that ships this test (slice 414 audited cross-package). |
+| createXxx function-export typeof check | `describe("TeamsAdapter") > should export createTeamsAdapter function` (index.test.ts L100) (1 case) | Asserts `typeof createTeamsAdapter === "function"`. | Rust's module system makes the `pub fn new` constructor visible at compile time; missing exports become compilation errors, not runtime assertion failures (slice 458). |
+| Default-Logger constructor parameter | `describe("constructor env var resolution") > should default logger when not provided` (index.test.ts L264) (1 case) | Per `port-chat-sdk.md` slice 447, Rust adapters do not take a `Logger` as a first-class adapter dependency. | Static dispatch via the `log` crate makes the constructor-default-logger fallback shape moot. |
+| Subclass extensibility | `describe("subclass extensibility") > exposes protected members and methods to subclasses` (index.test.ts L1238-L1249) (1 case) | TypeScript `protected` access modifier check on `logger` / `formatConverter` / `handleMessageActivity`. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance; the subclass-protected-leak test is unrepresentable by construction. |
+
+Mapped accounting: 129 Rust-mapped + 25 js-only-documented =
+154/154 upstream cases accounted for. Remaining 129 cases are
+ported as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-teams/src/{lib,parse,cards,markdown,errors,modals,graph_api,thread_id}.rs`](../../crates/chat-sdk-adapter-teams/src/).
