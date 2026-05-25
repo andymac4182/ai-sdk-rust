@@ -3754,6 +3754,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `live_vercel_ai_gateway_openai_responses_stream_text_with_otel`, proving the
   local OTLP receiver path exports real Gateway OpenAI-compatible and OpenAI
   Responses telemetry without printing credentials.
+- 2026-05-26: Gateway OpenAI Responses JSON response-format proof revalidated
+  `live_vercel_ai_gateway_openai_responses_no_schema_json_response_format`
+  against the current `.env.local` key, confirming the live Responses JSON
+  formatting path still returns valid JSON output without printing
+  credentials.
 - 2026-05-20: Test-server package marked verified
   `crates/ai-sdk-test-server` covers the portable upstream `createTestServer`
   contracts, request inspection, controlled-stream helper, array-stream helper,
