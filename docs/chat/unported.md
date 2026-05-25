@@ -188,3 +188,19 @@ file from the relevant `upstream-parity.md` row.
 
 Remaining 7 upstream cases are mapped to Rust tests in
 [`crates/chat-sdk-state-redis/src/lib.rs`](../../crates/chat-sdk-state-redis/src/lib.rs).
+
+---
+
+## Section: `chat-sdk-state-ioredis`
+
+### `packages/state-ioredis/src/index.test.ts` (4 unportable cases)
+
+| Upstream case (line) | Reason | Rust replacement |
+| --- | --- | --- |
+| `should export createIoRedisState function` (L13) | JS module-loader check (`typeof createIoRedisState === "function"`). | Rust's module system makes the export visible at compile time. |
+| `describe.skip > should connect to Redis` (L76) | `describe.skip`-marked upstream; requires live Redis cluster + Sentinel. | Future opt-in `#[ignore]` integration test once redis-rs cluster wire-up lands. |
+| `describe.skip > should force-release a lock regardless of token` (L85) | `describe.skip`-marked upstream; requires live Redis cluster + Lua scripts. | Future opt-in `#[ignore]` integration test. |
+| `describe.skip > should no-op when force-releasing a non-existent lock` (L104) | `describe.skip`-marked upstream; requires live Redis cluster. | Future opt-in `#[ignore]` integration test. |
+
+Remaining 6 upstream cases are mapped to Rust tests in
+[`crates/chat-sdk-state-ioredis/src/lib.rs`](../../crates/chat-sdk-state-ioredis/src/lib.rs).
