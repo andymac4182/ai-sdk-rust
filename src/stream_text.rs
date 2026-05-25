@@ -2483,6 +2483,7 @@ where
             provider_options: call_options.provider_options.clone(),
             runtime_context: runtime_context.clone(),
             tools_context: tools_context.clone(),
+            timeout: timeout.clone(),
         };
         if let Some(on_start) = &on_start {
             on_start.start(start_event.clone()).await;
@@ -12206,12 +12207,26 @@ mod tests {
 
         let result = poll_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_timeout(TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new()
+                        .with_total_ms(5_000)
+                        .with_step_ms(1_000),
+                ))
+                .with_stop_condition(StopCondition::StepCount(3))
                 .with_on_start(move |event| {
                     let start_events = Arc::clone(&start_events);
                     async move {
                         assert_eq!(event.operation_id, "ai.streamText");
                         assert_eq!(event.messages.len(), 1);
                         assert_eq!(event.max_retries, DEFAULT_MAX_RETRIES);
+                        assert_eq!(
+                            event.timeout,
+                            Some(TimeoutConfiguration::detailed(
+                                TimeoutConfigurationOptions::new()
+                                    .with_total_ms(5_000)
+                                    .with_step_ms(1_000),
+                            ))
+                        );
                         start_events
                             .lock()
                             .expect("events lock")

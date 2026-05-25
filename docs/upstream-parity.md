@@ -1144,6 +1144,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_text_passes_undefined_when_timeout_object_has_no_total_ms`, proving
   the high-level total-timeout value is merged into the model-call abort signal
   while missing total-timeout values stay absent.
+- 2026-05-25: `packages/ai` `generateText`/`streamText` `onStart` timeout
+  exposure parity added `generate_text_event_aliases_share_upstream_json_shapes`
+  and `stream_text_invokes_lifecycle_callbacks_with_streamed_steps`, proving
+  the shared start event now carries optional timeout configuration alongside
+  the existing message, provider, runtime-context, and tools-context fields.
 - 2026-05-25: `packages/ai` `generateText` telemetry context-filtering parity
   added `generate_text_telemetry_includes_configured_runtime_context_properties`,
   `generate_text_telemetry_includes_configured_tools_context_properties`,

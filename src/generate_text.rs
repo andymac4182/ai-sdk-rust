@@ -516,6 +516,10 @@ pub struct GenerateTextStartEvent {
     /// Tool context at the start of the generation.
     #[serde(default)]
     pub tools_context: JsonObject,
+
+    /// Timeout configuration at the start of the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutConfiguration>,
 }
 
 /// Event sent before each high-level non-streaming generate-text model step.
@@ -5425,6 +5429,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             provider_options: call_options.provider_options.clone(),
             runtime_context: runtime_context.clone(),
             tools_context: tools_context.clone(),
+            timeout: timeout.clone(),
         };
         if let Some(on_start) = &on_start {
             on_start.start(start_event.clone()).await;
@@ -14149,6 +14154,7 @@ mod tests {
             provider_options: None,
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
+            timeout: None,
         };
 
         assert_eq!(
