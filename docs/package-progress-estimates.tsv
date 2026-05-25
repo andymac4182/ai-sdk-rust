@@ -23,4 +23,4 @@ togetherai	45	Initial provider wrapper exists; broader package behavior and live
 vercel	40	Construction wrapper exists; live validation and full package test parity remain.
 voyage	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 mcp	90	Protocol, transports, OAuth, examples, and Gateway tool bridge are broad; protected live auth validation and hosted auth examples remain.
-workflow	79	WorkflowAgent and iterator callback/continuation coverage is substantial, including named providerMetadata/OpenAI itemId sanitization, WorkflowAgent option-forwarding/default, workflow chat transport constructor API/max-error coverage, and tool-execution callback event counterparts; real model execution, HTTP/SSE adapters, and JSON Schema validation remain.
+workflow	80	WorkflowAgent and iterator callback/continuation coverage is substantial, including named providerMetadata/OpenAI itemId sanitization, WorkflowAgent option-forwarding/default, workflow chat transport constructor API/max-error coverage, and tool-execution callback event counterparts; real model execution, HTTP/SSE adapters, and JSON Schema validation remain.
