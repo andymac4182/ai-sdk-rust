@@ -8643,6 +8643,20 @@ mod tests {
             vec!["HELLO".to_string(), ", ".to_string(), "WORLD!".to_string()]
         );
         assert_eq!(
+            serde_json::to_value(&result.response_messages).expect("response messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "text": "HELLO, WORLD!",
+                            "type": "text"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
             *chunks.lock().expect("chunks mutex is not poisoned"),
             ["HELLO".to_string(), ", ".to_string(), "WORLD!".to_string()]
         );
