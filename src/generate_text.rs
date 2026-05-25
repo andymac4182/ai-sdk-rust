@@ -30,7 +30,7 @@ use crate::language_model::{
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
-    Prompt, TimeoutConfiguration, get_tool_timeout_ms, prompt_has_url_files,
+    Prompt, TimeoutConfiguration, get_tool_timeout_ms, get_total_timeout_ms, prompt_has_url_files,
     standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{
@@ -5385,6 +5385,14 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
 
     let max_steps = max_steps.max(1);
     let call_id = generate_text_call_id();
+    let request_abort_signal = merge_abort_signals([
+        call_options
+            .abort_signal
+            .clone()
+            .map(AbortSignalSource::signal),
+        get_total_timeout_ms(timeout.as_ref()).map(AbortSignalSource::timeout_ms),
+    ]);
+    call_options.abort_signal = request_abort_signal;
 
     if on_start.is_some() || telemetry_dispatcher.is_enabled() {
         let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
@@ -15137,6 +15145,59 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    #[test]
+    fn generate_text_forwards_timeout_as_abort_signal_to_model() {
+        let model = MockLanguageModel::new()
+            .with_generate_result(warning_logger_text_result("Hello", Vec::new()));
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_timeout(TimeoutConfiguration::total_ms(5_000)),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let generate_calls = model.generate_calls();
+        assert_eq!(generate_calls.len(), 1);
+        let provider_abort_signal = generate_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("timeout should create an abort signal");
+        assert!(!provider_abort_signal.is_aborted());
+    }
+
+    #[test]
+    fn generate_text_merges_timeout_with_abort_signal() {
+        let model = MockLanguageModel::new()
+            .with_generate_result(warning_logger_text_result("Hello", Vec::new()));
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+
+        let mut options = GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+            .with_timeout(TimeoutConfiguration::detailed(
+                TimeoutConfigurationOptions::new().with_total_ms(5_000),
+            ));
+        options.call_options.abort_signal = Some(abort_signal.clone());
+
+        let result = poll_ready(generate_text(options));
+
+        assert_eq!(result.text, "Hello");
+        let generate_calls = model.generate_calls();
+        assert_eq!(generate_calls.len(), 1);
+        let provider_abort_signal = generate_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("merged timeout should create an abort signal");
+        assert!(!provider_abort_signal.is_same_signal(&abort_signal));
+        assert!(!provider_abort_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(provider_abort_signal.is_aborted());
+        assert_eq!(
+            provider_abort_signal.reason(),
+            Some(json!("client-disconnected"))
+        );
     }
 
     fn generate_text_result_with_output(output: JsonValue) -> GenerateTextResult {

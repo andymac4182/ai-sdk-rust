@@ -52,7 +52,7 @@ use crate::language_model::{
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
-    Prompt, TimeoutConfiguration, prompt_has_url_files,
+    Prompt, TimeoutConfiguration, get_total_timeout_ms, prompt_has_url_files,
     standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
@@ -76,8 +76,11 @@ use crate::ui_message_stream::{
     create_ui_message_stream_response, get_response_ui_message_id, handle_ui_message_stream_finish,
     pipe_ui_message_stream_to_response,
 };
-use crate::util::Callback;
+use crate::util::{AbortSignalSource, Callback, merge_abort_signals};
 use crate::warning::Warning;
+
+#[cfg(test)]
+use crate::prompt::TimeoutConfigurationOptions;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum TextStreamStartKind {
@@ -2417,7 +2420,7 @@ where
         transforms,
         on_chunk,
         on_error,
-        abort_signal,
+        abort_signal: _,
         on_abort,
         max_steps,
         stop_conditions,
@@ -2432,6 +2435,15 @@ where
     let active_tools_for_start = active_tools.clone();
     let base_active_tools = active_tools;
     let call_id = generate_text_call_id();
+    let request_abort_signal = merge_abort_signals([
+        call_options
+            .abort_signal
+            .clone()
+            .map(AbortSignalSource::signal),
+        get_total_timeout_ms(timeout.as_ref()).map(AbortSignalSource::timeout_ms),
+    ]);
+    call_options.abort_signal = request_abort_signal.clone();
+    let abort_signal = request_abort_signal;
     let max_steps = max_steps.max(1);
     let mut stream_steps = Vec::new();
     let mut generate_steps = Vec::new();
@@ -10895,6 +10907,126 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].steps.is_empty());
         assert_eq!(events[0].reason, Some(json!("client-disconnected")));
+    }
+
+    #[test]
+    fn stream_text_forwards_timeout_as_abort_signal_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_timeout(TimeoutConfiguration::total_ms(5_000)),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let provider_abort_signal = stream_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("timeout should create an abort signal");
+        assert!(!provider_abort_signal.is_aborted());
+    }
+
+    #[test]
+    fn stream_text_merges_timeout_with_abort_signal() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_timeout(TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_total_ms(5_000),
+                ))
+                .with_abort_signal(abort_signal.clone()),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let provider_abort_signal = stream_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("merged timeout should create an abort signal");
+        assert!(!provider_abort_signal.is_same_signal(&abort_signal));
+        assert!(!provider_abort_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(provider_abort_signal.is_aborted());
+        assert_eq!(
+            provider_abort_signal.reason(),
+            Some(json!("client-disconnected"))
+        );
+    }
+
+    #[test]
+    fn stream_text_passes_undefined_when_no_timeout_or_abort_signal_provided() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        assert_eq!(result.text, "Hello");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert!(stream_calls[0].abort_signal.is_none());
+    }
+
+    #[test]
+    fn stream_text_passes_undefined_when_timeout_object_has_no_total_ms() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")]).with_timeout(
+                TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_step_ms(5_000),
+                ),
+            ),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert!(stream_calls[0].abort_signal.is_none());
     }
 
     #[test]
