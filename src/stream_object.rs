@@ -3072,6 +3072,34 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_messages_support_models_that_use_context_in_supported_urls() {
+        let supported_urls_called = Arc::new(Mutex::new(false));
+        let model = SupportedUrlsStreamModel::new(Arc::clone(&supported_urls_called));
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.text, r#"{ "content": "Hello, world!" }"#);
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert!(
+            *supported_urls_called
+                .lock()
+                .expect("supported urls called lock")
+        );
+    }
+
+    #[test]
     fn stream_object_custom_schema_sends_object_deltas() {
         let schema = answer_schema();
         let expected_schema = schema.json_schema().clone();
