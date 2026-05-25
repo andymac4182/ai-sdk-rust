@@ -1,6 +1,7 @@
 use std::cmp;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use ai_sdk_rust::{Headers, JsonObject, JsonValue, UiMessage, UiMessageChunk};
 use serde::{Deserialize, Serialize};
@@ -237,6 +238,13 @@ impl ReconnectToStreamOptions {
     }
 }
 
+/// Callback invoked after sending a chat message.
+pub type WorkflowChatSendMessageCallback =
+    Arc<dyn Fn(&WorkflowChatResponse, &SendMessagesOptions) + Send + Sync + 'static>;
+
+/// Callback invoked when a chat stream ends.
+pub type WorkflowChatEndCallback = Arc<dyn Fn(&WorkflowChatEnd) + Send + Sync + 'static>;
+
 /// Successful transport output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowChatTransportResult {
@@ -258,7 +266,7 @@ pub struct WorkflowChatEnd {
 }
 
 /// Workflow chat transport options.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct WorkflowChatTransportOptions {
     /// API endpoint. Defaults to `/api/chat`.
     pub api: String,
@@ -268,6 +276,12 @@ pub struct WorkflowChatTransportOptions {
 
     /// Default first reconnect start index. Defaults to 0.
     pub initial_start_index: isize,
+
+    /// Callback invoked after the chat POST response is received.
+    pub on_chat_send_message: Option<WorkflowChatSendMessageCallback>,
+
+    /// Callback invoked after a chat stream finishes.
+    pub on_chat_end: Option<WorkflowChatEndCallback>,
 }
 
 impl Default for WorkflowChatTransportOptions {
@@ -276,9 +290,36 @@ impl Default for WorkflowChatTransportOptions {
             api: DEFAULT_WORKFLOW_CHAT_API.to_string(),
             max_consecutive_errors: 3,
             initial_start_index: 0,
+            on_chat_send_message: None,
+            on_chat_end: None,
         }
     }
 }
+
+impl fmt::Debug for WorkflowChatTransportOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowChatTransportOptions")
+            .field("api", &self.api)
+            .field("max_consecutive_errors", &self.max_consecutive_errors)
+            .field("initial_start_index", &self.initial_start_index)
+            .field("on_chat_send_message", &self.on_chat_send_message.is_some())
+            .field("on_chat_end", &self.on_chat_end.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for WorkflowChatTransportOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.api == other.api
+            && self.max_consecutive_errors == other.max_consecutive_errors
+            && self.initial_start_index == other.initial_start_index
+            && self.on_chat_send_message.is_some() == other.on_chat_send_message.is_some()
+            && self.on_chat_end.is_some() == other.on_chat_end.is_some()
+    }
+}
+
+impl Eq for WorkflowChatTransportOptions {}
 
 /// Rust workflow chat transport foundation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -312,6 +353,27 @@ impl WorkflowChatTransport {
     /// Sets the default first reconnect start index.
     pub fn with_initial_start_index(mut self, initial_start_index: isize) -> Self {
         self.options.initial_start_index = initial_start_index;
+        self
+    }
+
+    /// Sets the callback invoked after the chat POST response is received.
+    pub fn with_on_chat_send_message(
+        mut self,
+        on_chat_send_message: impl Fn(&WorkflowChatResponse, &SendMessagesOptions)
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.options.on_chat_send_message = Some(Arc::new(on_chat_send_message));
+        self
+    }
+
+    /// Sets the callback invoked after a chat stream finishes.
+    pub fn with_on_chat_end(
+        mut self,
+        on_chat_end: impl Fn(&WorkflowChatEnd) + Send + Sync + 'static,
+    ) -> Self {
+        self.options.on_chat_end = Some(Arc::new(on_chat_end));
         self
     }
 
@@ -349,17 +411,23 @@ impl WorkflowChatTransport {
             .ok_or(WorkflowChatTransportError::MissingWorkflowRunId)?
             .to_string();
 
+        if let Some(callback) = &self.options.on_chat_send_message {
+            callback.as_ref()(&response, &options);
+        }
+
         let mut chunks = Vec::new();
         let mut chunk_index = 0;
         let got_finish = append_chunks(&mut chunks, &mut chunk_index, response.chunks);
 
         if got_finish {
+            let chat_end = WorkflowChatEnd {
+                chat_id: options.chat_id.clone(),
+                chunk_index,
+            };
+            self.notify_chat_end(&chat_end);
             return Ok(WorkflowChatTransportResult {
                 chunks,
-                chat_end: Some(WorkflowChatEnd {
-                    chat_id: options.chat_id,
-                    chunk_index,
-                }),
+                chat_end: Some(chat_end),
             });
         }
 
@@ -486,14 +554,22 @@ impl WorkflowChatTransport {
             consecutive_errors = 0;
 
             if got_finish {
+                let chat_end = WorkflowChatEnd {
+                    chat_id: options.chat_id.clone(),
+                    chunk_index,
+                };
+                self.notify_chat_end(&chat_end);
                 return Ok(WorkflowChatTransportResult {
                     chunks,
-                    chat_end: Some(WorkflowChatEnd {
-                        chat_id: options.chat_id,
-                        chunk_index,
-                    }),
+                    chat_end: Some(chat_end),
                 });
             }
+        }
+    }
+
+    fn notify_chat_end(&self, chat_end: &WorkflowChatEnd) {
+        if let Some(callback) = &self.options.on_chat_end {
+            callback.as_ref()(chat_end);
         }
     }
 }
@@ -640,6 +716,7 @@ fn percent_encode_path_segment(segment: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct ScriptedWorkflowChatClient {
@@ -720,6 +797,15 @@ mod tests {
     }
 
     #[test]
+    fn workflow_chat_transport_accepts_and_stores_callback_functions() {
+        let transport = WorkflowChatTransport::new()
+            .with_on_chat_send_message(|_, _| {})
+            .with_on_chat_end(|_| {});
+
+        assert_eq!(transport.api(), DEFAULT_WORKFLOW_CHAT_API);
+    }
+
+    #[test]
     fn workflow_chat_transport_uses_custom_api_endpoint_and_builds_send_request() {
         let transport = WorkflowChatTransport::new().with_api("/custom/chat");
         let messages = vec![
@@ -787,6 +873,73 @@ mod tests {
         );
         assert_eq!(
             result.chat_end,
+            Some(WorkflowChatEnd {
+                chat_id: "chat-1".to_string(),
+                chunk_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_chat_transport_calls_on_chat_send_message_callback() {
+        let called = Arc::new(Mutex::new(None));
+        let called_for_closure = Arc::clone(&called);
+        let transport = WorkflowChatTransport::new().with_on_chat_send_message(
+            move |response: &WorkflowChatResponse, options: &SendMessagesOptions| {
+                *called_for_closure.lock().expect("lock callback state") = Some((
+                    response.status,
+                    options.chat_id.clone(),
+                    response.headers.get("x-workflow-run-id").cloned(),
+                ));
+            },
+        );
+        let mut client =
+            ScriptedWorkflowChatClient::new([WorkflowChatResponse::ok([UiMessageChunk::finish()])
+                .with_header("x-workflow-run-id", "run-1")]);
+
+        let _ = transport
+            .send_messages(
+                &mut client,
+                SendMessagesOptions::new(WorkflowChatTrigger::SubmitMessage, "chat-1", Vec::new()),
+            )
+            .expect("messages send");
+
+        assert_eq!(
+            *called.lock().expect("lock callback state"),
+            Some((200, "chat-1".to_string(), Some("run-1".to_string())))
+        );
+    }
+
+    #[test]
+    fn workflow_chat_transport_calls_on_chat_end_callback_when_stream_ends() {
+        let called = Arc::new(Mutex::new(None));
+        let called_for_closure = Arc::clone(&called);
+        let transport =
+            WorkflowChatTransport::new().with_on_chat_end(move |chat_end: &WorkflowChatEnd| {
+                *called_for_closure.lock().expect("lock callback state") = Some(chat_end.clone());
+            });
+        let mut client = ScriptedWorkflowChatClient::new([WorkflowChatResponse::ok([
+            UiMessageChunk::text_delta("text-1", "hello"),
+            UiMessageChunk::finish(),
+        ])
+        .with_header("x-workflow-run-id", "run-1")]);
+
+        let result = transport
+            .send_messages(
+                &mut client,
+                SendMessagesOptions::new(WorkflowChatTrigger::SubmitMessage, "chat-1", Vec::new()),
+            )
+            .expect("messages send");
+
+        assert_eq!(
+            result.chat_end,
+            Some(WorkflowChatEnd {
+                chat_id: "chat-1".to_string(),
+                chunk_index: 2,
+            })
+        );
+        assert_eq!(
+            *called.lock().expect("lock callback state"),
             Some(WorkflowChatEnd {
                 chat_id: "chat-1".to_string(),
                 chunk_index: 2,
