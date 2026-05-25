@@ -861,14 +861,15 @@ mod tests {
     //! 403..405) and the other 4 are deferred behind PostableMessage
     //! input shapes that require the `from_full_stream` integration.
     //!
-    //! ---------- upstream type-system-impossible cases (1) ----------
+    //! ---------- upstream type-system-impossible cases (2) ----------
     //!
     //! Per the slice-380 type-system-impossible pattern, the
-    //! following upstream `serialization.test.ts > describe("ThreadImpl.fromJSON()")`
-    //! case is enumerated here because it asserts a runtime behavior
-    //! that the Rust port makes structurally impossible (slice 472):
+    //! following upstream cases are enumerated here because they
+    //! assert a runtime behavior that the Rust port makes
+    //! structurally impossible:
     //!
-    //! 1. `should throw error for unknown adapter on access`
+    //! 1. `serialization.test.ts > describe("ThreadImpl.fromJSON()") >
+    //!    "should throw error for unknown adapter on access"`
     //!    (serialization.test.ts:185) — upstream `ThreadImpl.fromJSON(json)`
     //!    takes no adapter argument and defers adapter resolution
     //!    until `thread.adapter` is read, which throws if no matching
@@ -881,7 +882,24 @@ mod tests {
     //!    registered or the requested adapter name is not found
     //!    (see [`crate::reviver`] `chat:Thread` branch, slice 443) —
     //!    again a safer-by-construction behavior than the upstream
-    //!    deferred throw.
+    //!    deferred throw. (slice 472)
+    //!
+    //! 2. `thread.test.ts > describe("schedule()") > "should return
+    //!    the ScheduledMessage from adapter"` (thread.test.ts:72) —
+    //!    upstream asserts `expect(result).toBe(expected)` (JS
+    //!    reference equality on the adapter's returned
+    //!    `ScheduledMessage` object). The Rust port returns
+    //!    [`crate::types::ScheduledMessage`] as a value (moved or
+    //!    cloned across the async-trait boundary); reference
+    //!    equality is unrepresentable in Rust's value semantics.
+    //!    Structural equality on every public field is verified by
+    //!    the 4 sibling return-shape cases:
+    //!    `thread_schedule_should_return_scheduled_message_id_from_adapter`,
+    //!    `thread_schedule_should_return_channel_id_from_adapter`,
+    //!    `thread_schedule_should_return_post_at_from_adapter`,
+    //!    `thread_schedule_should_return_raw_platform_response_from_adapter`
+    //!    — combined they pin every observable detail of the
+    //!    adapter's response. (slice 489)
     use super::*;
     use crate::postable_object::postable_envelope;
     use crate::types::{AdapterError, AdapterResult};
