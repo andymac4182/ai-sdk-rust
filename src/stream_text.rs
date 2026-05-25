@@ -52,7 +52,8 @@ use crate::language_model::{
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
-    Prompt, TimeoutConfiguration, get_total_timeout_ms, prompt_has_url_files,
+    Prompt, PromptDownload, TimeoutConfiguration, apply_downloaded_prompt_assets,
+    download_prompt_assets, get_total_timeout_ms, prompt_has_url_files,
     standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
@@ -1000,6 +1001,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Optional callback used to download URL-backed prompt assets.
+    pub download: Option<PromptDownload>,
+
     /// Optional request timeout configuration.
     pub timeout: Option<TimeoutConfiguration>,
 
@@ -1055,6 +1059,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            download: None,
             timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             smooth_stream: None,
@@ -1098,6 +1103,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            download: None,
             timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             smooth_stream: None,
@@ -1475,6 +1481,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.on_abort = Some(StreamTextOnAbort::new(on_abort));
+        self
+    }
+
+    /// Sets the callback used to download URL-backed prompt assets.
+    pub fn with_download(mut self, download: PromptDownload) -> Self {
+        self.download = Some(download);
         self
     }
 
@@ -2414,6 +2426,7 @@ where
         on_step_finish,
         on_finish,
         telemetry,
+        download,
         timeout,
         max_retries,
         smooth_stream,
@@ -2593,7 +2606,7 @@ where
         let step_active_tools = step_active_tools
             .as_deref()
             .or(base_active_tools.as_deref());
-        let step_prompt = current_prompt.clone();
+        let mut step_prompt = current_prompt.clone();
         let step_tools =
             crate::generate_text::filter_active_tools(Some(tools.clone()), step_active_tools)
                 .unwrap_or_default();
@@ -2622,8 +2635,20 @@ where
             merge_provider_options(base_provider_options.as_ref(), step_provider_options);
         append_stream_text_user_agent(&mut step_call_options);
         if prompt_has_url_files(&step_call_options.prompt) {
-            let _ = step_model.supported_urls().await;
+            let supported_urls = step_model.supported_urls().await;
+            let downloaded_assets = download_prompt_assets(
+                &step_call_options.prompt,
+                &supported_urls,
+                download.as_ref(),
+            )
+            .await
+            .expect("prompt asset download failed");
+            step_call_options.prompt = apply_downloaded_prompt_assets(
+                step_call_options.prompt.clone(),
+                &downloaded_assets,
+            );
         }
+        step_prompt = step_call_options.prompt.clone();
 
         if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
             let step_start_event = GenerateTextStepStartEvent {
@@ -4769,6 +4794,7 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
+    use crate::PromptDownload;
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{
         GenerateTextContentPart, NormalizedToolApprovalStatus, ToolApprovalStatusKind,
@@ -4796,8 +4822,8 @@ mod tests {
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider_utils::{
-        ExecuteToolOutput, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
-        Schema, Tool, ToolExecutionError, ValidationResult,
+        DownloadedBlob, ExecuteToolOutput, SandboxCommandOptions, SandboxCommandResult,
+        SandboxRunCommandFuture, Schema, Tool, ToolExecutionError, ValidationResult,
     };
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
@@ -6762,6 +6788,35 @@ mod tests {
 
     #[test]
     fn stream_text_prepare_step_model_switch_uses_step_model_supported_urls() {
+        let download_calls = Arc::new(Mutex::new(Vec::new()));
+        let download = PromptDownload::new({
+            let download_calls = Arc::clone(&download_calls);
+            move |requested_downloads| {
+                let download_calls = Arc::clone(&download_calls);
+                async move {
+                    download_calls.lock().expect("download calls lock").extend(
+                        requested_downloads.iter().map(|download| {
+                            (download.url.clone(), download.is_url_supported_by_model)
+                        }),
+                    );
+
+                    Ok(requested_downloads
+                        .into_iter()
+                        .map(|download| {
+                            if download.is_url_supported_by_model {
+                                None
+                            } else {
+                                Some(
+                                    DownloadedBlob::new(vec![1, 2, 3, 4])
+                                        .with_media_type("image/png"),
+                                )
+                            }
+                        })
+                        .collect())
+                }
+            }
+        });
+
         let primary = MockLanguageModel::new()
             .with_model_id("with-image-url-support")
             .with_supported_urls(BTreeMap::from([(
@@ -6781,6 +6836,7 @@ mod tests {
         let secondary = MockLanguageModel::new()
             .with_provider("without-image-url-support")
             .with_model_id("without-image-url-support")
+            .with_supported_urls(BTreeMap::new())
             .with_stream_result(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
@@ -6803,18 +6859,28 @@ mod tests {
                     FileData::Url {
                         url: Url::parse("https://example.com/test.jpg").expect("url parses"),
                     },
-                    "image/jpeg",
+                    "image",
                 )),
             ],
         ))];
 
         let result = poll_ready(stream_text(
-            StreamTextOptions::new(&primary, prompt).with_prepare_step(
-                move |_options| async move { PrepareStepResult::new().with_model(secondary_model) },
-            ),
+            StreamTextOptions::new(&primary, prompt)
+                .with_prepare_step(move |_options| async move {
+                    PrepareStepResult::new().with_model(secondary_model)
+                })
+                .with_download(download),
         ));
 
         assert_eq!(result.text, "response from without-image-url-support");
+        assert_eq!(download_calls.lock().expect("download calls lock").len(), 1);
+        assert_eq!(
+            download_calls.lock().expect("download calls lock")[0],
+            (
+                Url::parse("https://example.com/test.jpg").expect("url parses"),
+                false
+            )
+        );
         assert_eq!(primary.supported_urls_calls(), 0);
         assert_eq!(secondary.supported_urls_calls(), 1);
         assert_eq!(primary.stream_calls().len(), 0);
@@ -6827,8 +6893,13 @@ mod tests {
                     && matches!(
                         &message.content[1],
                         LanguageModelUserContentPart::File(file)
-                            if file.media_type == "image/jpeg"
-                                && matches!(file.data, FileData::Url { .. })
+                            if file.media_type == "image/png"
+                                && matches!(
+                                    file.data,
+                                    FileData::Data {
+                                        data: FileDataContent::Bytes(ref bytes)
+                                    } if bytes == &vec![1, 2, 3, 4]
+                                )
                     )
         ));
     }

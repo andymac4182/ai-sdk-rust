@@ -30,7 +30,8 @@ use crate::language_model::{
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
-    Prompt, TimeoutConfiguration, get_tool_timeout_ms, get_total_timeout_ms, prompt_has_url_files,
+    Prompt, PromptDownload, TimeoutConfiguration, apply_downloaded_prompt_assets,
+    download_prompt_assets, get_tool_timeout_ms, get_total_timeout_ms, prompt_has_url_files,
     standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{
@@ -3614,6 +3615,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Settings controlling which large provider payloads are retained in step results.
     pub include: GenerateTextInclude,
+
+    /// Optional callback used to download URL-backed prompt assets.
+    pub download: Option<PromptDownload>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
@@ -3645,6 +3649,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
+            download: None,
         }
     }
 
@@ -3685,6 +3690,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
+            download: None,
         }
     }
 
@@ -4054,6 +4060,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Sets the reasoning effort.
     pub fn with_reasoning(mut self, reasoning: LanguageModelReasoningEffort) -> Self {
         self.call_options.reasoning = Some(reasoning);
+        self
+    }
+
+    /// Sets the callback used to download URL-backed prompt assets.
+    pub fn with_download(mut self, download: PromptDownload) -> Self {
+        self.download = Some(download);
         self
     }
 
@@ -5373,6 +5385,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         on_step_finish,
         on_finish,
         telemetry,
+        download,
         timeout,
         max_retries,
         max_steps,
@@ -5542,7 +5555,18 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             merge_provider_options(base_provider_options.as_ref(), step_provider_options);
 
         if prompt_has_url_files(&step_call_options.prompt) {
-            let _ = step_model.supported_urls().await;
+            let supported_urls = step_model.supported_urls().await;
+            let downloaded_assets = download_prompt_assets(
+                &step_call_options.prompt,
+                &supported_urls,
+                download.as_ref(),
+            )
+            .await
+            .expect("prompt asset download failed");
+            step_call_options.prompt = apply_downloaded_prompt_assets(
+                step_call_options.prompt.clone(),
+                &downloaded_assets,
+            );
         }
 
         let step_prompt = step_call_options.prompt.clone();
@@ -8239,6 +8263,7 @@ mod tests {
         prune_messages, refine_tool_inputs, repair_tool_calls, resolve_tool_approval,
         response_messages_for_step, step_count_is, sum_token_counts, validate_tool_context,
     };
+    use crate::PromptDownload;
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
@@ -8268,9 +8293,9 @@ mod tests {
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
     use crate::provider_utils::{
-        ExecuteToolOutput, ExperimentalSandbox, FlexibleSchema, SandboxCommandOptions,
-        SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool, ToolExecutionError,
-        ValidationResult, dynamic_tool,
+        DownloadedBlob, ExecuteToolOutput, ExperimentalSandbox, FlexibleSchema,
+        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool,
+        ToolExecutionError, ValidationResult, dynamic_tool,
     };
     use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::telemetry::{
@@ -15446,20 +15471,62 @@ mod tests {
 
     #[test]
     fn generate_text_prepare_step_model_switch_uses_step_model_supported_urls() {
-        let primary_supported_urls_called = Arc::new(AtomicBool::new(false));
-        let secondary_supported_urls_called = Arc::new(AtomicBool::new(false));
-        let primary = FakeLanguageModel::new()
-            .with_model_id("with-image-url-support")
-            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
-                "should not run",
-            ))])
-            .with_supported_urls_called(Arc::clone(&primary_supported_urls_called));
-        let secondary = FakeLanguageModel::new()
-            .with_model_id("mock-model-id")
-            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
-                "response from without-image-url-support",
-            ))])
-            .with_supported_urls_called(Arc::clone(&secondary_supported_urls_called));
+        let download_calls = Arc::new(Mutex::new(Vec::new()));
+        let download = PromptDownload::new({
+            let download_calls = Arc::clone(&download_calls);
+            move |requested_downloads| {
+                let download_calls = Arc::clone(&download_calls);
+                async move {
+                    download_calls.lock().expect("download calls lock").extend(
+                        requested_downloads.iter().map(|download| {
+                            (download.url.clone(), download.is_url_supported_by_model)
+                        }),
+                    );
+
+                    Ok(requested_downloads
+                        .into_iter()
+                        .map(|download| {
+                            if download.is_url_supported_by_model {
+                                None
+                            } else {
+                                Some(
+                                    DownloadedBlob::new(vec![1, 2, 3, 4])
+                                        .with_media_type("image/png"),
+                                )
+                            }
+                        })
+                        .collect())
+                }
+            }
+        });
+
+        let primary = MockLanguageModel::new()
+            .with_supported_urls(LanguageModelSupportedUrls::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+            .with_generate_result(LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "should not run",
+                ))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+                LanguageModelUsage::default(),
+            ));
+        let secondary = MockLanguageModel::new()
+            .with_supported_urls(LanguageModelSupportedUrls::new())
+            .with_generate_result(LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "response from without-image-url-support",
+                ))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+                LanguageModelUsage::default(),
+            ));
         let secondary_model = &secondary;
         let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
             vec![
@@ -15470,31 +15537,46 @@ mod tests {
                     FileData::Url {
                         url: Url::parse("https://example.com/test.jpg").expect("url parses"),
                     },
-                    "image/jpeg",
+                    "image",
                 )),
             ],
         ))];
 
         let result = poll_ready(generate_text(
-            GenerateTextOptions::new(&primary, prompt).with_prepare_step(
-                move |_options| async move { PrepareStepResult::new().with_model(secondary_model) },
-            ),
+            GenerateTextOptions::new(&primary, prompt)
+                .with_prepare_step(move |_options| async move {
+                    PrepareStepResult::new().with_model(secondary_model)
+                })
+                .with_download(download),
         ));
 
         assert_eq!(result.text, "response from without-image-url-support");
-        assert!(!primary_supported_urls_called.load(Ordering::SeqCst));
-        assert!(secondary_supported_urls_called.load(Ordering::SeqCst));
-        assert!(primary.calls.borrow().is_empty());
-        assert_eq!(secondary.calls.borrow().len(), 1);
+        assert_eq!(download_calls.lock().expect("download calls lock").len(), 1);
+        assert_eq!(
+            download_calls.lock().expect("download calls lock")[0],
+            (
+                Url::parse("https://example.com/test.jpg").expect("url parses"),
+                false
+            )
+        );
+        assert_eq!(primary.supported_urls_calls(), 0);
+        assert_eq!(secondary.supported_urls_calls(), 1);
+        assert!(primary.generate_calls().is_empty());
+        assert_eq!(secondary.generate_calls().len(), 1);
         assert!(matches!(
-            &secondary.calls.borrow()[0].prompt[0],
+            &secondary.generate_calls()[0].prompt[0],
             LanguageModelMessage::User(message)
                 if message.content.len() == 2
                     && matches!(
                         &message.content[1],
                         LanguageModelUserContentPart::File(file)
-                            if file.media_type == "image/jpeg"
-                                && matches!(file.data, FileData::Url { .. })
+                            if file.media_type == "image/png"
+                                && matches!(
+                                    file.data,
+                                    FileData::Data {
+                                        data: FileDataContent::Bytes(ref bytes)
+                                    } if bytes == &vec![1, 2, 3, 4]
+                                )
                     )
         ));
     }
