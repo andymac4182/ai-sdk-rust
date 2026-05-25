@@ -1214,11 +1214,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   `create_ui_message_stream_should_send_data_stream_part_and_close_the_stream`,
   `create_ui_message_stream_should_forward_a_single_stream_with_two_elements`,
   `create_ui_message_stream_should_send_async_message_annotation_and_close_the_stream`,
+  `create_ui_message_stream_should_forward_elements_from_multiple_streams_and_data_parts`,
   and `create_ui_message_stream_should_add_error_parts_when_stream_errors`.
   Rust maps upstream `writer.write` and `writer.merge(ReadableStream)` to the
-  existing materialized writer and `merge`/`merge_result` APIs. Browser
-  `ReadableStream` scheduling cases such as delayed merged streams and writes
-  after close remain JavaScript-runtime-specific until a live stream
+  existing materialized writer and `merge`/`merge_result` APIs. The portable
+  mixed multi-stream/data-part ordering case now has a named Rust counterpart;
+  browser `ReadableStream` scheduling cases such as delayed merged streams and
+  writes after close remain JavaScript-runtime-specific until a live stream
   abstraction is introduced.
 - 2026-05-24: `packages/ai` UI-message text/response edge parity added named
   Rust counterparts for the remaining portable upstream

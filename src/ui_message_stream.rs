@@ -4758,6 +4758,85 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_should_forward_elements_from_multiple_streams_and_data_parts() {
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            writer.write(UiMessageChunk::text_delta("1", "data-part-1"));
+            writer.merge([
+                UiMessageChunk::text_delta("1", "1a"),
+                UiMessageChunk::text_delta("1", "1b"),
+            ]);
+            writer.write(UiMessageChunk::text_delta("1", "data-part-2"));
+            writer.merge([
+                UiMessageChunk::text_delta("2", "2a"),
+                UiMessageChunk::text_delta("2", "2b"),
+            ]);
+            writer.write(UiMessageChunk::text_delta("1", "data-part-3"));
+            writer.merge([
+                UiMessageChunk::text_delta("1", "1c"),
+                UiMessageChunk::text_delta("1", "1d"),
+                UiMessageChunk::text_delta("1", "1e"),
+            ]);
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "data-part-1"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1b"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "data-part-2"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2b"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "data-part-3"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1c"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1d"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1e"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn create_ui_message_stream_should_add_error_parts_when_stream_errors() {
         let chunks = create_ui_message_stream(
             CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
