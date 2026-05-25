@@ -14480,6 +14480,264 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_telemetry_includes_configured_runtime_context_properties() {
+        let model = FakeLanguageModel::new().with_body_metadata();
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(
+                    event
+                        .event
+                        .get("runtimeContext")
+                        .cloned()
+                        .expect("runtimeContext field"),
+                );
+            });
+        }
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_runtime_context(
+                    json!({
+                        "userId": "user-123",
+                        "requestId": "request-123",
+                    })
+                    .as_object()
+                    .expect("runtime context is object")
+                    .clone(),
+                )
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("generate-text-test")
+                        .with_integration(integration)
+                        .with_runtime_context_key("requestId", true),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        let telemetry_contexts = telemetry_contexts.lock().expect("telemetry event lock");
+        assert_eq!(
+            telemetry_contexts.as_slice(),
+            [
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_text_telemetry_includes_configured_tools_context_properties() {
+        let model = FakeLanguageModel::new().with_body_metadata();
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" },
+                    "region": { "type": "string" },
+                },
+                "required": ["apiKey", "region"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        );
+        let tools_context = json!({
+            "weather": {
+                "apiKey": "secret-api-key",
+                "region": "eu",
+            },
+        })
+        .as_object()
+        .expect("tools context is object")
+        .clone();
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(
+                    event
+                        .event
+                        .get("toolsContext")
+                        .cloned()
+                        .expect("toolsContext field"),
+                );
+            });
+        }
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_tool(Tool::new("weather", input_schema).with_context_schema(context_schema))
+                .with_tools_context(tools_context.clone())
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("generate-text-test")
+                        .with_integration(integration)
+                        .with_tool_context_key("weather", "region", true),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        let telemetry_contexts = telemetry_contexts.lock().expect("telemetry event lock");
+        assert_eq!(
+            telemetry_contexts.as_slice(),
+            [
+                json!({ "weather": { "region": "eu" } }),
+                json!({ "weather": { "region": "eu" } }),
+                json!({ "weather": { "region": "eu" } }),
+                json!({ "weather": { "region": "eu" } }),
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_text_telemetry_excludes_tools_context_by_default() {
+        let model = FakeLanguageModel::new().with_body_metadata();
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" },
+                    "region": { "type": "string" },
+                },
+                "required": ["apiKey", "region"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        );
+        let tools_context = json!({
+            "weather": {
+                "apiKey": "secret-api-key",
+                "region": "eu",
+            },
+        })
+        .as_object()
+        .expect("tools context is object")
+        .clone();
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(
+                    event
+                        .event
+                        .get("toolsContext")
+                        .cloned()
+                        .expect("toolsContext field"),
+                );
+            });
+        }
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_tool(Tool::new("weather", input_schema).with_context_schema(context_schema))
+                .with_tools_context(tools_context)
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("generate-text-test")
+                        .with_integration(integration),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        let telemetry_contexts = telemetry_contexts.lock().expect("telemetry event lock");
+        assert_eq!(
+            telemetry_contexts.as_slice(),
+            [json!({}), json!({}), json!({}), json!({})]
+        );
+    }
+
+    #[test]
+    fn generate_text_telemetry_excludes_runtime_context_by_default() {
+        let model = FakeLanguageModel::new().with_body_metadata();
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(
+                    event
+                        .event
+                        .get("runtimeContext")
+                        .cloned()
+                        .expect("runtimeContext field"),
+                );
+            });
+        }
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_runtime_context(
+                    json!({
+                        "userId": "user-123",
+                        "requestId": "request-123",
+                    })
+                    .as_object()
+                    .expect("runtime context is object")
+                    .clone(),
+                )
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("generate-text-test")
+                        .with_integration(integration),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        let telemetry_contexts = telemetry_contexts.lock().expect("telemetry event lock");
+        assert_eq!(
+            telemetry_contexts.as_slice(),
+            [json!({}), json!({}), json!({}), json!({})]
+        );
+    }
+
+    #[test]
     fn generate_text_accepts_experimental_telemetry_alias() {
         let model = FakeLanguageModel::new();
         let start_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
