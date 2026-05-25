@@ -4212,6 +4212,59 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_support_tool_input_schemas_across_step_boundaries() {
+        let tool = Tool::new(
+            "addNumbers",
+            serde_json::from_value(json!({
+                "type": "object",
+                "properties": {
+                    "a": { "type": "number" },
+                    "b": { "type": "number" }
+                },
+                "required": ["a", "b"]
+            }))
+            .expect("schema is an object"),
+        )
+        .with_execute(|input, _| async move {
+            let a = input["a"].as_i64().expect("a is a number");
+            let b = input["b"].as_i64().expect("b is a number");
+            Ok(json!(a + b))
+        });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new(
+                "add-numbers-call",
+                "addNumbers",
+                r#"{"a":3,"b":7}"#,
+            )),
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                    LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                        "text-1",
+                        "The sum is 10",
+                    )),
+                    LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                    finish(FinishReason::Stop),
+                ],
+                1,
+            ),
+        ]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.steps[0].tool_calls.len(), 1);
+        assert_eq!(
+            result.steps[0].tool_calls[0].input,
+            json!({ "a": 3, "b": 7 })
+        );
+        assert_eq!(result.steps[1].text, "The sum is 10");
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_accept_a_string_prompt_in_stream() {
         let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
         let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);

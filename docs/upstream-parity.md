@@ -2483,15 +2483,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   and `tool error recovery` is represented by
   `workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result`.
   The upstream `tools with zod input schemas work across step boundaries` case
-  is represented by the workflow tool-schema serialization coverage plus
-  `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`,
+  is now represented by
+  `workflow_agent_upstream_should_support_tool_input_schemas_across_step_boundaries`,
   while `callback survives serialization and repairs malformed tool input`
-  is represented by
+  remains represented by
   `workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator`
-  together with the lower-level stream-text repair tests. The callback-order
-  e2e cases remain represented by the existing workflow compat tests for
-  `fires constructor + stream callbacks in order with step data` and
-  `fires constructor + stream callbacks in order with event data`.
+  together with the lower-level stream-text repair tests.
+  The callback-order e2e cases remain represented by the existing workflow
+  compat tests for `fires constructor + stream callbacks in order with step
+  data` and `fires constructor + stream callbacks in order with event data`.
 - 2026-05-26: WorkflowAgent timeout e2e parity added the named Rust
   counterpart `workflow_agent_upstream_should_complete_within_timeout` for
   upstream `workflow-agent-e2e.integration.test.ts` `completes within
