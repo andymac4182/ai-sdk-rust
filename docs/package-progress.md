@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 55
-- Average estimated completion: 50.2%
-- Portable package average: 39.2%
-- Closed package rows: 13 / 55
-- Strict portable verified rows: 3 / 45
-- In-progress rows: 27
+- Average estimated completion: 50.4%
+- Portable package average: 39.4%
+- Closed package rows: 14 / 55
+- Strict portable verified rows: 4 / 45
+- In-progress rows: 26
 - Not-started rows: 15
 
 ## 100% Closed
@@ -16,6 +16,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | --- | ---: | --- | --- |
 | `@ai-sdk/gateway` | 100% | Verified | provider package |
 | `@ai-sdk/openai-compatible` | 100% | Verified | provider base package |
+| `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/test-server` | 100% | Verified | testing support package |
 | `@ai-sdk/devtools` | 100% | JavaScript-only | JavaScript devtools package |
 | `@ai-sdk/codemod` | 100% | JavaScript-only | JavaScript migration tooling |
@@ -35,7 +36,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/provider-utils` | 82% | In progress | provider support library | Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod... |
 | `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
 | `@ai-sdk/openai` | 99% | In progress | provider package | OpenAI/Open Responses foundations, provider base URL precedence, language-model capability matrix, hosted... |
-| `@ai-sdk/open-responses` | 88% | In progress | provider package | Most fixture, tool, prompt, request, metadata, and stream slices are mapped; remaining... |
 | `@ai-sdk/assemblyai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
