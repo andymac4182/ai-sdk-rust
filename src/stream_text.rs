@@ -12754,6 +12754,95 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_telemetry_includes_configured_tools_context_properties() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let tools_context = json!({
+            "weather": {
+                "apiKey": "secret-api-key",
+                "region": "eu",
+            },
+        })
+        .as_object()
+        .expect("tools context is object")
+        .clone();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" },
+                    "region": { "type": "string" },
+                },
+                "required": ["apiKey", "region"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        );
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(
+                    event
+                        .event
+                        .get("toolsContext")
+                        .cloned()
+                        .expect("toolsContext field"),
+                );
+            });
+        }
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_tools_context(tools_context.clone())
+                .with_tool(Tool::new("weather", input_schema).with_context_schema(context_schema))
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("stream-text-test")
+                        .with_integration(integration)
+                        .with_tool_context_key("weather", "region", true),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let telemetry_contexts = telemetry_contexts.lock().expect("telemetry event lock");
+        assert_eq!(
+            telemetry_contexts.as_slice(),
+            [
+                json!({ "weather": { "region": "eu" } }),
+                json!({ "weather": { "region": "eu" } }),
+                json!({ "weather": { "region": "eu" } }),
+                json!({ "weather": { "region": "eu" } }),
+            ]
+        );
+    }
+
+    #[test]
     fn stream_text_calls_globally_registered_integration_listeners() {
         let _guard = telemetry_test_guard_for_tests();
         reset_telemetry_state_for_tests();
