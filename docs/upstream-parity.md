@@ -1213,6 +1213,7 @@ focused tests for each portable behavior before changing rows to `verified`.
   `create-ui-message-stream.test.ts` write/merge/error cases:
   `create_ui_message_stream_should_send_data_stream_part_and_close_the_stream`,
   `create_ui_message_stream_should_forward_a_single_stream_with_two_elements`,
+  `create_ui_message_stream_should_send_async_message_annotation_and_close_the_stream`,
   and `create_ui_message_stream_should_add_error_parts_when_stream_errors`.
   Rust maps upstream `writer.write` and `writer.merge(ReadableStream)` to the
   existing materialized writer and `merge`/`merge_result` APIs. Browser

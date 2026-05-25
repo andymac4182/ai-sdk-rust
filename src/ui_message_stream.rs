@@ -4728,6 +4728,36 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_should_send_async_message_annotation_and_close_the_stream() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel::<()>();
+
+        let handle = std::thread::spawn(move || {
+            create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+                ready_tx.send(()).expect("ready signal sends");
+                continue_rx.recv().expect("continue signal receives");
+                writer.write(UiMessageChunk::text_delta("1", "1a"));
+            })
+            .expect("stream is created")
+        });
+
+        ready_rx.recv().expect("ready signal receives");
+        continue_tx.send(()).expect("continue signal sends");
+
+        let chunks = handle.join().expect("stream thread joins");
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn create_ui_message_stream_should_add_error_parts_when_stream_errors() {
         let chunks = create_ui_message_stream(
             CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
