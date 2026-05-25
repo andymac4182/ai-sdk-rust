@@ -2459,7 +2459,7 @@ focused tests for each portable behavior before changing rows to `verified`.
   and callback exchange, token exchange, auth-provider transport config
   creation, protected tool listing/calling, and authenticated session cleanup
   without external credentials.
-- 2026-05-25: MCP hosted OAuth HTTP example confirmed locally
+- 2026-05-26: MCP hosted OAuth HTTP example confirmed locally
   `cargo run -p ai-sdk-mcp --example hosted_oauth_http` completed end to end
   with local server connection, protected tool discovery, protected tool
   execution, and request counting.
