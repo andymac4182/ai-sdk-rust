@@ -204,3 +204,34 @@ Remaining 7 upstream cases are mapped to Rust tests in
 
 Remaining 6 upstream cases are mapped to Rust tests in
 [`crates/chat-sdk-state-ioredis/src/lib.rs`](../../crates/chat-sdk-state-ioredis/src/lib.rs).
+
+---
+
+## Section: `chat-sdk-state-pg`
+
+### `packages/state-pg/src/index.test.ts` (~50 unportable cases)
+
+The state-pg upstream test file contains ~64 cases. The Rust port
+maps the structural cases (constructor, ensureConnected throw-before-
+connect, queue family) and documents the remainder under five
+categories. Per the cross-cutting js-only-documented sweep pattern
+(`port-chat-sdk.md` slice 411), the mock-client behavior cases are
+bulk-enumerated rather than transcribed one by one.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| Module-loader exports | `should export createPostgresState function` (L42), `should export PostgresStateAdapter class` (L46) (2 cases) | `typeof X === "function"` / `instanceof Class`. | Rust's module system makes exports visible at compile time. |
+| Existing-client injection | `should create an adapter with an existing client` (L68) (1 case) | Upstream takes a pre-configured `pg.Client`; Rust placeholder doesn't model the node-pg client surface. | Future tokio-postgres / sqlx wire-up is additive production code. |
+| Default-Logger constructor parameter | `should use default logger when none provided` (L74) (1 case) | Per `port-chat-sdk.md` slice 447, Rust uses static-dispatch `log` crate not a typed Logger constructor parameter. | Static dispatch makes the case unrepresentable. |
+| Env-var fallback | `should throw when no url or env var is available` (L81), `should use POSTGRES_URL env var as fallback` (L94), `should use DATABASE_URL env var as fallback` (L108) (3 cases) | JS-runtime `process.env`; Rust 2024 makes `std::env::set_var` `unsafe` and parallel test runners race. | Future `try_create_pg_state_adapter` factory closure pattern (slice 305 reference) — `env: impl Fn(&str) -> Option<String>`. |
+| Mock-client behavior (`with mock client` describe) | ~40 cases under `connect/disconnect` (5), `subscriptions` (3), `locking` (8), `cache` (3), `appendToList / getList` (4), `enqueue / dequeue / queueDepth` (~17) | Requires JS `vi.fn()`-based mock pg.Pool to assert call shapes. Per the cross-cutting js-only-documented sweep pattern (slice 411), the mock infrastructure is JS-only; Rust uses inline `Mutex<Vec<_>>` recorders. | Real behavior will be verified by future tokio-postgres integration tests once the client lands. |
+| `getClient` typed-class getter | `should return the underlying client` (L658) (1 case) | Per `port-chat-sdk.md` slice 439, Rust holds the connection pool by opaque type — no typed-class-getter pattern. | Type-system-impossible by construction. |
+| Live-Postgres integration | `describe.skip > should connect to Postgres` (L666) + sibling skipped cases | `describe.skip`-marked upstream; requires live Postgres. | Future opt-in `#[ignore]` integration tests once tokio-postgres lands. |
+
+Remaining ~14 structural upstream cases are mapped to Rust tests in
+[`crates/chat-sdk-state-pg/src/lib.rs`](../../crates/chat-sdk-state-pg/src/lib.rs) —
+constructor options, ensureConnected throw-before-connect for every
+StateAdapter method (get, set, set_if_not_exists, delete,
+append_to_list, get_list, subscribe, unsubscribe, is_subscribed,
+acquire_lock, release_lock, extend_lock), and queue family default
+trait impls (enqueue, dequeue, queue_depth).
