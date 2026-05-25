@@ -14266,6 +14266,30 @@ mod tests {
         ]
     }
 
+    fn provider_executed_approval_response_prompt(
+        response: LanguageModelToolApprovalResponsePart,
+    ) -> Vec<LanguageModelMessage> {
+        vec![
+            user_message("Shorten this URL: https://example.com"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "provider-call-1",
+                        "providerTool",
+                        json!({ "query": "test" }),
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("mcp-approval-1", "provider-call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(response),
+            ])),
+        ]
+    }
+
     #[test]
     fn language_model_call_events_round_trip_upstream_shape() {
         let prompt = vec![user_message("Say hello")];
@@ -20048,6 +20072,70 @@ mod tests {
         );
         assert_eq!(result.tool_results[0].provider_executed, Some(true));
         assert_eq!(result.tool_results[0].dynamic, Some(true));
+    }
+
+    #[test]
+    fn generate_text_sends_approved_provider_executed_tool_approval_response_once() {
+        let model = ProviderExecutedToolLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = provider_executed_approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("mcp-approval-1", true)
+                .with_provider_executed(true),
+        );
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_messages(prompt.clone()))
+                .expect("prompt converts")
+                .with_tool(Tool::new("providerTool", input_schema))
+                .with_max_steps(2),
+        ));
+
+        let calls = model.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt.len(), 3);
+        assert_eq!(calls[0].prompt[0], prompt[0]);
+        assert_eq!(
+            &calls[0].prompt[1],
+            &LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "provider-call-1",
+                        "providerTool",
+                        json!({ "query": "test" }),
+                    )
+                    .with_provider_executed(true),
+                ),
+            ]))
+        );
+        assert_eq!(
+            &calls[0].prompt[2],
+            &LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("mcp-approval-1", true),
+                ),
+            ]))
+        );
+
+        assert!(matches!(
+            &result.content[..],
+            [
+                GenerateTextContentPart::ToolCall(tool_call),
+                GenerateTextContentPart::ToolResult(tool_result),
+            ] if tool_call.provider_executed == Some(true)
+                && tool_result.provider_executed == Some(true)
+                && tool_result.output == json!({ "forecast": "sunny" })
+        ));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "forecast": "sunny" })
+        );
     }
 
     #[test]
