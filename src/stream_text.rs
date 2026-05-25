@@ -12438,6 +12438,65 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_measures_time_to_first_output_token_from_tool_input_deltas() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
+                    "call-1", "tool1",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "{",
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    "{\"value\":\"value\"}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let model_call_end_events = Arc::new(Mutex::new(Vec::new()));
+        let model_call_end_events_for_callback = Arc::clone(&model_call_end_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Call the tool")])
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let model_call_end_events = Arc::clone(&model_call_end_events_for_callback);
+                    async move {
+                        model_call_end_events
+                            .lock()
+                            .expect("model call end events lock")
+                            .push(event.performance);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        let step_performance = &result.steps[0].performance;
+        assert!(
+            step_performance.time_to_first_output_token_ms.is_some(),
+            "first tool-input token duration is captured"
+        );
+
+        let end_events = model_call_end_events
+            .lock()
+            .expect("model call end events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(
+            end_events[0].time_to_first_output_token_ms,
+            step_performance.time_to_first_output_token_ms
+        );
+        assert!(end_events[0].output_tokens_per_second.is_some());
+        assert!(end_events[0].input_tokens_per_second.is_some());
+        assert!(end_events[0].effective_output_tokens_per_second.is_finite());
+        assert!(end_events[0].effective_total_tokens_per_second.is_finite());
+    }
+
+    #[test]
     fn stream_text_invokes_finish_callback_with_completed_records() {
         let provider_metadata = ProviderMetadata::from([(
             "mock".to_string(),

@@ -2030,9 +2030,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   start/end callbacks while fallback response identity is still generated.
 - 2026-05-25: `packages/ai` `streamLanguageModelCall` performance timing
   parity added
-  `stream_text_measures_time_to_first_output_token_from_text_deltas`, proving
-  streamed text deltas populate `timeToFirstOutputTokenMs` plus input/output
-  token-per-second metrics on language-model-call-end performance.
+  `stream_text_measures_time_to_first_output_token_from_text_deltas` and
+  `stream_text_measures_time_to_first_output_token_from_tool_input_deltas`,
+  proving streamed text and tool-input deltas populate
+  `timeToFirstOutputTokenMs` plus input/output token-per-second metrics on
+  language-model-call-end performance.
 - 2026-05-25: `packages/ai` `streamText` interleaved reasoning/text ordering
   parity added
   `stream_text_result_preserves_interleaved_text_and_reasoning_content_order`,
