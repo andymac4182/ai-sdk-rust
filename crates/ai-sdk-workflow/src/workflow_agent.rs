@@ -17,7 +17,7 @@ use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions,
     ToolNeedsApprovalOptions, execute_tool,
 };
-use ai_sdk_rust::{StopCondition, TelemetryOptions};
+use ai_sdk_rust::{Instructions, StopCondition, TelemetryOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -40,7 +40,7 @@ pub struct WorkflowAgentOptions {
     pub tools: BTreeMap<String, Tool>,
 
     /// Default system instructions for every stream call on this agent.
-    pub instructions: Option<String>,
+    pub instructions: Option<Instructions>,
 
     /// Default generation settings.
     pub generation_settings: WorkflowGenerationSettings,
@@ -130,7 +130,7 @@ impl WorkflowAgentOptions {
     }
 
     /// Sets constructor-level instructions.
-    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+    pub fn with_instructions(mut self, instructions: impl Into<Instructions>) -> Self {
         self.instructions = Some(instructions.into());
         self
     }
@@ -285,7 +285,7 @@ pub struct WorkflowAgent {
     id: Option<String>,
     model: WorkflowModelInfo,
     tools: BTreeMap<String, Tool>,
-    instructions: Option<String>,
+    instructions: Option<Instructions>,
     generation_settings: WorkflowGenerationSettings,
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
@@ -390,10 +390,7 @@ impl WorkflowAgent {
         let mut prompt = options.prompt;
 
         if let Some(instructions) = self.instructions.as_ref() {
-            prompt.insert(
-                0,
-                LanguageModelMessage::System(LanguageModelSystemMessage::new(instructions.clone())),
-            );
+            prepend_instructions(&mut prompt, instructions.clone());
         }
 
         apply_tool_approvals_before_stream(
@@ -646,6 +643,18 @@ impl WorkflowAgent {
         }
 
         Ok(execution)
+    }
+}
+
+fn prepend_instructions(prompt: &mut WorkflowPrompt, instructions: Instructions) {
+    let system_messages = match instructions {
+        Instructions::Text(text) => vec![LanguageModelSystemMessage::new(text)],
+        Instructions::Message(message) => vec![message],
+        Instructions::Messages(messages) => messages,
+    };
+
+    for message in system_messages.into_iter().rev() {
+        prompt.insert(0, LanguageModelMessage::System(message));
     }
 }
 
@@ -4254,6 +4263,54 @@ mod tests {
             calls[0].prompt,
             vec![
                 LanguageModelMessage::System(LanguageModelSystemMessage::new("You are a pirate.")),
+                user_text_message("ahoy"),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_system_message_instructions() {
+        let instructions = LanguageModelSystemMessage::new("INSTRUCTIONS");
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_instructions(instructions.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new("ahoy", executor)))
+            .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].prompt,
+            vec![
+                LanguageModelMessage::System(instructions),
+                user_text_message("ahoy"),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_array_of_system_message_instructions() {
+        let instructions = vec![
+            LanguageModelSystemMessage::new("INSTRUCTIONS_1"),
+            LanguageModelSystemMessage::new("INSTRUCTIONS_2"),
+        ];
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_instructions(instructions.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new("ahoy", executor)))
+            .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].prompt,
+            vec![
+                LanguageModelMessage::System(instructions[0].clone()),
+                LanguageModelMessage::System(instructions[1].clone()),
                 user_text_message("ahoy"),
             ]
         );
