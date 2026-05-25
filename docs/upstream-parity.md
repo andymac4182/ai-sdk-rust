@@ -2966,7 +2966,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_object_enum_output_keeps_ambiguous_prefixes_until_resolved`, and
   `stream_object_enum_output_suppresses_impossible_prefixes`, aligning the
   remaining portable upstream choice and enum partial-output cases with the
-  shared Rust output parsers and stream-result wrappers.
+  shared Rust output parsers and stream-result wrappers. That covers the
+  upstream `streamText` cases `should not call JSON.stringify for string
+  partial outputs`, `should send valid partial text fragments`, `should send
+  partial output stream when last chunk contains content`, `should stream an
+  choice value`, `should not stream incorrect values`, `should handle
+  ambiguous values`, and `should handle non-ambiguous values`, plus the
+  upstream `streamObject` enum-output cases `should unwrap result`, `should
+  stream a value and send responseFormat`, `should not stream incorrect
+  values`, `should handle ambiguous values`, and `should handle
+  non-ambiguous values`.
 - 2026-05-25: `packages/ai` `generateText` and `streamText` prepare-step
   URL-file model-switch download-decision parity added
   `generate_text_prepare_step_model_switch_uses_step_model_supported_urls` and
@@ -5352,6 +5361,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_object_enum_output_keeps_ambiguous_prefixes_until_resolved`,
    `stream_object_enum_output_suppresses_impossible_prefixes`, and
    `stream_object_enum_output_handles_non_ambiguous_values`.
+   The explicit upstream `streamText` output-strategy names now mapped are
+   `should not call JSON.stringify for string partial outputs`,
+   `should send valid partial text fragments`, `should send partial output
+   stream when last chunk contains content`, `should stream an choice value`,
+   `should not stream incorrect values`, `should handle ambiguous values`,
+   `should handle non-ambiguous values`, `should unwrap result`, and `should
+   stream a value and send responseFormat`.
    The current upstream `result.fullStream` finish providerMetadata/timestamp
    snapshot fields now have a named Rust counterpart in
    `stream_object_result_full_stream_sends_finish_provider_metadata_and_timestamp`.
