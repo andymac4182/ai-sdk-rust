@@ -15482,6 +15482,87 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_passes_tools_context_to_tool_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let recorded_context = Arc::new(Mutex::new(None::<JsonValue>));
+        let recorded_context_for_tool = Arc::clone(&recorded_context);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "context": { "type": "string" }
+                },
+                "required": ["context"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            if value.get("context").and_then(JsonValue::as_str).is_some() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("expected context string")
+            }
+        });
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "context": "test" }))]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_context_schema(context_schema)
+                        .with_execute(move |_input, options| {
+                            let recorded_context = Arc::clone(&recorded_context_for_tool);
+                            async move {
+                                *recorded_context.lock().expect("recorded context lock") =
+                                    options.context.clone();
+                                Ok(json!({ "forecast": "sunny" }))
+                            }
+                        }),
+                ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(
+            *recorded_context.lock().expect("recorded context lock"),
+            Some(json!({ "context": "test" }))
+        );
+        assert_eq!(result.tool_results[0].is_error, None);
+        assert_eq!(
+            result.tool_results[0]
+                .output
+                .as_object()
+                .expect("tool result output is an object")
+                .get("forecast"),
+            Some(&json!("sunny"))
+        );
+    }
+
+    #[test]
     fn stream_text_repairs_and_refines_streamed_tool_call_before_execution() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
