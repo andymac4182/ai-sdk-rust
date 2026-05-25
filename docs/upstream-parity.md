@@ -2474,6 +2474,20 @@ focused tests for each portable behavior before changing rows to `verified`.
   for upstream `workflow-agent-e2e.integration.test.ts` `basic text response`,
   proving the agent can stream a single non-tool round-trip from prompt to
   assistant text result.
+- 2026-05-26: WorkflowAgent remaining portable e2e coverage now maps the
+  upstream `workflow-agent-e2e.integration.test.ts` callback-order, string
+  instructions, timeout, and runtime/tool-context flow cases explicitly to the
+  existing Rust counterparts:
+  `fires constructor + stream callbacks in order with step data` maps to
+  `workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order`,
+  `fires constructor + stream callbacks in order with event data` maps to
+  `workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order`,
+  `string instructions are passed to the model` maps to
+  `workflow_agent_upstream_should_pass_string_instructions_to_the_model`,
+  `completes within timeout` maps to
+  `workflow_agent_upstream_should_complete_within_timeout`, and
+  `flows through prepareStep, tool execute, and onFinish` maps to
+  `workflow_agent_upstream_should_flow_through_runtime_context_and_tools_context_e2e`.
 - 2026-05-26: WorkflowAgent core tool e2e parity added explicit ledger
   mappings for the remaining portable upstream
   `workflow-agent-e2e.integration.test.ts` core cases: `single tool call` is
