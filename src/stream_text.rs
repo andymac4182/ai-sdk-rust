@@ -10980,6 +10980,66 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_forwards_abort_signal_to_tool_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let received_signal = Arc::new(Mutex::new(None::<StreamTextAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Use the tool")])
+                .with_abort_signal(abort_signal.clone())
+                .with_tool(Tool::new("tool1", input_schema).with_execute(
+                    move |_input, options| {
+                        let received_signal = Arc::clone(&received_signal_for_closure);
+                        async move {
+                            *received_signal.lock().expect("signal lock") = options.abort_signal;
+                            Ok(json!("result1"))
+                        }
+                    },
+                )),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool received abort signal");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+        assert!(!captured_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(captured_signal.is_aborted());
+        assert_eq!(captured_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
     fn stream_text_passes_undefined_when_no_timeout_or_abort_signal_provided() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
