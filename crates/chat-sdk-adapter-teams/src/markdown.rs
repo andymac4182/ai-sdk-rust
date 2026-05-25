@@ -9,10 +9,10 @@
 
 use chat_sdk_adapter_shared::card_utils::escape_table_cell;
 use chat_sdk_chat::markdown::{
-    Node, default_node_to_text, from_ast_with_node_converter, get_node_children,
-    is_blockquote_node, is_code_node, is_delete_node, is_emphasis_node, is_inline_code_node,
-    is_link_node, is_list_node, is_paragraph_node, is_strong_node, is_table_node, is_text_node,
-    parse_markdown, render_list, to_plain_text,
+    Node, ParseMarkdownError, default_node_to_text, from_ast_with_node_converter,
+    get_node_children, is_blockquote_node, is_code_node, is_delete_node, is_emphasis_node,
+    is_inline_code_node, is_link_node, is_list_node, is_paragraph_node, is_strong_node,
+    is_table_node, is_text_node, parse_markdown, render_list, to_plain_text,
 };
 use chat_sdk_chat::types::AdapterPostableMessage;
 
@@ -51,6 +51,13 @@ impl TeamsFormatConverter {
     /// `BaseFormatConverter.extractPlainText`.
     pub fn extract_plain_text(&self, teams_text: &str) -> String {
         to_plain_text(&self.to_ast(teams_text))
+    }
+
+    /// `fromMarkdown` shorthand: parse markdown then render as Teams.
+    /// 1:1 with the inherited `BaseFormatConverter.fromMarkdown(markdown)`.
+    pub fn from_markdown(&self, markdown: &str) -> Result<String, ParseMarkdownError> {
+        let ast = parse_markdown(markdown)?;
+        Ok(self.from_ast(&ast))
     }
 
     /// Render a postable message for Teams. 1:1 port of upstream
@@ -456,120 +463,154 @@ mod tests {
         conv.from_ast(&ast)
     }
 
-    // ---------- fromAst (AST -> Teams format), 12 upstream cases ----------
+    // ---------- fromAst (AST -> Teams format), 16 upstream cases ----------
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:8 > "should convert bold"
     #[test]
     fn from_ast_should_convert_bold() {
-        let r = rt("**bold text**");
-        assert!(r.contains("**bold text**"), "got: {r}");
+        let ast = c().to_ast("**bold text**");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("**bold text**"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:14 > "should convert italic"
     #[test]
     fn from_ast_should_convert_italic() {
-        let r = rt("_italic text_");
-        assert!(r.contains("_italic text_"), "got: {r}");
+        let ast = c().to_ast("_italic text_");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("_italic text_"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:20 > "should convert strikethrough"
     #[test]
     fn from_ast_should_convert_strikethrough() {
-        let r = rt("~~strikethrough~~");
-        assert!(r.contains("~~strikethrough~~"), "got: {r}");
+        let ast = c().to_ast("~~strikethrough~~");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("~~strikethrough~~"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:26 > "should preserve inline code"
     #[test]
     fn from_ast_should_preserve_inline_code() {
-        let r = rt("Use `const x = 1`");
-        assert!(r.contains("`const x = 1`"), "got: {r}");
+        let ast = c().to_ast("Use `const x = 1`");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("`const x = 1`"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:32 > "should handle code blocks"
     #[test]
     fn from_ast_should_handle_code_blocks() {
-        let r = rt("```js\nconst x = 1;\n```");
-        assert!(r.contains("```"), "got: {r}");
-        assert!(r.contains("const x = 1;"), "got: {r}");
+        let input = "```js\nconst x = 1;\n```";
+        let ast = c().to_ast(input);
+        let output = c().from_ast(&ast);
+        assert!(output.contains("```"), "got: {output}");
+        assert!(output.contains("const x = 1;"), "got: {output}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:40 > "should convert links to markdown format"
     #[test]
     fn from_ast_should_convert_links_to_markdown_format() {
-        let r = rt("[link text](https://example.com)");
-        assert!(r.contains("[link text](https://example.com)"), "got: {r}");
+        let ast = c().to_ast("[link text](https://example.com)");
+        let result = c().from_ast(&ast);
+        assert!(
+            result.contains("[link text](https://example.com)"),
+            "got: {result}"
+        );
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:46 > "should handle blockquotes"
     #[test]
     fn from_ast_should_handle_blockquotes() {
-        let r = rt("> quoted text");
-        assert!(r.contains("> quoted text"), "got: {r}");
+        let ast = c().to_ast("> quoted text");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("> quoted text"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:52 > "should handle unordered lists"
     #[test]
     fn from_ast_should_handle_unordered_lists() {
-        let r = rt("- one\n- two");
-        assert!(r.contains("one"), "got: {r}");
-        assert!(r.contains("two"), "got: {r}");
+        let ast = c().to_ast("- item 1\n- item 2");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("- item 1"), "got: {result}");
+        assert!(result.contains("- item 2"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:59 > "should handle ordered lists"
     #[test]
     fn from_ast_should_handle_ordered_lists() {
-        let r = rt("1. one\n2. two");
-        assert!(r.contains("one"), "got: {r}");
-        assert!(r.contains("two"), "got: {r}");
+        let ast = c().to_ast("1. first\n2. second");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("1."), "got: {result}");
+        assert!(result.contains("2."), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:66 > "should indent nested unordered lists"
     #[test]
     fn from_ast_should_indent_nested_unordered_lists() {
-        let r = rt("- outer\n  - inner");
-        assert!(r.contains("outer"));
-        assert!(r.contains("inner"));
+        let result = c()
+            .from_markdown("- parent\n  - child 1\n  - child 2")
+            .expect("from_markdown");
+        assert_eq!(result, "- parent\n  - child 1\n  - child 2");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:73 > "should indent nested ordered lists"
     #[test]
     fn from_ast_should_indent_nested_ordered_lists() {
-        let r = rt("1. outer\n   1. inner");
-        assert!(r.contains("outer"));
-        assert!(r.contains("inner"));
+        let result = c()
+            .from_markdown("1. first\n   1. sub-first\n   2. sub-second\n2. second")
+            .expect("from_markdown");
+        assert!(result.contains("1. first"), "got: {result}");
+        assert!(result.contains("  1. sub-first"), "got: {result}");
+        assert!(result.contains("  2. sub-second"), "got: {result}");
+        assert!(result.contains("2. second"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:83 > "should handle deeply nested lists"
     #[test]
     fn from_ast_should_handle_deeply_nested_lists() {
-        let r = rt("- a\n  - b\n    - c");
-        assert!(r.contains("a"));
-        assert!(r.contains("b"));
-        assert!(r.contains("c"));
+        let result = c()
+            .from_markdown("- level 1\n  - level 2\n    - level 3")
+            .expect("from_markdown");
+        assert!(result.contains("- level 1"), "got: {result}");
+        assert!(result.contains("  - level 2"), "got: {result}");
+        assert!(result.contains("    - level 3"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:92 > "should keep sibling items at the same indent level"
     #[test]
-    fn from_ast_should_keep_siblings_at_same_indent_level() {
-        let r = rt("- a\n  - b\n  - c");
-        let lines: Vec<&str> = r.lines().collect();
-        let indent_of = |s: &str| -> Option<usize> {
-            lines
-                .iter()
-                .find(|l| l.contains(s))
-                .map(|l| l.len() - l.trim_start().len())
-        };
-        let b = indent_of("b").expect("b");
-        let cc = indent_of("c").expect("c");
-        assert_eq!(b, cc, "got: {r}");
+    fn from_ast_should_keep_sibling_items_at_the_same_indent_level() {
+        let result = c()
+            .from_markdown("- item 1\n- item 2\n- item 3")
+            .expect("from_markdown");
+        assert_eq!(result, "- item 1\n- item 2\n- item 3");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:97 > "should handle mixed ordered and unordered nesting"
     #[test]
     fn from_ast_should_handle_mixed_ordered_and_unordered_nesting() {
-        let r = rt("- outer\n  1. inner-ord\n- next");
-        assert!(r.contains("outer"));
-        assert!(r.contains("inner-ord"));
-        assert!(r.contains("next"));
+        let result = c()
+            .from_markdown("1. first\n   - sub a\n   - sub b\n2. second")
+            .expect("from_markdown");
+        assert!(result.contains("1. first"), "got: {result}");
+        assert!(result.contains("  - sub a"), "got: {result}");
+        assert!(result.contains("  - sub b"), "got: {result}");
+        assert!(result.contains("2. second"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:107 > "should convert @mentions to <at>mention</at>"
     #[test]
     fn from_ast_should_convert_at_mentions_to_at_tag() {
-        let r = rt("Hello @bob");
-        assert!(r.contains("<at>bob</at>"), "got: {r}");
+        let ast = c().to_ast("Hello @someone");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("<at>someone</at>"), "got: {result}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:113 > "should handle thematic breaks"
     #[test]
     fn from_ast_should_handle_thematic_breaks() {
-        let r = rt("---");
-        assert!(r.contains("---"), "got: {r}");
+        let ast = c().to_ast("text\n\n---\n\nmore");
+        let result = c().from_ast(&ast);
+        assert!(result.contains("---"), "got: {result}");
     }
 
     // ---------- toAst (Teams HTML -> AST), 11 upstream cases ----------
