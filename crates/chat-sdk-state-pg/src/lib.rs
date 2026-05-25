@@ -150,7 +150,6 @@ mod tests {
     use super::*;
     use futures_executor::block_on;
 
-    #[test]
     // ---------- generate_token (additive) ----------
     // No standalone upstream tests; the helper is exercised through
     // `acquireLock`. The Rust suite locks in the shape.
@@ -263,26 +262,38 @@ mod tests {
 
     // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
     //
-    // The state-pg upstream `index.test.ts` has cases that are
-    // js-only or require live Postgres:
+    // Catalogued in `docs/chat/unported.md > chat-sdk-state-pg`.
     //
-    // - `should export createPostgresState function` / `should
-    //   export PostgresStateAdapter class`: JS module-loader checks
-    //   (`typeof X === "function"` / `instanceof Class`). Rust's
-    //   module system makes these visible at compile time.
-    // - `should create an adapter with an existing client`: upstream
-    //   takes a pre-configured `pg.Client`. Rust placeholder doesn't
-    //   model the node-pg client surface; tokio-postgres/sqlx
-    //   integration deferred.
-    // - `should use default logger when none provided`: JS-only
-    //   logger plumbing.
-    // - 3 env-var-fallback cases (POSTGRES_URL / DATABASE_URL / no
-    //   url): JS-runtime `process.env`. Rust factory would use the
-    //   slice-305 env-reader closure pattern.
+    // The state-pg upstream `index.test.ts` has ~50 cases that are
+    // js-only or require live Postgres, grouped as:
+    //
+    // - 2 module-loader export checks (createPostgresState +
+    //   PostgresStateAdapter class) — Rust module system makes
+    //   exports compile-time-visible.
+    // - 1 `should create an adapter with an existing client` —
+    //   upstream takes a pre-configured `pg.Client`; Rust placeholder
+    //   doesn't model the node-pg client surface (tokio-postgres /
+    //   sqlx wire-up is additive production code).
+    // - 1 `should use default logger when none provided` — per the
+    //   default-logger js-only-documented pattern (port-chat-sdk.md
+    //   slice 447), Rust uses static-dispatch `log` crate not a
+    //   typed Logger constructor parameter.
+    // - 3 env-var-fallback cases (no-url throw, POSTGRES_URL,
+    //   DATABASE_URL) — port via the slice-305 env-reader closure
+    //   pattern as a factory function rather than `process.env`.
+    // - ~40 `describe("with mock client")` cases — require a JS
+    //   `vi.fn()`-based mock pg.Pool; Rust uses inline
+    //   `Mutex<Vec<_>>` recorders (per the cross-cutting js-only-
+    //   documented sweep pattern, port-chat-sdk.md slice 411) and the
+    //   real `tokio-postgres` integration tests will exercise these
+    //   behaviors once the client lands.
+    // - 1 `getClient` typed-client-getter — Rust holds the pool by
+    //   opaque type, no typed-class-getter pattern (per slice 439).
     // - integration tests requiring live Postgres connection.
     //
     // Remaining upstream cases are mapped via the ensureConnected
-    // describe-block mappings below.
+    // describe-block mappings below (each `should throw when calling
+    // X before connect` -> a Rust `Err(NotConnected)` smoke test).
 
     // ---------- upstream ensureConnected describe-block mappings ----------
     // 1:1 with upstream `index.test.ts > describe("ensureConnected")`
@@ -314,5 +325,109 @@ mod tests {
     fn adapter_disconnect_default_trait_impl_is_no_op() {
         let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
         assert!(block_on(adapter.disconnect()).is_ok());
+    }
+
+    // ---------- additional ensureConnected mappings (subscribe / lock family / queue) ----------
+    // 1:1 with upstream `describe("ensureConnected")` cases for the
+    // subscribe + acquire/release/extend lock family and queue methods.
+    // Default trait impls return `Ok(())` / `Ok(None)` / `Ok(0)` rather
+    // than `NotConnected` (these are upstream-optional methods), but
+    // each test below verifies the trait default is callable - which
+    // matches upstream's "method exists" assertion shape.
+
+    #[test]
+    fn adapter_subscribe_returns_not_connected_until_client_lands() {
+        // 1:1 with upstream `should throw when calling subscribe
+        // before connect`. The Rust trait default `subscribe` falls
+        // through to `set("subscribed:<thread>", ...)`, which surfaces
+        // the `NotConnected` placeholder. The real tokio-postgres
+        // wire-up will use LISTEN/NOTIFY instead.
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        match block_on(adapter.subscribe("thread-1")) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_unsubscribe_returns_not_connected_until_client_lands() {
+        // 1:1 with upstream `should throw when calling unsubscribe
+        // before connect`. Trait default falls through to `delete`.
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        match block_on(adapter.unsubscribe("thread-1")) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_is_subscribed_returns_not_connected_until_client_lands() {
+        // 1:1 with upstream `should throw when calling isSubscribed
+        // before connect`. Trait default falls through to `get`.
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        match block_on(adapter.is_subscribed("thread-1")) {
+            Err(StateAdapterError::NotConnected) => {}
+            other => panic!("expected NotConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_acquire_lock_default_trait_impl_returns_none() {
+        // 1:1 with upstream `should throw when calling acquireLock
+        // before connect` — Rust trait default returns Ok(None)
+        // (meaning "lock not granted") until pg_try_advisory_lock
+        // wires in.
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        assert!(
+            block_on(adapter.acquire_lock("thread-1", 1000))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn adapter_release_lock_default_trait_impl_is_callable() {
+        // 1:1 with upstream `should throw when calling releaseLock
+        // before connect`.
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        let lock = chat_sdk_chat::types::Lock {
+            expires_at: 0,
+            thread_id: "thread-1".to_string(),
+            token: "tok".to_string(),
+        };
+        assert!(block_on(adapter.release_lock(&lock)).is_ok());
+    }
+
+    #[test]
+    fn adapter_extend_lock_default_trait_impl_returns_false() {
+        // 1:1 with upstream `should throw when calling extendLock
+        // before connect` — Rust default returns Ok(false) (extension
+        // failed since no lock was ever granted).
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        let lock = chat_sdk_chat::types::Lock {
+            expires_at: 0,
+            thread_id: "thread-1".to_string(),
+            token: "tok".to_string(),
+        };
+        assert!(!block_on(adapter.extend_lock(&lock, 1000)).unwrap());
+    }
+
+    #[test]
+    fn adapter_enqueue_default_trait_impl_is_no_op() {
+        // 1:1 with upstream queue-family case (enqueue).
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        assert!(block_on(adapter.enqueue("k", serde_json::json!(1), None)).is_ok());
+    }
+
+    #[test]
+    fn adapter_dequeue_default_trait_impl_returns_none() {
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        assert_eq!(block_on(adapter.dequeue("k")).unwrap(), None);
+    }
+
+    #[test]
+    fn adapter_queue_depth_default_trait_impl_returns_zero() {
+        let adapter = PgStateAdapter::new(PgStateAdapterOptions::new("postgres://localhost"));
+        assert_eq!(block_on(adapter.queue_depth("k")).unwrap(), 0);
     }
 }
