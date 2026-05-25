@@ -31,13 +31,20 @@ use crate::prompt::{Instructions, Prompt, PromptInput, TimeoutConfiguration};
 use crate::provider::{InvalidPromptError, ProviderOptions, TypeValidationContext};
 use crate::provider_utils::{ExperimentalSandbox, FlexibleSchema, validate_types};
 use crate::stream_text::{
-    StreamTextOptions, StreamTextResult, StreamTextUiMessageStreamOptions, stream_text,
+    StreamTextOptions, StreamTextResult, StreamTextTransform, StreamTextUiMessageStreamOptions,
+    stream_text,
 };
 use crate::telemetry::TelemetryOptions;
 use crate::ui_message_stream::{UiMessage, UiMessageStreamResponse, UiMessageStreamResponseInit};
 
 /// Upstream version tag for `ToolLoopAgent`.
 pub const TOOL_LOOP_AGENT_VERSION: &str = "agent-v1";
+
+/// Upstream-compatible alias for agent call parameters.
+pub type AgentCallParameters<'a, M> = ToolLoopAgentCallOptions<'a, M>;
+
+/// Upstream-compatible alias for agent stream parameters.
+pub type AgentStreamParameters<'a, M> = ToolLoopAgentCallOptions<'a, M>;
 
 /// Upstream-compatible alias for the agent `onStart` callback type.
 pub type ToolLoopAgentOnStartCallback<'a> = GenerateTextOnStartCallback<'a>;
@@ -181,6 +188,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
                 options.on_step_finish,
             ),
             on_finish: merge_on_finish(self.settings.on_finish.clone(), options.on_finish),
+            experimental_transform: options.experimental_transform,
             telemetry: options
                 .telemetry
                 .or_else(|| self.settings.telemetry.clone()),
@@ -831,6 +839,7 @@ pub struct ToolLoopAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
     pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
     pub on_finish: Option<GenerateTextOnFinish<'a>>,
+    pub experimental_transform: Vec<StreamTextTransform<'a>>,
     pub telemetry: Option<TelemetryOptions>,
     pub abort_signal: Option<LanguageModelAbortSignal>,
     pub timeout: Option<TimeoutConfiguration>,
@@ -863,6 +872,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
             on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
+            experimental_transform: Vec::new(),
             telemetry: None,
             abort_signal: None,
             timeout: None,
@@ -1051,6 +1061,21 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
         self
     }
 
+    /// Adds a per-call stream transform.
+    pub fn with_transform(mut self, transform: StreamTextTransform<'a>) -> Self {
+        self.experimental_transform.push(transform);
+        self
+    }
+
+    /// Replaces the per-call stream transform list.
+    pub fn with_transforms(
+        mut self,
+        transforms: impl IntoIterator<Item = StreamTextTransform<'a>>,
+    ) -> Self {
+        self.experimental_transform = transforms.into_iter().collect();
+        self
+    }
+
     /// Sets per-call telemetry.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
@@ -1128,6 +1153,7 @@ pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
     pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
     pub on_finish: Option<GenerateTextOnFinish<'a>>,
+    pub experimental_transform: Vec<StreamTextTransform<'a>>,
     pub telemetry: Option<TelemetryOptions>,
     pub abort_signal: Option<LanguageModelAbortSignal>,
     pub timeout: Option<TimeoutConfiguration>,
@@ -1158,6 +1184,12 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentPreparedCall<'a, M> {
     /// Sets the prepared step callback.
     pub fn with_prepare_step(mut self, prepare_step: PrepareStep<'a, M>) -> Self {
         self.prepare_step = Some(prepare_step);
+        self
+    }
+
+    /// Adds a prepared stream transform.
+    pub fn with_transform(mut self, transform: StreamTextTransform<'a>) -> Self {
+        self.experimental_transform.push(transform);
         self
     }
 }
@@ -1262,6 +1294,9 @@ fn apply_stream_prepared_options<'a, M: LanguageModel + ?Sized>(
 ) -> StreamTextOptions<'a, M> {
     for tool in prepared.tools {
         options = options.with_tool(tool);
+    }
+    for transform in prepared.experimental_transform {
+        options = options.with_transform(transform);
     }
     options.runtime_context = prepared.runtime_context;
     options.tools_context = prepared.tools_context;

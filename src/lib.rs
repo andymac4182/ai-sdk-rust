@@ -65,12 +65,12 @@ pub mod voyage;
 pub mod warning;
 
 pub use agent::{
-    AgentUiStreamResponseOptions, TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions,
-    ToolLoopAgentModelSettings, ToolLoopAgentOnFinishCallback, ToolLoopAgentOnStartCallback,
-    ToolLoopAgentOnStepFinishCallback, ToolLoopAgentOnStepStartCallback,
-    ToolLoopAgentOnToolExecutionEndCallback, ToolLoopAgentOnToolExecutionStartCallback,
-    ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall, ToolLoopAgentSettings,
-    create_agent_ui_stream_response,
+    AgentCallParameters, AgentStreamParameters, AgentUiStreamResponseOptions,
+    TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings,
+    ToolLoopAgentOnFinishCallback, ToolLoopAgentOnStartCallback, ToolLoopAgentOnStepFinishCallback,
+    ToolLoopAgentOnStepStartCallback, ToolLoopAgentOnToolExecutionEndCallback,
+    ToolLoopAgentOnToolExecutionStartCallback, ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall,
+    ToolLoopAgentSettings, create_agent_ui_stream_response,
 };
 pub use baseten::{
     BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
@@ -588,6 +588,8 @@ mod tests {
         assert_type::<Prompt>();
         assert_type::<ProviderRegistry<MockProvider>>();
         assert_type::<ToolLoopAgent<'static, MockLanguageModel>>();
+        assert_type::<AgentCallParameters<'static, MockLanguageModel>>();
+        assert_type::<AgentStreamParameters<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentCallOptions<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentModelSettings>();
         assert_type::<ToolLoopAgentOnStartCallback<'static>>();
