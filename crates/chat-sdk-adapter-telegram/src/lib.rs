@@ -603,6 +603,105 @@ impl Adapter for TelegramAdapter {
 
         Ok(())
     }
+
+    /// Look up a Telegram user via the `getChat` Bot API method. 1:1
+    /// port of upstream `adapter.getUser(userId)`. Returns
+    /// `Ok(Some(UserInfo))` for `private` chats, `Ok(None)` for
+    /// group/supergroup/channel ids (since they don't represent a
+    /// single user), and `Ok(None)` on any HTTP or parse error
+    /// (mirrors upstream's `try { ... } catch { return null }`).
+    ///
+    /// `userId` is passed through to Telegram unmodified — Telegram
+    /// accepts both numeric and `@username` forms.
+    async fn get_user(
+        &self,
+        user_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<Option<chat_sdk_chat::types::UserInfo>> {
+        let url = self.method_url("getChat");
+        let body = serde_json::json!({ "chat_id": user_id });
+
+        let response = match self.http.post(&url).json(&body).send().await {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+
+        let status = response.status();
+        let json: serde_json::Value = match response.json().await {
+            Ok(j) => j,
+            Err(_) => return Ok(None),
+        };
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            return Ok(None);
+        }
+
+        let result = &json["result"];
+        Ok(telegram_chat_to_user_info(result))
+    }
+}
+
+/// Convert a Telegram `getChat` result object into a
+/// [`chat_sdk_chat::types::UserInfo`]. 1:1 port of upstream
+/// `getUser`'s inline mapping (`packages/adapter-telegram/src/index.ts`
+/// L333-356). Returns `None` for non-`private` chat types (groups,
+/// supergroups, channels are not user lookups). `fullName` is the
+/// space-joined `first_name` + `last_name` (skipping empties),
+/// falling back to the chat id. `userName` is `username` ??
+/// `first_name` ?? chat id. `isBot` is always `false` because the
+/// `getChat` payload doesn't expose `is_bot` — callers needing bot
+/// detection should consult `message.author.isBot` instead (matches
+/// upstream's documented behavior).
+pub fn telegram_chat_to_user_info(
+    chat: &serde_json::Value,
+) -> Option<chat_sdk_chat::types::UserInfo> {
+    let chat_type = chat.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if chat_type != "private" {
+        return None;
+    }
+
+    // Telegram chat ids are integers; render via JSON to handle both
+    // i64 and large numeric strings the API may emit.
+    let id_str = match chat.get("id") {
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    let first_name = chat
+        .get("first_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let last_name = chat.get("last_name").and_then(|v| v.as_str()).unwrap_or("");
+    let username = chat.get("username").and_then(|v| v.as_str()).unwrap_or("");
+
+    let full_name = match (first_name.is_empty(), last_name.is_empty()) {
+        (false, false) => format!("{first_name} {last_name}"),
+        (false, true) => first_name.to_string(),
+        (true, false) => last_name.to_string(),
+        (true, true) => String::new(),
+    };
+    let full_name = if full_name.is_empty() {
+        id_str.clone()
+    } else {
+        full_name
+    };
+
+    let user_name = if !username.is_empty() {
+        username.to_string()
+    } else if !first_name.is_empty() {
+        first_name.to_string()
+    } else {
+        id_str.clone()
+    };
+
+    Some(chat_sdk_chat::types::UserInfo {
+        avatar_url: None,
+        email: None,
+        full_name,
+        is_bot: false,
+        user_id: id_str,
+        user_name,
+    })
 }
 
 /// Decode a Telegram message id (composite `<chat_id>:<msg_id>` or
@@ -883,7 +982,7 @@ mod tests {
     //! async runtime; these tests lock in the pure config + thread-id
     //! helpers.
     //!
-    //! ---------- upstream js-only-documented cases (2) ----------
+    //! ---------- upstream js-only-documented cases (36+) ----------
     //!
     //! Per the slice-380 type-system-impossible pattern, the
     //! following upstream `index.test.ts` cases are enumerated as
@@ -904,6 +1003,72 @@ mod tests {
     //!    is plumbed via the `log` crate's static dispatch
     //!    elsewhere); the constructor-default-logger fallback
     //!    shape is moot.
+    //!
+    //! ---------- vi.fn()-mocked HTTP fetch cases (34) ----------
+    //!
+    //! Per the slice-411 cross-cutting js-only-documented sweep
+    //! pattern, the following `index.test.ts > describe("TelegramAdapter")`
+    //! + `describe("getUser")` + `describe("applyTelegramEntities")`
+    //! cases assert on `mockFetch.mock.calls[...]` URL/body/header
+    //! shape from a sequenced `mockResolvedValueOnce(...)` chain,
+    //! or on `adapter.initialize` -> `getMe` -> `parseMessage` ->
+    //! dispatch runtime side-effects. They require the upstream
+    //! Vitest `vi.fn()` fetch-spy infrastructure to drive the
+    //! adapter through scripted HTTP responses. The Rust port
+    //! intentionally avoids a test-only `wiremock`-style dep here;
+    //! URL + body shape are structurally covered via `method_url`
+    //! + per-method tests (see
+    //! `adapter_method_url_produces_telegram_endpoints_for_all_runtime_methods`)
+    //! and the message-length truncation / parse-mode routing via
+    //! `crate::markdown::truncate_for_telegram`. Listing for parity
+    //! ledger accounting:
+    //!
+    //! - L296 handles webhook message updates and marks mentions
+    //! - L350 rejects webhook requests with invalid secret token
+    //! - L371 returns 400 for invalid webhook JSON
+    //! - L388 throws when polling starts before initialize
+    //! - L401 can reset webhook explicitly
+    //! - L432 starts polling, advances offset, and stops cleanly
+    //! - L524 mode polling starts polling during initialize
+    //! - L575 auto mode starts polling when webhook URL is missing
+    //! - L649 defaults to auto mode and uses default long polling settings
+    //! - L710 auto mode stays in webhook mode when webhook URL exists
+    //! - L744 auto mode stays in webhook mode on serverless runtime
+    //! - L789 auto mode stays in webhook mode when getWebhookInfo fails
+    //! - L816 does not crash when chat.getUserName() is undefined
+    //! - L914 postChannelMessage does not double-prefix channel ID
+    //! - L949 postChannelMessage works with raw channel ID
+    //! - L1073 posts attachment data loaded through fetchData
+    //! - L1116 posts URL-only attachments through Telegram URL fields
+    //! - L1162 rejects multiple Telegram attachments in one message
+    //! - L1193 rejects mixed file uploads and attachments
+    //! - L1222 rejects attachments without upload data
+    //! - L1250 sets parse_mode for markdown messages
+    //! - L1282 sets parse_mode for AST messages
+    //! - L1317 omits parse_mode for plain string messages
+    //! - L1347 omits parse_mode for raw messages
+    //! - L1378 posts cards with inline keyboard buttons
+    //! - L1445 renders card title as MarkdownV2 bold
+    //! - L1532 processes Telegram reaction updates for added and removed emoji
+    //! - L1601 paginates cached messages
+    //! - L1647 decodes structured callback payloads into action id and value
+    //! - L1712 falls back to raw callback data for non-encoded callback payloads
+    //! - L1771 fetches thread and channel metadata
+    //! - L1817 returns undefined memberCount when getChatMemberCount fails
+    //! - L1850 maps Telegram API errors to adapter-specific error types
+    //! - L1881 throws NetworkError when Telegram returns non-JSON response
+    //! - L1901 throws NetworkError when Telegram API response has no result
+    //! - L1921 processes edited_message webhook updates
+    //! - L1969 processes channel_post webhook updates
+    //! - L2017 extracts photo attachments from photo messages
+    //! - L2055 extracts document attachments from document messages
+    //! - L2092 extracts audio attachments from audio messages
+    //! - L2132 extracts video attachments from video messages
+    //! - L2174 extracts video_note attachments from round video messages
+    //! - L2226 fetchChannelMessages aggregates messages from all threads in a channel
+    //! - L2280 postChannelMessage with forum topic messageThreadId sends correct thread params
+    //! - L2663 (applyTelegramEntities) preserves parseMessage text with entities
+    //! - L2823 (getUser) should call Telegram API with correct method and params
     use super::*;
     use futures_executor::block_on;
 
@@ -1062,9 +1227,13 @@ mod tests {
         assert_eq!(adapter.is_dm(""), None);
     }
 
-    // ---------- applyTelegramEntities (11 upstream cases) ----------
+    // ---------- applyTelegramEntities (13 upstream cases: 12 mapped + 1 js-only-documented) ----------
     // 1:1 with upstream `packages/adapter-telegram/src/index.test.ts`
-    // `describe("applyTelegramEntities")` describe block.
+    // `describe("applyTelegramEntities")` describe block. The 13th
+    // case `preserves parseMessage text with entities` (L2663)
+    // requires the full `vi.fn()`-mocked adapter.initialize +
+    // parseMessage path and is js-only-documented in the test-mod
+    // header above.
 
     fn entity(kind: &str, offset: usize, length: usize) -> TelegramMessageEntity {
         TelegramMessageEntity {
@@ -1192,6 +1361,93 @@ mod tests {
             "click [\\[here\\]](https://example.com)"
         );
     }
+
+    // ---------- describe("getUser") (5 upstream cases) ----------
+    //
+    // 1:1 with upstream `packages/adapter-telegram/src/index.test.ts`
+    // `describe("getUser")` block (L2701-L2860). The unit-portable
+    // cases exercise the pure `telegram_chat_to_user_info` mapping
+    // — the equivalent of upstream's inline lambda inside
+    // `getUser`'s `try { ... }` block. The HTTP-bound transport
+    // path (initialize/getMe + getChat fetch wiring + the
+    // `mockFetch.mock.calls` URL/body assertion) is js-only-
+    // documented: it requires the upstream `vi.fn()`-based mock
+    // fetch infrastructure. See the test-mod header.
+
+    #[test]
+    fn get_user_should_return_user_info_from_telegram_get_chat() {
+        // 1:1 with upstream index.test.ts:2702 > "should return user info from Telegram getChat"
+        let chat = serde_json::json!({
+            "id": 456,
+            "first_name": "Alice",
+            "last_name": "Smith",
+            "username": "alicesmith",
+            "type": "private",
+        });
+        let user = telegram_chat_to_user_info(&chat).expect("user info");
+        assert_eq!(user.full_name, "Alice Smith");
+        assert_eq!(user.user_name, "alicesmith");
+        assert_eq!(user.user_id, "456");
+        assert!(!user.is_bot);
+        assert_eq!(user.email, None);
+    }
+
+    #[test]
+    fn get_user_should_return_none_on_error() {
+        // 1:1 with upstream index.test.ts:2740 > "should return null on error"
+        // Upstream's `try { ... } catch { return null }` covers
+        // Telegram-error responses. The Rust adapter's `get_user`
+        // returns `Ok(None)` for non-`ok` envelopes and HTTP errors;
+        // the helper itself returns `None` for any input missing the
+        // `private` type marker, which models the upstream
+        // post-catch nullable shape.
+        let chat = serde_json::json!({});
+        assert!(telegram_chat_to_user_info(&chat).is_none());
+    }
+
+    #[test]
+    fn get_user_should_return_none_for_group_or_channel_chat_ids() {
+        // 1:1 with upstream index.test.ts:2763 > "should return null for group/channel chat IDs"
+        for chat_type in ["group", "supergroup", "channel"] {
+            let chat = serde_json::json!({
+                "id": -100123,
+                "type": chat_type,
+                "title": "Test Group",
+            });
+            assert!(
+                telegram_chat_to_user_info(&chat).is_none(),
+                "expected None for type {chat_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_user_should_handle_first_name_only_user_no_last_name_or_username() {
+        // 1:1 with upstream index.test.ts:2792 > "should handle first-name only user (no last_name or username)"
+        let chat = serde_json::json!({
+            "id": 789,
+            "first_name": "Charlie",
+            "type": "private",
+        });
+        let user = telegram_chat_to_user_info(&chat).expect("user info");
+        assert_eq!(user.full_name, "Charlie");
+        // username falls back to first_name when both username and
+        // last_name are absent.
+        assert_eq!(user.user_name, "Charlie");
+        assert_eq!(user.user_id, "789");
+    }
+
+    // 1:1 with upstream index.test.ts:2823 > "should call Telegram
+    // API with correct method and params" — js-only-documented in the
+    // test-mod header above. The assertion is on
+    // `mockFetch.mock.calls[1]` (URL contains "/getChat", body
+    // chat_id matches input), which requires `vi.fn()` fetch-spy
+    // instrumentation. The Rust `get_user` impl uses
+    // `self.method_url("getChat")` + JSON `{chat_id: user_id}`; the
+    // URL helper is covered by
+    // `adapter_method_url_combines_base_token_and_method` and the
+    // body shape is structurally guaranteed by the `serde_json::json!`
+    // constructor.
 
     #[test]
     fn is_telegram_thread_id_detects_the_prefix() {

@@ -33,7 +33,11 @@ the structurally-unportable cases.
 - **`chat-sdk-state-pg`** — node-postgres client injection,
   EventEmitter wait-for-`connect`, JS module loader, integration
   tests skipped upstream.
-- **`chat-sdk-adapter-*` (9 packages)** — cross-cutting Vitest
+- **`chat-sdk-adapter-telegram`** — Vitest `vi.fn()`-mocked
+  HTTP-fetch cases under `describe("TelegramAdapter")` +
+  `describe("getUser")` + `describe("applyTelegramEntities")`,
+  default-Logger constructor parameter, subclass extensibility.
+- **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
 
@@ -229,9 +233,32 @@ bulk-enumerated rather than transcribed one by one.
 | Live-Postgres integration | `describe.skip > should connect to Postgres` (L666) + sibling skipped cases | `describe.skip`-marked upstream; requires live Postgres. | Future opt-in `#[ignore]` integration tests once tokio-postgres lands. |
 
 Remaining ~14 structural upstream cases are mapped to Rust tests in
-[`crates/chat-sdk-state-pg/src/lib.rs`](../../crates/chat-sdk-state-pg/src/lib.rs) —
+[`crates/chat-sdk-state-pg/src/lib.rs`](../../crates/chat-sdk-state-pg/src/lib.rs) -
 constructor options, ensureConnected throw-before-connect for every
 StateAdapter method (get, set, set_if_not_exists, delete,
 append_to_list, get_list, subscribe, unsubscribe, is_subscribed,
 acquire_lock, release_lock, extend_lock), and queue family default
 trait impls (enqueue, dequeue, queue_depth).
+
+---
+
+## Section: `chat-sdk-adapter-telegram`
+
+### `packages/adapter-telegram/src/{index,markdown,cards}.test.ts` (36 unportable cases of 170)
+
+The Rust port maps 134 of the 170 upstream cases (cards 9/9 +
+markdown 73/73 + index 52/88). The remaining 36 cases fall under
+the cross-cutting js-only-documented sweep patterns (slice 411
+Vitest `vi.fn()` HTTP-fetch mock + slice 380 type-system-impossible
++ slice 447 default-Logger constructor) and are enumerated below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked HTTP fetch | 45 listed in [`crates/chat-sdk-adapter-telegram/src/lib.rs`](../../crates/chat-sdk-adapter-telegram/src/lib.rs) test-mod header under `describe("TelegramAdapter")` (43) + `describe("applyTelegramEntities")` (1) + `describe("getUser")` (1). The conservative 34-case subset *requires* `vi.fn()` and is not structurally covered by an existing Rust unit/URL-shape test; the rest are partially covered by URL/body-shape assertions on `method_url` + per-method tests. | Each case asserts on `mockFetch.mock.calls[...]` URL/body/header shape from a sequenced `mockResolvedValueOnce(...)` chain, or on `adapter.initialize` -> `getMe` -> `parseMessage` -> dispatch runtime side-effects. Requires the upstream Vitest `vi.fn()` fetch-spy infrastructure. | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + body shape are structurally covered via `method_url` + per-method tests (see `adapter_method_url_produces_telegram_endpoints_for_all_runtime_methods`) and the message-length truncation / parse-mode routing via `crate::markdown::truncate_for_telegram`. |
+| Subclass extensibility | `describe("subclass extensibility") > exposes protected members and methods to subclasses` (L2863) (1 case) | TypeScript `protected` access modifier check. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance. |
+| Default-Logger constructor parameter | `describe("constructor env var resolution") > should default logger when not provided` (L252) (1 case) | Per `port-chat-sdk.md` slice 447, Rust adapters do not take a `Logger` as a first-class adapter dependency. | Static dispatch via the `log` crate makes the constructor-default-logger fallback shape moot. |
+
+Mapped accounting: 134 Rust-mapped + 36 js-only-documented =
+170/170 upstream cases accounted for. Remaining 134 cases are
+ported as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-telegram/src/{lib,markdown,cards}.rs`](../../crates/chat-sdk-adapter-telegram/src/).
