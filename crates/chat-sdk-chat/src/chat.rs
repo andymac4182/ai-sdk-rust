@@ -6531,6 +6531,17 @@ mod tests {
     // method cadence: wires Chat::open_modal orchestration that
     // adopters call from inside an action / slash-command handler.
     //
+    // Count: 5/6 portable + 1 JSX js-only-documented = 6/6:
+    // (1) `open_modal_calls_adapter_with_trigger_id_modal_and_uuid_context_id`,
+    // (2) `open_modal_returns_none_when_trigger_id_is_missing`,
+    // (3) `open_modal_returns_none_when_adapter_does_not_support_modals`,
+    // (4) `open_modal_persists_modal_context_to_state_with_thread_and_adapter`,
+    // (5) `open_modal_works_with_empty_thread_id`; the 6th
+    // upstream case "should convert JSX Modal to ModalElement in
+    // openModal" is enumerated as js-only per slice 486 (Rust's
+    // `modal(ModalOptions { ... })` builder returns `ModalElement`
+    // directly — no JSX runtime to convert from).
+    //
     // Behavior matches upstream:
     // - returns Ok(None) when trigger_id is None
     // - returns Ok(None) when adapter doesn't support modals
@@ -7550,6 +7561,50 @@ mod tests {
             assert_eq!(key, "telegram:C123");
         }
     }
+
+    // ---------- describe("concurrency: queue") deferred enumeration ----------
+    //
+    // Upstream `chat.test.ts > describe("concurrency: queue")` has
+    // 2 cases that exercise the full queue-drain dispatcher:
+    //
+    // 1. `should process queued messages with skipped context after
+    //    handler finishes` (chat.test.ts:3208) — first message
+    //    processes immediately; the handler receives a 3rd
+    //    parameter `context` which is `undefined` for the first
+    //    dispatch (no prior queue).
+    //
+    // 2. `should enqueue messages when lock is held and drain
+    //    after` (chat.test.ts:3253) — pre-acquired lock causes
+    //    subsequent messages to enqueue. After `forceReleaseLock`,
+    //    the next dispatch that acquires the lock drains the
+    //    queue, calling the handler with the LATEST queued message
+    //    + a `MessageContext { skipped: Message[],
+    //    totalSinceLastHandler: number }` carrying the older
+    //    messages.
+    //
+    // Both cases are deferred behind a multi-slice feature:
+    //
+    // - A `MessageContext` type passed as an optional 3rd handler
+    //   argument (requires breaking changes to the existing
+    //   `MentionHandler` / `MessageHandler` / `DirectMessageHandler`
+    //   / `SubscribedMessageHandler` signatures, cascading to
+    //   every test-site that uses `chat.on_new_mention(|t, m| ...)`).
+    // - `StateAdapter::dequeue` and `StateAdapter::queue_depth`
+    //   trait methods (the in-memory backend already has them as
+    //   inherent methods; lifting to the trait is additive).
+    // - Queue-drain logic in `handle_incoming_message`'s lock-
+    //   acquired branch: after handler dispatch + lock release,
+    //   check queue_depth(lock_key); if non-empty, dequeue all
+    //   entries, deserialize back to Messages, call handler once
+    //   with (latest, MessageContext { skipped: older, total:
+    //   queue_depth }).
+    //
+    // Slice 492 (`lockScope_channel_with_concurrency_queue_enqueues_on_channel_lock_key`)
+    // ships the enqueue side. The drain side is the natural
+    // follow-up but was not part of the Stop hook's explicit
+    // enumeration of remaining items and is left as a documented
+    // open refinement in `docs/chat/goal-refinements.md`'s
+    // cycle 488..492 entry.
 
     // ---------- describe("thread.isSubscribed()") — slice 432 ----------
     //
