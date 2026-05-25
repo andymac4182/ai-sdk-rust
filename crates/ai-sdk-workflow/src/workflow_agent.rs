@@ -3196,6 +3196,38 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_return_messages_and_steps_in_result() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                finish(FinishReason::Stop),
+            ],
+            0,
+        )]);
+        let expected_messages = vec![
+            user_text_message("test"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(
+                    ai_sdk_provider::LanguageModelTextPart::new("Hello"),
+                ),
+            ])),
+        ];
+
+        let result = poll_ready(agent.stream(WorkflowAgentStreamOptions::new(
+            vec![user_text_message("test")],
+            executor,
+        )))
+        .expect("agent stream succeeds");
+
+        assert_eq!(result.messages, expected_messages);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].text, "Hello");
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context() {
         let received_context = Arc::new(Mutex::new(None));
         let received_context_for_tool = Arc::clone(&received_context);

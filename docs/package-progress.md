@@ -4,7 +4,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 - Displayed package rows: 55
 - Average estimated completion: 51.6%
-- Portable package average: 40.8%
+- Portable package average: 40.9%
 - Closed package rows: 18 / 55
 - Strict portable verified rows: 8 / 45
 - In-progress rows: 22
@@ -58,7 +58,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/vercel` | 40% | In progress | provider package | Construction wrapper exists; live validation and full package test parity remain. |
 | `@ai-sdk/voyage` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/mcp` | 90% | In progress | protocol/client package | Protocol, transports, OAuth, examples, and Gateway tool bridge are broad; protected live auth validation and hosted... |
-| `@ai-sdk/workflow` | 78% | In progress | agent/workflow package | WorkflowAgent and iterator callback/continuation coverage is substantial, including named providerMetadata/OpenAI... |
+| `@ai-sdk/workflow` | 79% | In progress | agent/workflow package | WorkflowAgent and iterator callback/continuation coverage is substantial, including named providerMetadata/OpenAI... |
 
 ## Not Started
 
