@@ -15174,6 +15174,45 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_forwards_abort_signal_to_tool_execution() {
+        let model = ToolLoopLanguageModel::new();
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+
+        let mut options = GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+            .with_tool(Tool::new("weather", approval_tool_schema()).with_execute(
+                move |input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        *received_signal.lock().expect("signal lock") = options.abort_signal;
+                        Ok(json!({
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id,
+                        }))
+                    }
+                },
+            ))
+            .with_max_steps(2);
+        options.call_options = options.call_options.with_abort_signal(abort_signal.clone());
+
+        let _result = poll_ready(generate_text(options));
+
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock")
+            .clone()
+            .expect("tool received abort signal");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+        assert!(!captured_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(captured_signal.is_aborted());
+        assert_eq!(captured_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
     fn generate_text_merges_timeout_with_abort_signal() {
         let model = MockLanguageModel::new()
             .with_generate_result(warning_logger_text_result("Hello", Vec::new()));
