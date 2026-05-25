@@ -82,6 +82,21 @@ the structurally-unportable cases.
   `Octokit` instance identity / `AsyncLocalStorage`-resolved
   per-installation getter, `defaultOctokit` property-injection
   pattern, no-auth runtime throw (type-system-enforced in Rust).
+- **`chat-sdk-adapter-linear`** — Vitest `vi.fn()`-mocked
+  `LinearClient` typed-client cases under `describe("linearClient
+  getter")` + `describe("constructor")` no-auth/no-botUserId throws
+  + `describe("handleWebhook - signature verification /
+  timestamp validation / invalid JSON / comment created /
+  agent session events / reaction events / unknown event types")`
+  + `describe("buildMessage via webhook")` +
+  `describe("postMessage / editMessage / deleteMessage /
+  addReaction / fetchMessages / fetchThread / initialize /
+  ensureValidToken / refreshClientCredentialsToken / runtime
+  operations / client credentials auth / multi-tenant installations
+  / getUser / fetchSubject")`, AES-256-GCM token encryption (no
+  AEAD dep in scope), default-Logger constructor parameter,
+  subclass extensibility, typed-client `LinearClient` instance
+  identity / `AsyncLocalStorage`-resolved per-installation getter.
 - **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
@@ -429,3 +444,38 @@ Mapped accounting: 85 Rust-mapped + 74 js-only-documented =
 159/159 upstream cases accounted for. Remaining 85 cases are
 ported as colocated `#[cfg(test)] mod tests` in
 [`crates/chat-sdk-adapter-github/src/{lib,parse,cards,markdown,webhook}.rs`](../../crates/chat-sdk-adapter-github/src/).
+
+---
+
+## Section: `chat-sdk-adapter-linear`
+
+### `packages/adapter-linear/src/{index,markdown,cards,utils}.test.ts` (111 unportable cases of 192)
+
+The Rust port maps 81 of the 192 upstream cases (cards 12/12 +
+markdown 13/13 + utils 3/3 + thread_id 18/18 + index 35/146 — the
+3 channelIdFromThreadId + 1 renderFormatted + 3 constructor + 18
+createLinearAdapter + 1 removeReaction + 1 startTyping + 7
+parseMessage + 1 token-encryption key-length validator = 35
+portable index.test.ts cases that don't require the `LinearClient`
+typed-client mock). The remaining 111 cases fall under the
+cross-cutting js-only-documented sweep patterns (slice 411 Vitest
+`vi.fn()` HTTP / typed-client mock + slice 380
+type-system-impossible + slice 439 typed-client `LinearClient`
+getter + slice 447 default-Logger constructor) and are enumerated
+below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked `LinearClient` typed-client / `vi.fn()`-Chat dispatch | 99 listed in [`crates/chat-sdk-adapter-linear/src/lib.rs`](../../crates/chat-sdk-adapter-linear/src/lib.rs) test-mod header under `describe("postMessage")` (5, L1671-L1827) + `describe("editMessage")` (2, L1829-L1888) + `describe("deleteMessage")` (1, L1890-L1910) + `describe("addReaction")` (4, L1912-L2013) + `describe("fetchMessages")` (10, L2049-L2470) + `describe("fetchThread")` (2, L2472-L2524) + `describe("initialize")` (3+2=5, L2526-L2629 / L3305-L3371) + `describe("ensureValidToken")` (3, L2631-L2699) + `describe("refreshClientCredentialsToken")` (4, L2701-L2806) + `describe("runtime operations")` (13, L2808-L3303) + `describe("client credentials auth")` (3, L3373-L3449) + `describe("multi-tenant installations")` (5, L3451-L3611) + `describe("getUser")` (5, L3917-L3998) + `describe("fetchSubject")` (4, L4000-L4150) + `describe("handleWebhook - signature verification / timestamp validation / invalid JSON / comment created / agent session events / reaction events / unknown event types")` (4+3+1+6+10+2+1 = 27, L1005-L1551) + `describe("buildMessage via webhook")` (6, L1553-L1669). | Each case asserts on `mockClient.createComment.toHaveBeenCalledWith(...)` / `mockClient.updateComment` / `mockClient.deleteComment` / `mockClient.createReaction` / `mockClient.agentActivityCreate` / `(adapter as unknown as {linearClient}).linearClient = mockClient` property-injection state, or drives a synthetic `Request` -> `Response` through `adapter.handleWebhook` -> `mockChat.processMessage` / `mockChat.processReaction` runtime dispatch, with HMAC-SHA256 webhook signature verification via the `signPayload(body, secret)` helper. Requires the upstream Vitest `vi.fn()` fetch-spy + Request/Response infrastructure + `LinearClient` typed-class typed-method-spy pattern. | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + mutation + body shape are structurally covered via the `COMMENT_CREATE_MUTATION` / `COMMENT_UPDATE_MUTATION` / `COMMENT_DELETE_MUTATION` / `REACTION_CREATE_MUTATION` GraphQL constants + the `linear_graphql_call` envelope helper + the 4 thread-id-rejection tests on the Adapter trait methods. Structural payload parsing is covered by [`crate::parse::parse_message`] (7 upstream `parseMessage` cases + 3 additive). |
+| `linearClient` typed-client getter | 5 cases (index.test.ts L890-L976 — `describe("linearClient getter")`) | Asserts `linearClient` getter returns a `LinearClient`-typed class instance with referential equality across calls; the deprecated `client` alias; the multi-tenant property-throw outside a webhook context; the per-installation `AsyncLocalStorage`-resolved client inside a webhook. | The Rust port holds HTTP as an opaque `reqwest::Client` injected via `with_http_client(...)`; there is no `LinearClient` typed-class equivalent and no `AsyncLocalStorage`-per-call swap. The multi-tenant per-installation context is surfaced via typed errors at the call sites that need a per-installation client (not via a property getter). All 5 cases enumerated in the [`crates/chat-sdk-adapter-linear/src/lib.rs`](../../crates/chat-sdk-adapter-linear/src/lib.rs) test-mod header per slice 439. |
+| AES-256-GCM token encryption | 3 cases (index.test.ts L3618-L3711 — `describe("multi-tenant installations > token encryption")`: `encrypts accessToken and refreshToken at rest in the state store` / `stores plaintext when no encryptionKey is configured` / `getInstallation tolerates legacy plaintext records`) | AES-256-GCM round-trip through `setInstallation` / `getInstallation` with an `{ iv, data, tag }` envelope. | This crate's parity policy is no new dependencies; the workspace doesn't already pull in an AEAD cipher. The 4th `token encryption` case (`rejects an encryption key of the wrong length`) IS ported as a pure hex-length validator in [`crates/chat-sdk-adapter-linear/src/token.rs::tests`](../../crates/chat-sdk-adapter-linear/src/token.rs). |
+| Constructor "throw when no auth method is provided" | 1 case (index.test.ts L861 — `describe("constructor") > should throw when no auth method provided`) | `new LinearAdapter({})` with no auth fields asserts `throw new ValidationError`. | Rust's `LinearAdapterOptions` requires `LinearAuth` at compile time; passing "no auth" is a type error, so the runtime throw is unrepresentable. The Rust port's typed-builder is the equivalent compile-time guarantee. Enumerated in the [`crates/chat-sdk-adapter-linear/src/lib.rs`](../../crates/chat-sdk-adapter-linear/src/lib.rs) test-mod header. |
+| Constructor "botUserId pre-initialization throw" | 1 case (index.test.ts L872 — `describe("constructor") > should throw when botUserId is accessed before initialization`) | Asserts `adapter.botUserId` getter throws when read before `adapter.initialize(chat)` resolves the viewer query. | The Rust port does not yet model a `bot_user_id` getter surface on `LinearAdapter`; the viewer-fetch path (initialize) is deferred. Enumerated in the [`crates/chat-sdk-adapter-linear/src/lib.rs`](../../crates/chat-sdk-adapter-linear/src/lib.rs) test-mod header. |
+| Subclass extensibility | 1 case (index.test.ts L4152-L4164 — `describe("subclass extensibility") > exposes protected members and methods to subclasses`) | TypeScript `protected` access-modifier compile-time check via `class TestSubclass extends LinearAdapter { checkAccess() { return [this.logger, this.formatConverter, ...] } }`. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance — the subclass-protected-leak test is unrepresentable by construction. Enumerated in the [`crates/chat-sdk-adapter-linear/src/lib.rs`](../../crates/chat-sdk-adapter-linear/src/lib.rs) test-mod header. |
+| Default-Logger constructor parameter | 1 case (index.test.ts L3870 — `describe("createLinearAdapter") > should accept custom logger`) | Per `port-chat-sdk.md` slice 447, Rust adapters do not take a `Logger` as a first-class adapter dependency. | Static dispatch via the `log` crate makes the constructor-default-logger fallback shape moot. |
+
+Note: per the per-describe accounting in `upstream-parity.md`,
+the Rust-mapped 81 + js-only-documented 111 = 192/192 upstream
+cases accounted for. The 81 mapped tests live as colocated
+`#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-linear/src/{lib,cards,markdown,parse,thread_id,token,linear_functions}.rs`](../../crates/chat-sdk-adapter-linear/src/).

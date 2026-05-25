@@ -10,7 +10,9 @@
 pub mod cards;
 pub mod linear_functions;
 pub mod markdown;
+pub mod parse;
 pub mod thread_id;
+pub mod token;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
@@ -735,51 +737,116 @@ pub fn is_linear_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (6) ----------
+    //! ---------- upstream js-only-documented cases (111) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the
-    //! following upstream `index.test.ts` cases are enumerated as
-    //! js-only-documented here because they exercise behavior that
-    //! is unrepresentable in the Rust port by construction:
+    //! Per the cross-cutting js-only sweep patterns (slice 411
+    //! Vitest `vi.fn()` HTTP/typed-client mock + slice 380
+    //! type-system-impossible + slice 439 typed-client `LinearClient`
+    //! getter + slice 447 default-Logger constructor), the following
+    //! upstream `index.test.ts` cases are enumerated here as
+    //! js-only-documented. They exercise behavior that is either
+    //! unrepresentable in the Rust port by construction, or that
+    //! requires the upstream Vitest `vi.fn()` + `LinearClient`
+    //! typed-class-mock infrastructure that the Rust port intentionally
+    //! does not ship (the port asserts URL / mutation / body shapes
+    //! via the `COMMENT_CREATE_MUTATION` / `COMMENT_UPDATE_MUTATION`
+    //! / `COMMENT_DELETE_MUTATION` / `REACTION_CREATE_MUTATION`
+    //! constants + the `linear_graphql_call` envelope helper).
     //!
-    //! 1. `describe("subclass extensibility") > should expose
-    //!    protected members and methods to subclasses` — TypeScript
-    //!    `protected` access modifier check. Rust uses
-    //!    `pub(crate)` visibility + trait composition rather than
-    //!    class inheritance.
+    //! **Categories** (99 vi.fn + 12 type-system-impossible/logger
+    //! = 111 cases):
     //!
-    //! 2. `describe("linearClient getter") > should return the
-    //!    underlying LinearClient in apiKey mode` — asserts the
-    //!    getter returns a `LinearClient` typed-class instance
-    //!    with an `.issue(...)` method. Rust has no `LinearClient`
-    //!    equivalent — HTTP/GraphQL is held as an opaque
-    //!    `reqwest::Client`; the "type identity" assertion is moot.
-    //!
-    //! 3. `describe("linearClient getter") > should return the
-    //!    same instance across calls in single-tenant mode` —
-    //!    LinearClient-instance referential equality. The Rust
-    //!    port's `Client` is shared by value (Clone-shared
-    //!    underlying pool); per-call referential equality is moot.
-    //!
-    //! 4. `describe("linearClient getter") > should expose the
-    //!    same instance via the deprecated "client" alias` —
-    //!    alias-name backwards-compat. The Rust port never shipped
-    //!    the deprecated alias, so there is nothing to assert.
-    //!
-    //! 5. `describe("linearClient getter") > should throw in
-    //!    multi-tenant OAuth mode when called outside a webhook`
-    //!    — runtime "no token context" throw via AsyncLocalStorage.
-    //!    The Rust port surfaces the equivalent via typed errors
-    //!    at the per-installation call sites (e.g. webhook
-    //!    handler), rather than via a property getter, so the
-    //!    property-throw shape is unrepresentable.
-    //!
-    //! 6. `describe("linearClient getter") > should resolve the
-    //!    per-org LinearClient when accessed inside a webhook
-    //!    context` — AsyncLocalStorage-based request-context
-    //!    resolution. The Rust port plumbs per-request client
-    //!    state through function parameters rather than thread-
-    //!    local context, so the ALS-based getter is moot.
+    //! - `describe("constructor")` > throws when no auth method (1
+    //!   case, L861) and "should throw when botUserId is accessed
+    //!   before initialization" (1 case, L872) — type-system-impossible
+    //!   (auth is a required field; botUserId surface not modeled).
+    //! - `describe("linearClient getter")` (5 cases, L890-L976) —
+    //!   typed-client identity / referential equality / deprecated
+    //!   alias / multi-tenant property-throw / AsyncLocalStorage
+    //!   per-org resolution.
+    //! - `describe("handleWebhook - signature verification")` (4
+    //!   cases, L1005-L1046), `describe("handleWebhook - timestamp
+    //!   validation")` (3 cases, L1048-L1088), `describe("handleWebhook
+    //!   - invalid JSON")` (1 case, L1090), `describe("handleWebhook
+    //!   - comment created")` (6 cases, L1106-L1241),
+    //!   `describe("handleWebhook - agent session events")` (10
+    //!   cases, L1243-L1475), `describe("handleWebhook - reaction
+    //!   events")` (2 cases, L1477-L1528), `describe("handleWebhook
+    //!   - unknown event types")` (1 case, L1530-L1551),
+    //!   `describe("buildMessage via webhook")` (6 cases, L1553-L1669)
+    //!   — synthetic `Request` -> `adapter.handleWebhook(request)`
+    //!   round-trip + `mockChat.processMessage` / `mockChat.processReaction`
+    //!   dispatch + HMAC-SHA256 signature `signPayload(body, secret)`
+    //!   helper. The Rust port covers the signature-verification primitive
+    //!   structurally via the HMAC-SHA256 helpers in the workspace's
+    //!   webhook-signing modules; structural payload parsing is
+    //!   covered by [`crate::parse::parse_message`].
+    //! - `describe("postMessage")` (5 cases, L1671-L1827),
+    //!   `describe("editMessage")` (2 cases, L1829-L1888),
+    //!   `describe("deleteMessage")` (1 case, L1890-L1910),
+    //!   `describe("addReaction")` (4 cases, L1912-L2013) — all
+    //!   assert on `mockClient.createComment.toHaveBeenCalledWith(...)`
+    //!   / `mockClient.updateComment` / `mockClient.deleteComment`
+    //!   / `mockClient.createReaction` typed-method-spy state via
+    //!   `(adapter as unknown as {linearClient}).linearClient = {...}`
+    //!   property-injection. The Rust port asserts URL/mutation
+    //!   shape via the `COMMENT_*_MUTATION` constants + body shape
+    //!   via the `Adapter::post_message` / `edit_message` /
+    //!   `delete_message` / `add_reaction` trait methods themselves
+    //!   (4 thread-id-rejection tests cover the validation path).
+    //! - `describe("fetchMessages")` (10 cases, L2049-L2470),
+    //!   `describe("fetchThread")` (2 cases, L2472-L2524) —
+    //!   `(adapter as unknown as {linearClient}).linearClient = {
+    //!   issue: vi.fn() }` typed-class mock + per-call
+    //!   `mockResolvedValue({...})` chain. Linear typed-client
+    //!   queries / connections are JS-only per slice 439.
+    //! - `describe("initialize")` (3 + 2 = 5 cases at L2526-L2629
+    //!   and L3305-L3371) — drives `viewer` getter + GraphQL fetch
+    //!   via `vi.spyOn(adapter.linearClient, "viewer")` and asserts
+    //!   side-effects on `adapter.botUserId` / logger.warn. JS-only.
+    //! - `describe("ensureValidToken")` (3 cases, L2631-L2699),
+    //!   `describe("refreshClientCredentialsToken")` (4 cases,
+    //!   L2701-L2806), `describe("client credentials auth")` (3
+    //!   cases, L3373-L3449) — `vi.stubGlobal("fetch", vi.fn()
+    //!   .mockResolvedValue(...))` + `accessTokenExpiry` state-getter
+    //!   spy. JS-only (token-refresh runtime is Linear-SDK-specific).
+    //! - `describe("runtime operations")` (13 cases, L2808-L3303)
+    //!   — `setDefaultClient(adapter, mockClient)` property-injection
+    //!   + assertions on `mockClient.createComment.toHaveBeenCalledWith`
+    //!   / `mockClient.updateComment` / `mockClient.deleteComment`
+    //!   / `mockClient.createReaction` / `mockClient.agentActivityCreate`
+    //!   / agent-session ephemeral-thought activities / stream action
+    //!   activities / error activities / session-plan updates /
+    //!   organizationId preservation. All driven by the upstream
+    //!   `LinearClient` typed-class mock — Rust port holds the
+    //!   client as opaque HTTP per slice 439.
+    //! - `describe("multi-tenant installations")` (5 cases,
+    //!   L3451-L3611) — `handleOAuthCallback` synthetic Request +
+    //!   `vi.fn()` state spy + `withInstallation` per-request
+    //!   context. JS-only (request-context plumbing is per slice
+    //!   439 / 305 not yet ported).
+    //! - `describe("multi-tenant installations > token encryption")`
+    //!   3 of 4 cases (L3618-L3711) — AES-256-GCM encryption envelope
+    //!   `{ iv, data, tag }` round-trip through `setInstallation` /
+    //!   `getInstallation`. Requires an AEAD cipher; this crate's
+    //!   parity policy is no new dependencies. The 4th case (key
+    //!   length validator) IS ported in [`crate::token::tests`].
+    //! - `describe("getUser")` (5 cases, L3917-L3998) — driven by
+    //!   `vi.spyOn(adapter, "getClient")` returning a stub with
+    //!   `user(userId)` resolved value. Linear typed-client per
+    //!   slice 439.
+    //! - `describe("fetchSubject")` (4 cases, L4000-L4150) — same
+    //!   typed-client + issue-getter chain.
+    //! - `describe("subclass extensibility")` (1 case, L4152-L4164)
+    //!   — TypeScript `protected` access-modifier compile-time check
+    //!   via `class TestSubclass extends LinearAdapter`. Rust uses
+    //!   `pub(crate)` visibility + trait composition.
+    //! - `describe("createLinearAdapter") > should accept custom
+    //!   logger` (1 case, L3870) — default-Logger constructor
+    //!   parameter per slice 447. Rust adapters do not take a Logger
+    //!   as a first-class adapter dependency; static dispatch via
+    //!   the `log` crate makes the constructor-default-logger fallback
+    //!   shape moot.
     use super::*;
     use futures_executor::block_on;
 

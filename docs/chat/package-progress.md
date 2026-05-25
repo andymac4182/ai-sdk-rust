@@ -3,11 +3,11 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 95.6%
-- Portable package average: 94.7%
-- Closed package rows: 15 / 18
-- Strict portable verified rows: 12 / 15
-- In-progress rows: 3
+- Average estimated completion: 97.8%
+- Portable package average: 97.3%
+- Closed package rows: 16 / 18
+- Strict portable verified rows: 13 / 15
+- In-progress rows: 2
 - Not-started rows: 0
 
 ## 100% Closed
@@ -20,6 +20,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/state-memory` | 100% | Verified | state backend (in-memory) |
 | `@chat-sdk/adapter-teams` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-discord` | 100% | Verified | adapter package |
+| `@chat-sdk/adapter-linear` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-github` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-messenger` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-telegram` | 100% | Verified | adapter package |
@@ -36,7 +37,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | --- | ---: | --- | --- | --- |
 | `@chat-sdk/adapter-slack` | 85% | In progress | adapter package | chat-sdk-adapter-slack 203 tests (slice 355 adds post_ephemeral pure helpers + 5 cases, slice 366 adds Adapter trait... |
 | `@chat-sdk/adapter-gchat` | 75% | In progress | adapter package | chat-sdk-adapter-gchat 134 tests (slice 357 adds post_ephemeral via privateMessageViewer pure helpers + 4 cases, slice... |
-| `@chat-sdk/adapter-linear` | 60% | In progress | adapter package | chat-sdk-adapter-linear 113 tests (slice 366 adds Adapter trait impls, slice 406 splits channelIdFromThreadId into 3... |
 
 ## Not Started
 
