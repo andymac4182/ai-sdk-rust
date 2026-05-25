@@ -19604,6 +19604,76 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_passes_tools_context_to_tool_execution() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "context": { "type": "string" }
+                },
+                "required": ["context"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            if value.get("context").and_then(JsonValue::as_str).is_some() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("expected context string")
+            }
+        });
+        let tools_context = json!({
+            "weather": {
+                "context": "test"
+            }
+        })
+        .as_object()
+        .expect("tools context is an object")
+        .clone();
+        let recorded_context = Arc::new(Mutex::new(None::<JsonValue>));
+        let recorded_context_for_tool = Arc::clone(&recorded_context);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_context_schema(context_schema)
+                        .with_execute(move |_input, options| {
+                            let recorded_context = Arc::clone(&recorded_context_for_tool);
+                            async move {
+                                *recorded_context.lock().expect("recorded context lock") =
+                                    options.context.clone();
+                                Ok(json!({ "forecast": "sunny" }))
+                            }
+                        }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            *recorded_context.lock().expect("recorded context lock"),
+            Some(json!({ "context": "test" }))
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].is_error, None);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+    }
+
+    #[test]
     fn generate_text_returns_tool_error_when_tool_context_schema_fails() {
         let model = ToolLoopLanguageModel::new();
         let input_schema = json!({
