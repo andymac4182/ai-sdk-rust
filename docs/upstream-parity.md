@@ -5271,6 +5271,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    `generate_text_response_messages_preserve_tool_approval_requests`,
    proving approval-request content is retained in `result.responseMessages`
    alongside the tool-call assistant message.
+   The automatic-approval variant now has the named Rust counterpart
+   `generate_text_response_messages_preserve_automatic_tool_approval_requests`,
+   proving `isAutomatic: true` is retained in `result.responseMessages` for
+   the approval request and is paired with the approval-response/tool-result
+   continuation messages.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,

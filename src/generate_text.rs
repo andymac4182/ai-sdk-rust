@@ -16295,6 +16295,70 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_response_messages_preserve_automatic_tool_approval_requests() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "weather",
+                    NormalizedToolApprovalStatus::approved_with_reason("trusted tool"),
+                ))
+                .with_max_steps(2),
+        ));
+
+        let [
+            LanguageModelMessage::Assistant(assistant_message),
+            LanguageModelMessage::Tool(tool_message),
+            LanguageModelMessage::Assistant(final_message),
+        ] = result.response_messages.as_slice()
+        else {
+            panic!("expected assistant, tool, assistant response messages");
+        };
+
+        let [
+            LanguageModelAssistantContentPart::ToolCall(tool_call),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(approval_request),
+        ] = assistant_message.content.as_slice()
+        else {
+            panic!("assistant response includes tool call and automatic approval request");
+        };
+        assert_eq!(tool_call.tool_call_id, "call-1");
+        assert_eq!(tool_call.tool_name, "weather");
+        assert_eq!(approval_request.tool_call_id, "call-1");
+        assert_eq!(approval_request.is_automatic, Some(true));
+
+        let approval_id = approval_request.approval_id.clone();
+
+        let [
+            LanguageModelToolContentPart::ToolApprovalResponse(approval_response),
+            LanguageModelToolContentPart::ToolResult(tool_result),
+        ] = tool_message.content.as_slice()
+        else {
+            panic!("tool response includes approval response and result");
+        };
+        assert_eq!(approval_response.approval_id, approval_id);
+        assert!(approval_response.approved);
+        assert_eq!(approval_response.reason.as_deref(), Some("trusted tool"));
+        assert_eq!(tool_result.tool_call_id, "call-1");
+        assert_eq!(tool_result.tool_name, "weather");
+
+        let [LanguageModelAssistantContentPart::Text(text)] = final_message.content.as_slice()
+        else {
+            panic!("final assistant message contains text");
+        };
+        assert_eq!(text.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
     fn generate_text_include_controls_retained_provider_bodies() {
         let model = FakeLanguageModel::new().with_body_metadata();
         let prompt = vec![user_message("Say hello")];
