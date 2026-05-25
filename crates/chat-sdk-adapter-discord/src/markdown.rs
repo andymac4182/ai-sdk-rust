@@ -528,71 +528,78 @@ mod tests {
 
     // ---------- extractPlainText, 10 upstream cases ----------
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:106 > "should remove bold markers"
     #[test]
     fn extract_plain_text_should_remove_bold_markers() {
         let r = converter().extract_plain_text("Hello **world**!");
         assert_eq!(r, "Hello world!");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:112 > "should remove italic markers"
     #[test]
     fn extract_plain_text_should_remove_italic_markers() {
         let r = converter().extract_plain_text("Hello *world*!");
         assert_eq!(r, "Hello world!");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:116 > "should remove strikethrough markers"
     #[test]
     fn extract_plain_text_should_remove_strikethrough_markers() {
         let r = converter().extract_plain_text("Hello ~~world~~!");
         assert_eq!(r, "Hello world!");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:122 > "should extract link text"
     #[test]
     fn extract_plain_text_should_extract_link_text() {
         let r = converter().extract_plain_text("Check [this](https://example.com)");
         assert_eq!(r, "Check this");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:128 > "should format user mentions"
     #[test]
     fn extract_plain_text_should_format_user_mentions() {
-        let r = converter().extract_plain_text("Hey <@123>!");
-        assert!(r.contains("@123"), "got: {r}");
+        let r = converter().extract_plain_text("Hey <@U123>!");
+        assert!(r.contains("@U123"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:133 > "should handle complex messages"
     #[test]
     fn extract_plain_text_should_handle_complex_messages() {
         let r = converter()
-            .extract_plain_text("**Bold** and *italic* with [link](https://x.com) and <@123>");
+            .extract_plain_text("**Bold** and *italic* with [link](https://x.com) and <@U123>");
         assert!(r.contains("Bold"), "got: {r}");
         assert!(r.contains("italic"), "got: {r}");
         assert!(r.contains("link"), "got: {r}");
-        assert!(r.contains("@123"), "got: {r}");
-        assert!(!r.contains('*'), "got: {r}");
-        assert!(!r.contains('<'), "got: {r}");
+        assert!(r.contains("@U123"), "got: {r}");
+        assert!(!r.contains("**"), "got: {r}");
+        assert!(!r.contains("<@"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:146 > "should handle inline code"
     #[test]
     fn extract_plain_text_should_handle_inline_code() {
-        let r = converter().extract_plain_text("Use `code`");
-        assert_eq!(r, "Use code");
+        let r = converter().extract_plain_text("Use `const x = 1`");
+        assert!(r.contains("const x = 1"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:151 > "should handle code blocks"
     #[test]
     fn extract_plain_text_should_handle_code_blocks() {
-        let r = converter().extract_plain_text("```\nconst x = 1;\n```");
+        let r = converter().extract_plain_text("```js\nconst x = 1;\n```");
         assert!(r.contains("const x = 1;"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:156 > "should handle empty string"
     #[test]
     fn extract_plain_text_should_handle_empty_string() {
         assert_eq!(converter().extract_plain_text(""), "");
     }
 
+    // 1:1 with upstream packages/adapter-discord/src/markdown.test.ts:160 > "should handle plain text"
     #[test]
     fn extract_plain_text_should_handle_plain_text() {
-        assert_eq!(
-            converter().extract_plain_text("Just plain text"),
-            "Just plain text"
-        );
+        assert_eq!(converter().extract_plain_text("Hello world"), "Hello world");
     }
 
     // ---------- renderPostable, 5 upstream cases ----------
