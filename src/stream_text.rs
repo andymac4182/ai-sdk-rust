@@ -40,10 +40,10 @@ use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelAbortController, LanguageModelAbortSignal,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelCustomContent,
     LanguageModelErrorStreamPart, LanguageModelFile, LanguageModelFileData,
-    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelPrompt,
-    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningEnd,
-    LanguageModelReasoningFile, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
+    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
+    LanguageModelPrompt, LanguageModelRawStreamPart, LanguageModelReasoning,
+    LanguageModelReasoningEnd, LanguageModelReasoningFile, LanguageModelReasoningStart,
+    LanguageModelRequest, LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
     LanguageModelStreamResponseMetadata, LanguageModelStreamResultResponse, LanguageModelText,
     LanguageModelTextEnd, LanguageModelTextStart, LanguageModelToolApprovalRequest,
     LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolInputDelta,
@@ -1537,6 +1537,10 @@ pub struct StreamTextStep {
     /// Tool results emitted by the provider.
     pub tool_results: Vec<GenerateTextToolResult>,
 
+    /// Response messages generated for this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_messages: Vec<LanguageModelMessage>,
+
     /// Provider-specific custom parts emitted by the provider.
     pub custom_parts: Vec<LanguageModelCustomContent>,
 
@@ -1592,6 +1596,10 @@ pub struct StreamTextResult {
 
     /// Tool results emitted by all steps.
     pub tool_results: Vec<GenerateTextToolResult>,
+
+    /// Response messages accumulated across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_messages: Vec<LanguageModelMessage>,
 
     /// Provider-specific custom parts emitted by all steps.
     pub custom_parts: Vec<LanguageModelCustomContent>,
@@ -2866,6 +2874,7 @@ where
         .await
         .unwrap_or_default();
         generate_step.response_messages = response_messages.clone();
+        collected_step.response_messages = response_messages.clone();
         generate_step
             .response
             .get_or_insert_with(LanguageModelResponse::new)
@@ -2969,6 +2978,10 @@ where
             .iter()
             .flat_map(|step| step.tool_results.iter().cloned())
             .collect(),
+        response_messages: stream_steps
+            .iter()
+            .flat_map(|step| step.response_messages.iter().cloned())
+            .collect(),
         custom_parts: stream_steps
             .iter()
             .flat_map(|step| step.custom_parts.iter().cloned())
@@ -3011,6 +3024,7 @@ struct CollectedStreamTextStep {
     reasoning_files: Vec<LanguageModelReasoningFile>,
     tool_calls: Vec<GenerateTextToolCall>,
     tool_results: Vec<GenerateTextToolResult>,
+    response_messages: Vec<LanguageModelMessage>,
     custom_parts: Vec<LanguageModelCustomContent>,
     errors: Vec<JsonValue>,
     usage: LanguageModelUsage,
@@ -3068,6 +3082,7 @@ impl CollectedStreamTextStep {
             reasoning_files: Vec::new(),
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
+            response_messages: Vec::new(),
             custom_parts: Vec::new(),
             errors: Vec::new(),
             usage: LanguageModelUsage::default(),
@@ -3131,6 +3146,7 @@ impl CollectedStreamTextStep {
             reasoning_files: self.reasoning_files,
             tool_calls: self.tool_calls,
             tool_results: self.tool_results,
+            response_messages: self.response_messages,
             custom_parts: self.custom_parts,
             errors: self.errors,
             usage: self.usage,
@@ -3899,6 +3915,7 @@ where
         reasoning_files,
         tool_calls,
         tool_results,
+        response_messages: Vec::new(),
         custom_parts,
         errors,
         usage,
@@ -11097,6 +11114,51 @@ mod tests {
         assert_eq!(result.usage, usage());
         assert_eq!(result.total_usage.input_tokens.total, Some(6));
         assert_eq!(result.total_usage.output_tokens.total, Some(20));
+        assert_eq!(
+            serde_json::to_value(&result.response_messages).expect("response messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": {
+                                "city": "Brisbane"
+                            },
+                            "type": "tool-call"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "json",
+                                "value": {
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }
+                            },
+                            "type": "tool-result"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "text": "Brisbane is sunny.",
+                            "type": "text"
+                        }
+                    ]
+                }
+            ])
+        );
 
         let part_names = result
             .parts
