@@ -683,4 +683,58 @@ mod tests {
             ]
         );
     }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct WorkflowSmokeResult {
+        sum: i32,
+        product: i32,
+        combined: i32,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct WorkflowSmokeRun {
+        run_id: String,
+        return_value: WorkflowSmokeResult,
+        status: &'static str,
+    }
+
+    fn calculate_workflow(a: i32, b: i32) -> WorkflowSmokeRun {
+        let sum = add(a, b);
+        let product = multiply(a, b);
+        let combined = add(sum, product);
+
+        WorkflowSmokeRun {
+            run_id: format!("wrun_{a}_{b}"),
+            return_value: WorkflowSmokeResult {
+                sum,
+                product,
+                combined,
+            },
+            status: "completed",
+        }
+    }
+
+    fn add(a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn multiply(a: i32, b: i32) -> i32 {
+        a * b
+    }
+
+    #[test]
+    fn workflow_smoke_should_compute_the_correct_result() {
+        let run = calculate_workflow(2, 7);
+
+        assert!(run.run_id.starts_with("wrun_"));
+        assert_eq!(
+            run.return_value,
+            WorkflowSmokeResult {
+                sum: 9,
+                product: 14,
+                combined: 23,
+            }
+        );
+        assert_eq!(run.status, "completed");
+    }
 }
