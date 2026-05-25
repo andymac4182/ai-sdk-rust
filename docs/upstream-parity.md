@@ -3761,7 +3761,7 @@ focused tests for each portable behavior before changing rows to `verified`.
   lists cached tool definitions, validates schema-typed `structuredContent`,
   executes an untyped tool, and prints MCP provider metadata without network or
   hosted credentials.
-- 2026-05-20: MCP tools validated through Vercel AI Gateway
+- 2026-05-26: MCP tools validated through Vercel AI Gateway
   `vercel_ai_gateway_openai_compatible_runs_generate_text_with_mcp_tools` now
   proves MCP-created tool definitions can be passed into root `generate_text`,
   serialized through the Vercel AI Gateway OpenAI-compatible tool-call request,
