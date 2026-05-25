@@ -2938,6 +2938,9 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_text_telemetry_includes_configured_runtime_context_properties`,
   proving configured runtimeContext properties survive the telemetry
   include-filter path for `streamText` when `includeRuntimeContext` is set.
+- 2026-05-25: `streamText` runtimeContext callback parity added
+  `stream_text_passes_full_runtime_context_to_callbacks`, proving the
+  configured runtimeContext value is forwarded intact to all stream callbacks.
 - 2026-05-25: `packages/ai` `streamText` prepare-step URL-file model-switch
   parity added
   `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
