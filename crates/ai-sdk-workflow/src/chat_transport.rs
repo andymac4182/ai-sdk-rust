@@ -713,6 +713,43 @@ mod tests {
     }
 
     #[test]
+    fn workflow_chat_transport_accepts_custom_max_consecutive_errors() {
+        let transport = WorkflowChatTransport::new().with_max_consecutive_errors(5);
+
+        assert_eq!(transport.max_consecutive_errors(), 5);
+    }
+
+    #[test]
+    fn workflow_chat_transport_uses_custom_api_endpoint_and_builds_send_request() {
+        let transport = WorkflowChatTransport::new().with_api("/custom/chat");
+        let messages = vec![
+            UiMessage::new("msg-1", ai_sdk_rust::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "hello" })),
+        ];
+        let options = SendMessagesOptions::new(
+            WorkflowChatTrigger::SubmitMessage,
+            "chat-1",
+            messages.clone(),
+        )
+        .with_body(json!({ "custom": "body" }));
+
+        assert_eq!(transport.api(), "/custom/chat");
+        assert_eq!(
+            transport
+                .send_messages_request(&options)
+                .expect("request builds"),
+            WorkflowChatRequest::post(
+                "/custom/chat",
+                json!({
+                    "messages": messages,
+                    "custom": "body"
+                }),
+                None,
+            )
+        );
+    }
+
+    #[test]
     fn workflow_chat_transport_sends_messages_and_reports_chat_end() {
         let transport = WorkflowChatTransport::new();
         let mut client = ScriptedWorkflowChatClient::new([WorkflowChatResponse::ok([
