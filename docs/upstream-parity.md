@@ -1972,6 +1972,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   stream from the same result object. Rust proves the equivalent owned-result
   multi-view contract because result streams are materialized rather than
   one-shot JavaScript iterables.
+  The upstream `reader.cancel()` / async-iteration early-exit `onFinish`
+  cases are documented as JavaScript-only for the current Rust surface because
+  `stream_text::StreamTextResult` exposes materialized `consume_stream`
+  helpers rather than a live cancelable async iterator.
 - 2026-05-23: `packages/ai` `streamText` error handling parity added
   named Rust counterparts
   `stream_text_invokes_finish_callback_when_error_chunk_occurs_mid_stream`
