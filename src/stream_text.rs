@@ -6539,6 +6539,70 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_prepare_step_passes_accumulated_steps_to_subsequent_prepare_step_calls() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Game Results",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prepare_step_calls = Arc::new(Mutex::new(Vec::<(usize, usize, usize)>::new()));
+        let prepare_step_calls_for_callback = Arc::clone(&prepare_step_calls);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move { Ok(json!({ "forecast": "sunny" })) },
+                ))
+                .with_max_steps(2)
+                .with_prepare_step(move |options| {
+                    let prepare_step_calls = Arc::clone(&prepare_step_calls_for_callback);
+                    prepare_step_calls
+                        .lock()
+                        .expect("prepare step calls lock succeeds")
+                        .push((
+                            options.step_number,
+                            options.steps.len(),
+                            options.messages.len(),
+                        ));
+                    async move { PrepareStepResult::new() }
+                }),
+        ));
+
+        result.consume_stream();
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(
+            *prepare_step_calls
+                .lock()
+                .expect("prepare step calls lock succeeds"),
+            vec![(0, 0, 1), (1, 1, 3)]
+        );
+    }
+
+    #[test]
     fn stream_text_on_step_start_omits_telemetry_metadata() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
