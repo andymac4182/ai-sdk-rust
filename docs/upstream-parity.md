@@ -2474,6 +2474,19 @@ focused tests for each portable behavior before changing rows to `verified`.
   counterpart `workflow_agent_upstream_should_return_messages_and_steps_in_result`,
   proving the stream result exposes both the final conversation messages and
   collected steps.
+- 2026-05-26: Workflow stream-text-iterator exact-name parity added explicit
+  ledger mappings for the upstream `stream-text-iterator.test.ts` continuation
+  cases: `should preserve providerMetadata as providerOptions in tool-call
+  messages` maps to `stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation`,
+  `should not add providerOptions when providerMetadata is undefined` maps to
+  `stream_text_iterator_omits_provider_options_without_metadata`,
+  `should preserve providerMetadata for multiple parallel tool calls` maps to
+  `stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls`,
+  `should handle mixed tool calls with and without providerMetadata` maps to
+  `stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata`,
+  the OpenAI itemId sanitization cases map to the existing `stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors`,
+  `stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id`,
+  and `stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata` tests, and `should pass currentContexts to doStreamStep and yielded steps` maps to `stream_text_iterator_passes_contexts_to_executor_and_yields_them`.
 - 2026-05-22: WorkflowAgent finish callback parity added named Rust
   counterparts for upstream client-side stop and normal tool-completion cases:
   `workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools`
