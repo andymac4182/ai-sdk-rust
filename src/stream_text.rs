@@ -1342,7 +1342,13 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
         Fut: Future<Output = ()> + 'a,
     {
-        self.with_on_tool_execution_start(on_tool_execution_start)
+        let mut this = self;
+        if this.on_tool_execution_start.is_none() {
+            this.on_tool_execution_start = Some(GenerateTextOnToolExecutionStart::new(
+                on_tool_execution_start,
+            ));
+        }
+        this
     }
 
     /// Deprecated upstream alias for [`StreamTextOptions::with_on_tool_execution_end`].
@@ -1351,7 +1357,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
         Fut: Future<Output = ()> + 'a,
     {
-        self.with_on_tool_execution_end(on_tool_execution_end)
+        let mut this = self;
+        if this.on_tool_execution_end.is_none() {
+            this.on_tool_execution_end =
+                Some(GenerateTextOnToolExecutionEnd::new(on_tool_execution_end));
+        }
+        this
     }
 
     /// Sets a callback that is invoked after every completed streamed step.
@@ -11318,6 +11329,222 @@ mod tests {
             callback_events.lock().expect("events lock").as_slice(),
             ["start:call-1:Brisbane:1", "end:call-1:sunny:1"]
         );
+    }
+
+    #[test]
+    fn stream_text_uses_experimental_on_tool_call_start_as_a_fallback() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let events_for_callback = Arc::clone(&events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_experimental_on_tool_call_start(move |_event| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallStart");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["experimental_onToolCallStart"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn stream_text_prefers_on_tool_execution_start_over_experimental_on_tool_call_start() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let alias_events = Arc::clone(&events);
+        let preferred_events = Arc::clone(&events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_on_tool_execution_start(move |_event| {
+                    let preferred_events = Arc::clone(&preferred_events);
+                    async move {
+                        preferred_events
+                            .lock()
+                            .expect("events lock")
+                            .push("onToolExecutionStart");
+                    }
+                })
+                .with_experimental_on_tool_call_start(move |_event| {
+                    let alias_events = Arc::clone(&alias_events);
+                    async move {
+                        alias_events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallStart");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["onToolExecutionStart"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn stream_text_uses_experimental_on_tool_call_finish_as_a_fallback() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let events_for_callback = Arc::clone(&events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_experimental_on_tool_call_finish(move |_event| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallFinish");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["experimental_onToolCallFinish"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn stream_text_prefers_on_tool_execution_end_over_experimental_on_tool_call_finish() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let alias_events = Arc::clone(&events);
+        let preferred_events = Arc::clone(&events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_on_tool_execution_end(move |_event| {
+                    let preferred_events = Arc::clone(&preferred_events);
+                    async move {
+                        preferred_events
+                            .lock()
+                            .expect("events lock")
+                            .push("onToolExecutionEnd");
+                    }
+                })
+                .with_experimental_on_tool_call_finish(move |_event| {
+                    let alias_events = Arc::clone(&alias_events);
+                    async move {
+                        alias_events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallFinish");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["onToolExecutionEnd"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
     }
 
     #[test]

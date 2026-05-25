@@ -3936,7 +3936,13 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
         Fut: Future<Output = ()> + 'a,
     {
-        self.with_on_tool_execution_start(on_tool_execution_start)
+        let mut this = self;
+        if this.on_tool_execution_start.is_none() {
+            this.on_tool_execution_start = Some(GenerateTextOnToolExecutionStart::new(
+                on_tool_execution_start,
+            ));
+        }
+        this
     }
 
     /// Deprecated upstream alias for [`GenerateTextOptions::with_on_tool_execution_end`].
@@ -3945,7 +3951,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
         Fut: Future<Output = ()> + 'a,
     {
-        self.with_on_tool_execution_end(on_tool_execution_end)
+        let mut this = self;
+        if this.on_tool_execution_end.is_none() {
+            this.on_tool_execution_end =
+                Some(GenerateTextOnToolExecutionEnd::new(on_tool_execution_end));
+        }
+        this
     }
 
     /// Sets a callback that is invoked after every completed step.
@@ -15388,6 +15399,202 @@ mod tests {
         assert!(end_events[0].tool_execution_ms <= result.steps[0].performance.step_time_ms);
         assert_eq!(end_events[0].tool_output, result.tool_results[0]);
         assert_eq!(end_events[0].tool_output.output["unit"], json!("celsius"));
+    }
+
+    #[test]
+    fn generate_text_uses_experimental_on_tool_call_start_as_a_fallback() {
+        let model = ToolLoopLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let events_for_callback = Arc::clone(&events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", approval_tool_schema()).with_execute(|input, options| {
+                        async move {
+                            Ok(json!({
+                                "city": input["city"],
+                                "toolCallId": options.tool_call_id,
+                                "unit": options.context.as_ref().and_then(|context| context["unit"].as_str())
+                            }))
+                        }
+                    }),
+                )
+                .with_tool_context(
+                    "weather",
+                    json!({
+                        "unit": "celsius"
+                    }),
+                )
+                .with_max_steps(2)
+                .with_experimental_on_tool_call_start(move |_event| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallStart");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["experimental_onToolCallStart"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn generate_text_prefers_on_tool_execution_start_over_experimental_on_tool_call_start() {
+        let model = ToolLoopLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let alias_events = Arc::clone(&events);
+        let preferred_events = Arc::clone(&events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", approval_tool_schema()).with_execute(|input, options| {
+                        async move {
+                            Ok(json!({
+                                "city": input["city"],
+                                "toolCallId": options.tool_call_id,
+                                "unit": options.context.as_ref().and_then(|context| context["unit"].as_str())
+                            }))
+                        }
+                    }),
+                )
+                .with_tool_context(
+                    "weather",
+                    json!({
+                        "unit": "celsius"
+                    }),
+                )
+                .with_max_steps(2)
+                .with_on_tool_execution_start(move |_event| {
+                    let preferred_events = Arc::clone(&preferred_events);
+                    async move {
+                        preferred_events
+                            .lock()
+                            .expect("events lock")
+                            .push("onToolExecutionStart");
+                    }
+                })
+                .with_experimental_on_tool_call_start(move |_event| {
+                    let alias_events = Arc::clone(&alias_events);
+                    async move {
+                        alias_events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallStart");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["onToolExecutionStart"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn generate_text_uses_experimental_on_tool_call_finish_as_a_fallback() {
+        let model = ToolLoopLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let events_for_callback = Arc::clone(&events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", approval_tool_schema()).with_execute(|input, options| {
+                        async move {
+                            Ok(json!({
+                                "city": input["city"],
+                                "toolCallId": options.tool_call_id,
+                                "unit": options.context.as_ref().and_then(|context| context["unit"].as_str())
+                            }))
+                        }
+                    }),
+                )
+                .with_tool_context(
+                    "weather",
+                    json!({
+                        "unit": "celsius"
+                    }),
+                )
+                .with_max_steps(2)
+                .with_experimental_on_tool_call_finish(move |_event| {
+                    let events = Arc::clone(&events_for_callback);
+                    async move {
+                        events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallFinish");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["experimental_onToolCallFinish"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn generate_text_prefers_on_tool_execution_end_over_experimental_on_tool_call_finish() {
+        let model = ToolLoopLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let alias_events = Arc::clone(&events);
+        let preferred_events = Arc::clone(&events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", approval_tool_schema()).with_execute(|input, options| {
+                        async move {
+                            Ok(json!({
+                                "city": input["city"],
+                                "toolCallId": options.tool_call_id,
+                                "unit": options.context.as_ref().and_then(|context| context["unit"].as_str())
+                            }))
+                        }
+                    }),
+                )
+                .with_tool_context(
+                    "weather",
+                    json!({
+                        "unit": "celsius"
+                    }),
+                )
+                .with_max_steps(2)
+                .with_on_tool_execution_end(move |_event| {
+                    let preferred_events = Arc::clone(&preferred_events);
+                    async move {
+                        preferred_events
+                            .lock()
+                            .expect("events lock")
+                            .push("onToolExecutionEnd");
+                    }
+                })
+                .with_experimental_on_tool_call_finish(move |_event| {
+                    let alias_events = Arc::clone(&alias_events);
+                    async move {
+                        alias_events
+                            .lock()
+                            .expect("events lock")
+                            .push("experimental_onToolCallFinish");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["onToolExecutionEnd"]
+        );
+        assert_eq!(result.tool_results.len(), 1);
     }
 
     #[test]
