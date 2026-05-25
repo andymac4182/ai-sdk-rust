@@ -3612,6 +3612,52 @@ mod tests {
     }
 
     #[test]
+    fn chat_handle_incoming_message_should_handle_concurrent_duplicates_atomically() {
+        // 1:1 with upstream `chat.test.ts > message-deduplication >
+        // "should handle concurrent duplicates atomically"` (slice
+        // 491). Two `handle_incoming_message` calls with the same
+        // message id are dispatched from separate OS threads. The
+        // shared `RecordingState::set_if_not_exists` is atomic
+        // (Mutex<HashSet> guards seen-keys) — exactly one call
+        // returns true; the handler fires exactly once.
+        let (chat, _state, adapter) = chat_with_recording_state();
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let counter = invoked.clone();
+        chat.on_new_mention(move |_thread, _msg| {
+            let c = counter.clone();
+            Box::pin(async move {
+                c.fetch_add(1, AtomicOrdering::SeqCst);
+            })
+        });
+        let chat = Arc::new(chat);
+        let chat_a = chat.clone();
+        let adapter_a = adapter.clone();
+        let chat_b = chat.clone();
+        let adapter_b = adapter.clone();
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                let mut msg = dispatched_message("ts-1", false);
+                msg.is_mention = Some(true);
+                let _ = futures_executor::block_on(chat_a.handle_incoming_message(
+                    adapter_a.as_ref(),
+                    "slack:C123:ts-1",
+                    &mut msg,
+                ));
+            });
+            s.spawn(move || {
+                let mut msg = dispatched_message("ts-1", false);
+                msg.is_mention = Some(true);
+                let _ = futures_executor::block_on(chat_b.handle_incoming_message(
+                    adapter_b.as_ref(),
+                    "slack:C123:ts-1",
+                    &mut msg,
+                ));
+            });
+        });
+        assert_eq!(invoked.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
     fn chat_handle_incoming_message_should_skip_duplicate_messages_with_the_same_id() {
         let (chat, adapter) = chat_with_in_memory_state();
         let mut msg = dispatched_message("msg-1", false);
