@@ -1534,6 +1534,40 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_convert_fatal_error_to_tool_error_result() {
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(|_, _| async { Err(ToolExecutionError::new("This is a fatal error")) });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new("test-call-id", "testTool", "{}")),
+            stop_step(),
+        ]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.tool_calls, Vec::<ParsedToolCall>::new());
+        let prompt = result.messages;
+        let tool_message = prompt
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Tool(message) => Some(message),
+                _ => None,
+            })
+            .expect("tool result message is appended");
+        assert_eq!(tool_message.content.len(), 1);
+        let tool_result = first_tool_result(tool_message);
+        assert_eq!(tool_result.tool_call_id, "test-call-id");
+        assert_eq!(tool_result.tool_name, "testTool");
+        assert_eq!(
+            tool_result.output,
+            LanguageModelToolResultOutput::error_text("This is a fatal error")
+        );
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_successfully_execute_tools_that_return_normally() {
         let tool = Tool::new("testTool", object_schema()).with_execute(|_, _| async {
             Ok(json!({
