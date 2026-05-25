@@ -475,6 +475,18 @@ impl TelegramFormatConverter {
     pub fn render_postable_ast(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         self.from_ast(ast)
     }
+
+    /// Extract plain text from Telegram MarkdownV2 input. 1:1 with upstream
+    /// `BaseFormatConverter.extractPlainText`: `toPlainText(this.toAst(text))`.
+    /// Falls back to the raw input when parsing fails (mirrors upstream's
+    /// "AST construction never throws for these inputs" assumption while
+    /// remaining defensive on the Rust side).
+    pub fn extract_plain_text(&self, text: &str) -> String {
+        match self.to_ast(text) {
+            Ok(node) => chat_sdk_chat::markdown::to_plain_text(&node),
+            Err(_) => text.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1023,5 +1035,91 @@ mod tests {
     #[test]
     fn escape_link_url_handles_paren_and_backslash() {
         assert_eq!(escape_link_url("a)b\\c"), "a\\)b\\\\c");
+    }
+
+    // ---------- extractPlainText (9 upstream cases) ----------
+    //
+    // Ported 1:1 from upstream
+    // `packages/adapter-telegram/src/markdown.test.ts`
+    // `describe("extractPlainText")` (lines 417-470). The upstream method is
+    // inherited from `BaseFormatConverter` and defined as
+    // `toPlainText(this.toAst(text))`. The Rust port mirrors that via
+    // `chat_sdk_chat::markdown::to_plain_text` over our `to_ast` output.
+
+    #[test]
+    fn extract_plain_text_strips_bold_markers() {
+        // 1:1 with upstream markdown.test.ts:418 > "strips bold markers"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.extract_plain_text("Hello **world**!"), "Hello world!");
+    }
+
+    #[test]
+    fn extract_plain_text_strips_italic_markers() {
+        // 1:1 with upstream markdown.test.ts:424 > "strips italic markers"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.extract_plain_text("Hello *world*!"), "Hello world!");
+    }
+
+    #[test]
+    fn extract_plain_text_strips_strikethrough_markers() {
+        // 1:1 with upstream markdown.test.ts:428 > "strips strikethrough markers"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.extract_plain_text("Hello ~~world~~!"), "Hello world!");
+    }
+
+    #[test]
+    fn extract_plain_text_extracts_link_text() {
+        // 1:1 with upstream markdown.test.ts:434 > "extracts link text"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(
+            c.extract_plain_text("Check [this](https://example.com)"),
+            "Check this"
+        );
+    }
+
+    #[test]
+    fn extract_plain_text_preserves_inline_code_content() {
+        // 1:1 with upstream markdown.test.ts:440 > "preserves inline code content"
+        let c = TelegramFormatConverter::new();
+        assert!(
+            c.extract_plain_text("Use `const x = 1`")
+                .contains("const x = 1")
+        );
+    }
+
+    #[test]
+    fn extract_plain_text_preserves_code_block_content() {
+        // 1:1 with upstream markdown.test.ts:446 > "preserves code block content"
+        let c = TelegramFormatConverter::new();
+        assert!(
+            c.extract_plain_text("```js\nconst x = 1;\n```")
+                .contains("const x = 1;")
+        );
+    }
+
+    #[test]
+    fn extract_plain_text_returns_plain_text_unchanged() {
+        // 1:1 with upstream markdown.test.ts:452 > "returns plain text unchanged"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.extract_plain_text("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn extract_plain_text_returns_empty_string_unchanged() {
+        // 1:1 with upstream markdown.test.ts:456 > "returns empty string unchanged"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.extract_plain_text(""), "");
+    }
+
+    #[test]
+    fn extract_plain_text_strips_all_formatting_from_complex_input() {
+        // 1:1 with upstream markdown.test.ts:460 > "strips all formatting from complex input"
+        let c = TelegramFormatConverter::new();
+        let result = c.extract_plain_text("**Bold** and *italic* with [link](https://x.com)");
+        assert!(result.contains("Bold"));
+        assert!(result.contains("italic"));
+        assert!(result.contains("link"));
+        assert!(!result.contains("**"));
+        assert!(!result.contains("]("));
     }
 }
