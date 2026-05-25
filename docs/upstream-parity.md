@@ -3010,6 +3010,7 @@ focused tests for each portable behavior before changing rows to `verified`.
   added `create_ui_message_stream_invokes_step_and_finish_callbacks` and
   `create_ui_message_stream_keeps_existing_message_id_from_start_chunk`,
   `create_ui_message_stream_adds_error_chunk_when_execute_returns_error`,
+  `create_ui_message_stream_on_error_receives_execute_error_text`,
   `create_ui_message_stream_should_add_error_parts_when_execute_throws`, plus
   `create_ui_message_stream_adds_error_chunk_when_merged_stream_errors` in
   `src/ui_message_stream.rs`, covering a Rust-native writer/write/merge flow,
