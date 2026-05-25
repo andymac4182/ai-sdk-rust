@@ -1,4 +1,4 @@
-# Intentionally Unported Cases — `chat-sdk-chat`
+# Intentionally Unported Cases — Chat SDK Rust port
 
 This registry catalogues every upstream `vercel/chat` test case that
 **cannot be literally ported to Rust** and explains why. The Rust
@@ -6,6 +6,9 @@ port honours the upstream behaviour through the closest available
 Rust idiom (typed builder, serde shape, type-system guarantee), but
 the upstream test as written cannot be reproduced 1:1 in Rust
 because it exercises a JavaScript-only language feature.
+
+The registry is organised by Rust crate. Each section enumerates the
+upstream cases that crate documents as structurally unportable.
 
 Cases listed here are considered **closed for "100% port"
 purposes** per the project's
@@ -17,7 +20,28 @@ The Rust-portable cases are tracked in
 [`upstream-parity.md`](upstream-parity.md) — this file ONLY lists
 the structurally-unportable cases.
 
-## Categories
+## Top-level sections
+
+- **`chat-sdk-chat`** — JSX runtime, JS Symbol-keyed protocols,
+  deprecated re-export aliases.
+- **`chat-sdk-state-redis`** — node-redis client injection,
+  EventEmitter wait-for-ready, JS module loader, integration tests
+  skipped upstream.
+- **`chat-sdk-state-ioredis`** — ioredis cluster client injection,
+  same EventEmitter shape, JS module loader, integration tests
+  skipped upstream.
+- **`chat-sdk-state-pg`** — node-postgres client injection,
+  EventEmitter wait-for-`connect`, JS module loader, integration
+  tests skipped upstream.
+- **`chat-sdk-adapter-*` (9 packages)** — cross-cutting Vitest
+  `vi.fn()` mock infrastructure, default-Logger constructor
+  parameter, subclass extensibility, typed-client getter access.
+
+---
+
+## Section: `chat-sdk-chat`
+
+Categories:
 
 1. **JSX runtime cases.** Rust has no JSX syntax. The Rust port
    ships typed builders (`modal(ModalOptions { ... })`,
@@ -143,3 +167,24 @@ that ports it, and delete the entry here.
 When a new unportable case is discovered, add it here with the
 upstream citation + Rust-side justification, and reference this
 file from the relevant `upstream-parity.md` row.
+
+---
+
+## Section: `chat-sdk-state-redis`
+
+### `packages/state-redis/src/index.test.ts` (9 unportable cases)
+
+| Upstream case (line) | Reason | Rust replacement |
+| --- | --- | --- |
+| `should export createRedisState function` (L15) | JS module-loader check (`typeof createRedisState === "function"`). | Rust's module system makes the export visible at compile time; calling the type's constructor in any other test proves it. |
+| `should accept an existing redis client` (L35) | Upstream takes a pre-configured `node-redis` client via `{client}`. Rust's placeholder adapter doesn't model the node-redis client surface; redis-rs wire-up is additive production code, not a test-parity gap. | Enumerated in [`crates/chat-sdk-state-redis/src/lib.rs`](../../crates/chat-sdk-state-redis/src/lib.rs) test-mod header. |
+| `should wait for an injected open client to become ready` (L53) | Upstream EventEmitter-based wait-for-`ready`. | Rust has no analog; future redis-rs wire-up will use `tokio` `Notify` rather than EventEmitter. |
+| `should ignore transient errors while waiting for an injected client to recover` (L85) | Same EventEmitter-based path. | Same. |
+| `should wait for an injected client to become ready again after reconnecting` (L124) | Same EventEmitter-based path. | Same. |
+| `should reject when an injected client ends before becoming ready` (L165) | Same EventEmitter-based path. | Same. |
+| `describe.skip > should connect to Redis` (L232) | `describe.skip`-marked upstream; requires live Redis. | Future opt-in `#[ignore]` integration test once redis-rs lands. |
+| `describe.skip > should force-release a lock regardless of token` (L241) | `describe.skip`-marked upstream; requires live Redis + Lua scripts. | Future opt-in `#[ignore]` integration test. |
+| `describe.skip > should no-op when force-releasing a non-existent lock` (L260) | `describe.skip`-marked upstream; requires live Redis. | Future opt-in `#[ignore]` integration test. |
+
+Remaining 7 upstream cases are mapped to Rust tests in
+[`crates/chat-sdk-state-redis/src/lib.rs`](../../crates/chat-sdk-state-redis/src/lib.rs).

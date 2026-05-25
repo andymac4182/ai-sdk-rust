@@ -303,7 +303,9 @@ mod tests {
 
     // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
     //
-    // The following 8 upstream `index.test.ts` cases are js-only or
+    // Catalogued in `docs/chat/unported.md > state-redis`.
+    //
+    // The following 9 upstream `index.test.ts` cases are js-only or
     // type-system-impossible and have no matching Rust test:
     //
     // - `should export createRedisState function`: JS module-loader
@@ -312,8 +314,8 @@ mod tests {
     // - `should accept an existing redis client`: upstream takes a
     //   pre-configured node-redis client via `{client}`. Rust's
     //   placeholder adapter doesn't model the node-redis client
-    //   surface; integration with `redis-rs` is deferred until the
-    //   workspace runtime decision lands.
+    //   surface; integration with `redis-rs` is deferred to a future
+    //   slice as additive production wiring (not a test-parity gap).
     // - `should wait for an injected open client to become ready`:
     //   upstream EventEmitter-based wait-for-`ready` semantics; Rust
     //   placeholder has no event-emitter wiring.
@@ -326,11 +328,10 @@ mod tests {
     // - 3 `describe.skip("integration tests")` cases — explicitly
     //   skipped upstream too; would need a live Redis instance.
     //
-    // The remaining 16 upstream cases are mapped (5 method-existence
-    // mapped to NotConnected smoke tests below + 8 NotConnected
-    // smoke tests + 3 generate_token additive tests).
+    // The remaining 7 upstream cases are mapped (see "should have X
+    // method" mappings below) for a total of 16/16 accounted for.
 
-    // ---------- upstream "should have X method" mappings (3 of 5) ----------
+    // ---------- upstream "should have X method" mappings (5 of 5) ----------
     // 1:1 with upstream `index.test.ts` cases:
     //
     // - `should have appendToList method` → mapped to
@@ -339,17 +340,39 @@ mod tests {
     //   only asserts `typeof adapter.appendToList === "function"`).
     // - `should have getList method` → mapped to
     //   `adapter_get_list_returns_not_connected_until_client_lands`.
-    // - `should have set_if_not_exists method` (implicit upstream
-    //   coverage via the lock primitive) → mapped to the new
-    //   `adapter_set_if_not_exists_returns_not_connected_until_client_lands`
-    //   test below.
-    //
-    // The remaining 3 upstream method-existence cases (`enqueue` /
-    // `dequeue` / `queueDepth`) are deferred until the chat-sdk-chat
-    // `StateAdapter` trait gets extended with the queue-primitive
-    // methods (currently only `state-memory` has them as inherent
-    // methods, not trait surface). They're tracked as deferred in
-    // `docs/chat/goal-refinements.md`.
+    // - `should have enqueue method` → mapped to
+    //   `adapter_enqueue_default_trait_impl_is_no_op` below.
+    // - `should have dequeue method` → mapped to
+    //   `adapter_dequeue_default_trait_impl_returns_none` below.
+    // - `should have queueDepth method` → mapped to
+    //   `adapter_queue_depth_default_trait_impl_returns_zero` below.
+
+    #[test]
+    fn adapter_enqueue_default_trait_impl_is_no_op() {
+        // 1:1 with upstream `should have enqueue method` (calling
+        // proves the method exists). The Rust trait default returns
+        // `Ok(())` until the redis-rs wire-up lands.
+        let adapter = RedisStateAdapter::new(RedisStateAdapterOptions::new());
+        assert!(block_on(adapter.enqueue("k", serde_json::json!(1), None)).is_ok());
+    }
+
+    #[test]
+    fn adapter_dequeue_default_trait_impl_returns_none() {
+        // 1:1 with upstream `should have dequeue method`. The Rust
+        // trait default returns `Ok(None)` until the redis-rs LPOP
+        // wire-up lands.
+        let adapter = RedisStateAdapter::new(RedisStateAdapterOptions::new());
+        assert_eq!(block_on(adapter.dequeue("k")).unwrap(), None);
+    }
+
+    #[test]
+    fn adapter_queue_depth_default_trait_impl_returns_zero() {
+        // 1:1 with upstream `should have queueDepth method`. The Rust
+        // trait default returns `Ok(0)` until the redis-rs LLEN
+        // wire-up lands.
+        let adapter = RedisStateAdapter::new(RedisStateAdapterOptions::new());
+        assert_eq!(block_on(adapter.queue_depth("k")).unwrap(), 0);
+    }
 
     #[test]
     fn adapter_set_if_not_exists_returns_not_connected_until_client_lands() {
