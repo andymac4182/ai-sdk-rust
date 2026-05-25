@@ -8,6 +8,7 @@
 
 pub mod cards;
 pub mod markdown;
+pub mod parse;
 pub mod webhook;
 
 use async_trait::async_trait;
@@ -202,6 +203,22 @@ impl WhatsappAdapter {
     pub fn open_dm(&self, user_id: &str) -> String {
         encode_thread_id(&self.options.phone_number_id, user_id)
     }
+
+    /// Parse a WhatsApp inbound-message envelope (the upstream
+    /// `WhatsAppRawMessage` shape: `{ message, contact?, phoneNumberId }`)
+    /// into the cross-platform [`chat_sdk_chat::message::Message`].
+    /// 1:1 with upstream `adapter.parseMessage(raw)`.
+    ///
+    /// `author.is_me` is `true` when `raw.message.from` matches this
+    /// adapter's configured `phone_number_id` (upstream reads
+    /// `this._botUserId`, which is set to `this.phoneNumberId` in
+    /// `initialize`).
+    pub fn parse_message(
+        &self,
+        raw: &parse::WhatsAppRawMessage,
+    ) -> chat_sdk_chat::message::Message {
+        parse::parse_message(raw, &self.options.phone_number_id)
+    }
 }
 
 #[async_trait]
@@ -230,6 +247,20 @@ impl Adapter for WhatsappAdapter {
     /// — no HTTP call required).
     async fn open_dm(&self, user_id: &str) -> chat_sdk_chat::types::AdapterResult<String> {
         Ok(self.open_dm(user_id))
+    }
+
+    /// Parse a `WhatsAppRawMessage`-shaped JSON payload into the
+    /// cross-platform `Message`. 1:1 with upstream
+    /// `adapter.parseMessage(raw)`. Returns `InvalidPayload` when the
+    /// JSON doesn't match the expected envelope.
+    async fn parse_message(
+        &self,
+        raw: serde_json::Value,
+    ) -> chat_sdk_chat::types::AdapterResult<chat_sdk_chat::message::Message> {
+        use chat_sdk_chat::types::AdapterError;
+        let parsed: parse::WhatsAppRawMessage = serde_json::from_value(raw)
+            .map_err(|err| AdapterError::InvalidPayload(err.to_string()))?;
+        Ok(self.parse_message(&parsed))
     }
 
     /// Post a text message via the WhatsApp Cloud API. 1:1 with

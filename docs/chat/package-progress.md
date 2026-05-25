@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 85.1%
-- Portable package average: 82.1%
+- Average estimated completion: 86.1%
+- Portable package average: 83.3%
 - Closed package rows: 9 / 18
 - Strict portable verified rows: 6 / 15
 - In-progress rows: 9
@@ -36,7 +36,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-github` | 60% | In progress | adapter package | chat-sdk-adapter-github 107 tests (slice 368 splits bundled emojiToGitHubReaction into 16 explicit 1:1 cases, slice... |
 | `@chat-sdk/adapter-messenger` | 70% | In progress | adapter package | chat-sdk-adapter-messenger 102 tests (slice 369 adds normalize_thread_id helper, slice 370 adds Adapter::open_dm trait... |
 | `@chat-sdk/adapter-telegram` | 72% | In progress | adapter package | chat-sdk-adapter-telegram 133 tests (slice 370 adds Adapter::open_dm trait impl). Helpers: applyTelegramEntities... |
-| `@chat-sdk/adapter-whatsapp` | 70% | In progress | adapter package | chat-sdk-adapter-whatsapp 106 tests (slice 370 adds Adapter::open_dm trait impl). splitMessage 8/8, channelId+isDM,... |
+| `@chat-sdk/adapter-whatsapp` | 88% | In progress | adapter package | chat-sdk-adapter-whatsapp 123 tests (slice 503 ports parseMessage end-to-end +16). splitMessage 8/8, channelId+isDM,... |
 
 ## Not Started
 
