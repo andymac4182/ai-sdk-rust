@@ -2981,11 +2981,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/stream_text.rs`, covering Rust-native transforms over collected
   `TextStreamPart`s before replay, ordered transform composition, callback
   visibility, response/step state recomputation, response-message
-  reconstruction, and provider-emitted tool call/result transformation.
+  reconstruction, provider-emitted tool call/result transformation, transformed
+  provider metadata, and transformed `onFinish` payloads.
   `stream_text_transform_updates_finish_metadata_and_usage` and
   `stream_text_transform_can_stop_stream_with_finish_parts` additionally cover
-  transformed finish metadata/usage and stop-style truncation with supplied
-  finish parts. `stream_text_transform_updates_local_tool_results_after_execution`
+  transformed finish metadata/usage including `result.totalUsage`, plus stop-
+  style truncation with supplied finish parts. `stream_text_transform_updates_local_tool_results_after_execution`
   covers local tool-result transformation after execution before callbacks,
   results, and continuation messages. True streaming scheduler timing remains
   an explicit follow-up.
