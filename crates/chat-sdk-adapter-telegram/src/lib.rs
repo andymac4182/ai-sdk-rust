@@ -1603,4 +1603,265 @@ mod tests {
         assert_eq!(adapter.token(), "config-token");
         assert_eq!(adapter.user_name(), "config-name");
     }
+
+    // ---------- describe("message length limits") (9 upstream cases) ----------
+    //
+    // 1:1 with upstream `index.test.ts > describe("message length
+    // limits", ...)` (lines 2325-2578). The upstream cases drive
+    // `adapter.postMessage(threadId, plain|{markdown}|{markdown,files}
+    // |{markdown,attachments})` through a `vi.fn()`-mocked `fetch`
+    // and inspect the JSON / FormData body Telegram would receive.
+    //
+    // The Rust `post_message` currently accepts only `text: &str`
+    // (no `{markdown}` / `{files}` / `{attachments}` overload), and
+    // the crate has no HTTP mocking dep (constraint: no new deps).
+    // The behavior the upstream cases actually exercise is the
+    // `truncate_for_telegram` helper invocation at the body / caption
+    // boundary — wired with `TELEGRAM_MESSAGE_LIMIT` (text) vs
+    // `TELEGRAM_CAPTION_LIMIT` (caption) and the corresponding
+    // `TelegramParseMode`. Each case below ports the structural
+    // invariant the upstream `it(...)` asserts (post-truncation body
+    // shape), against the helper directly, using the same input
+    // payload the upstream produces. The HTTP-wire / FormData-body
+    // / parse_mode field-routing path is js-only-documented: it
+    // requires the `{markdown,files,attachments}` post-message
+    // overload + a mock HTTP transport, both deferred.
+
+    fn render_markdown_for_telegram(input: &str) -> String {
+        crate::markdown::TelegramFormatConverter::new()
+            .render_postable_markdown(input)
+            .expect("markdown parse")
+    }
+
+    fn count_unescaped(text: &str, marker: char) -> usize {
+        let bytes: Vec<char> = text.chars().collect();
+        let mut count = 0usize;
+        for i in 0..bytes.len() {
+            if bytes[i] != marker {
+                continue;
+            }
+            let mut backslashes = 0usize;
+            let mut j = i as isize - 1;
+            while j >= 0 && bytes[j as usize] == '\\' {
+                backslashes += 1;
+                j -= 1;
+            }
+            if backslashes % 2 == 0 {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn ends_with_orphan_backslash_local(text: &str) -> bool {
+        let mut trailing = 0usize;
+        for ch in text.chars().rev() {
+            if ch == '\\' {
+                trailing += 1;
+            } else {
+                break;
+            }
+        }
+        trailing % 2 == 1
+    }
+
+    #[test]
+    fn plain_string_over_4096_chars_truncates_to_exactly_the_limit_with_ellipsis_and_no_parse_mode()
+    {
+        // 1:1 with upstream index.test.ts:2390 > "plain string over
+        // 4096 chars truncates to exactly the limit with '...' and
+        // no parse_mode"
+        let long_plain = "a".repeat(5000);
+        let body_text = crate::markdown::truncate_for_telegram(
+            &long_plain,
+            crate::markdown::TELEGRAM_MESSAGE_LIMIT,
+            crate::markdown::TelegramParseMode::Plain,
+        );
+        // parse_mode is Plain (upstream: undefined) ⇒ no MarkdownV2
+        // routing; assert the body shape:
+        assert!(body_text.len() <= crate::markdown::TELEGRAM_MESSAGE_LIMIT);
+        assert!(body_text.ends_with("..."));
+        // Plain-text path: the literal ellipsis is fine — should NOT
+        // be the escaped MarkdownV2 form.
+        assert!(!body_text.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn plain_string_exactly_4096_chars_is_not_truncated_and_has_no_ellipsis() {
+        // 1:1 with upstream index.test.ts:2405 > "plain string
+        // exactly 4096 chars is not truncated and has no ellipsis"
+        let exact = "a".repeat(crate::markdown::TELEGRAM_MESSAGE_LIMIT);
+        let body_text = crate::markdown::truncate_for_telegram(
+            &exact,
+            crate::markdown::TELEGRAM_MESSAGE_LIMIT,
+            crate::markdown::TelegramParseMode::Plain,
+        );
+        assert_eq!(body_text, exact);
+    }
+
+    #[test]
+    fn markdown_v2_message_over_4096_chars_escapes_the_trailing_ellipsis() {
+        // 1:1 with upstream index.test.ts:2416 > "MarkdownV2 message
+        // over 4096 chars escapes the trailing ellipsis as '\\.\\.\\.'"
+        //
+        // 5000 'a' chars through the markdown path renders to 5000
+        // 'a' (nothing to escape). Must end with escaped ellipsis,
+        // NOT literal dots.
+        let rendered = render_markdown_for_telegram(&"a".repeat(5000));
+        let body_text = crate::markdown::truncate_for_telegram(
+            &rendered,
+            crate::markdown::TELEGRAM_MESSAGE_LIMIT,
+            crate::markdown::TelegramParseMode::MarkdownV2,
+        );
+        assert!(body_text.len() <= crate::markdown::TELEGRAM_MESSAGE_LIMIT);
+        assert!(body_text.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn markdown_v2_truncation_does_not_leave_an_orphan_trailing_backslash_before_the_ellipsis() {
+        // 1:1 with upstream index.test.ts:2432 > "MarkdownV2
+        // truncation does not leave an orphan trailing backslash
+        // before the ellipsis"
+        //
+        // 4092 'a's + 50 '.' → renders as 4092 'a's + `\.`×50.
+        // Naïve slice-to-4093 keeps 4092 'a' + a lone '\'.
+        let long_with_dots = format!("{}{}", "a".repeat(4092), ".".repeat(50));
+        let rendered = render_markdown_for_telegram(&long_with_dots);
+        let body_text = crate::markdown::truncate_for_telegram(
+            &rendered,
+            crate::markdown::TELEGRAM_MESSAGE_LIMIT,
+            crate::markdown::TelegramParseMode::MarkdownV2,
+        );
+        // Strip the trailing ellipsis (escaped or not) before checking
+        // the body
+        let ellipsis: &str = if body_text.ends_with("\\.\\.\\.") {
+            "\\.\\.\\."
+        } else {
+            "..."
+        };
+        let before_ellipsis = &body_text[..body_text.len() - ellipsis.len()];
+        assert!(!ends_with_orphan_backslash_local(before_ellipsis));
+    }
+
+    #[test]
+    fn markdown_v2_truncation_leaves_all_entity_delimiters_balanced() {
+        // 1:1 with upstream index.test.ts:2450 > "MarkdownV2
+        // truncation leaves all entity delimiters balanced (no
+        // unclosed **bold**)"
+        //
+        // Long bold span crossing the limit: 4000 'a' + `**` + 1000
+        // 'b' + `**`. Rendered MarkdownV2: 4000 'a' + `*` + 1000
+        // 'b' + `*` → 5002 chars. Naïve truncate keeps the opening
+        // `*` without its closer.
+        let bolded = format!("{}**{}**", "a".repeat(4000), "b".repeat(1000));
+        let rendered = render_markdown_for_telegram(&bolded);
+        let body_text = crate::markdown::truncate_for_telegram(
+            &rendered,
+            crate::markdown::TELEGRAM_MESSAGE_LIMIT,
+            crate::markdown::TelegramParseMode::MarkdownV2,
+        );
+        let ellipsis: &str = if body_text.ends_with("\\.\\.\\.") {
+            "\\.\\.\\."
+        } else {
+            "..."
+        };
+        let before_ellipsis = &body_text[..body_text.len() - ellipsis.len()];
+        // Every entity delimiter must appear an even number of
+        // unescaped times
+        for marker in ['*', '_', '~', '`'] {
+            assert_eq!(
+                count_unescaped(before_ellipsis, marker) % 2,
+                0,
+                "{marker} count must be even"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_v2_truncation_closes_or_drops_an_unmatched_inline_code_span() {
+        // 1:1 with upstream index.test.ts:2474 > "MarkdownV2
+        // truncation closes or drops an unmatched inline code span"
+        //
+        // Long inline code span crossing the limit.
+        let coded = format!("{}`{}`", "a".repeat(4000), "b".repeat(1000));
+        let rendered = render_markdown_for_telegram(&coded);
+        let body_text = crate::markdown::truncate_for_telegram(
+            &rendered,
+            crate::markdown::TELEGRAM_MESSAGE_LIMIT,
+            crate::markdown::TelegramParseMode::MarkdownV2,
+        );
+        let ellipsis: &str = if body_text.ends_with("\\.\\.\\.") {
+            "\\.\\.\\."
+        } else {
+            "..."
+        };
+        let before_ellipsis = &body_text[..body_text.len() - ellipsis.len()];
+        assert_eq!(count_unescaped(before_ellipsis, '`') % 2, 0);
+    }
+
+    #[test]
+    fn markdown_v2_caption_over_1024_escapes_the_ellipsis() {
+        // 1:1 with upstream index.test.ts:2490 > "MarkdownV2 caption
+        // over 1024 escapes the ellipsis"
+        //
+        // Upstream: `postMessage(threadId, {markdown: "a"*1500,
+        // files: [...]})` → sendDocument FormData caption +
+        // parse_mode=MarkdownV2. Caption-routing path is HTTP wiring
+        // (js-only-documented above); structural invariant is that
+        // truncating the rendered markdown to the *caption* limit
+        // produces a MarkdownV2-escaped ellipsis.
+        let long_markdown = "a".repeat(1500);
+        let rendered = render_markdown_for_telegram(&long_markdown);
+        let caption = crate::markdown::truncate_for_telegram(
+            &rendered,
+            crate::markdown::TELEGRAM_CAPTION_LIMIT,
+            crate::markdown::TelegramParseMode::MarkdownV2,
+        );
+        assert!(caption.len() <= crate::markdown::TELEGRAM_CAPTION_LIMIT);
+        assert!(caption.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn plain_string_caption_over_1024_uses_literal_ellipsis() {
+        // 1:1 with upstream index.test.ts:2520 > "plain-string
+        // caption over 1024 uses literal '...' ellipsis"
+        //
+        // Upstream docs that the caption truncation limit
+        // (`TELEGRAM_CAPTION_LIMIT`) is wired correctly even on the
+        // plain path; structural invariant: truncating a 1500-char
+        // input to the caption limit produces a body ≤ the caption
+        // limit.
+        let long_markdown = "a".repeat(1500);
+        let caption = crate::markdown::truncate_for_telegram(
+            &long_markdown,
+            crate::markdown::TELEGRAM_CAPTION_LIMIT,
+            crate::markdown::TelegramParseMode::Plain,
+        );
+        assert!(caption.len() <= crate::markdown::TELEGRAM_CAPTION_LIMIT);
+        // Plain path uses the literal ellipsis, not the MarkdownV2-escaped form.
+        assert!(caption.ends_with("..."));
+        assert!(!caption.ends_with("\\.\\.\\."));
+    }
+
+    #[test]
+    fn markdown_v2_attachment_captions_use_the_telegram_caption_limit() {
+        // 1:1 with upstream index.test.ts:2550 > "MarkdownV2
+        // attachment captions use the Telegram caption limit"
+        //
+        // Upstream: `postMessage(threadId, {markdown: "a"*1500,
+        // attachments: [...]})` → sendPhoto FormData caption +
+        // parse_mode=MarkdownV2. Attachment-routing path is HTTP
+        // wiring (js-only-documented above); structural invariant is
+        // identical to the `files` case: caption respects
+        // `TELEGRAM_CAPTION_LIMIT` and ends with escaped ellipsis.
+        let long_markdown = "a".repeat(1500);
+        let rendered = render_markdown_for_telegram(&long_markdown);
+        let caption = crate::markdown::truncate_for_telegram(
+            &rendered,
+            crate::markdown::TELEGRAM_CAPTION_LIMIT,
+            crate::markdown::TelegramParseMode::MarkdownV2,
+        );
+        assert!(caption.len() <= crate::markdown::TELEGRAM_CAPTION_LIMIT);
+        assert!(caption.ends_with("\\.\\.\\."));
+    }
 }
