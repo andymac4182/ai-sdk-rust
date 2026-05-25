@@ -2479,6 +2479,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   upstream `workflow-agent-e2e.integration.test.ts` `completes within
   timeout`, proving the workflow agent accepts the portable stream timeout
   option and still completes the fast mock-model run successfully.
+- 2026-05-26: WorkflowAgent instruction-string e2e parity added the named Rust
+  counterpart `workflow_agent_upstream_should_pass_string_instructions_to_the_model`
+  for upstream `workflow-agent-e2e.integration.test.ts` `string instructions
+  are passed to the model`, proving constructor instructions are prepended to
+  the prompt that reaches the deterministic workflow executor.
 - 2026-05-26: WorkflowAgent message-propagation parity added named Rust
   counterparts for upstream `workflow-agent.test.ts` `should pass messages to
   multiple tools in parallel execution` and `should pass updated messages on
