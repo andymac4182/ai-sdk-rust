@@ -644,6 +644,9 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level telemetry settings that override constructor defaults.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Stream-level timeout in milliseconds.
+    pub timeout: Option<u64>,
+
     /// Whether raw provider chunks should be included in step results.
     pub include_raw_chunks: bool,
 
@@ -705,6 +708,7 @@ impl<E> WorkflowAgentStreamOptions<E> {
             executor,
             generation_settings: None,
             telemetry: None,
+            timeout: None,
             include_raw_chunks: false,
             runtime_context: WorkflowRuntimeContext::new(),
             tools_context: WorkflowToolsContext::new(),
@@ -737,6 +741,12 @@ impl<E> WorkflowAgentStreamOptions<E> {
     /// Sets stream-level telemetry settings.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets the stream-level timeout in milliseconds.
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout = Some(timeout_ms);
         self
     }
 
@@ -4144,6 +4154,32 @@ mod tests {
                 ])),
             ]
         );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_complete_within_timeout() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "fast response",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                finish(FinishReason::Stop),
+            ],
+            0,
+        )]);
+
+        let result =
+            poll_ready(agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor).with_timeout(30_000),
+            ))
+            .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].text, "fast response");
     }
 
     #[test]

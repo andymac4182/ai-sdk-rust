@@ -2474,6 +2474,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   for upstream `workflow-agent-e2e.integration.test.ts` `basic text response`,
   proving the agent can stream a single non-tool round-trip from prompt to
   assistant text result.
+- 2026-05-26: WorkflowAgent timeout e2e parity added the named Rust
+  counterpart `workflow_agent_upstream_should_complete_within_timeout` for
+  upstream `workflow-agent-e2e.integration.test.ts` `completes within
+  timeout`, proving the workflow agent accepts the portable stream timeout
+  option and still completes the fast mock-model run successfully.
 - 2026-05-26: WorkflowAgent message-propagation parity added named Rust
   counterparts for upstream `workflow-agent.test.ts` `should pass messages to
   multiple tools in parallel execution` and `should pass updated messages on
