@@ -948,6 +948,27 @@ pub struct OpenModalResult {
     pub view_id: String,
 }
 
+/// Result of [`Adapter::post_channel_message_sent`]. 1:1 with
+/// upstream's richer `postChannelMessage` response shape
+/// `{id, threadId?, raw}` — id is the platform-assigned message
+/// id, threadId is an optional override when the platform routed
+/// the channel post into a thread inside that channel, raw is the
+/// platform-specific response payload preserved for adapter
+/// inspection. (slice 490)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedChannelMessage {
+    pub id: String,
+    /// Optional thread-id override. When `Some`, the channel post
+    /// was actually routed into a thread within the channel; the
+    /// resulting [`crate::thread::SentMessage`] carries this id so
+    /// subsequent edit/delete/reaction operations target the
+    /// thread instead of the channel root.
+    #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub raw: serde_json::Value,
+}
+
 /// Result of posting an ephemeral message. 1:1 port of upstream
 /// `interface EphemeralMessage`. Ephemeral messages are visible only to a
 /// specific user and typically cannot be edited or deleted (platform-dependent).
@@ -1595,6 +1616,24 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         _message: &serde_json::Value,
     ) -> AdapterResult<String> {
         Err(AdapterError::Unsupported("post_channel_message_postable"))
+    }
+
+    /// Richer variant of [`Self::post_channel_message`] that returns
+    /// a [`PostedChannelMessage`] envelope — id + optional
+    /// thread-id override + raw payload. 1:1 with upstream's
+    /// `postChannelMessage` overload that returns `{id, threadId?,
+    /// raw}` instead of just `{id}`; used when the platform's
+    /// channel-post response actually targeted a thread inside the
+    /// channel (e.g. Slack's thread_ts override). Adapters that
+    /// want this override path implement it; the default returns
+    /// `Err(Unsupported)` and [`crate::channel::Channel::post_sent_message`]
+    /// falls back to the string-only method. (slice 490)
+    async fn post_channel_message_sent(
+        &self,
+        _channel_id: &str,
+        _text: &str,
+    ) -> AdapterResult<PostedChannelMessage> {
+        Err(AdapterError::Unsupported("post_channel_message_sent"))
     }
 
     /// Optional native scheduled-message dispatch. 1:1 with upstream
