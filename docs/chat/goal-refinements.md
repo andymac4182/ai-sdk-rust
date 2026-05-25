@@ -5549,3 +5549,119 @@ Slash Commands to 10/11 portable (+1 js-only), and Actions to
 - Inherit prior unchanged deferreds (concurrency=queue
   dispatcher, attachment rehydration, SentMessage refactor,
   `MemoryStateAdapter::no_op()` test helper).
+
+## Cycle 483..487 (structural refactors closing previously-deferred items)
+
+Five consecutive structural slices unblocking the long-tail
+items the cycle 471..475 + 477..481 refinements flagged. Tests
+go 932 → 949 (+17), with Actions closing to 14/15 portable +
+1 js-only, schedule to 21/24 portable + 2 js-only + 1 deferred,
+and Channel post 3/3 + ChannelImpl.post SentMessage-flow 5/6
+portable + 1 deferred.
+
+**What the brief got wrong or left out**
+
+- **The "additive sibling-method" pattern is the right shape for
+  typed-payload variants.** Slices 484 (Adapter::schedule_message_postable),
+  485 (Adapter::post_channel_message_postable), and 487 (the
+  Channel::post_sent_message wrapper) all add a sibling Adapter
+  method/Channel method that accepts a richer payload shape
+  (`serde_json::Value` for typed PostableMessage unions; a
+  synthesized full Message for SentMessage). The original
+  string-only method stays unchanged. Pattern: when upstream's
+  method signature accepts a union, the Rust port adds a sibling
+  trait method instead of changing the existing signature —
+  avoids cascading breakage to every adapter crate.
+
+- **Option<Thread> refactor on event handles is straightforward when
+  the adapter is on the event as a sibling field.** Slice 483
+  refactored `ActionEvent.thread: Thread` → `Option<Thread>` and
+  also added `adapter: Arc<dyn Adapter>` so `open_modal` doesn't
+  depend on thread presence. Pattern for future event refactors:
+  if a struct field can become None for legitimate upstream cases,
+  hoist any adapter/state access to a sibling field on the event,
+  not through the now-optional handle.
+
+- **`now_iso_utc` without chrono is ~30 LOC of Howard-Hinnant date
+  math.** Slice 487 needed an ISO timestamp for the synthesized
+  Message.metadata.date_sent. Pulling in `chrono` is overkill;
+  the inline helper using `SystemTime` + civil-date conversion
+  formula is small enough. Cookbook entry: don't add a date
+  library dependency for a single use site; use SystemTime +
+  manual ISO formatting.
+
+- **Synthesizing a Message from a post-call response is acceptable
+  when the platform doesn't return one.** Slice 487's
+  `Channel::post_sent_message` synthesizes a Message from just
+  the returned id + the posted text + a bot-author shell + the
+  current timestamp. This loses platform-provided fields
+  (real author identity, real timestamp from the platform's
+  server, raw payload) but is observably correct for the
+  upstream test cases (edit/delete/reaction operations all
+  thread through the right adapter methods with the right
+  message id). The platform-side richness can be added later
+  via a `Adapter::post_channel_message_returning_sent` overload.
+
+- **The 5-cycle refinement schedule is working.** Cycles 471..475,
+  477..481, and 483..487 each closed 3-5 deferred items and
+  added concrete pattern documentation. The discipline of
+  pausing every 5 cycles to reflect prevents the slice cadence
+  from drifting into pure-mechanical-port mode.
+
+**Stale or misleading guidance**
+
+- The brief's "ChannelImpl.post error cases" deferral note is
+  now mostly resolved by slice 487 (5/6 portable). Only the
+  threadId-override case remains, which requires
+  `Adapter::post_channel_message` to return a richer
+  `{id, threadId?}` struct instead of just `String`. That's a
+  follow-up trait-extension slice candidate.
+
+- The brief still mentions the `~75 cases remain deferred behind
+  openModal / callbackUrl POSTs + lock/concurrency/queue
+  dispatcher` figure from before cycles 471..487. After this
+  refinement the remaining deferred chat-sdk-chat cases are
+  approximately: 1 channel threadId-override, 1 schedule
+  object-identity, 1 lockScope queue, 1 dedupe race — about 4
+  cases, all behind specific structural pieces.
+
+**Edits applied**
+
+- `crates/chat-sdk-chat/src/chat.rs`: `ActionEvent.thread` →
+  `Option<Thread>` + `adapter` field; empty-threadId test case
+  (slice 483).
+- `crates/chat-sdk-chat/src/types.rs`:
+  `Adapter::schedule_message_postable` + `Adapter::post_channel_message_postable`
+  sibling trait methods, default `Err(Unsupported)` (slices 484, 485).
+- `crates/chat-sdk-chat/src/thread.rs`: `Thread::schedule_postable`
+  + 3 PostableMessage variant tests (slice 484); `SentMessage::new`
+  public constructor (slice 487).
+- `crates/chat-sdk-chat/src/channel.rs`: `Channel::post_stream`
+  + `PostStreamResult` + streaming-accumulates test (slice 485);
+  `Channel::post_sent_message` + `now_iso_utc` helper + 5
+  SentMessage-flow tests (slice 487).
+- `docs/chat/upstream-parity.md`: per-block count corrections
+  on chat.test.ts (Actions 14/15), thread.test.ts (schedule
+  21/24), channel.test.ts (post 3/3 + SentMessage-flow 5/6).
+- `crates/chat-sdk-chat/src/chat.rs`: explicit js-only
+  enumeration for 2 JSX-modal cases (slice 486).
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- `Adapter::post_channel_message_returning_sent` overload for
+  the threadId-override channel.post case.
+- `Adapter::schedule_message_returning_sent` overload for the
+  schedule object-identity case (referential-equality with the
+  adapter's ScheduledMessage instance).
+- Concurrency=queue dispatcher to close lockScope #5 and
+  dedupe #4 cases. This needs a per-thread queue inside Chat
+  + a `ChatOptions.concurrency: Drop | Queue` field. Touches
+  the main dispatcher.
+- Tighten the brief's slice-59 "Next Unported Work Queue" and
+  the `~75 cases remain` figure (carry-over from all prior
+  refinements).
+- Mark `Phase 1.5 trait-extension session` block as completed
+  (carry-over).
+- Inherit prior unchanged deferreds (attachment rehydration,
+  `MemoryStateAdapter::no_op()` test helper).
