@@ -2469,6 +2469,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   subsequent tool call rounds`, proving each local tool invocation sees the
   current round prompt and that later tool-call rounds include prior tool
   results.
+- 2026-05-26: WorkflowAgent compat inventory refresh confirmed the remaining
+  portable upstream forwarding gaps are `stopWhen`,
+  `experimental_repairToolCall`, and `onError`; the upstream
+  `collectUIMessages` block is now commented out in `workflow-agent.test.ts`
+  and is documented as intentionally non-portable rather than parity debt.
 - 2026-05-26: WorkflowAgent result-shape parity added the named Rust
   counterpart `workflow_agent_upstream_should_return_messages_and_steps_in_result`,
   proving the stream result exposes both the final conversation messages and
@@ -5089,6 +5094,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    standalone providers.
    Standalone provider slices are blocked while any of these rows are not yet
    verified or explicitly documented as intentionally non-portable.
+   Workflow currently still has portable forwarding gaps for
+   `stopWhen`, `experimental_repairToolCall`, and `onError`; the upstream
+   `collectUIMessages` block is commented out and is treated as intentionally
+   non-portable.
    Within this gate, use the current hard package order as the slice selection
    rule at the start of every iteration: choose the first package below 100% in
    this order and stay on it until it is verified or explicitly documented as
