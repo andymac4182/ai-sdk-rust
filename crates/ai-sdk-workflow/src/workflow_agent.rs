@@ -3341,6 +3341,80 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_pass_undefined_context_when_no_tools_context_entry_exists() {
+        let received_context = Arc::new(Mutex::new(Some(json!({"unexpected": true}))));
+        let received_context_for_tool = Arc::clone(&received_context);
+        let tool = Tool::new("weather", object_schema()).with_execute(move |_, options| {
+            let received_context = Arc::clone(&received_context_for_tool);
+            async move {
+                *received_context.lock().expect("context lock succeeds") = options.context;
+                Ok(json!({ "result": "ok" }))
+            }
+        });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new("call-1", "weather", "{}")),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *received_context.lock().expect("context lock succeeds"),
+            None
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_runtime_context_to_on_finish() {
+        let captured_finish = Arc::new(Mutex::new(None));
+        let captured_finish_for_callback = Arc::clone(&captured_finish);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_finish(
+            WorkflowAgentOnFinishCallback::new(move |info| {
+                *captured_finish_for_callback
+                    .lock()
+                    .expect("finish lock succeeds") = Some(info);
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+        let runtime_context = serde_json::from_value(json!({
+            "tenantId": "tenant_123"
+        }))
+        .expect("runtime context");
+        let tools_context = {
+            let mut context = WorkflowToolsContext::new();
+            context.insert(
+                "weather".to_string(),
+                Some(
+                    serde_json::from_value(json!({
+                        "unit": "fahrenheit"
+                    }))
+                    .expect("tools context"),
+                ),
+            );
+            context
+        };
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_runtime_context(runtime_context.clone())
+                    .with_tools_context(tools_context.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let captured_finish = captured_finish
+            .lock()
+            .expect("finish lock succeeds")
+            .clone()
+            .expect("finish info was captured");
+        assert_eq!(captured_finish.runtime_context, runtime_context);
+        assert_eq!(captured_finish.tools_context, tools_context);
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator() {
         let injected_message = user_text_message("injected message");
         let prepare_injected_message = injected_message.clone();
