@@ -3681,7 +3681,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   refresh-token authorization, retried GET/POST requests with the fresh token,
   and authenticated session DELETE cleanup against deterministic loopback HTTP.
   Interactive hosted MCP OAuth and protected live service validation remain in
-  progress because they require external user/service credentials.
+  progress because they require external user/service credentials, and this
+  checkout does not expose a live protected MCP target to run against.
 - 2026-05-22: MCP SSE transport OAuth provider parity added
   `SseMcpTransport::with_auth_provider` now mirrors upstream `SseMCPTransport`
   token-header and one-shot 401 retry behavior for both initial SSE connection
@@ -3691,7 +3692,9 @@ focused tests for each portable behavior before changing rows to `verified`.
   cover `WWW-Authenticate` protected-resource discovery, refresh-token auth,
   retried connection/POST requests with the fresh bearer token, and parsed
   endpoint POST JSON-RPC responses through deterministic loopback HTTP. Hosted
-  interactive MCP OAuth and protected live service proof remain in progress.
+  interactive MCP OAuth and protected live service proof remain in progress,
+  and this checkout does not expose a live protected MCP target to run
+  against.
 - 2026-05-22: MCP transport config hosted-auth parity added
   `McpTransportConfig`, `create_mcp_transport`, and
   `McpClientConfig::from_transport_config` now mirror upstream
@@ -3708,7 +3711,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   performs dynamic client registration, PKCE redirect/callback exchange, token
   exchange, `McpTransportConfig::http(...).with_auth_provider(...)` client
   creation, protected tool listing/calling, and authenticated session cleanup.
-  Protected live service proof remains credential-gated.
+  Protected live service proof remains credential-gated, and this checkout
+  does not expose a live protected MCP target to run against.
 - 2026-05-20: MCP stdio typed-tool example added
   `cargo run -p ai-sdk-mcp --example stdio_typed_tools` now self-spawns a local
   MCP stdio server using `StdioMcpTransport`, initializes a package-owned client,
