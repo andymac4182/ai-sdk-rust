@@ -5260,6 +5260,31 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_records_downgraded_protocol_version_when_server_negotiates_an_older_supported_version()
+     {
+        let transport = MockMcpTransport::new().with_initialize_result(InitializeResult {
+            protocol_version: "2025-06-18".to_string(),
+            capabilities: ServerCapabilities {
+                tools: Some(JsonObject::new()),
+                ..ServerCapabilities::default()
+            },
+            server_info: Configuration::new("downgraded-server", "1.0.0"),
+            instructions: None,
+            meta: None,
+        });
+
+        let client =
+            create_mcp_client(McpClientConfig::new(transport.clone())).expect("client initializes");
+
+        assert_eq!(
+            transport.negotiated_protocol_version().as_deref(),
+            Some("2025-06-18")
+        );
+
+        client.close().expect("client closes");
+    }
+
+    #[test]
     fn mcp_client_lists_calls_reads_resources_and_prompts() {
         let client = create_mcp_client(McpClientConfig::new(MockMcpTransport::new()))
             .expect("client initializes");
