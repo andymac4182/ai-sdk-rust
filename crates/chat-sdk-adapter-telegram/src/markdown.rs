@@ -759,32 +759,63 @@ mod tests {
         );
     }
 
-    // ---------- renderPostable ----------
+    // ---------- renderPostable (6 upstream cases) ----------
+    //
+    // 1:1 with upstream `packages/adapter-telegram/src/markdown.test.ts`
+    // `describe("renderPostable")` (L354-389). The Rust port exposes
+    // the underlying postable variants as four typed methods
+    // (`render_postable_string` / `render_postable_raw` /
+    // `render_postable_markdown` / `render_postable_ast`); the
+    // upstream `renderPostable(postable)` dispatches on the
+    // `{raw|markdown|ast|string}` discriminator at runtime.
 
     #[test]
     fn render_postable_string_passthrough() {
+        // 1:1 with upstream markdown.test.ts:355 > "returns a plain string as-is"
         let c = TelegramFormatConverter::new();
-        assert_eq!(c.render_postable_string("hi"), "hi");
+        assert_eq!(c.render_postable_string("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn render_postable_returns_an_empty_string_unchanged() {
+        // 1:1 with upstream markdown.test.ts:359 > "returns an empty string unchanged"
+        let c = TelegramFormatConverter::new();
+        assert_eq!(c.render_postable_string(""), "");
     }
 
     #[test]
     fn render_postable_raw_passthrough() {
+        // 1:1 with upstream markdown.test.ts:363 > "returns a raw message directly"
         let c = TelegramFormatConverter::new();
-        assert_eq!(c.render_postable_raw("raw"), "raw");
+        assert_eq!(c.render_postable_raw("raw content"), "raw content");
     }
 
     #[test]
     fn render_postable_markdown_converts_to_v2() {
+        // 1:1 with upstream markdown.test.ts:369 > "renders a markdown message as MarkdownV2"
         let c = TelegramFormatConverter::new();
-        let result = c.render_postable_markdown("**bold**").unwrap();
-        assert_eq!(result, "*bold*");
+        let result = c.render_postable_markdown("**bold** and *italic*").unwrap();
+        assert!(result.contains("*bold*"), "got: {result}");
+        assert!(result.contains("_italic_"), "got: {result}");
     }
 
     #[test]
     fn render_postable_ast_converts_to_v2() {
+        // 1:1 with upstream markdown.test.ts:377 > "renders an AST message"
         let c = TelegramFormatConverter::new();
-        let ast = c.to_ast("**bold**").unwrap();
-        assert_eq!(c.render_postable_ast(&ast), "*bold*");
+        let ast = c.to_ast("Hello from AST").unwrap();
+        assert!(c.render_postable_ast(&ast).contains("Hello from AST"));
+    }
+
+    #[test]
+    fn render_postable_renders_a_markdown_table_as_a_code_block() {
+        // 1:1 with upstream markdown.test.ts:382 > "renders a markdown table as a code block"
+        let c = TelegramFormatConverter::new();
+        let result = c
+            .render_postable_markdown("| A | B |\n| --- | --- |\n| 1 | 2 |")
+            .unwrap();
+        assert!(result.contains("```"), "got: {result}");
+        assert!(result.contains("A"), "got: {result}");
     }
 
     // ---------- links and images (4 upstream cases) ----------
@@ -920,7 +951,7 @@ mod tests {
         assert!(!output.contains("<b>"), "got: {output}");
     }
 
-    // ---------- corpus validity invariants (2 upstream cases) ----------
+    // ---------- corpus validity invariants (3 upstream cases) ----------
 
     const LLM_CORPUS: &str = "# Trip Summary: Morocco\n\nHere's your **personalized** 7-day itinerary. Price: $2,450 per person (all-inclusive)!\n\n## Day 1 — Arrival in Marrakech\n\n- Airport pickup at 14:30\n- Check-in at *Riad El Fenn* (4-star)\n- Welcome dinner: [La Mamounia](https://www.mamounia.com/restaurants)\n\n> Tip: bring cash — not every souk accepts cards.\n\n## Day 2 — Atlas Mountains\n\n1. 08:00 breakfast\n2. 09:00 departure (2h drive)\n3. Hike to Toubkal base camp\n\nPack: `sunscreen`, `hiking boots`, *layers* (temperatures drop ~10°C).\n\n```bash\n# Exchange rate check\ncurl 'https://api.rates.io/MAD' | jq '.rate'\n```\n\n| Day | Activity | Cost |\n|-----|----------|------|\n| 1 | Arrival | $200 |\n| 2 | Atlas | $350 |\n\n---\n\n~~Previous version priced at $2,800~~. New total: **$2,450**.";
 
@@ -963,6 +994,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn corpus_preserves_code_block_contents_verbatim_no_over_escaping() {
+        // 1:1 with upstream markdown.test.ts:342 > "preserves code block contents verbatim (no over-escaping)"
+        let output = rt(LLM_CORPUS);
+        // Find the bash fenced code block.
+        let start = output.find("```bash").expect("bash fence open");
+        let after_open = &output[start + "```bash".len()..];
+        // Skip the newline after the language tag.
+        let body_start = after_open.find('\n').expect("newline after ```bash") + 1;
+        let body_start_abs = start + "```bash".len() + body_start;
+        let body_end_rel = output[body_start_abs..]
+            .find("```")
+            .expect("bash fence close");
+        let code_content = &output[body_start_abs..body_start_abs + body_end_rel];
+        // These symbols must appear literally - MarkdownV2 only
+        // escapes ` and \ inside code blocks.
+        assert!(code_content.contains('\''), "got: {code_content}");
+        assert!(code_content.contains('|'), "got: {code_content}");
+        assert!(code_content.contains('.'), "got: {code_content}");
     }
 
     /// Test helper: strip ```…``` fenced blocks, `…` inline-code, and
@@ -1034,6 +1086,51 @@ mod tests {
             i += 1;
         }
         out2
+    }
+
+    // ---------- toAst (4 upstream cases) ----------
+    //
+    // 1:1 with upstream `packages/adapter-telegram/src/markdown.test.ts`
+    // `describe("toAst")` (L391-415). Each case asserts the parsed
+    // root carries `type === "root"` and has at least one child.
+
+    fn assert_root_with_children(ast: &chat_sdk_chat::markdown::Node) {
+        let chat_sdk_chat::markdown::Node::Root(root) = ast else {
+            panic!("expected Root node, got {ast:?}");
+        };
+        assert!(!root.children.is_empty(), "expected non-empty children");
+    }
+
+    #[test]
+    fn to_ast_parses_plain_text() {
+        // 1:1 with upstream markdown.test.ts:392 > "parses plain text"
+        let c = TelegramFormatConverter::new();
+        let ast = c.to_ast("Hello world").unwrap();
+        assert_root_with_children(&ast);
+    }
+
+    #[test]
+    fn to_ast_parses_bold() {
+        // 1:1 with upstream markdown.test.ts:398 > "parses bold"
+        let c = TelegramFormatConverter::new();
+        let ast = c.to_ast("**bold**").unwrap();
+        assert_root_with_children(&ast);
+    }
+
+    #[test]
+    fn to_ast_parses_italic() {
+        // 1:1 with upstream markdown.test.ts:404 > "parses italic"
+        let c = TelegramFormatConverter::new();
+        let ast = c.to_ast("*italic*").unwrap();
+        assert_root_with_children(&ast);
+    }
+
+    #[test]
+    fn to_ast_parses_inline_code() {
+        // 1:1 with upstream markdown.test.ts:410 > "parses inline code"
+        let c = TelegramFormatConverter::new();
+        let ast = c.to_ast("`code`").unwrap();
+        assert_root_with_children(&ast);
     }
 
     // ---------- escape helpers ----------
