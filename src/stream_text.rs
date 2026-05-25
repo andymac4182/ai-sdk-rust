@@ -4822,8 +4822,9 @@ mod tests {
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider_utils::{
-        DownloadedBlob, ExecuteToolOutput, SandboxCommandOptions, SandboxCommandResult,
-        SandboxRunCommandFuture, Schema, Tool, ToolExecutionError, ValidationResult,
+        DelayedPromise, DownloadedBlob, ExecuteToolOutput, SandboxCommandOptions,
+        SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool, ToolExecutionError,
+        ValidationResult,
     };
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
@@ -4845,6 +4846,12 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("mock futures should be ready"),
         }
+    }
+
+    fn poll_once<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        future.poll(&mut context)
     }
 
     fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
@@ -11266,6 +11273,125 @@ mod tests {
         let stream_calls = model.stream_calls();
         assert_eq!(stream_calls.len(), 1);
         assert!(stream_calls[0].abort_signal.is_none());
+    }
+
+    struct DelayedStreamLanguageModel {
+        delayed: Arc<DelayedPromise<()>>,
+    }
+
+    impl DelayedStreamLanguageModel {
+        fn new(delayed: Arc<DelayedPromise<()>>) -> Self {
+            Self { delayed }
+        }
+    }
+
+    impl LanguageModel for DelayedStreamLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = std::future::Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = std::future::Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Pin<Box<dyn Future<Output = LanguageModelStreamResult<Self::Stream>> + Send + 'a>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            std::future::ready(BTreeMap::new())
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            std::future::ready(LanguageModelGenerateResult::new(
+                Vec::new(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Other,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            let delayed = Arc::clone(&self.delayed);
+            Box::pin(async move {
+                let _ = delayed.promise().await;
+                LanguageModelStreamResult::new(Vec::new())
+            })
+        }
+    }
+
+    #[test]
+    fn stream_text_aborts_while_waiting_for_do_stream_and_invokes_on_abort() {
+        let delayed = Arc::new(DelayedPromise::<()>::new());
+        let model = DelayedStreamLanguageModel::new(Arc::clone(&delayed));
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let abort_events = Arc::new(Mutex::new(Vec::<StreamTextOnAbortEvent>::new()));
+        let events = Arc::clone(&abort_events);
+
+        let mut result = Box::pin(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_abort_signal(abort_signal.clone())
+                .with_on_abort(move |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().expect("abort events lock").push(event);
+                    }
+                }),
+        ));
+
+        assert!(matches!(poll_once(result.as_mut()), Poll::Pending));
+
+        abort_controller.abort_with_reason("client-disconnected");
+        delayed.resolve(());
+
+        let result = loop {
+            match poll_once(result.as_mut()) {
+                Poll::Ready(result) => break result,
+                Poll::Pending => continue,
+            }
+        };
+
+        assert!(model.delayed.is_resolved());
+        assert!(!model.delayed.is_pending());
+        assert!(!model.delayed.is_rejected());
+        assert_eq!(result.steps.len(), 0);
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step", "request": {}, "warnings": [] },
+                { "type": "abort", "reason": "client-disconnected" }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "abort", "reason": "client-disconnected" }
+            ])
+        );
+
+        let events = abort_events.lock().expect("abort events lock");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].steps.is_empty());
+        assert_eq!(events[0].reason, Some(json!("client-disconnected")));
     }
 
     #[test]
