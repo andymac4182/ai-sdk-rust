@@ -3,11 +3,11 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 91.7%
-- Portable package average: 90.0%
-- Closed package rows: 13 / 18
-- Strict portable verified rows: 10 / 15
-- In-progress rows: 5
+- Average estimated completion: 93.3%
+- Portable package average: 92.0%
+- Closed package rows: 14 / 18
+- Strict portable verified rows: 11 / 15
+- In-progress rows: 4
 - Not-started rows: 0
 
 ## 100% Closed
@@ -20,6 +20,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/state-memory` | 100% | Verified | state backend (in-memory) |
 | `@chat-sdk/adapter-teams` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-discord` | 100% | Verified | adapter package |
+| `@chat-sdk/adapter-messenger` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-telegram` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-whatsapp` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-web` | 100% | JavaScript-only | adapter package |
@@ -36,7 +37,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-gchat` | 75% | In progress | adapter package | chat-sdk-adapter-gchat 134 tests (slice 357 adds post_ephemeral via privateMessageViewer pure helpers + 4 cases, slice... |
 | `@chat-sdk/adapter-linear` | 60% | In progress | adapter package | chat-sdk-adapter-linear 113 tests (slice 366 adds Adapter trait impls, slice 406 splits channelIdFromThreadId into 3... |
 | `@chat-sdk/adapter-github` | 60% | In progress | adapter package | chat-sdk-adapter-github 107 tests (slice 368 splits bundled emojiToGitHubReaction into 16 explicit 1:1 cases, slice... |
-| `@chat-sdk/adapter-messenger` | 70% | In progress | adapter package | chat-sdk-adapter-messenger 102 tests (slice 369 adds normalize_thread_id helper, slice 370 adds Adapter::open_dm trait... |
 
 ## Not Started
 

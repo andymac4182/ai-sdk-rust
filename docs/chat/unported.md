@@ -61,6 +61,15 @@ the structurally-unportable cases.
   constructor parameter, ESM compatibility subprocess assertion,
   `createTeamsAdapter` function-export typeof check, subclass
   extensibility.
+- **`chat-sdk-adapter-messenger`** — Vitest `vi.fn()`-mocked
+  HTTP-fetch cases under `describe("initialization")` +
+  `describe("webhook handling - payload validation / message
+  processing / postback handling / reaction handling")` +
+  `describe("messaging - posting messages / streaming")` +
+  `describe("attachments - downloadAttachment*")` +
+  `describe("thread and channel info")` +
+  `describe("Graph API error handling")`, subclass extensibility,
+  invalid-postable-shape TypeError.
 - **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
@@ -363,3 +372,26 @@ Mapped accounting: 129 Rust-mapped + 25 js-only-documented =
 154/154 upstream cases accounted for. Remaining 129 cases are
 ported as colocated `#[cfg(test)] mod tests` in
 [`crates/chat-sdk-adapter-teams/src/{lib,parse,cards,markdown,errors,modals,graph_api,thread_id}.rs`](../../crates/chat-sdk-adapter-teams/src/).
+
+---
+
+## Section: `chat-sdk-adapter-messenger`
+
+### `packages/adapter-messenger/src/{index,markdown,cards}.test.ts` (36 unportable cases of 169)
+
+The Rust port maps 133 of the 169 upstream cases (cards 45/45 +
+markdown 10/11 + index 78/113). The remaining 36 cases fall under
+the cross-cutting js-only-documented sweep patterns (slice 411
+Vitest `vi.fn()` HTTP-fetch mock + slice 380 type-system-impossible
++ slice 447 default-Logger constructor) and are enumerated below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked HTTP fetch | 34 listed in [`crates/chat-sdk-adapter-messenger/src/lib.rs`](../../crates/chat-sdk-adapter-messenger/src/lib.rs) test-mod header: `describe("initialization")` (4 cases — `/me` fetch + `mockLogger.warn` chain) + `describe("webhook handling") > describe("payload validation")` (3 cases — synthetic Request 400/404/200 dispatch) + `describe("webhook handling") > describe("message processing")` (8 cases — `mockChat.processMessage` runtime dispatch through synthetic Request) + `describe("webhook handling") > describe("postback handling")` (3 cases — `mockChat.processAction.mock.calls[0][0]` shape) + `describe("webhook handling") > describe("reaction handling")` (2 cases — `mockChat.processReaction.mock.calls[0][0].added`) + `describe("messaging") > describe("posting messages")` subset (4 of 8 cases — `caches sent message`, `posts message with markdown content`, `posts message with AST content`, `rejects empty messages`) + `describe("messaging") > describe("streaming")` (2 cases — assertion is on outbound HTTP body via `vi.spyOn(global, "fetch")` + `Adapter` trait lacks `stream`) + `describe("attachments")` subset (3 of 11 cases — `downloads attachment successfully`, `throws NetworkError when attachment download fails`, `throws NetworkError when attachment download returns non-ok`) + `describe("thread and channel info")` subset (5 of 7 cases — `fetches thread info with user profile`, `fetches channel info with user profile`, `falls back to user ID when profile fetch fails`, `caches user profiles on second call`, plus the second `falls back to user ID when profile has no name`) + `describe("Graph API error handling")` subset (3 of 15 cases — `throws NetworkError when fetch throws`, `throws NetworkError when response is not valid JSON`, plus the `await adapter.startTyping(...)` drive path on the 3 fallback-message/code/no-error cases). | Each case asserts on `mockFetch.mock.calls[...]` URL/body/header shape from a sequenced `mockResolvedValueOnce(...)` chain, or on `mockChat.processMessage` / `mockChat.processAction` / `mockChat.processReaction` runtime side-effects through `adapter.handleWebhook(request)` driven by a synthetic `Request` constructor. Requires the upstream Vitest `vi.fn()` fetch-spy + Request/Response infrastructure. | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + body shape are structurally covered via `MessengerAdapter::send_url` + `build_text_message_body` + `build_template_message_body` + `build_typing_body` pure body-builder helpers, structural parsing is covered by `parse::parse_messenger_message` + `parse::extract_attachments` (16 tests in `parse.rs`), pagination by `fetch::paginate_messages` (14 tests in `fetch.rs`), error classification by `errors::classify_graph_api_error` + `errors::graph_api_fetch_error` + `errors::graph_api_json_parse_error` (15 tests in `errors.rs`), and webhook signature verification by `webhook::verify_messenger_signature` (10 tests in `webhook.rs`). Thread/channel info display-name formatting is covered by `profile_display_name` (4 lib.rs tests covering first-only / last-only / both / fallback-id paths). |
+| Subclass extensibility | `describe("subclass extensibility") > exposes protected members and methods to subclasses` (index.test.ts L2131-L2132) (1 case) | TypeScript `protected` access modifier check. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance — the subclass-protected-leak test is unrepresentable by construction. |
+| Invalid-postable-shape TypeError | `markdown.test.ts > describe("renderPostable") > throws on invalid postable message shapes` (markdown.test.ts L62-L66) (1 case) | TypeScript `as never` runtime cast that invokes `BaseFormatConverter::renderPostable` with an unknown discriminator and asserts `throw new TypeError("Unknown postable message shape")`. | The Rust port's `MessengerFormatConverter` exposes per-shape methods (`render_postable_string` / `render_postable_raw` / `render_postable_markdown` / `render_postable_ast`) each type-checked at compile time; there is no runtime "unknown shape" path. The compile-time rejection is the Rust equivalent of the upstream throw and is documented in the test-mod comment in [`crates/chat-sdk-adapter-messenger/src/markdown.rs`](../../crates/chat-sdk-adapter-messenger/src/markdown.rs). |
+
+Mapped accounting: 133 Rust-mapped + 36 js-only-documented =
+169/169 upstream cases accounted for. Remaining 133 cases are
+ported as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-messenger/src/{lib,parse,cards,markdown,errors,fetch,webhook}.rs`](../../crates/chat-sdk-adapter-messenger/src/).
