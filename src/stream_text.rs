@@ -1159,6 +1159,15 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         self
     }
 
+    /// Sets the response format for the streamed generation.
+    pub fn with_response_format(
+        mut self,
+        response_format: crate::language_model::LanguageModelResponseFormat,
+    ) -> Self {
+        self.call_options.response_format = Some(response_format);
+        self
+    }
+
     /// Adds a tool that is available to the model.
     pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
         match tool.into() {
@@ -4758,16 +4767,17 @@ mod tests {
         LanguageModelAssistantMessage, LanguageModelDocumentSource, LanguageModelErrorStreamPart,
         LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
         LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoningDelta,
-        LanguageModelReasoningFile, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
-        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-        LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTextDelta,
-        LanguageModelTextPart, LanguageModelToolApprovalRequest,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
-        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
-        LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultContentPart,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelReasoningFile, LanguageModelResponseFormat, LanguageModelStreamFinish,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
@@ -10599,6 +10609,42 @@ mod tests {
                 .any(|part| matches!(part, TextStreamPart::Raw(_)))
         );
         assert_eq!(model.stream_calls()[0].include_raw_chunks, Some(false));
+    }
+
+    #[test]
+    fn stream_text_passes_response_format_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let response_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("response schema is an object")
+        .clone();
+        let response_format = LanguageModelResponseFormat::json().with_schema(response_schema);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_response_format(response_format.clone()),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        assert_eq!(
+            model.stream_calls()[0].response_format,
+            Some(response_format)
+        );
     }
 
     #[test]
