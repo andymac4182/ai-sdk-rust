@@ -3328,6 +3328,45 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_provide_step_information_to_prepare_step_callback() {
+        let prepare_step_calls = Arc::new(Mutex::new(
+            None::<(WorkflowModelInfo, usize, usize, WorkflowPrompt)>,
+        ));
+        let captured_prepare_step_calls = Arc::clone(&prepare_step_calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        let result = poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_prepare_step(
+                WorkflowPrepareStepCallback::new(move |info| {
+                    *captured_prepare_step_calls
+                        .lock()
+                        .expect("prepare step capture lock succeeds") = Some((
+                        info.model.clone(),
+                        info.step_number,
+                        info.steps.len(),
+                        info.messages.clone(),
+                    ));
+                    WorkflowPrepareStepResult::default()
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 1);
+        let (captured_model, captured_step_number, captured_step_count, captured_messages) =
+            prepare_step_calls
+                .lock()
+                .expect("prepare step capture lock succeeds")
+                .clone()
+                .expect("prepareStep was called");
+        assert_eq!(captured_model, model());
+        assert_eq!(captured_step_number, 0);
+        assert_eq!(captured_step_count, 0);
+        assert_eq!(captured_messages, user_prompt());
+    }
+
+    #[test]
     fn workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop() {
         let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_prepare_step(
             WorkflowPrepareStepCallback::new(|info| {
