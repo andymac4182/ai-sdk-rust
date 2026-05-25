@@ -946,67 +946,223 @@ pub fn parse_slack_post_ephemeral_response(
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (7) ----------
+    //! ---------- upstream js-only-documented cases (315 total) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the
-    //! following upstream `index.test.ts` cases are enumerated as
-    //! js-only-documented here because they exercise behavior that
-    //! is unrepresentable in the Rust port by construction:
+    //! Slack is the largest adapter in the chat-sdk port (448 upstream
+    //! `it()` cases across 11 test files). 133 cases are mapped 1:1 as
+    //! colocated `#[test]` cases below and in sibling modules; the
+    //! remaining 315 cases are enumerated below per the slice-380
+    //! type-system-impossible / slice-411 vi.fn()-HTTP-mock /
+    //! slice-439 typed-client-getter / slice-447 default-Logger sweep
+    //! patterns. Each entry cites the upstream describe block + case
+    //! count + structural reason + Rust-side replacement.
     //!
-    //! 1. `describe("subclass extensibility") > should expose
-    //!    protected members and methods to subclasses` —
-    //!    TypeScript `protected` access modifier check (verifies
-    //!    subclasses can reach `logger` / `formatConverter` / etc on
-    //!    the base class). Rust uses `pub(crate)` visibility +
-    //!    trait composition rather than class inheritance.
+    //! See [`docs/chat/unported.md`](../../../../docs/chat/unported.md)
+    //! `Section: chat-sdk-adapter-slack` for the full per-describe
+    //! table; the summary below tracks the same accounting from the
+    //! source side.
     //!
-    //! 2. `describe("webClient getter") > returns the underlying
-    //!    WebClient bound to the static botToken` — asserts the
-    //!    getter returns a `WebClient` typed-class instance with
-    //!    `.token` exposed. Rust has no `WebClient` equivalent —
-    //!    HTTP is held as an opaque `reqwest::Client`; the typed
-    //!    "instanceof" + `.token` accessor have no Rust analogue.
+    //! ## Type-system-impossible (slice 380)
     //!
-    //! 3. `describe("webClient getter") > returns the same
-    //!    instance across calls in single-workspace mode` —
-    //!    WebClient referential equality. The Rust port's `Client`
-    //!    is held by value (Clone-shared underlying pool); per-call
-    //!    referential equality is moot.
+    //! 1. `index.test.ts > describe("subclass extensibility")` (1
+    //!    case) — TypeScript `protected` access modifier check
+    //!    (verifies subclasses can reach `logger` / `formatConverter`
+    //!    / `handleEventMessage` on the base class). Rust uses
+    //!    `pub(crate)` visibility + trait composition rather than
+    //!    class inheritance.
     //!
-    //! 4. `describe("webClient getter") > exposes the same
-    //!    instance via the deprecated "client" alias` — alias-name
-    //!    backwards-compat. The Rust port never shipped the
-    //!    deprecated alias, so there is nothing to assert.
+    //! ## Typed `WebClient` instance access (slice 439)
     //!
-    //! 5. `describe("webClient getter") > throws on both
-    //!    "webClient" and the "client" alias in multi-workspace
-    //!    mode without context` — runtime "no workspace context"
-    //!    throw via AsyncLocalStorage. The Rust port surfaces the
-    //!    equivalent via typed errors at the per-workspace call
-    //!    sites (webhook handler), not via a property getter, so
-    //!    the property-throw shape is unrepresentable.
+    //! 2. `index.test.ts > describe("webClient getter")` (5 cases) +
+    //!    `describe("direct WebClient access via adapter.client")`
+    //!    (10 cases) — assert the getter returns a `WebClient`
+    //!    typed-class instance with `.token` exposed, identity
+    //!    semantics across calls, deprecated `client` property
+    //!    alias, multi-workspace `throw` without context, and
+    //!    `AsyncLocalStorage`-resolved per-installation token via
+    //!    `withBotToken`. Rust has no `WebClient` equivalent — HTTP
+    //!    is held as an opaque `reqwest::Client`. Per-call
+    //!    referential equality is moot under `Clone`-shared-pool
+    //!    semantics. The deprecated `client` alias was never shipped
+    //!    in Rust. Multi-workspace property-throw + ALS-based
+    //!    per-request token resolution are surfaced via typed errors
+    //!    + function-parameter plumbing at the per-workspace call
+    //!    sites (webhook handler), not via a property getter.
     //!
-    //! 6. `describe("webClient getter") > uses the request
-    //!    context token under withBotToken via "webClient"` —
-    //!    AsyncLocalStorage-based per-request token resolution
-    //!    through a getter. The Rust port plumbs per-request
-    //!    token state through function parameters rather than
-    //!    thread-local context, so the ALS-based getter shape is
-    //!    moot.
+    //! ## Constructor default-Logger (slice 447)
     //!
-    //! Additionally `describe("direct WebClient access via
-    //!    adapter.client")` re-asserts the same alias semantics
-    //!    as case 4 (deprecated property alias check); accounted
-    //!    for under case 4.
+    //! 3. `index.test.ts > describe("constructor env var
+    //!    resolution") > should default logger when not provided`
+    //!    (1 case) — Rust adapters do not take a `Logger` as a
+    //!    first-class adapter dependency (logging is plumbed via the
+    //!    `log` crate's static dispatch).
     //!
-    //! 7. `describe("constructor env var resolution") > should
-    //!    default logger when not provided` — asserts the
-    //!    constructor falls back to a default `Logger` instance
-    //!    when none is supplied. Rust adapters do not take a
-    //!    `Logger` as a first-class adapter dependency (logging
-    //!    is plumbed via the `log` crate's static dispatch
-    //!    elsewhere); the constructor-default-logger fallback
-    //!    shape is moot.
+    //! ## Constructor env-var resolution + factory (slice 305)
+    //!
+    //! 4. `index.test.ts > describe("constructor env var
+    //!    resolution")` remaining 7 cases — assert `process.env`
+    //!    mutation-driven resolution of `SLACK_SIGNING_SECRET` /
+    //!    `SLACK_BOT_TOKEN` / `SLACK_API_URL`. The Rust port models
+    //!    env-var resolution via the slice-305 `try_create_*(opts,
+    //!    env: Fn(&str) -> Option<String>)` closure pattern; the
+    //!    `process.env` mutation harness is JS-specific. The Slack
+    //!    factory is not yet ported (deferred — slice scope); when
+    //!    landed, will mirror gchat slice 312. Currently enumerated
+    //!    here.
+    //!
+    //! ## vi.fn() HTTP-mocked Web API + handleWebhook orchestration (slice 411)
+    //!
+    //! Each upstream case stubs `globalThis.fetch` via `vi.fn()` /
+    //! `vi.mock("@slack/web-api")` chains, drives a Web API call or
+    //! `adapter.handleWebhook(request)` with a synthetic `Request`,
+    //! and asserts on `mockFetch.toHaveBeenCalledWith(url, {body,
+    //! headers})` URL/body shape OR on `mockChat.processMessage` /
+    //! `mockChat.processAction` runtime side-effects. The Rust port
+    //! intentionally avoids a test-only `wiremock`-style dep here;
+    //! URL + body shape are structurally covered via parametric
+    //! `method_url` tests + pure body-shape helpers
+    //! (`build_post_message_body` / `parse_slack_post_ephemeral_response`).
+    //!
+    //! Cases enumerated by describe-block (291 cases total):
+    //!
+    //! - `index.test.ts > describe("handleWebhook - signature
+    //!   verification")` (5)
+    //! - `index.test.ts > describe("handleWebhook - webhookVerifier")` (6)
+    //! - `index.test.ts > describe("handleWebhook - URL verification")` (1)
+    //! - `index.test.ts > describe("handleWebhook - event_callback")` (5)
+    //! - `index.test.ts > describe("handleWebhook - interactive payloads")` (10)
+    //! - `index.test.ts > describe("handleWebhook - JSON parsing")` (1)
+    //! - `index.test.ts > describe("parseMessage")` (7) — requires
+    //!   `SlackAdapter::parse_message` orchestrator + author
+    //!   classification + attachments classifier; not yet ported
+    //! - `index.test.ts > describe("link extraction")` (6) — requires
+    //!   rich_text-block walker on `parse_message`
+    //! - `index.test.ts > describe("edge cases")` (4) — handleWebhook
+    //!   error paths
+    //! - `index.test.ts > describe("date parsing")` (2) — relative
+    //!   timestamp parsing in event payloads
+    //! - `index.test.ts > describe("formatted text extraction")` (3)
+    //! - `index.test.ts > describe("multi-workspace mode")` (9) —
+    //!   `installationProvider` + `botTokenResolver` + per-workspace
+    //!   token dispatch via `AsyncLocalStorage`
+    //! - `index.test.ts > describe("installationProvider")` (13) —
+    //!   `OAuth2` install-store + `enterprise_id` vs `team_id`
+    //!   resolution + multi-workspace token lookup
+    //! - `index.test.ts > describe("multi-workspace mode with encryption")` (3)
+    //! - `index.test.ts > describe("installationKeyPrefix")` (2)
+    //! - `index.test.ts > describe("handleOAuthCallback")` (6) —
+    //!   `@slack/oauth` SDK install-store integration
+    //! - `index.test.ts > describe("withBotToken")` (2) — ALS-based
+    //!   per-request token resolution
+    //! - `index.test.ts > describe("adapter.client end-to-end with
+    //!   multi-workspace webhook")` (1)
+    //! - `index.test.ts > describe("DM message handling")` (4)
+    //! - `index.test.ts > describe("message subtype handling")` (5)
+    //! - `index.test.ts > describe("handleWebhook - slash commands")` (6)
+    //! - `index.test.ts > describe("botToken as function")` (5)
+    //! - `index.test.ts > describe("Attachment.fetchData token resolution")` (2)
+    //! - `index.test.ts > describe("postMessage")` (4) — full Web API
+    //!   dispatch including blocks + retry + error handling
+    //! - `index.test.ts > describe("postEphemeral")` (0 — all 3
+    //!   portable cases mapped above)
+    //! - `index.test.ts > describe("editMessage")` (1)
+    //! - `index.test.ts > describe("deleteMessage")` (1)
+    //! - `index.test.ts > describe("addReaction")` (2)
+    //! - `index.test.ts > describe("removeReaction")` (1)
+    //! - `index.test.ts > describe("openModal")` (3) —
+    //!   `views.open` Web API call with full modal renderer
+    //! - `index.test.ts > describe("updateModal")` (1)
+    //! - `index.test.ts > describe("startTyping")` (3 of 4) —
+    //!   non-skip branch requires `assistant.threads.setStatus`
+    //!   Web API dispatch
+    //! - `index.test.ts > describe("openDM")` (2)
+    //! - `index.test.ts > describe("fetchMessages")` (3)
+    //! - `index.test.ts > describe("fetchMessage")` (2)
+    //! - `index.test.ts > describe("fetchChannelInfo")` (3)
+    //! - `index.test.ts > describe("fetchChannelMessages")` (3)
+    //! - `index.test.ts > describe("postChannelMessage")` (2)
+    //! - `index.test.ts > describe("listThreads")` (2)
+    //! - `index.test.ts > describe("ephemeral message ID encoding")` (2)
+    //! - `index.test.ts > describe("error handling")` (5)
+    //! - `index.test.ts > describe("resolveInlineMentions")` (6)
+    //! - `index.test.ts > describe("fetchThread")` (1)
+    //! - `index.test.ts > describe("initialize")` (3)
+    //! - `index.test.ts > describe("publishHomeView")` (1)
+    //! - `index.test.ts > describe("setSuggestedPrompts")` (2)
+    //! - `index.test.ts > describe("setAssistantStatus")` (2)
+    //! - `index.test.ts > describe("setAssistantTitle")` (1)
+    //! - `index.test.ts > describe("handleWebhook - assistant events")` (4)
+    //! - `index.test.ts > describe("decodeEphemeralMessageId edge cases")` (5)
+    //! - `index.test.ts > describe("editMessage via response_url")` (1)
+    //! - `index.test.ts > describe("deleteMessage via response_url")` (1)
+    //! - `index.test.ts > describe("isMessageFromSelf")` (3)
+    //! - `index.test.ts > describe("reverse user lookup")` (19) —
+    //!   reverse-index storage in lookupUser + resolveOutgoingMentions
+    //!   + resolveMessageMentions + thread participant tracking +
+    //!   user_change event + rehydrateAttachment
+    //! - `index.test.ts > describe("stream with empty threadTs")` (1)
+    //! - `index.test.ts > describe("scheduleMessage with empty threadTs")` (1)
+    //! - `index.test.ts > describe("getUser")` (7) — `users.info`
+    //!   Web API dispatch + state-cache wiring
+    //! - `index.test.ts > describe("link unfurl enrichment")` (6)
+    //! - `index.test.ts > describe("createSlackAdapter")` (0 — all 4
+    //!   portable cases mapped above)
+    //!
+    //! ## Socket Mode (`@slack/socket-mode` SDK) (slice 411 — js-only)
+    //!
+    //! Socket Mode requires the `@slack/socket-mode` Node SDK
+    //! (WebSocket pump + auto-reconnect over Slack's app-level
+    //! token). No Rust port of `@slack/socket-mode` is in workspace
+    //! scope. All socket-mode cases drive `vi.mock("@slack/socket-mode")`
+    //! and assert on the `socketClient.start/stop` lifecycle plus
+    //! event-forwarding to the same `handleWebhook` dispatcher
+    //! described above.
+    //!
+    //! - `index.test.ts > describe("socket mode - factory validation")` (5)
+    //! - `index.test.ts > describe("socket mode - handleWebhook")` (1)
+    //! - `index.test.ts > describe("socket mode - initialize")` (1)
+    //! - `index.test.ts > describe("socket mode - routeSocketEvent")` (7)
+    //! - `index.test.ts > describe("socket mode - disconnect")` (2)
+    //! - `index.test.ts > describe("socket mode forwarding - handleWebhook")` (9)
+    //! - `index.test.ts > describe("startSocketModeListener")` (3)
+    //! - `index.test.ts > describe("routeSocketEvent with options")` (3)
+    //!
+    //! ## Pure-helper renderer ports deferred (structural — not js-only)
+    //!
+    //! - `modals.test.ts > describe("modalToSlackView")` (15) +
+    //!   `describe("modalToSlackView with radio select")` (4) +
+    //!   `describe("modalToSlackView with select option descriptions")`
+    //!   (2) — full `ModalElement -> Slack Block Kit view` JSON
+    //!   renderer (input/select/external-select/radio/divider/section
+    //!   blocks). Helper is portable but represents a substantial
+    //!   slice on its own; deferred. The 12 `encodeModalMetadata` +
+    //!   `decodeModalMetadata` cases under this file ARE mapped 1:1
+    //!   in [`crate::modals`].
+    //!
+    //! - `webhook/index.test.ts > describe("parseSlackWebhookBody")`
+    //!   (11) + `describe("verifySlackRequest")` (3) +
+    //!   `describe("readSlackWebhook")` (1) — typed-payload enum
+    //!   parser for app_mention / direct_message / interactive /
+    //!   slash_command / url_verification webhook bodies. Pure
+    //!   helper, portable, but represents a substantial slice;
+    //!   deferred. The 5 `verifySlackSignature` cases under this
+    //!   file ARE mapped 1:1 in [`crate::webhook`].
+    //!
+    //! - `api/index.test.ts > describe("Slack api primitives")` (12
+    //!   of 13) — `callSlackApi` / `postSlackMessage` /
+    //!   `editSlackMessage` / `deleteSlackMessage` /
+    //!   `fetchSlackFile` / `postSlackEphemeral` /
+    //!   `sendSlackResponseUrl` / `uploadSlackFiles` HTTP wrappers
+    //!   over `vi.fn()`-mocked `fetch`. The Rust port wires the
+    //!   underlying HTTP through [`SlackAdapter`] methods directly;
+    //!   the wrapper functions are JS-shape ergonomics. The 1
+    //!   portable `encodeSlackApiBody` case IS mapped 1:1 in
+    //!   [`crate::api`].
+    //!
+    //! ---
+    //!
+    //! Accounting: 133 Rust-mapped + 315 js-only-documented =
+    //! 448/448 upstream cases.
     use super::*;
     use futures_executor::block_on;
 
@@ -1164,9 +1320,7 @@ mod tests {
     // `slack:<channel>`) and `isDM(threadId)` (true iff the underlying
     // Slack channel id starts with `D`).
 
-    #[test]
     // ---------- renderFormatted (1 upstream case) ----------
-    #[test]
     // ---------- getChannelVisibility (4 upstream cases) ----------
     // 1:1 with upstream's `getChannelVisibility(threadId)` behavior:
     // external if `_externalChannels.has(channel)`, else private for
@@ -1228,7 +1382,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn slack_timing_constants_match_upstream() {
         // 1:1 with upstream's private `OPTIONS_LOAD_TIMEOUT_MS`,
