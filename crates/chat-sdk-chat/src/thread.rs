@@ -730,6 +730,16 @@ impl std::fmt::Debug for SentMessage {
 }
 
 impl SentMessage {
+    /// Construct a `SentMessage` from an existing [`crate::message::Message`]
+    /// + the adapter that posted it. 1:1 with upstream's
+    /// `new SentMessage(message, adapter)` shape. Used by
+    /// [`crate::channel::Channel::post_sent_message`] (slice 487)
+    /// to wrap the synthesized Message returned from
+    /// `Adapter::post_channel_message`.
+    pub fn new(message: crate::message::Message, adapter: Arc<dyn Adapter>) -> Self {
+        Self { message, adapter }
+    }
+
     /// Borrow the wrapped [`crate::message::Message`].
     pub fn message(&self) -> &crate::message::Message {
         &self.message
