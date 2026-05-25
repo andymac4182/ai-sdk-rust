@@ -15002,6 +15002,61 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_prepare_step_model_switch_uses_step_model_supported_urls() {
+        let primary_supported_urls_called = Arc::new(AtomicBool::new(false));
+        let secondary_supported_urls_called = Arc::new(AtomicBool::new(false));
+        let primary = FakeLanguageModel::new()
+            .with_model_id("with-image-url-support")
+            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
+                "should not run",
+            ))])
+            .with_supported_urls_called(Arc::clone(&primary_supported_urls_called));
+        let secondary = FakeLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
+                "response from without-image-url-support",
+            ))])
+            .with_supported_urls_called(Arc::clone(&secondary_supported_urls_called));
+        let secondary_model = &secondary;
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "Describe this image",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&primary, prompt).with_prepare_step(
+                move |_options| async move { PrepareStepResult::new().with_model(secondary_model) },
+            ),
+        ));
+
+        assert_eq!(result.text, "response from without-image-url-support");
+        assert!(!primary_supported_urls_called.load(Ordering::SeqCst));
+        assert!(secondary_supported_urls_called.load(Ordering::SeqCst));
+        assert!(primary.calls.borrow().is_empty());
+        assert_eq!(secondary.calls.borrow().len(), 1);
+        assert!(matches!(
+            &secondary.calls.borrow()[0].prompt[0],
+            LanguageModelMessage::User(message)
+                if message.content.len() == 2
+                    && matches!(
+                        &message.content[1],
+                        LanguageModelUserContentPart::File(file)
+                            if file.media_type == "image/jpeg"
+                                && matches!(file.data, FileData::Url { .. })
+                    )
+        ));
+    }
+
+    #[test]
     fn generate_text_retries_retryable_pre_content_errors() {
         let mut retry_metadata = ProviderMetadata::new();
         retry_metadata.insert(
@@ -17185,6 +17240,95 @@ mod tests {
         assert_eq!(result.text, "secondary");
         assert!(primary.calls.borrow().is_empty());
         assert_eq!(secondary.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn generate_text_prepare_step_uses_initial_tool_result_in_response_messages() {
+        let model = FakeLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let prompt = approval_response_prompt(
+            LanguageModelToolApprovalResponsePart::new("approval-1", true),
+            false,
+        );
+        let prepare_step_response_messages = Arc::new(std::sync::Mutex::new(Vec::<
+            Vec<LanguageModelMessage>,
+        >::new()));
+        let prepare_step_response_messages_for_callback =
+            Arc::clone(&prepare_step_response_messages);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id
+                        }))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_prepare_step(move |options| {
+                    let messages = Arc::clone(&prepare_step_response_messages_for_callback);
+                    async move {
+                        messages
+                            .lock()
+                            .expect("prepare-step messages lock")
+                            .push(options.response_messages);
+                        PrepareStepResult::new()
+                    }
+                })
+                .with_max_steps(3),
+        ));
+
+        let calls = model.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(&calls[0].prompt[..3], prompt.as_slice());
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "weather"
+                                && part.output == LanguageModelToolResultOutput::json(json!({
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }))
+                    )
+        ));
+        assert_eq!(result.text, "Hello world");
+
+        let prepare_step_response_messages = prepare_step_response_messages
+            .lock()
+            .expect("prepare-step messages lock");
+        assert_eq!(prepare_step_response_messages.len(), 1);
+        assert_eq!(prepare_step_response_messages[0].len(), 1);
+        assert!(matches!(
+            &prepare_step_response_messages[0][0],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "weather"
+                                && part.output == LanguageModelToolResultOutput::json(json!({
+                                    "forecast": "sunny",
+                                    "city": "Brisbane",
+                                    "toolCallId": "call-1"
+                                }))
+                    )
+        ));
     }
 
     fn filter_active_tools_mock_tools() -> Vec<Tool> {
