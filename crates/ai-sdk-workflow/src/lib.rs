@@ -22,8 +22,9 @@ pub use stream_text_iterator::{
     StreamTextIteratorYieldValue, WorkflowGenerationSettings, WorkflowModelInfo,
     WorkflowPrepareStepCallback, WorkflowPrepareStepInfo, WorkflowPrepareStepResult,
     WorkflowPrompt, WorkflowRuntimeContext, WorkflowStreamStep, WorkflowStreamStepContent,
-    WorkflowStreamTextError, WorkflowStreamTextStepExecutor, WorkflowToolsContext,
-    do_stream_step_from_parts, sanitize_provider_metadata_for_tool_call,
+    WorkflowStreamTextError, WorkflowStreamTextOnErrorCallback, WorkflowStreamTextStepExecutor,
+    WorkflowToolCallRepairCallback, WorkflowToolsContext, do_stream_step_from_parts,
+    sanitize_provider_metadata_for_tool_call,
 };
 pub use workflow_agent::{
     WorkflowAgent, WorkflowAgentError, WorkflowAgentFinishInfo, WorkflowAgentOnFinishCallback,

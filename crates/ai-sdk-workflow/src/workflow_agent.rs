@@ -13,13 +13,14 @@ use ai_sdk_provider::{
 use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions, execute_tool,
 };
+use ai_sdk_rust::StopCondition;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ParsedToolCall, ProviderExecutedToolResult, StreamTextIterator, WorkflowGenerationSettings,
     WorkflowModelInfo, WorkflowPrepareStepCallback, WorkflowPrompt, WorkflowRuntimeContext,
-    WorkflowStreamStep, WorkflowStreamTextError, WorkflowStreamTextStepExecutor,
-    WorkflowToolsContext,
+    WorkflowStreamStep, WorkflowStreamTextError, WorkflowStreamTextOnErrorCallback,
+    WorkflowStreamTextStepExecutor, WorkflowToolCallRepairCallback, WorkflowToolsContext,
 };
 
 /// Constructor options for [`WorkflowAgent`].
@@ -42,6 +43,15 @@ pub struct WorkflowAgentOptions {
 
     /// Default serialized tool-choice value.
     pub tool_choice: Option<JsonValue>,
+
+    /// Default stop conditions.
+    pub stop_conditions: Vec<StopCondition>,
+
+    /// Default repair callback for malformed tool calls.
+    pub experimental_repair_tool_call: Option<WorkflowToolCallRepairCallback>,
+
+    /// Default stream error callback.
+    pub on_error: Option<WorkflowStreamTextOnErrorCallback>,
 
     /// Default prepare-step callback.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
@@ -75,6 +85,9 @@ impl WorkflowAgentOptions {
             generation_settings: WorkflowGenerationSettings::default(),
             active_tools: None,
             tool_choice: None,
+            stop_conditions: Vec::new(),
+            experimental_repair_tool_call: None,
+            on_error: None,
             prepare_step: None,
             on_start: None,
             on_step_start: None,
@@ -122,6 +135,30 @@ impl WorkflowAgentOptions {
     /// Sets constructor-level tool choice.
     pub fn with_tool_choice(mut self, tool_choice: impl Into<JsonValue>) -> Self {
         self.tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    /// Sets constructor-level stop conditions.
+    pub fn with_stop_conditions(
+        mut self,
+        stop_conditions: impl IntoIterator<Item = StopCondition>,
+    ) -> Self {
+        self.stop_conditions = stop_conditions.into_iter().collect();
+        self
+    }
+
+    /// Sets constructor-level repair callback.
+    pub fn with_experimental_repair_tool_call(
+        mut self,
+        experimental_repair_tool_call: WorkflowToolCallRepairCallback,
+    ) -> Self {
+        self.experimental_repair_tool_call = Some(experimental_repair_tool_call);
+        self
+    }
+
+    /// Sets constructor-level stream error callback.
+    pub fn with_on_error(mut self, on_error: WorkflowStreamTextOnErrorCallback) -> Self {
+        self.on_error = Some(on_error);
         self
     }
 
@@ -186,6 +223,9 @@ pub struct WorkflowAgent {
     generation_settings: WorkflowGenerationSettings,
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
+    stop_conditions: Vec<StopCondition>,
+    experimental_repair_tool_call: Option<WorkflowToolCallRepairCallback>,
+    on_error: Option<WorkflowStreamTextOnErrorCallback>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
     on_start: Option<WorkflowAgentOnStartCallback>,
     on_step_start: Option<WorkflowAgentOnStepStartCallback>,
@@ -205,6 +245,9 @@ impl WorkflowAgent {
             generation_settings: options.generation_settings,
             active_tools: options.active_tools,
             tool_choice: options.tool_choice,
+            stop_conditions: options.stop_conditions,
+            experimental_repair_tool_call: options.experimental_repair_tool_call,
+            on_error: options.on_error,
             prepare_step: options.prepare_step,
             on_start: options.on_start,
             on_step_start: options.on_step_start,
@@ -246,6 +289,15 @@ impl WorkflowAgent {
             .or_else(|| self.active_tools.clone())
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
+        let stop_conditions = if options.stop_conditions.is_empty() {
+            self.stop_conditions.clone()
+        } else {
+            options.stop_conditions
+        };
+        let experimental_repair_tool_call = options
+            .experimental_repair_tool_call
+            .or_else(|| self.experimental_repair_tool_call.clone());
+        let on_error = options.on_error.or_else(|| self.on_error.clone());
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
         let constructor_on_start = self.on_start.clone();
         let stream_on_start = options.on_start;
@@ -281,6 +333,15 @@ impl WorkflowAgent {
         }
         if let Some(tool_choice) = tool_choice {
             iterator = iterator.with_tool_choice(tool_choice);
+        }
+        if !stop_conditions.is_empty() {
+            iterator = iterator.with_stop_conditions(stop_conditions);
+        }
+        if let Some(experimental_repair_tool_call) = experimental_repair_tool_call {
+            iterator = iterator.with_repair_tool_call(experimental_repair_tool_call);
+        }
+        if let Some(on_error) = on_error {
+            iterator = iterator.with_on_error(on_error);
         }
         if let Some(prepare_step) = prepare_step {
             iterator = iterator.with_prepare_step(prepare_step);
@@ -529,6 +590,15 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level tool choice that overrides constructor defaults.
     pub tool_choice: Option<JsonValue>,
 
+    /// Stream-level stop conditions that override constructor defaults.
+    pub stop_conditions: Vec<StopCondition>,
+
+    /// Stream-level repair callback that overrides constructor defaults.
+    pub experimental_repair_tool_call: Option<WorkflowToolCallRepairCallback>,
+
+    /// Stream-level error callback that overrides constructor defaults.
+    pub on_error: Option<WorkflowStreamTextOnErrorCallback>,
+
     /// Stream-level prepare-step callback that overrides constructor defaults.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
@@ -568,6 +638,9 @@ impl<E> WorkflowAgentStreamOptions<E> {
             tools_context: WorkflowToolsContext::new(),
             active_tools: None,
             tool_choice: None,
+            stop_conditions: Vec::new(),
+            experimental_repair_tool_call: None,
+            on_error: None,
             prepare_step: None,
             on_start: None,
             on_step_start: None,
@@ -610,6 +683,30 @@ impl<E> WorkflowAgentStreamOptions<E> {
     /// Sets stream-level tool choice.
     pub fn with_tool_choice(mut self, tool_choice: impl Into<JsonValue>) -> Self {
         self.tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    /// Sets stream-level stop conditions.
+    pub fn with_stop_conditions(
+        mut self,
+        stop_conditions: impl IntoIterator<Item = StopCondition>,
+    ) -> Self {
+        self.stop_conditions = stop_conditions.into_iter().collect();
+        self
+    }
+
+    /// Sets stream-level repair callback.
+    pub fn with_experimental_repair_tool_call(
+        mut self,
+        experimental_repair_tool_call: WorkflowToolCallRepairCallback,
+    ) -> Self {
+        self.experimental_repair_tool_call = Some(experimental_repair_tool_call);
+        self
+    }
+
+    /// Sets stream-level error callback.
+    pub fn with_on_error(mut self, on_error: WorkflowStreamTextOnErrorCallback) -> Self {
+        self.on_error = Some(on_error);
         self
     }
 
@@ -3024,6 +3121,52 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_use_constructor_stop_conditions_when_not_specified_in_stream()
+    {
+        let stop_conditions = vec![ai_sdk_rust::StopCondition::StepCount(3)];
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_stop_conditions(stop_conditions.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .stop_conditions,
+            stop_conditions
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_allow_stream_options_to_override_constructor_stop_conditions()
+    {
+        let constructor_stop_conditions = vec![ai_sdk_rust::StopCondition::StepCount(1)];
+        let stream_stop_conditions = vec![ai_sdk_rust::StopCondition::StepCount(2)];
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_stop_conditions(constructor_stop_conditions),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_stop_conditions(stream_stop_conditions.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .stop_conditions,
+            stream_stop_conditions
+        );
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator() {
         let tool_choice = json!("required");
         let agent = WorkflowAgent::new(
@@ -3062,6 +3205,70 @@ mod tests {
                 .options
                 .tool_choice,
             Some(stream_tool_choice)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_use_constructor_experimental_repair_tool_call_when_not_specified_in_stream()
+     {
+        let repair = WorkflowToolCallRepairCallback::new(|_| async { Ok(None) });
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_experimental_repair_tool_call(repair.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .repair_tool_call,
+            Some(repair)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator() {
+        let repair = WorkflowToolCallRepairCallback::new(|_| async { Ok(None) });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_experimental_repair_tool_call(repair.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .repair_tool_call,
+            Some(repair)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_on_error_callback_to_stream_text_iterator() {
+        let on_error = WorkflowStreamTextOnErrorCallback::new(|_| {});
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_on_error(on_error.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .on_error,
+            Some(on_error)
         );
     }
 
