@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use ai_sdk_provider::json::{JsonObject, JsonValue};
@@ -12,6 +14,7 @@ use ai_sdk_provider::{
     LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultPart,
     LanguageModelUsage, ProviderMetadata, ProviderOptions, Warning,
 };
+use ai_sdk_rust::{StopCondition, ToolCallRepairFunction, ToolCallRepairOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{SerializableToolSet, serialize_tool_set};
@@ -251,6 +254,18 @@ pub struct DoStreamStepOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<JsonValue>,
 
+    /// Stop conditions carried through to the workflow iterator.
+    #[serde(skip, default)]
+    pub stop_conditions: Vec<StopCondition>,
+
+    /// Tool-call repair callback carried through to the workflow iterator.
+    #[serde(skip, default)]
+    pub repair_tool_call: Option<WorkflowToolCallRepairCallback>,
+
+    /// Error callback carried through to the workflow iterator.
+    #[serde(skip, default)]
+    pub on_error: Option<WorkflowStreamTextOnErrorCallback>,
+
     /// Current runtime context.
     #[serde(default)]
     pub runtime_context: WorkflowRuntimeContext,
@@ -449,6 +464,91 @@ pub struct WorkflowPrepareStepResult {
     pub tools_context: Option<WorkflowToolsContext>,
 }
 
+/// Callback invoked for workflow stream-text errors.
+#[derive(Clone)]
+pub struct WorkflowStreamTextOnErrorCallback {
+    callback: Arc<dyn Fn(String) + Send + Sync + 'static>,
+}
+
+impl WorkflowStreamTextOnErrorCallback {
+    /// Creates a stream-text error callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn call(&self, error: String) {
+        (self.callback)(error);
+    }
+}
+
+impl fmt::Debug for WorkflowStreamTextOnErrorCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowStreamTextOnErrorCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for WorkflowStreamTextOnErrorCallback {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.callback, &other.callback)
+    }
+}
+
+/// Callback invoked to repair workflow stream-text tool calls.
+#[derive(Clone)]
+pub struct WorkflowToolCallRepairCallback {
+    repair: Arc<ToolCallRepairFunction>,
+}
+
+impl WorkflowToolCallRepairCallback {
+    /// Creates a tool-call repair callback from a synchronous Rust function.
+    pub fn new<F, Fut>(repair: F) -> Self
+    where
+        F: Fn(ToolCallRepairOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<ai_sdk_provider::LanguageModelToolCall>, String>>
+            + Send
+            + 'static,
+    {
+        Self {
+            repair: Arc::new(move |options| Box::pin(repair(options))),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn call(
+        &self,
+        options: ToolCallRepairOptions,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<ai_sdk_provider::LanguageModelToolCall>, String>>
+                + Send,
+        >,
+    > {
+        (self.repair)(options)
+    }
+}
+
+impl fmt::Debug for WorkflowToolCallRepairCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowToolCallRepairCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for WorkflowToolCallRepairCallback {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.repair, &other.repair)
+    }
+}
+
 impl WorkflowPrepareStepResult {
     /// Sets the model override.
     pub fn with_model(mut self, model: WorkflowModelInfo) -> Self {
@@ -513,6 +613,9 @@ pub struct StreamTextIterator<E> {
     tools_context: WorkflowToolsContext,
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
+    stop_conditions: Vec<StopCondition>,
+    repair_tool_call: Option<WorkflowToolCallRepairCallback>,
+    on_error: Option<WorkflowStreamTextOnErrorCallback>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
     include_raw_chunks: bool,
     response_format: Option<JsonValue>,
@@ -535,6 +638,9 @@ impl<E> StreamTextIterator<E> {
             tools_context: WorkflowToolsContext::new(),
             active_tools: None,
             tool_choice: None,
+            stop_conditions: Vec::new(),
+            repair_tool_call: None,
+            on_error: None,
             prepare_step: None,
             include_raw_chunks: false,
             response_format: None,
@@ -593,6 +699,30 @@ impl<E> StreamTextIterator<E> {
         self
     }
 
+    /// Sets stop conditions carried through this iterator.
+    pub fn with_stop_conditions(
+        mut self,
+        stop_conditions: impl IntoIterator<Item = StopCondition>,
+    ) -> Self {
+        self.stop_conditions = stop_conditions.into_iter().collect();
+        self
+    }
+
+    /// Sets the tool-call repair callback.
+    pub fn with_repair_tool_call(
+        mut self,
+        repair_tool_call: WorkflowToolCallRepairCallback,
+    ) -> Self {
+        self.repair_tool_call = Some(repair_tool_call);
+        self
+    }
+
+    /// Sets the error callback.
+    pub fn with_on_error(mut self, on_error: WorkflowStreamTextOnErrorCallback) -> Self {
+        self.on_error = Some(on_error);
+        self
+    }
+
     /// Sets a prepare-step callback.
     pub fn with_prepare_step(mut self, prepare_step: WorkflowPrepareStepCallback) -> Self {
         self.prepare_step = Some(prepare_step);
@@ -624,6 +754,21 @@ impl<E> StreamTextIterator<E> {
     /// Returns completed steps.
     pub fn steps(&self) -> &[WorkflowStreamStep] {
         &self.steps
+    }
+
+    /// Returns configured stop conditions.
+    pub fn stop_conditions(&self) -> &[StopCondition] {
+        &self.stop_conditions
+    }
+
+    /// Returns the configured repair callback.
+    pub fn repair_tool_call(&self) -> Option<&WorkflowToolCallRepairCallback> {
+        self.repair_tool_call.as_ref()
+    }
+
+    /// Returns the configured error callback.
+    pub fn on_error(&self) -> Option<&WorkflowStreamTextOnErrorCallback> {
+        self.on_error.as_ref()
     }
 
     fn apply_prepare_step(&mut self) {
@@ -704,6 +849,9 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
             tool_choice: self.tool_choice.clone(),
             include_raw_chunks: self.include_raw_chunks,
             response_format: self.response_format.clone(),
+            stop_conditions: self.stop_conditions.clone(),
+            repair_tool_call: self.repair_tool_call.clone(),
+            on_error: self.on_error.clone(),
             runtime_context: self.runtime_context.clone(),
             tools_context: self.tools_context.clone(),
             step_number: self.step_number,
