@@ -3,11 +3,11 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 72.6%
-- Portable package average: 67.1%
-- Closed package rows: 6 / 18
-- Strict portable verified rows: 3 / 15
-- In-progress rows: 12
+- Average estimated completion: 76.8%
+- Portable package average: 72.1%
+- Closed package rows: 7 / 18
+- Strict portable verified rows: 4 / 15
+- In-progress rows: 11
 - Not-started rows: 0
 
 ## 100% Closed
@@ -19,6 +19,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/tests` | 100% | JavaScript-only | test support library |
 | `@chat-sdk/state-memory` | 100% | Verified | state backend (in-memory) |
 | `@chat-sdk/adapter-web` | 100% | JavaScript-only | adapter package |
+| `@chat-sdk/state-redis` | 100% | Verified | state backend (Redis) |
 | `@chat-sdk/integration-tests` | 100% | JavaScript-only | integration tests |
 
 ## In Progress
@@ -34,7 +35,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-messenger` | 70% | In progress | adapter package | chat-sdk-adapter-messenger 102 tests (slice 369 adds normalize_thread_id helper, slice 370 adds Adapter::open_dm trait... |
 | `@chat-sdk/adapter-telegram` | 72% | In progress | adapter package | chat-sdk-adapter-telegram 133 tests (slice 370 adds Adapter::open_dm trait impl). Helpers: applyTelegramEntities... |
 | `@chat-sdk/adapter-whatsapp` | 70% | In progress | adapter package | chat-sdk-adapter-whatsapp 106 tests (slice 370 adds Adapter::open_dm trait impl). splitMessage 8/8, channelId+isDM,... |
-| `@chat-sdk/state-redis` | 25% | In progress | state backend (Redis) | chat-sdk-state-redis 17 tests (slices 361/394). Test-parity closed: 16 Rust-mapped + 8 js-only-documented = 24/24... |
 | `@chat-sdk/state-ioredis` | 25% | In progress | state backend (ioredis) | chat-sdk-state-ioredis 18 tests (slices 362/395). Test-parity closed: 14 Rust-mapped + 4 js-only-documented = 18/18... |
 | `@chat-sdk/state-pg` | 25% | In progress | state backend (Postgres) | chat-sdk-state-pg 16 tests (slices 362/395). Test-parity closed: 16 Rust-mapped + 8 js-only-documented = 24/24... |
 
