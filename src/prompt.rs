@@ -1811,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_serializes_text_prompt_with_optional_common_fields() {
+    fn prompt_serializes_text_prompt_with_optional_standard_fields() {
         let prompt = Prompt::from_prompt("What is the weather?")
             .with_instructions("Answer briefly.")
             .with_system(system_message("Legacy system instructions."))
