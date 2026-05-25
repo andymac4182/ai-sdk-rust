@@ -17642,6 +17642,37 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_passes_sandbox_to_prepare_step() {
+        let model = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
+            LanguageModelText::new("Hello, world!"),
+        )]);
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let captured_sandbox = Arc::new(Mutex::new(None::<String>));
+        let captured_sandbox_for_callback = Arc::clone(&captured_sandbox);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test")])
+                .with_experimental_sandbox(Arc::clone(&sandbox))
+                .with_prepare_step(move |options| {
+                    let captured_sandbox = Arc::clone(&captured_sandbox_for_callback);
+                    async move {
+                        *captured_sandbox.lock().expect("captured sandbox lock") = options
+                            .experimental_sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.description().to_string());
+                        PrepareStepResult::new()
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            *captured_sandbox.lock().expect("captured sandbox lock"),
+            Some("test sandbox".to_string())
+        );
+    }
+
+    #[test]
     fn generate_text_prepare_step_can_override_model_with_same_model_type() {
         let primary = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
             LanguageModelText::new("primary"),
