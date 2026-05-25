@@ -2469,6 +2469,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   override ordering, dynamic model plus generation-setting updates,
   active-tool and tool-choice updates, runtime/tool context updates, and
   agent-level callback forwarding/runtime context propagation.
+- 2026-05-26: WorkflowAgent basic text-response e2e parity added the named
+  Rust counterpart `workflow_agent_upstream_should_generate_basic_text_response`
+  for upstream `workflow-agent-e2e.integration.test.ts` `basic text response`,
+  proving the agent can stream a single non-tool round-trip from prompt to
+  assistant text result.
 - 2026-05-26: WorkflowAgent message-propagation parity added named Rust
   counterparts for upstream `workflow-agent.test.ts` `should pass messages to
   multiple tools in parallel execution` and `should pass updated messages on
