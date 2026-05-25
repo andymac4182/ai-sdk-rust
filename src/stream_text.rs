@@ -7023,6 +7023,46 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_passes_provider_metadata_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Provider metadata test.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "aProvider".to_string(),
+            json!({
+                "someKey": "someValue",
+            })
+            .as_object()
+            .expect("provider options are objects")
+            .clone(),
+        );
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_provider_options(provider_options.clone()),
+        ));
+
+        assert_eq!(result.text, "Provider metadata test.");
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(
+            model.stream_calls()[0].provider_options,
+            Some(provider_options)
+        );
+    }
+
+    #[test]
     fn stream_text_collects_text_deltas_and_finish_metadata() {
         let provider_metadata = ProviderMetadata::from([(
             "testProvider".to_string(),
