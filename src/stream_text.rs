@@ -6161,6 +6161,107 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_warnings_resolve_with_warnings_from_all_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            warning_logger_tool_call_stream_result(
+                "testTool",
+                vec![Warning::Other {
+                    message: "step 0 warning".to_string(),
+                }],
+            ),
+            warning_logger_text_stream_result(
+                "Final response",
+                vec![Warning::Other {
+                    message: "step 1 warning".to_string(),
+                }],
+            ),
+        ]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Hello")])
+                .with_tool(warning_logger_tool())
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "step 0 warning".to_string(),
+                },
+                Warning::Other {
+                    message: "step 1 warning".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            result.steps.last().expect("final step exists").warnings,
+            vec![Warning::Other {
+                message: "step 1 warning".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn stream_text_result_warnings_are_passed_to_on_finish() {
+        let model = MockLanguageModel::new().with_stream_results([
+            warning_logger_tool_call_stream_result(
+                "testTool",
+                vec![Warning::Other {
+                    message: "step 0 warning".to_string(),
+                }],
+            ),
+            warning_logger_text_stream_result(
+                "Final response",
+                vec![Warning::Other {
+                    message: "step 1 warning".to_string(),
+                }],
+            ),
+        ]);
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Hello")])
+                .with_tool(warning_logger_tool())
+                .with_max_steps(2)
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(result.warnings, finish_events[0].warnings);
+        assert_eq!(
+            finish_events[0].warnings,
+            vec![
+                Warning::Other {
+                    message: "step 0 warning".to_string(),
+                },
+                Warning::Other {
+                    message: "step 1 warning".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            finish_events[0]
+                .steps
+                .last()
+                .expect("final step exists")
+                .warnings,
+            vec![Warning::Other {
+                message: "step 1 warning".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn stream_text_calls_language_model_do_stream_with_standardized_prompt() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
