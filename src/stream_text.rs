@@ -8057,12 +8057,56 @@ mod tests {
             result.reasoning_text,
             Some("Thinking...I'm thinking...Separate thoughts".to_string())
         );
+        assert_eq!(
+            result
+                .parts
+                .iter()
+                .map(|part| match part {
+                    TextStreamPart::Start(_) => "start",
+                    TextStreamPart::StartStep(_) => "start-step",
+                    TextStreamPart::ReasoningStart(_) => "reasoning-start",
+                    TextStreamPart::TextStart(_) => "text-start",
+                    TextStreamPart::ReasoningDelta(_) => "reasoning-delta",
+                    TextStreamPart::TextDelta(_) => "text-delta",
+                    TextStreamPart::ReasoningEnd(_) => "reasoning-end",
+                    TextStreamPart::TextEnd(_) => "text-end",
+                    TextStreamPart::FinishStep(_) => "finish-step",
+                    TextStreamPart::Finish(_) => "finish",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "start",
+                "start-step",
+                "reasoning-start",
+                "text-start",
+                "reasoning-delta",
+                "text-delta",
+                "text-delta",
+                "text-start",
+                "text-delta",
+                "text-delta",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "text-delta",
+                "text-delta",
+                "reasoning-end",
+                "text-delta",
+                "text-end",
+                "reasoning-end",
+                "text-end",
+                "finish-step",
+                "finish",
+            ]
+        );
 
         let step = step
             .lock()
             .expect("step mutex is not poisoned")
             .clone()
             .expect("on_step_finish should receive a step");
+        assert_eq!(result.steps.len(), 1);
         let content_labels = step
             .content
             .iter()
