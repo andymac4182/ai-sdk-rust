@@ -11121,6 +11121,8 @@ mod tests {
         let abort_signal = abort_controller.signal();
         let abort_events = Arc::new(Mutex::new(Vec::<StreamTextOnAbortEvent>::new()));
         let events = Arc::clone(&abort_events);
+        let on_error_calls = Arc::new(Mutex::new(Vec::<StreamTextOnErrorEvent>::new()));
+        let errors = Arc::clone(&on_error_calls);
 
         let result = poll_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Use the tool")])
@@ -11134,6 +11136,12 @@ mod tests {
                         }
                     },
                 ))
+                .with_on_error(move |error| {
+                    let errors = Arc::clone(&errors);
+                    async move {
+                        errors.lock().expect("error calls lock").push(error);
+                    }
+                })
                 .with_on_abort(move |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -11155,6 +11163,7 @@ mod tests {
                 .iter()
                 .any(|part| matches!(part, TextStreamPart::FinishStep(_)))
         );
+        assert!(on_error_calls.lock().expect("error calls lock").is_empty());
         assert_eq!(
             serde_json::to_value(&result.parts).expect("parts serialize"),
             json!([
