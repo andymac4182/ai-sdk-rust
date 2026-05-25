@@ -5152,6 +5152,87 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_uses_custom_client_version_when_provided() {
+        let transport = MockMcpTransport::new();
+        create_mcp_client(McpClientConfig::new(transport.clone()).with_version("2.5.0"))
+            .expect("client initializes");
+
+        let initialize_request = transport
+            .sent_messages()
+            .into_iter()
+            .find_map(|message| match message {
+                JsonRpcMessage::Request(request) if request.method == "initialize" => Some(request),
+                _ => None,
+            })
+            .expect("initialize request is captured");
+
+        assert_eq!(
+            initialize_request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("clientInfo"))
+                .and_then(|client_info| client_info.get("version")),
+            Some(&json!("2.5.0"))
+        );
+    }
+
+    #[test]
+    fn mcp_client_uses_client_name_for_client_info_when_provided() {
+        let transport = MockMcpTransport::new();
+        create_mcp_client(
+            McpClientConfig::new(transport.clone()).with_client_name("CustomMCPClient"),
+        )
+        .expect("client initializes");
+
+        let initialize_request = transport
+            .sent_messages()
+            .into_iter()
+            .find_map(|message| match message {
+                JsonRpcMessage::Request(request) if request.method == "initialize" => Some(request),
+                _ => None,
+            })
+            .expect("initialize request is captured");
+
+        assert_eq!(
+            initialize_request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("clientInfo"))
+                .and_then(|client_info| client_info.get("name")),
+            Some(&json!("CustomMCPClient"))
+        );
+    }
+
+    #[test]
+    fn mcp_client_prefers_client_name_over_deprecated_name_for_client_info() {
+        let transport = MockMcpTransport::new();
+        create_mcp_client(
+            McpClientConfig::new(transport.clone())
+                .with_client_name("CustomMCPClient")
+                .with_name("DeprecatedMCPServer"),
+        )
+        .expect("client initializes");
+
+        let initialize_request = transport
+            .sent_messages()
+            .into_iter()
+            .find_map(|message| match message {
+                JsonRpcMessage::Request(request) if request.method == "initialize" => Some(request),
+                _ => None,
+            })
+            .expect("initialize request is captured");
+
+        assert_eq!(
+            initialize_request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("clientInfo"))
+                .and_then(|client_info| client_info.get("name")),
+            Some(&json!("CustomMCPClient"))
+        );
+    }
+
+    #[test]
     fn mcp_client_exposes_initialized_server_info_and_instructions() {
         let instructions = "Use search tools to resolve IDs - never ask the user. Always confirm destructive actions before executing.";
         let client = create_mcp_client(McpClientConfig::new(
