@@ -2,7 +2,7 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-assemblyai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+assemblyai	50	Initial provider crate exists; abort handling is covered, while live-provider validation and exact thrown-error parity remain.
 azure	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
 black-forest-labs	45	Initial provider crate exists; full upstream test and live-provider parity remain.

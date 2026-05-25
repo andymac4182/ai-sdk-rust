@@ -3,8 +3,8 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 49.4%
-- Portable package average: 37.4%
+- Average estimated completion: 49.5%
+- Portable package average: 37.5%
 - Closed package rows: 17 / 52
 - Strict portable verified rows: 7 / 42
 - In-progress rows: 20
@@ -36,7 +36,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/assemblyai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
+| `@ai-sdk/assemblyai` | 50% | In progress | provider package | Initial provider crate exists; abort handling is covered, while live-provider validation and exact thrown-error parity... |
 | `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |

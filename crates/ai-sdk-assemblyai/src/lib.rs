@@ -7,14 +7,14 @@ use ai_sdk_rust::{
     FetchErrorInfo, FileDataContent, GetFromApiOptions, HandledFetchError, Headers, JsonObject,
     JsonValue, LoadApiKeyError, LoadApiKeyOptions, ModelType, NoSuchModelError,
     OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
-    PostJsonToApiOptions, PostToApiOptions, Provider, ProviderApiRequest, ProviderApiRequestBody,
-    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
-    ProviderMetadata, ProviderWithTranscriptionModel, RuntimeEnvironment, TranscriptionModel,
-    TranscriptionModelCallOptions, TranscriptionModelRequest, TranscriptionModelResponse,
-    TranscriptionModelResult, TranscriptionModelSegment, Warning, combine_headers,
-    convert_base64_to_bytes, create_json_error_response_handler, create_json_response_handler,
-    delay, get_from_api, load_api_key, parse_provider_options, post_json_to_api, post_to_api,
-    with_user_agent_suffix,
+    PostJsonToApiOptions, PostToApiOptions, Provider, ProviderAbortSignal, ProviderApiRequest,
+    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithTranscriptionModel,
+    RuntimeEnvironment, TranscriptionModel, TranscriptionModelCallOptions,
+    TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
+    TranscriptionModelSegment, Warning, combine_headers, convert_base64_to_bytes,
+    create_json_error_response_handler, create_json_response_handler, delay, get_from_api,
+    load_api_key, parse_provider_options, post_json_to_api, post_to_api, with_user_agent_suffix,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -274,6 +274,7 @@ impl AssemblyAITranscriptionModel {
         options: TranscriptionModelCallOptions,
     ) -> TranscriptionModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let audio = match assemblyai_audio_bytes(&options.audio) {
             Ok(audio) => audio,
             Err(message) => {
@@ -315,6 +316,7 @@ impl AssemblyAITranscriptionModel {
             JsonValue::Object(JsonObject::new()),
         )
         .with_headers(upload_headers)
+        .with_optional_abort_signal(abort_signal.clone())
         .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
         let upload = match post_to_api(
@@ -380,6 +382,7 @@ impl AssemblyAITranscriptionModel {
         let submit_options =
             PostJsonToApiOptions::new(assemblyai_url("/v2/transcript"), submit_body.clone())
                 .with_headers(request_headers.clone())
+                .with_optional_abort_signal(abort_signal.clone())
                 .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
         let submit = match post_json_to_api(
@@ -419,7 +422,7 @@ impl AssemblyAITranscriptionModel {
         };
 
         match self
-            .wait_for_completion(&submit.value.id, request_headers)
+            .wait_for_completion(&submit.value.id, request_headers, abort_signal)
             .await
         {
             Ok((transcript, headers)) => assemblyai_transcription_result_from_response(
@@ -446,6 +449,7 @@ impl AssemblyAITranscriptionModel {
         &self,
         transcript_id: &str,
         headers: BTreeMap<String, Option<String>>,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<(AssemblyAITranscriptResponse, Option<Headers>), String> {
         let polling_interval = self
             .settings
@@ -454,9 +458,17 @@ impl AssemblyAITranscriptionModel {
         let url = assemblyai_url(&format!("/v2/transcript/{transcript_id}"));
 
         loop {
+            if abort_signal
+                .as_ref()
+                .is_some_and(ProviderAbortSignal::is_aborted)
+            {
+                return Err("Transcription request was aborted".to_string());
+            }
+
             let transport = Arc::clone(&self.transport);
             let options = GetFromApiOptions::new(url.clone())
                 .with_headers(headers.clone())
+                .with_optional_abort_signal(abort_signal.clone())
                 .with_environment(RuntimeEnvironment::unknown());
             let response = get_from_api(
                 options,
@@ -1108,8 +1120,8 @@ mod tests {
         AssemblyAITransportFuture, DEFAULT_ASSEMBLYAI_BASE_URL, assemblyai, create_assemblyai,
     };
     use ai_sdk_rust::{
-        FileDataContent, ModelType, Provider, ProviderApiRequest, ProviderApiRequestBody,
-        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
+        FileDataContent, ModelType, Provider, ProviderAbortController, ProviderApiRequest,
+        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
         ProviderWithTranscriptionModel, TranscriptionModel, TranscriptionModelCallOptions,
     };
     use serde_json::json;
@@ -1327,6 +1339,156 @@ mod tests {
             requests[2].url,
             "https://api.assemblyai.com/v2/transcript/transcript-123"
         );
+    }
+
+    #[test]
+    fn assemblyai_transcription_model_forwards_abort_signal_to_requests() {
+        let abort_controller = ProviderAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: AssemblyAITransport =
+            Arc::new(move |request| -> AssemblyAITransportFuture {
+                requests_for_transport
+                    .lock()
+                    .expect("request list mutex is not poisoned")
+                    .push(request.clone());
+
+                let response = match (request.method, request.url.as_str()) {
+                    (ProviderApiRequestMethod::Post, "https://api.assemblyai.com/v2/upload") => {
+                        json_response(json!({
+                            "upload_url": "https://storage.assemblyai.com/mock-upload-url"
+                        }))
+                    }
+                    (
+                        ProviderApiRequestMethod::Post,
+                        "https://api.assemblyai.com/v2/transcript",
+                    ) => json_response(json!({
+                        "id": "transcript-123",
+                        "status": "queued"
+                    })),
+                    (
+                        ProviderApiRequestMethod::Get,
+                        "https://api.assemblyai.com/v2/transcript/transcript-123",
+                    ) => json_response(json!({
+                        "id": "transcript-123",
+                        "status": "completed",
+                        "text": "Hello, world!",
+                        "language_code": "en_us",
+                        "audio_duration": 281,
+                        "words": [
+                            { "start": 250, "end": 650, "text": "Hello," },
+                            { "start": 730, "end": 1022, "text": "world" }
+                        ]
+                    })),
+                    _ => ProviderApiResponse::text(
+                        404,
+                        "Not Found",
+                        json!({"error": {"message": "unexpected request", "code": 404}})
+                            .to_string(),
+                    ),
+                };
+
+                Box::pin(ready(Ok(response)))
+            });
+        let provider =
+            create_assemblyai(AssemblyAIProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport);
+
+        let result = poll_ready(
+            provider.transcription("best").do_generate(
+                TranscriptionModelCallOptions::new(
+                    FileDataContent::Bytes(vec![1, 2, 3]),
+                    "audio/wav",
+                )
+                .with_abort_signal(abort_signal.clone()),
+            ),
+        );
+
+        assert_eq!(result.text, "Hello, world!");
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests.len(), 3);
+
+        for request in requests.iter() {
+            let request_signal = request.abort_signal.clone().expect("abort signal set");
+            assert!(request_signal.is_same_signal(&abort_signal));
+            assert!(!request_signal.is_aborted());
+        }
+
+        abort_controller.abort_with_reason("client-disconnected");
+
+        for request in requests.iter() {
+            let request_signal = request.abort_signal.clone().expect("abort signal set");
+            assert!(request_signal.is_aborted());
+            assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+        }
+    }
+
+    #[test]
+    fn assemblyai_transcription_model_aborts_before_polling_when_signal_is_aborted() {
+        let abort_controller = ProviderAbortController::new();
+        let abort_controller_for_transport = abort_controller.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: AssemblyAITransport =
+            Arc::new(move |request| -> AssemblyAITransportFuture {
+                requests_for_transport
+                    .lock()
+                    .expect("request list mutex is not poisoned")
+                    .push(request.clone());
+
+                let response = match (request.method, request.url.as_str()) {
+                    (ProviderApiRequestMethod::Post, "https://api.assemblyai.com/v2/upload") => {
+                        json_response(json!({
+                            "upload_url": "https://storage.assemblyai.com/mock-upload-url"
+                        }))
+                    }
+                    (
+                        ProviderApiRequestMethod::Post,
+                        "https://api.assemblyai.com/v2/transcript",
+                    ) => json_response(json!({
+                        "id": "transcript-123",
+                        "status": "queued"
+                    })),
+                    (
+                        ProviderApiRequestMethod::Get,
+                        "https://api.assemblyai.com/v2/transcript/transcript-123",
+                    ) => {
+                        abort_controller_for_transport.abort_with_reason("client-disconnected");
+                        json_response(json!({
+                            "id": "transcript-123",
+                            "status": "queued"
+                        }))
+                    }
+                    _ => ProviderApiResponse::text(
+                        404,
+                        "Not Found",
+                        json!({"error": {"message": "unexpected request", "code": 404}})
+                            .to_string(),
+                    ),
+                };
+
+                Box::pin(ready(Ok(response)))
+            });
+        let provider =
+            create_assemblyai(AssemblyAIProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport);
+
+        let result = poll_ready(
+            provider.transcription("best").do_generate(
+                TranscriptionModelCallOptions::new(
+                    FileDataContent::Bytes(vec![1, 2, 3]),
+                    "audio/wav",
+                )
+                .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.text.is_empty());
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests.len(), 3);
     }
 
     #[test]
