@@ -3527,6 +3527,159 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_flow_through_runtime_context_and_tools_context_e2e() {
+        let received_context = Arc::new(Mutex::new(None));
+        let received_context_for_tool = Arc::clone(&received_context);
+        let captured_finish = Arc::new(Mutex::new(None));
+        let captured_finish_for_callback = Arc::clone(&captured_finish);
+        let on_finish_runtime_context = Arc::new(Mutex::new(None));
+        let on_finish_runtime_context_for_callback = Arc::clone(&on_finish_runtime_context);
+        let on_finish_tools_context = Arc::new(Mutex::new(None));
+        let on_finish_tools_context_for_callback = Arc::clone(&on_finish_tools_context);
+
+        let tool = Tool::new("lookupCustomer", object_schema())
+            .with_context_schema(Schema::new(object_schema()).with_validator(|value| {
+                let api_key = value.get("apiKey").and_then(JsonValue::as_str);
+                let region = value.get("region").and_then(JsonValue::as_str);
+                if api_key.is_some() && matches!(region, Some("us" | "eu")) {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("apiKey and region are required")
+                }
+            }))
+            .with_execute(move |input, options| {
+                let received_context = Arc::clone(&received_context_for_tool);
+                async move {
+                    *received_context.lock().expect("context lock succeeds") =
+                        options.context.clone();
+                    Ok(json!({
+                        "customerId": input["customerId"],
+                        "eligible": true
+                    }))
+                }
+            });
+
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(tool)
+                .with_prepare_step(WorkflowPrepareStepCallback::new(
+                    |info: crate::WorkflowPrepareStepInfo| WorkflowPrepareStepResult {
+                        runtime_context: Some(
+                            serde_json::from_value(json!({
+                                "tenantId": info.runtime_context["tenantId"],
+                                "requestId": info.runtime_context["requestId"],
+                                "lastStep": info.step_number,
+                            }))
+                            .expect("runtime context serializes"),
+                        ),
+                        ..WorkflowPrepareStepResult::default()
+                    },
+                ))
+                .with_on_finish(WorkflowAgentOnFinishCallback::new(move |info| {
+                    *captured_finish_for_callback
+                        .lock()
+                        .expect("finish lock succeeds") = Some(info.clone());
+                    *on_finish_runtime_context_for_callback
+                        .lock()
+                        .expect("runtime context lock succeeds") =
+                        Some(info.runtime_context.clone());
+                    *on_finish_tools_context_for_callback
+                        .lock()
+                        .expect("tools context lock succeeds") = Some(info.tools_context.clone());
+                })),
+        );
+
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new(
+                "call-1",
+                "lookupCustomer",
+                r#"{"customerId":"cust_123"}"#,
+            )),
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                    LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                        "text-1",
+                        "Customer cust_123 is eligible.",
+                    )),
+                    LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                    finish(FinishReason::Stop),
+                ],
+                1,
+            ),
+        ]);
+        let runtime_context: WorkflowRuntimeContext = serde_json::from_value(json!({
+            "tenantId": "tenant_123",
+            "requestId": "req_abc"
+        }))
+        .expect("runtime context");
+        let tools_context = {
+            let mut context = WorkflowToolsContext::new();
+            context.insert(
+                "lookupCustomer".to_string(),
+                Some(
+                    serde_json::from_value(json!({
+                        "apiKey": "sk-test-key",
+                        "region": "us"
+                    }))
+                    .expect("tools context"),
+                ),
+            );
+            context
+        };
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_runtime_context(runtime_context.clone())
+                    .with_tools_context(tools_context.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(
+            result.steps.last().expect("last step").text,
+            "Customer cust_123 is eligible."
+        );
+        assert_eq!(
+            *received_context.lock().expect("context lock succeeds"),
+            Some(json!({
+                "apiKey": "sk-test-key",
+                "region": "us"
+            }))
+        );
+        let captured_finish = captured_finish
+            .lock()
+            .expect("finish lock succeeds")
+            .clone()
+            .expect("finish info was captured");
+        let on_finish_runtime_context = on_finish_runtime_context
+            .lock()
+            .expect("runtime context lock succeeds")
+            .clone()
+            .expect("runtime context captured");
+        let on_finish_tools_context = on_finish_tools_context
+            .lock()
+            .expect("tools context lock succeeds")
+            .clone()
+            .expect("tools context captured");
+        let expected_final_runtime_context = serde_json::from_value(json!({
+            "tenantId": "tenant_123",
+            "requestId": "req_abc",
+            "lastStep": 1,
+        }))
+        .expect("expected final runtime context");
+        assert_eq!(on_finish_runtime_context, expected_final_runtime_context);
+        assert_eq!(on_finish_tools_context, tools_context);
+        assert_eq!(
+            captured_finish.runtime_context,
+            expected_final_runtime_context
+        );
+        assert_eq!(captured_finish.tools_context, tools_context);
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_call_on_abort_when_abort_signal_is_already_aborted() {
         let captured_abort = Arc::new(Mutex::new(None));
         let captured_abort_for_callback = Arc::clone(&captured_abort);
