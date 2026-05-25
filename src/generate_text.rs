@@ -15418,6 +15418,33 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_passes_high_reasoning_to_model() {
+        let model =
+            MockLanguageModel::new().with_generate_result(LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "Hello, world!",
+                ))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+                LanguageModelUsage::default(),
+            ));
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")])
+                .with_reasoning(crate::language_model::LanguageModelReasoningEffort::High),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(model.generate_calls().len(), 1);
+        assert_eq!(
+            model.generate_calls()[0].reasoning,
+            Some(crate::language_model::LanguageModelReasoningEffort::High)
+        );
+    }
+
+    #[test]
     fn generate_text_prepare_step_model_switch_uses_step_model_supported_urls() {
         let primary_supported_urls_called = Arc::new(AtomicBool::new(false));
         let secondary_supported_urls_called = Arc::new(AtomicBool::new(false));

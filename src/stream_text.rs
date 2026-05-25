@@ -6915,6 +6915,36 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_passes_high_reasoning_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let mut options = StreamTextOptions::new(&model, vec![user_message("test-input")]);
+        options.call_options.reasoning =
+            Some(crate::language_model::LanguageModelReasoningEffort::High);
+
+        let result = poll_ready(stream_text(options));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(
+            model.stream_calls()[0].reasoning,
+            Some(crate::language_model::LanguageModelReasoningEffort::High)
+        );
+    }
+
+    #[test]
     fn stream_text_collects_text_deltas_and_finish_metadata() {
         let provider_metadata = ProviderMetadata::from([(
             "testProvider".to_string(),
