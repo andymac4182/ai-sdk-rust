@@ -66,8 +66,11 @@ pub mod warning;
 
 pub use agent::{
     AgentUiStreamResponseOptions, TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions,
-    ToolLoopAgentModelSettings, ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall,
-    ToolLoopAgentSettings, create_agent_ui_stream_response,
+    ToolLoopAgentModelSettings, ToolLoopAgentOnFinishCallback, ToolLoopAgentOnStartCallback,
+    ToolLoopAgentOnStepFinishCallback, ToolLoopAgentOnStepStartCallback,
+    ToolLoopAgentOnToolExecutionEndCallback, ToolLoopAgentOnToolExecutionStartCallback,
+    ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall, ToolLoopAgentSettings,
+    create_agent_ui_stream_response,
 };
 pub use baseten::{
     BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
@@ -547,7 +550,7 @@ mod tests {
 
     #[test]
     fn root_facade_reexports_upstream_index_surface() {
-        fn assert_type<T>() {}
+        fn assert_type<T: ?Sized>() {}
 
         let _gateway_model: GatewayLanguageModel = gateway("openai/gpt-4o-mini");
         let _gateway_provider: GatewayProvider = create_gateway(GatewayProviderSettings::new());
@@ -587,6 +590,12 @@ mod tests {
         assert_type::<ToolLoopAgent<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentCallOptions<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentModelSettings>();
+        assert_type::<ToolLoopAgentOnStartCallback<'static>>();
+        assert_type::<ToolLoopAgentOnStepStartCallback<'static>>();
+        assert_type::<ToolLoopAgentOnToolExecutionStartCallback<'static>>();
+        assert_type::<ToolLoopAgentOnToolExecutionEndCallback<'static>>();
+        assert_type::<ToolLoopAgentOnStepFinishCallback<'static>>();
+        assert_type::<ToolLoopAgentOnFinishCallback<'static>>();
         assert_type::<ToolLoopAgentPrepareCall<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentPreparedCall<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentSettings<'static, MockLanguageModel>>();

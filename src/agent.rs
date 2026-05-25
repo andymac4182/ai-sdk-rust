@@ -10,12 +10,15 @@ use crate::chat_transport::{
 };
 use crate::generate_text::{
     ActiveTools, GenerateTextFinishEvent, GenerateTextInclude, GenerateTextOnFinish,
-    GenerateTextOnStart, GenerateTextOnStepFinish, GenerateTextOnStepStart,
-    GenerateTextOnToolExecutionEnd, GenerateTextOnToolExecutionStart, GenerateTextOptions,
-    GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepStartEvent,
-    GenerateTextTool, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
-    PrepareStep, PrepareStepOptions, PrepareStepResult, StopCondition, ToolApprovalConfiguration,
-    ToolCallRepair, ToolInputRefinement, generate_text,
+    GenerateTextOnFinishCallback, GenerateTextOnStart, GenerateTextOnStartCallback,
+    GenerateTextOnStepFinish, GenerateTextOnStepFinishCallback, GenerateTextOnStepStart,
+    GenerateTextOnStepStartCallback, GenerateTextOnToolExecutionEnd,
+    GenerateTextOnToolExecutionStart, GenerateTextOptions, GenerateTextResult,
+    GenerateTextStartEvent, GenerateTextStep, GenerateTextStepStartEvent, GenerateTextTool,
+    GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
+    OnToolExecutionEndCallback, OnToolExecutionStartCallback, PrepareStep, PrepareStepOptions,
+    PrepareStepResult, StopCondition, ToolApprovalConfiguration, ToolCallRepair,
+    ToolInputRefinement, generate_text,
 };
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -35,6 +38,24 @@ use crate::ui_message_stream::{UiMessage, UiMessageStreamResponse, UiMessageStre
 
 /// Upstream version tag for `ToolLoopAgent`.
 pub const TOOL_LOOP_AGENT_VERSION: &str = "agent-v1";
+
+/// Upstream-compatible alias for the agent `onStart` callback type.
+pub type ToolLoopAgentOnStartCallback<'a> = GenerateTextOnStartCallback<'a>;
+
+/// Upstream-compatible alias for the agent `onStepStart` callback type.
+pub type ToolLoopAgentOnStepStartCallback<'a> = GenerateTextOnStepStartCallback<'a>;
+
+/// Upstream-compatible alias for the agent `onToolExecutionStart` callback type.
+pub type ToolLoopAgentOnToolExecutionStartCallback<'a> = OnToolExecutionStartCallback<'a>;
+
+/// Upstream-compatible alias for the agent `onToolExecutionEnd` callback type.
+pub type ToolLoopAgentOnToolExecutionEndCallback<'a> = OnToolExecutionEndCallback<'a>;
+
+/// Upstream-compatible alias for the agent `onStepFinish` callback type.
+pub type ToolLoopAgentOnStepFinishCallback<'a> = GenerateTextOnStepFinishCallback<'a>;
+
+/// Upstream-compatible alias for the agent `onFinish` callback type.
+pub type ToolLoopAgentOnFinishCallback<'a> = GenerateTextOnFinishCallback<'a>;
 
 /// Agent implementation that delegates each call to `generate_text` or `stream_text`.
 ///
