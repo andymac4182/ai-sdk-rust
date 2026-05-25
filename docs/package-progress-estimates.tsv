@@ -2,9 +2,6 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-provider-utils	82	Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod cases remain.
-provider	75	Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain.
-openai	99	OpenAI/Open Responses foundations, provider base URL precedence, language-model capability matrix, hosted web-search/local-shell tool helper type contracts, chat basic generate/request/response/header parity, chat provider-option extension request-body mapping including reasoningEffort/textVerbosity/logitBias/logprobs/parallelToolCalls, chat tool/toolChoice and responseFormat request-body mapping, annotation/citation source parsing, strict chat tool-call request/result mapping, chat usage, partial usage, finish reason, tool-call result, reasoning-token usage, and prediction-token provider-metadata mapping, chat logprobs provider-metadata extraction, chat streaming text/error/request/headers/usage/provider-option, streamed citation, and streamed tool-call edge parity with upstream include_usage stream options, chat reasoning/search-preview/service-tier request-rule parity including logprobs/logit-bias pruning, chat system-message mode parity, Embeddings request/result parity, Completion non-stream and streaming request/result parity, non-Responses OpenAI error schema parsing, Files upload, Skills upload, Speech, Transcription, and OpenAI image generation/edit request/result parity exist; remaining live proof and any newly discovered upstream drift remain.
 assemblyai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 azure	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
@@ -26,5 +23,4 @@ togetherai	45	Initial provider wrapper exists; broader package behavior and live
 vercel	40	Construction wrapper exists; live validation and full package test parity remain.
 voyage	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 mcp	90	Protocol, transports, OAuth, examples, and Gateway tool bridge are broad; protected live auth validation and hosted auth examples remain.
-otel	82	Package helpers, span lifecycle, local OTLP export, and Gateway live telemetry proof exist; broader provider live telemetry remains.
 workflow	76	WorkflowAgent and iterator callback/continuation coverage is substantial, including named providerMetadata/OpenAI itemId sanitization, WorkflowAgent option-forwarding/default, and tool-execution callback event counterparts; real model execution, HTTP/SSE adapters, and JSON Schema validation remain.
