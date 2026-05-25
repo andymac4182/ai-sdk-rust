@@ -4754,6 +4754,7 @@ mod tests {
         telemetry_test_guard_for_tests,
     };
     use crate::ui_message_stream::UiMessageRole;
+    use crate::util::parse_partial_json;
     use crate::warning::Warning;
     use serde::Deserialize;
     use url::Url;
@@ -4905,6 +4906,26 @@ mod tests {
                 finish_reason(),
             )),
         ])
+    }
+
+    fn stream_text_partial_output_values(result: &StreamTextResult) -> Vec<JsonValue> {
+        let mut output = String::new();
+        let mut partial_values = Vec::new();
+
+        for delta in &result.text_stream {
+            output.push_str(delta);
+
+            let value = parse_partial_json(Some(&output))
+                .value()
+                .cloned()
+                .unwrap_or_else(|| JsonValue::String(output.clone()));
+
+            if partial_values.last() != Some(&value) {
+                partial_values.push(value);
+            }
+        }
+
+        partial_values
     }
 
     #[test]
@@ -5087,6 +5108,110 @@ mod tests {
             .expect("default text output has no element stream");
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stream_text_result_partial_output_stream_collects_incremental_text_outputs() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            stream_text_partial_output_values(&result),
+            vec![json!("Hello, "), json!("Hello, world!"),]
+        );
+        assert_eq!(result.text, "Hello, world!");
+    }
+
+    #[test]
+    fn stream_text_result_partial_output_stream_repairs_incremental_object_outputs() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "{ ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                "text-1",
+                "\"value\": ",
+            )),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "\"Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "!\"")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", " }")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            stream_text_partial_output_values(&result),
+            vec![
+                json!({}),
+                json!({ "value": "Hello, " }),
+                json!({ "value": "Hello, world" }),
+                json!({ "value": "Hello, world!" }),
+            ]
+        );
+        assert_eq!(
+            result
+                .output_as::<JsonValue>()
+                .expect("object output is typed"),
+            json!({
+                "value": "Hello, world!"
+            })
+        );
+    }
+
+    #[test]
+    fn stream_text_result_partial_output_stream_repairs_incremental_array_outputs_and_elements() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "[")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                "text-1",
+                r#"{"value":"one"}"#,
+            )),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", ",")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                "text-1",
+                r#"{"value":"two"}"#,
+            )),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "]")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            stream_text_partial_output_values(&result),
+            vec![
+                json!([]),
+                json!([{"value": "one"}]),
+                json!([{"value": "one"}, {"value": "two"}]),
+            ]
+        );
+        assert_eq!(
+            result
+                .element_stream_as::<StreamTypedObjectOutput>()
+                .expect("array elements are typed"),
+            vec![
+                StreamTypedObjectOutput {
+                    value: "one".to_string()
+                },
+                StreamTypedObjectOutput {
+                    value: "two".to_string()
+                },
+            ]
+        );
     }
 
     #[derive(Default)]
