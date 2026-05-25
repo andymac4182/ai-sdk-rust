@@ -475,6 +475,38 @@ impl Thread {
         }
     }
 
+    /// Reference-identity variant of [`Self::schedule`]. Returns
+    /// the adapter's [`crate::types::ScheduledMessage`] as an
+    /// `Arc` so the caller can verify Rust reference equality
+    /// against the adapter's source `Arc` via
+    /// [`std::sync::Arc::ptr_eq`]. 1:1 with upstream's
+    /// `thread.test.ts > schedule() > "should return the
+    /// ScheduledMessage from adapter"` (slice 496). Dispatches
+    /// through [`crate::types::Adapter::schedule_message_arc`].
+    pub async fn schedule_arc(
+        &self,
+        text: &str,
+        post_at_unix_ms: u64,
+    ) -> Result<std::sync::Arc<crate::types::ScheduledMessage>, crate::errors::ChatError> {
+        match self
+            .adapter
+            .schedule_message_arc(&self.thread_id, text, post_at_unix_ms)
+            .await
+        {
+            Ok(scheduled) => Ok(scheduled),
+            Err(crate::types::AdapterError::Unsupported(_)) => {
+                Err(crate::errors::ChatError::not_implemented_feature(
+                    "Scheduled messages are not supported by this adapter",
+                    "scheduling",
+                ))
+            }
+            Err(other) => Err(crate::errors::ChatError::new(
+                format!("{other}"),
+                "ADAPTER_ERROR",
+            )),
+        }
+    }
+
     /// Schedule a typed PostableMessage for future delivery. 1:1
     /// with the upstream `thread.schedule(message: PostableMessage,
     /// options)` overload accepting non-string message shapes
@@ -2432,6 +2464,59 @@ mod tests {
         let calls = adapter.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, ast);
+    }
+
+    /// Adapter that holds the source `Arc<ScheduledMessage>` and
+    /// returns clones of THAT EXACT Arc on every `schedule_message_arc`
+    /// call — used by the slice-496 reference-equality test.
+    #[derive(Debug)]
+    struct ArcSchedulingAdapter {
+        source: Arc<crate::types::ScheduledMessage>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for ArcSchedulingAdapter {
+        fn name(&self) -> &str {
+            "arc-scheduling"
+        }
+        async fn schedule_message_arc(
+            &self,
+            _thread_id: &str,
+            _text: &str,
+            _post_at_unix_ms: u64,
+        ) -> AdapterResult<Arc<crate::types::ScheduledMessage>> {
+            Ok(Arc::clone(&self.source))
+        }
+    }
+
+    #[test]
+    fn thread_schedule_arc_returns_the_scheduled_message_from_adapter_with_reference_identity() {
+        // 1:1 with upstream `thread.test.ts > schedule() > "should
+        // return the ScheduledMessage from adapter"` (slice 496).
+        // Upstream's `expect(result).toBe(expected)` asserts JS
+        // reference identity. The Rust port maps this to
+        // `Arc::ptr_eq`: the adapter holds the source Arc and
+        // returns clones of THAT Arc both times; the test verifies
+        // each call returns the exact same Arc backing (not just
+        // structural equality).
+        let source = Arc::new(crate::types::ScheduledMessage {
+            scheduled_message_id: "Q-arc-1".to_string(),
+            channel_id: "slack:C123".to_string(),
+            post_at_unix_ms: FUTURE_UNIX_MS,
+            raw: serde_json::json!({"sentinel": true}),
+        });
+        let adapter = Arc::new(ArcSchedulingAdapter {
+            source: source.clone(),
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "slack:C123:1234.5678");
+        let first = block_on(thread.schedule_arc("Hello", FUTURE_UNIX_MS)).unwrap();
+        let second = block_on(thread.schedule_arc("Hello", FUTURE_UNIX_MS)).unwrap();
+        // Both calls return Arc clones backed by the SAME allocation
+        // as the source Arc held by the adapter — verified via
+        // pointer equality (the Rust analog of JS `toBe`).
+        assert!(Arc::ptr_eq(&source, &first));
+        assert!(Arc::ptr_eq(&source, &second));
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     // ---------- describe("schedule()") cancel() — slice 405 ----------

@@ -1654,6 +1654,24 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported("schedule_message"))
     }
 
+    /// Reference-identity variant of [`Self::schedule_message`].
+    /// Returns the [`ScheduledMessage`] wrapped in an `Arc` so the
+    /// caller can verify Rust reference equality against the
+    /// adapter's source `Arc` via [`std::sync::Arc::ptr_eq`]. 1:1
+    /// with upstream's `scheduleMessage` overload that returns the
+    /// same object reference — see `thread.test.ts > "should return
+    /// the ScheduledMessage from adapter"`. Default returns
+    /// `Err(Unsupported)` so adapters without ref-identity needs
+    /// compile unchanged. (slice 496)
+    async fn schedule_message_arc(
+        &self,
+        _thread_id: &str,
+        _text: &str,
+        _post_at_unix_ms: u64,
+    ) -> AdapterResult<std::sync::Arc<ScheduledMessage>> {
+        Err(AdapterError::Unsupported("schedule_message_arc"))
+    }
+
     /// Schedule a typed PostableMessage (raw / markdown / AST shape)
     /// for future delivery. 1:1 with the upstream
     /// `scheduleMessage(threadId, message: PostableMessage, options)`
