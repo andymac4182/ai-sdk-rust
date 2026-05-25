@@ -675,12 +675,75 @@ impl Thread {
 /// returned from `Thread::post` (once that surfaces SentMessage —
 /// currently it returns `String` message id; SentMessage construction
 /// from a post-result lands in a follow-up slice).
+/// 1:1 port of upstream's deferred-throw semantic on
+/// `ThreadImpl.fromJSON(json)`. Upstream's `fromJSON` returns a
+/// thread whose `.adapter` accessor throws if the adapter name
+/// is not registered on the chat singleton at *access time* (not
+/// at construction). The Rust [`Thread::from_json`] requires the
+/// adapter at construction, so the equivalent "throw on access"
+/// shape lives here as a separate type. (slice 497)
+///
+/// `Resolved` carries a fully-constructed [`Thread`] (singleton
+/// was present and held the named adapter at construction).
+/// `Unresolved` carries the raw payload and the requested
+/// `adapter_name`; calling [`Self::adapter`] returns
+/// `Err(ChatError("Adapter \"<name>\" not found in Chat singleton"))`
+/// — observably equivalent to upstream's deferred throw.
 #[derive(Clone)]
+pub enum LazyThread {
+    Resolved(Thread),
+    Unresolved {
+        json: serde_json::Value,
+        adapter_name: String,
+    },
+}
+
+impl LazyThread {
+    /// 1:1 with upstream `ThreadImpl.fromJSON(json)`: read
+    /// `adapterName` from the envelope, attempt singleton-based
+    /// resolution; on success return [`Self::Resolved`], otherwise
+    /// stash the payload + name for a deferred error on
+    /// [`Self::adapter`]. (slice 497)
+    pub fn from_json(json: &serde_json::Value) -> Self {
+        let adapter_name = json
+            .get("adapterName")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !adapter_name.is_empty() {
+            if let Some(singleton) = crate::chat_singleton::try_get_chat_singleton() {
+                if let Some(adapter) = singleton.get_adapter(&adapter_name) {
+                    return LazyThread::Resolved(Thread::from_json(json, adapter));
+                }
+            }
+        }
+        LazyThread::Unresolved {
+            json: json.clone(),
+            adapter_name,
+        }
+    }
+
+    /// 1:1 with upstream `thread.adapter` getter — throws when the
+    /// adapter name is not registered on the chat singleton. The
+    /// Rust port returns a `ChatError` with the upstream error
+    /// message format `Adapter "<name>" not found in Chat singleton`.
+    pub fn adapter(&self) -> Result<&Arc<dyn Adapter>, crate::errors::ChatError> {
+        match self {
+            LazyThread::Resolved(thread) => Ok(thread.adapter()),
+            LazyThread::Unresolved { adapter_name, .. } => Err(crate::errors::ChatError::new(
+                format!("Adapter \"{adapter_name}\" not found in Chat singleton"),
+                "ADAPTER_NOT_FOUND",
+            )),
+        }
+    }
+}
+
 /// 1:1 with upstream `ScheduledMessage`-with-`cancel()` shape. The
 /// upstream interface embeds the `cancel(): Promise<void>` closure on
 /// the value itself; the Rust port keeps [`crate::types::ScheduledMessage`]
 /// as a pure Serialize+Eq struct and binds the cancellation closure
 /// here via the adapter that produced it.
+#[derive(Clone)]
 pub struct ScheduledMessageHandle {
     scheduled: crate::types::ScheduledMessage,
     adapter: Arc<dyn Adapter>,
@@ -2517,6 +2580,46 @@ mod tests {
         assert!(Arc::ptr_eq(&source, &first));
         assert!(Arc::ptr_eq(&source, &second));
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// Static lock shared by all singleton-touching tests in this
+    /// module — serializes against any concurrent test that
+    /// registers a chat singleton to avoid cross-test races on the
+    /// process-wide singleton slot. (slice 497)
+    static LAZY_THREAD_SINGLETON_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn thread_from_json_lazy_throws_on_adapter_access_when_adapter_not_in_singleton() {
+        // 1:1 with upstream `serialization.test.ts > describe("ThreadImpl.fromJSON()") >
+        // "should throw error for unknown adapter on access"`. The
+        // upstream test asserts that ThreadImpl.fromJSON returns a
+        // handle whose `.adapter` accessor throws when the
+        // adapter name isn't registered on the chat singleton.
+        // Rust port: LazyThread::from_json returns an Unresolved
+        // variant whose adapter() method returns the equivalent
+        // error. (slice 497 — actual port, supersedes the
+        // slice-472 type-system-impossible enumeration.)
+        let _lock = LAZY_THREAD_SINGLETON_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Defensive: ensure no leftover singleton from another test.
+        crate::chat_singleton::clear_chat_singleton();
+        let json = serde_json::json!({
+            "_type": "chat:Thread",
+            "id": "discord:channel:thread",
+            "channelId": "channel",
+            "isDM": false,
+            "adapterName": "discord",
+        });
+        let lazy = LazyThread::from_json(&json);
+        let err = lazy
+            .adapter()
+            .expect_err("adapter() should fail without singleton");
+        assert!(
+            err.to_string()
+                .contains("Adapter \"discord\" not found in Chat singleton"),
+            "got error message: {err}"
+        );
     }
 
     // ---------- describe("schedule()") cancel() — slice 405 ----------
