@@ -14,7 +14,7 @@ use ai_sdk_provider::{
     LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultPart,
     LanguageModelUsage, ProviderMetadata, ProviderOptions, Warning,
 };
-use ai_sdk_rust::{StopCondition, ToolCallRepairFunction, ToolCallRepairOptions};
+use ai_sdk_rust::{StopCondition, TelemetryOptions, ToolCallRepairFunction, ToolCallRepairOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{SerializableToolSet, serialize_tool_set};
@@ -232,7 +232,7 @@ pub struct WorkflowStreamStep {
 }
 
 /// Options passed to a workflow stream step executor.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoStreamStepOptions {
     /// Current model identity for this workflow step.
@@ -274,8 +274,28 @@ pub struct DoStreamStepOptions {
     #[serde(default)]
     pub tools_context: WorkflowToolsContext,
 
+    /// Telemetry settings carried through to the workflow iterator.
+    #[serde(skip, default)]
+    pub telemetry: Option<TelemetryOptions>,
+
     /// Zero-based workflow step number.
     pub step_number: usize,
+}
+
+impl PartialEq for DoStreamStepOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.model == other.model
+            && self.generation_settings == other.generation_settings
+            && self.tool_choice == other.tool_choice
+            && self.include_raw_chunks == other.include_raw_chunks
+            && self.response_format == other.response_format
+            && self.stop_conditions == other.stop_conditions
+            && self.repair_tool_call == other.repair_tool_call
+            && self.on_error == other.on_error
+            && self.runtime_context == other.runtime_context
+            && self.tools_context == other.tools_context
+            && self.step_number == other.step_number
+    }
 }
 
 /// Portable generation settings accepted by the workflow iterator.
@@ -618,6 +638,7 @@ pub struct StreamTextIterator<E> {
     on_error: Option<WorkflowStreamTextOnErrorCallback>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
     include_raw_chunks: bool,
+    telemetry: Option<TelemetryOptions>,
     response_format: Option<JsonValue>,
     steps: Vec<WorkflowStreamStep>,
     step_number: usize,
@@ -643,6 +664,7 @@ impl<E> StreamTextIterator<E> {
             on_error: None,
             prepare_step: None,
             include_raw_chunks: false,
+            telemetry: None,
             response_format: None,
             steps: Vec::new(),
             step_number: 0,
@@ -732,6 +754,12 @@ impl<E> StreamTextIterator<E> {
     /// Sets whether raw chunks are included.
     pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
         self.include_raw_chunks = include_raw_chunks;
+        self
+    }
+
+    /// Sets telemetry settings.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
         self
     }
 
@@ -854,6 +882,7 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
             on_error: self.on_error.clone(),
             runtime_context: self.runtime_context.clone(),
             tools_context: self.tools_context.clone(),
+            telemetry: self.telemetry.clone(),
             step_number: self.step_number,
         };
 
