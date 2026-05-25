@@ -7,16 +7,16 @@ use std::time::Instant;
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
     FinishReason, InputTokenUsage, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
-    LanguageModelAssistantMessage, LanguageModelMessage, LanguageModelToolApprovalResponsePart,
-    LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
-    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-    OutputTokenUsage,
+    LanguageModelAssistantMessage, LanguageModelMessage, LanguageModelTextPart,
+    LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolContentPart,
+    LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+    LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions,
     ToolNeedsApprovalOptions, execute_tool,
 };
-use ai_sdk_rust::StopCondition;
+use ai_sdk_rust::{StopCondition, TelemetryOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -56,6 +56,9 @@ pub struct WorkflowAgentOptions {
     /// Default stream error callback.
     pub on_error: Option<WorkflowStreamTextOnErrorCallback>,
 
+    /// Default telemetry settings.
+    pub telemetry: Option<TelemetryOptions>,
+
     /// Default prepare-step callback.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
@@ -91,6 +94,7 @@ impl WorkflowAgentOptions {
             stop_conditions: Vec::new(),
             experimental_repair_tool_call: None,
             on_error: None,
+            telemetry: None,
             prepare_step: None,
             on_start: None,
             on_step_start: None,
@@ -165,6 +169,12 @@ impl WorkflowAgentOptions {
         self
     }
 
+    /// Sets constructor-level telemetry settings.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
     /// Sets a constructor-level prepare-step callback.
     pub fn with_prepare_step(mut self, prepare_step: WorkflowPrepareStepCallback) -> Self {
         self.prepare_step = Some(prepare_step);
@@ -217,6 +227,47 @@ impl WorkflowAgentOptions {
     }
 }
 
+/// Input accepted by [`WorkflowAgentStreamOptions::new`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkflowPromptInput {
+    /// A simple text prompt.
+    Text(String),
+
+    /// A list of already-standardized messages.
+    Messages(WorkflowPrompt),
+}
+
+impl WorkflowPromptInput {
+    fn into_prompt(self) -> WorkflowPrompt {
+        match self {
+            Self::Text(text) => vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new(text),
+                )],
+            ))],
+            Self::Messages(messages) => messages,
+        }
+    }
+}
+
+impl From<String> for WorkflowPromptInput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for WorkflowPromptInput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<WorkflowPrompt> for WorkflowPromptInput {
+    fn from(messages: WorkflowPrompt) -> Self {
+        Self::Messages(messages)
+    }
+}
+
 /// Deterministic Rust equivalent of upstream `WorkflowAgent`.
 #[derive(Clone, Debug)]
 pub struct WorkflowAgent {
@@ -229,6 +280,7 @@ pub struct WorkflowAgent {
     stop_conditions: Vec<StopCondition>,
     experimental_repair_tool_call: Option<WorkflowToolCallRepairCallback>,
     on_error: Option<WorkflowStreamTextOnErrorCallback>,
+    telemetry: Option<TelemetryOptions>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
     on_start: Option<WorkflowAgentOnStartCallback>,
     on_step_start: Option<WorkflowAgentOnStepStartCallback>,
@@ -251,6 +303,7 @@ impl WorkflowAgent {
             stop_conditions: options.stop_conditions,
             experimental_repair_tool_call: options.experimental_repair_tool_call,
             on_error: options.on_error,
+            telemetry: options.telemetry,
             prepare_step: options.prepare_step,
             on_start: options.on_start,
             on_step_start: options.on_step_start,
@@ -301,6 +354,8 @@ impl WorkflowAgent {
             .experimental_repair_tool_call
             .or_else(|| self.experimental_repair_tool_call.clone());
         let on_error = options.on_error.or_else(|| self.on_error.clone());
+        let telemetry = options.telemetry.or_else(|| self.telemetry.clone());
+        let include_raw_chunks = options.include_raw_chunks;
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
         let constructor_on_start = self.on_start.clone();
         let stream_on_start = options.on_start;
@@ -342,7 +397,12 @@ impl WorkflowAgent {
         .with_model(self.model.clone())
         .with_generation_settings(generation_settings.clone())
         .with_runtime_context(options.runtime_context)
-        .with_tools_context(options.tools_context);
+        .with_tools_context(options.tools_context)
+        .with_include_raw_chunks(include_raw_chunks);
+
+        if let Some(telemetry) = telemetry {
+            iterator = iterator.with_telemetry(telemetry);
+        }
 
         if !active_tools.is_empty() {
             iterator = iterator.with_active_tools(active_tools);
@@ -581,6 +641,12 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level generation settings that override constructor defaults.
     pub generation_settings: Option<WorkflowGenerationSettings>,
 
+    /// Stream-level telemetry settings that override constructor defaults.
+    pub telemetry: Option<TelemetryOptions>,
+
+    /// Whether raw provider chunks should be included in step results.
+    pub include_raw_chunks: bool,
+
     /// Stream-level runtime context.
     pub runtime_context: WorkflowRuntimeContext,
 
@@ -632,11 +698,14 @@ pub struct WorkflowAgentStreamOptions<E> {
 
 impl<E> WorkflowAgentStreamOptions<E> {
     /// Creates agent stream options.
-    pub fn new(prompt: WorkflowPrompt, executor: E) -> Self {
+    pub fn new(prompt: impl Into<WorkflowPromptInput>, executor: E) -> Self {
+        let prompt = prompt.into().into_prompt();
         Self {
             prompt,
             executor,
             generation_settings: None,
+            telemetry: None,
+            include_raw_chunks: false,
             runtime_context: WorkflowRuntimeContext::new(),
             tools_context: WorkflowToolsContext::new(),
             active_tools: None,
@@ -662,6 +731,18 @@ impl<E> WorkflowAgentStreamOptions<E> {
         generation_settings: WorkflowGenerationSettings,
     ) -> Self {
         self.generation_settings = Some(generation_settings);
+        self
+    }
+
+    /// Sets stream-level telemetry settings.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets whether raw provider chunks should be included.
+    pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
+        self.include_raw_chunks = include_raw_chunks;
         self
     }
 
@@ -4026,6 +4107,119 @@ mod tests {
         assert_eq!(result.messages, expected_messages);
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.steps[0].text, "Hello");
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_accept_a_string_prompt_in_stream() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(
+            "What is the weather?",
+            executor,
+        )))
+        .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].prompt,
+            vec![user_text_message("What is the weather?")]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_accept_an_array_of_messages_as_prompt() {
+        let prompt = vec![
+            user_text_message("What is the weather?"),
+            user_text_message("Please be concise."),
+        ];
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(prompt.clone(), executor)))
+            .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt, prompt);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_include_raw_chunks_to_stream_text_iterator() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_include_raw_chunks(true),
+        ))
+        .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].options.include_raw_chunks);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_telemetry_settings_from_constructor_to_stream_text_iterator()
+     {
+        let telemetry = ai_sdk_rust::TelemetryOptions::new()
+            .with_enabled(true)
+            .with_record_inputs(false)
+            .with_function_id("test-agent");
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_telemetry(telemetry.clone()),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        let captured_telemetry = calls[0]
+            .options
+            .telemetry
+            .as_ref()
+            .expect("telemetry settings were passed");
+        assert_eq!(captured_telemetry.is_enabled, Some(true));
+        assert_eq!(captured_telemetry.record_inputs, Some(false));
+        assert_eq!(
+            captured_telemetry.function_id.as_deref(),
+            Some("test-agent")
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_allow_stream_options_to_override_constructor_telemetry() {
+        let constructor_telemetry = ai_sdk_rust::TelemetryOptions::new()
+            .with_enabled(true)
+            .with_function_id("constructor-id");
+        let stream_telemetry = ai_sdk_rust::TelemetryOptions::new()
+            .with_enabled(false)
+            .with_record_outputs(true)
+            .with_function_id("stream-id");
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_telemetry(constructor_telemetry),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_telemetry(stream_telemetry.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        let captured_telemetry = calls[0]
+            .options
+            .telemetry
+            .as_ref()
+            .expect("telemetry settings were passed");
+        assert_eq!(captured_telemetry.is_enabled, Some(false));
+        assert_eq!(captured_telemetry.record_outputs, Some(true));
+        assert_eq!(captured_telemetry.function_id.as_deref(), Some("stream-id"));
     }
 
     #[test]

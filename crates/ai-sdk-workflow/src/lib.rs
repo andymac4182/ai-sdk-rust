@@ -32,7 +32,7 @@ pub use workflow_agent::{
     WorkflowAgentOnStepStartCallback, WorkflowAgentOnToolExecutionEndCallback,
     WorkflowAgentOnToolExecutionStartCallback, WorkflowAgentOptions, WorkflowAgentStartInfo,
     WorkflowAgentStepStartInfo, WorkflowAgentStreamOptions, WorkflowAgentStreamResult,
-    WorkflowAgentToolExecutionEndInfo, WorkflowAgentToolExecutionStartInfo,
+    WorkflowAgentToolExecutionEndInfo, WorkflowAgentToolExecutionStartInfo, WorkflowPromptInput,
 };
 
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
