@@ -1182,10 +1182,11 @@ mod tests {
     }
 
     // ---------- describe("normalizeDiscordEmoji") (7 upstream cases) ----------
-    // 1:1 with upstream `index.test.ts > describe("normalizeDiscordEmoji")`.
-    // Upstream's tests only assert the result is "defined" (truthy);
-    // the Rust port asserts that `get_emoji` returned an Arc with a
-    // non-empty `name()` after the unicode-to-name mapping.
+    // 1:1 with upstream `index.test.ts > describe("normalizeDiscordEmoji")`
+    // at L1984 (cases L1992-L2025). Upstream's tests only assert the result
+    // is "defined" (truthy); the Rust port asserts the resolved name from
+    // the unicode-to-name mapping, which is a strict superset of the
+    // upstream contract.
 
     #[test]
     fn discord_normalize_discord_emoji_normalizes_unicode_thumbs_up() {
