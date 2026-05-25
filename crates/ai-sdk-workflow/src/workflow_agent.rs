@@ -4110,6 +4110,43 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_generate_basic_text_response() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Echo: hello world",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                finish(FinishReason::Stop),
+            ],
+            0,
+        )]);
+
+        let result = poll_ready(agent.stream(WorkflowAgentStreamOptions::new(
+            vec![user_text_message("hello world")],
+            executor,
+        )))
+        .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].text, "Echo: hello world");
+        assert_eq!(
+            result.messages,
+            vec![
+                user_text_message("hello world"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(
+                        ai_sdk_provider::LanguageModelTextPart::new("Echo: hello world"),
+                    ),
+                ])),
+            ]
+        );
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_accept_a_string_prompt_in_stream() {
         let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
         let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
