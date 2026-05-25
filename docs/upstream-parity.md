@@ -5266,6 +5266,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    `generate_text_sends_approved_provider_executed_tool_approval_response_once`,
    proving the approval response is normalized before the model call while
    the provider-executed tool result remains surfaced in content.
+   The upstream `generateText` responseMessages tool-approval-request
+   preservation case now has the named Rust counterpart
+   `generate_text_response_messages_preserve_tool_approval_requests`,
+   proving approval-request content is retained in `result.responseMessages`
+   alongside the tool-call assistant message.
    The upstream `generateText` warning logger single-step, per-step multi-step,
    and empty-warning cases now have named Rust counterparts in
    `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
