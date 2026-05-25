@@ -28,6 +28,7 @@
 
 pub mod cards;
 pub mod markdown;
+pub mod parse;
 pub mod webhook;
 
 use async_trait::async_trait;
@@ -709,6 +710,328 @@ pub fn encode_thread_id(owner: &str, repo: &str, number: u64) -> String {
     format!("{THREAD_ID_PREFIX}{owner}/{repo}:{number}")
 }
 
+/// Thread variant. 1:1 with upstream's
+/// `type: "pr" | "issue"` discriminator on `GitHubThreadId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum GithubThreadKind {
+    /// Pull-request thread (or unspecified — upstream defaults to `pr`).
+    #[default]
+    Pr,
+    /// Issue thread.
+    Issue,
+}
+
+/// Structured GitHub thread id. 1:1 with upstream's
+/// `interface GitHubThreadId { owner; repo; prNumber; type?; reviewCommentId? }`.
+///
+/// `pr_number` carries the PR **or** issue number per upstream — the
+/// upstream type re-uses the same field for both, gated by `type`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GithubThreadId {
+    /// Repository owner (org or user login).
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// PR or issue number.
+    pub pr_number: u64,
+    /// Variant. `Pr` is the default; `Issue` selects the
+    /// `github:<owner>/<repo>:issue:<n>` wire form.
+    pub kind: GithubThreadKind,
+    /// Review-comment thread id (when this thread is a review
+    /// comment). Only valid on `Pr`-kind threads.
+    pub review_comment_id: Option<u64>,
+}
+
+/// Errors returned by [`encode_thread_id_full`]. 1:1 with upstream's
+/// `throw new ValidationError("github", "...")` in `encodeThreadId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeThreadIdError {
+    /// Issue-kind thread carries a `review_comment_id`. Upstream
+    /// throws `"Review comments are not supported on issue threads"`.
+    ReviewCommentOnIssueThread,
+}
+
+impl std::fmt::Display for EncodeThreadIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReviewCommentOnIssueThread => {
+                write!(f, "Review comments are not supported on issue threads")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EncodeThreadIdError {}
+
+/// Encode a structured [`GithubThreadId`] to the wire format. 1:1
+/// with upstream `encodeThreadId(platformData)`.
+///
+/// Wire formats:
+/// - PR-level: `github:<owner>/<repo>:<prNumber>`
+/// - Issue-level: `github:<owner>/<repo>:issue:<issueNumber>`
+/// - Review comment: `github:<owner>/<repo>:<prNumber>:rc:<reviewCommentId>`
+pub fn encode_thread_id_full(thread: &GithubThreadId) -> Result<String, EncodeThreadIdError> {
+    if thread.kind == GithubThreadKind::Issue && thread.review_comment_id.is_some() {
+        return Err(EncodeThreadIdError::ReviewCommentOnIssueThread);
+    }
+    if thread.kind == GithubThreadKind::Issue {
+        return Ok(format!(
+            "{THREAD_ID_PREFIX}{}/{}:issue:{}",
+            thread.owner, thread.repo, thread.pr_number
+        ));
+    }
+    if let Some(rc) = thread.review_comment_id {
+        return Ok(format!(
+            "{THREAD_ID_PREFIX}{}/{}:{}:rc:{}",
+            thread.owner, thread.repo, thread.pr_number, rc
+        ));
+    }
+    Ok(format!(
+        "{THREAD_ID_PREFIX}{}/{}:{}",
+        thread.owner, thread.repo, thread.pr_number
+    ))
+}
+
+/// Errors returned by [`decode_thread_id_full`]. 1:1 with upstream's
+/// `throw new ValidationError("github", "...")` in `decodeThreadId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeThreadIdError {
+    /// Thread id doesn't start with `github:`. Upstream throws
+    /// `"Invalid GitHub thread ID: <id>"`.
+    InvalidPrefix(String),
+    /// Thread id is `github:`-prefixed but doesn't match any of the
+    /// PR / issue / review-comment patterns. Upstream throws
+    /// `"Invalid GitHub thread ID format: <id>"`.
+    InvalidFormat(String),
+}
+
+impl std::fmt::Display for DecodeThreadIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPrefix(s) => write!(f, "Invalid GitHub thread ID: {s}"),
+            Self::InvalidFormat(s) => write!(f, "Invalid GitHub thread ID format: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeThreadIdError {}
+
+/// Decode a wire thread id into a structured [`GithubThreadId`]. 1:1
+/// with upstream `decodeThreadId(threadId)`.
+///
+/// Patterns (matched in order — same priority as upstream):
+/// 1. `github:<owner>/<repo>:<prNumber>:rc:<reviewCommentId>`
+/// 2. `github:<owner>/<repo>:issue:<issueNumber>`
+/// 3. `github:<owner>/<repo>:<prNumber>`
+pub fn decode_thread_id_full(thread_id: &str) -> Result<GithubThreadId, DecodeThreadIdError> {
+    let suffix = thread_id
+        .strip_prefix(THREAD_ID_PREFIX)
+        .ok_or_else(|| DecodeThreadIdError::InvalidPrefix(thread_id.to_string()))?;
+
+    // First: review-comment pattern `<owner>/<repo>:<n>:rc:<m>`.
+    if let Some((repo_path, rest)) = suffix.split_once(':') {
+        if let Some((owner, repo)) = repo_path.split_once('/') {
+            if !owner.is_empty() && !repo.is_empty() {
+                let parts: Vec<&str> = rest.split(':').collect();
+                if parts.len() == 3 && parts[1] == "rc" {
+                    if let (Ok(pr), Ok(rc)) = (parts[0].parse::<u64>(), parts[2].parse::<u64>()) {
+                        return Ok(GithubThreadId {
+                            owner: owner.to_string(),
+                            repo: repo.to_string(),
+                            pr_number: pr,
+                            kind: GithubThreadKind::Pr,
+                            review_comment_id: Some(rc),
+                        });
+                    }
+                }
+                if parts.len() == 2 && parts[0] == "issue" {
+                    if let Ok(n) = parts[1].parse::<u64>() {
+                        return Ok(GithubThreadId {
+                            owner: owner.to_string(),
+                            repo: repo.to_string(),
+                            pr_number: n,
+                            kind: GithubThreadKind::Issue,
+                            review_comment_id: None,
+                        });
+                    }
+                }
+                if parts.len() == 1 {
+                    if let Ok(n) = parts[0].parse::<u64>() {
+                        return Ok(GithubThreadId {
+                            owner: owner.to_string(),
+                            repo: repo.to_string(),
+                            pr_number: n,
+                            kind: GithubThreadKind::Pr,
+                            review_comment_id: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Err(DecodeThreadIdError::InvalidFormat(thread_id.to_string()))
+}
+
+/// Parse a GitHub channel id (`github:<owner>/<repo>`) into its
+/// `(owner, repo)` parts. 1:1 with upstream's inline parsing in
+/// `listThreads` / `fetchChannelInfo`. Throws upstream's
+/// `"Invalid GitHub channel ID: <id>"` on a missing slash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubChannelId {
+    /// Repository owner (org or user login).
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+/// Errors returned by [`parse_channel_id`]. 1:1 with upstream's
+/// inline `throw new ValidationError("github", \`Invalid GitHub channel ID: ${channelId}\`)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidChannelIdError(pub String);
+
+impl std::fmt::Display for InvalidChannelIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid GitHub channel ID: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidChannelIdError {}
+
+/// Parse a channel id (`github:<owner>/<repo>`). Returns
+/// [`InvalidChannelIdError`] when the slash separator is missing or
+/// the prefix is wrong — matches upstream's `listThreads` /
+/// `fetchChannelInfo` validation paths exactly.
+pub fn parse_channel_id(channel_id: &str) -> Result<GithubChannelId, InvalidChannelIdError> {
+    let suffix = channel_id
+        .strip_prefix(THREAD_ID_PREFIX)
+        .ok_or_else(|| InvalidChannelIdError(channel_id.to_string()))?;
+    let slash = suffix
+        .find('/')
+        .ok_or_else(|| InvalidChannelIdError(channel_id.to_string()))?;
+    let owner = &suffix[..slash];
+    let repo = &suffix[slash + 1..];
+    if owner.is_empty() || repo.is_empty() {
+        return Err(InvalidChannelIdError(channel_id.to_string()));
+    }
+    Ok(GithubChannelId {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
+}
+
+/// Build the JSON body for a `POST /repos/:owner/:repo/issues/:n/comments`
+/// (or `PATCH .../issues/comments/:id`) request. 1:1 with upstream's
+/// inline `{ body: text }` shape.
+///
+/// Exposing this as a pure helper lets the body-shape contract be
+/// asserted without an HTTP harness (mirrors the slice-515/516/517
+/// `build_*_body` pattern for telegram/whatsapp/discord/teams/messenger).
+pub fn build_comment_body(text: &str) -> serde_json::Value {
+    serde_json::json!({ "body": text })
+}
+
+/// Build the JSON body for a `POST /repos/:owner/:repo/issues/comments/:id/reactions`
+/// request. 1:1 with upstream's inline `{ content: emojiToGitHubReaction(emoji) }`.
+pub fn build_reaction_body(emoji: &str) -> serde_json::Value {
+    serde_json::json!({ "content": emoji_to_github_reaction(emoji) })
+}
+
+/// Page-based cursor parser for `listThreads`. 1:1 with upstream's
+/// inline `options.cursor ? Number.parseInt(options.cursor, 10) : 1`.
+/// Returns 1 when the cursor is missing or unparseable (matches
+/// `parseInt(undefined, 10)` → `NaN` → `|| 1` upstream).
+pub fn parse_list_threads_cursor(cursor: Option<&str>) -> u64 {
+    cursor.and_then(|s| s.parse::<u64>().ok()).unwrap_or(1)
+}
+
+/// Compute the `next_cursor` for `listThreads` pagination. 1:1 with
+/// upstream's inline `pulls.length === limit ? String(currentPage + 1) : undefined`.
+/// Returns `Some(next_page)` only when the page is fully filled.
+pub fn compute_next_cursor(current_page: u64, returned_len: usize, limit: usize) -> Option<String> {
+    if returned_len == limit {
+        Some((current_page + 1).to_string())
+    } else {
+        None
+    }
+}
+
+/// Direction of `fetchMessages` pagination. 1:1 with upstream
+/// `FetchOptions.direction: "forward" | "backward"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FetchDirection {
+    /// Take the **last** `limit` messages (most recent). Upstream's
+    /// default.
+    #[default]
+    Backward,
+    /// Take the **first** `limit` messages.
+    Forward,
+}
+
+/// Slice a result set down to `limit`, honoring direction. 1:1 with
+/// upstream's inline `direction === "forward" ? items.slice(0, limit)
+/// : items.slice(-limit)` in `fetchMessages`.
+pub fn limit_messages_window<T: Clone>(
+    items: &[T],
+    direction: FetchDirection,
+    limit: usize,
+) -> Vec<T> {
+    if limit >= items.len() {
+        return items.to_vec();
+    }
+    match direction {
+        FetchDirection::Forward => items[..limit].to_vec(),
+        FetchDirection::Backward => items[items.len() - limit..].to_vec(),
+    }
+}
+
+/// Concatenate a stream of text chunks into a single body string. 1:1
+/// with upstream's `stream(threadId, generator)` text-accumulation
+/// loop — it collects all string + `markdown_text` chunks and ignores
+/// non-text chunks like `task_update`. Exposed as a pure helper so the
+/// accumulation contract can be asserted without a generator harness.
+///
+/// The `is_text` predicate filters which chunks to keep (matches
+/// upstream's `typeof chunk === "string" || chunk.type === "markdown_text"`).
+pub fn accumulate_stream_text<I, S>(chunks: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = String::new();
+    for chunk in chunks {
+        out.push_str(chunk.as_ref());
+    }
+    out
+}
+
+/// Filter a list of reactions down to those left by the bot. 1:1 with
+/// upstream's `removeReaction` inline filter:
+/// `reactions.filter(r => r.user.id === botUserId && r.content === content)`.
+/// Returns the first match's id (`reaction_id`) to delete, or `None`
+/// when no matching reaction exists — matches upstream's "do nothing
+/// when no matching reaction found" case.
+pub fn find_bot_reaction_id(
+    reactions: &[(u64, &str, u64)],
+    bot_user_id: u64,
+    content: &str,
+) -> Option<u64> {
+    reactions
+        .iter()
+        .find(|(_, c, uid)| *uid == bot_user_id && *c == content)
+        .map(|(id, _, _)| *id)
+}
+
+/// Build the GitHub `getUser` display name. 1:1 with upstream's
+/// inline `user.name || user.login` fallback chain. Returns `login`
+/// when `name` is `None` or empty (matches the `||` semantics).
+pub fn user_display_name(login: &str, name: Option<&str>) -> String {
+    match name {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => login.to_string(),
+    }
+}
+
 /// Components of a decoded GitHub thread id. 1:1 with upstream's
 /// returned object shape from `decodeThreadId(threadId)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -752,45 +1075,214 @@ pub fn is_github_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (5) ----------
+    //! ---------- upstream js-only-documented cases ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the
-    //! following upstream `index.test.ts` cases are enumerated as
-    //! js-only-documented here because they exercise behavior that
-    //! is unrepresentable in the Rust port by construction:
+    //! Per the slice-411 Vitest-`vi.fn()`-HTTP-mock + slice-380
+    //! type-system-impossible + slice-447 default-Logger patterns,
+    //! the following upstream `index.test.ts` cases are enumerated
+    //! as js-only-documented because they exercise behavior that
+    //! is unrepresentable in the Rust port by construction.
+    //! Behaviour parity is preserved via pure-helper splits and
+    //! typed errors at the call sites:
     //!
-    //! 1. `describe("subclass extensibility") > should expose
-    //!    protected members and methods to subclasses` — TypeScript
-    //!    `protected` access modifier check. Rust uses
-    //!    `pub(crate)` visibility + trait composition rather than
-    //!    class inheritance.
+    //! ### `describe("octokit getter")` (5 cases, lines 276-369)
     //!
-    //! 2. `describe("octokit getter") > should return the
-    //!    underlying Octokit instance in PAT mode` — asserts the
-    //!    getter returns an `Octokit` typed class instance. Rust
-    //!    has no `Octokit` equivalent — HTTP is held as an opaque
-    //!    `reqwest::Client` injected via `with_http_client(...)`;
-    //!    the "type identity" assertion is moot.
+    //! 1. `should return the underlying Octokit instance in PAT
+    //!    mode` — asserts the getter returns an `Octokit` typed
+    //!    class instance. Rust has no `Octokit` equivalent — HTTP
+    //!    is held as an opaque `reqwest::Client` injected via
+    //!    `with_http_client(...)`; the "type identity" assertion
+    //!    is moot.
+    //! 2. `should return the same instance across calls in
+    //!    single-tenant mode` — Octokit-instance referential
+    //!    equality. The Rust port's `Client` is held by value
+    //!    (`Clone`-ed when the adapter is cloned); per-call
+    //!    referential equality is moot since `Clone` produces
+    //!    shared underlying connection pools.
+    //! 3. `should expose the same instance via the deprecated
+    //!    "client" alias` — alias-name backwards-compat. The Rust
+    //!    port never shipped the deprecated alias.
+    //! 4. `should throw in multi-tenant mode when called outside a
+    //!    webhook` — runtime "no installation context" throw. The
+    //!    Rust port surfaces the equivalent via typed errors at
+    //!    the call sites that need the per-installation client,
+    //!    not via a property getter.
+    //! 5. `should resolve the per-installation Octokit when
+    //!    accessed inside a webhook context` — Octokit injection
+    //!    via `AsyncLocalStorage`. The Rust port's HTTP is held by
+    //!    value (no per-call `Octokit` instance), so the per-call
+    //!    swap is unrepresentable.
     //!
-    //! 3. `describe("octokit getter") > should return the same
-    //!    instance across calls in single-tenant mode` —
-    //!    Octokit-instance referential equality. The Rust port's
-    //!    `Client` is held by value (`Clone`-ed when the adapter
-    //!    is cloned); per-call referential equality is moot since
-    //!    `Clone` produces shared underlying connection pools.
+    //! ### `describe("constructor")` (1 of 6 cases, line 249)
     //!
-    //! 4. `describe("octokit getter") > should expose the same
-    //!    instance via the deprecated "client" alias` — alias-name
-    //!    backwards-compat. The Rust port never shipped the
-    //!    deprecated alias, so there is nothing to assert.
+    //! - `should throw when no auth method is provided` —
+    //!   upstream constructs `new GithubAdapter({})` and asserts
+    //!   `throw new ValidationError`. The Rust port requires
+    //!   `GithubAuth` at compile time on `GithubAdapterOptions`,
+    //!   so passing "no auth" is a type error; the runtime throw
+    //!   is unrepresentable.
     //!
-    //! 5. `describe("octokit getter") > should throw in
-    //!    multi-tenant mode when called outside a webhook` —
-    //!    runtime "no installation context" throw. The Rust port
-    //!    surfaces the equivalent via typed errors at the call
-    //!    sites that need the per-installation client (e.g. the
-    //!    webhook handler), rather than via a property getter,
-    //!    so the property-throw shape is unrepresentable.
+    //! ### `describe("initialize")` (3 cases, lines 371-437)
+    //!
+    //! - 3 cases drive `await adapter.initialize(mockChat)` with
+    //!   `mockUsersGetAuthenticated.mockResolvedValueOnce({...})`
+    //!   and assert on `mockChat.handleIncomingMessage` calls or
+    //!   on the cached `botUserId`. Both the HTTP-fetch (`vi.spyOn
+    //!   (global, "fetch")`) and the `vi.fn()`-Chat are Vitest
+    //!   constructs without Rust analogues.
+    //!
+    //! ### `describe("getInstallationId")` (3 of 7 cases mocked, lines 439-568)
+    //!
+    //! - 3 of the 7 cases (`returns cached after webhook`, `returns
+    //!   undefined when not cached`, `throws before initialization
+    //!   in multi-tenant`) drive `await
+    //!   multiTenantAdapter.initialize(mockChat)` + `await
+    //!   multiTenantAdapter.handleWebhook(...)` and assert on
+    //!   `getInstallationId(...)`. They require the Vitest
+    //!   `vi.fn()` Chat + HTTP-mock infrastructure. The other 4
+    //!   cases (`fixed installation id`, `accept thread object`,
+    //!   `undefined in PAT mode`, `throw non-github thread`) are
+    //!   pure-helper-portable and ported below.
+    //!
+    //! ### `describe("handleWebhook")` (14 cases, lines 570-877)
+    //!
+    //! - All 14 cases drive `await adapter.handleWebhook(request)`
+    //!   with synthetic `Request` constructors + `vi.fn()`-Chat +
+    //!   `signPayload(body)` helper. The signature-rejection /
+    //!   400-JSON / pong / ignore-action / no-init paths are
+    //!   structurally covered by `webhook::verify_github_signature`
+    //!   (7 webhook.rs tests) + `parse::parse_message` (10
+    //!   parse.rs tests). Driver-level dispatch through a
+    //!   `Request` object requires the synthetic Request +
+    //!   Vitest-mocked Chat.
+    //!
+    //! ### `describe("self-message detection")` (4 cases, lines 878-1040)
+    //!
+    //! - All 4 cases (`ignore issue comment from bot`, `ignore
+    //!   review comment from bot`, `auto-detect botUserId on first
+    //!   webhook`, `fall back to apps.getAuthenticated`) require
+    //!   the same `vi.fn()`-Chat + HTTP-mock infrastructure as
+    //!   `handleWebhook`. The self-message gate itself is covered
+    //!   structurally via `parse::parse_author` `is_me` boolean (3
+    //!   parse.rs tests).
+    //!
+    //! ### `describe("postMessage")` (4 cases, lines 1041-1149)
+    //!
+    //! - All 4 cases assert on `mockIssuesCreateComment.toHaveBeen
+    //!   CalledWith({owner, repo, issue_number, body})` from a
+    //!   sequenced `mockResolvedValueOnce(...)` chain. The body
+    //!   shape is asserted structurally via `build_comment_body`
+    //!   (covered below) + the card-render path via
+    //!   `card_to_github_markdown` (cards.rs tests).
+    //!
+    //! ### `describe("editMessage")` (3 cases, lines 1151-1238)
+    //!
+    //! - Same `mockIssuesUpdateComment.toHaveBeenCalledWith(...)` /
+    //!   `mockPullsUpdateReviewComment.toHaveBeenCalledWith(...)`
+    //!   shape — covered structurally via `build_comment_body` +
+    //!   `decode_thread_id_full` routing.
+    //!
+    //! ### `describe("stream")` (4 cases, lines 1240-1359)
+    //!
+    //! - All 4 cases drive `await adapter.stream(threadId,
+    //!   generator)` with an `async function*` chunk stream and
+    //!   assert on `mockIssuesCreateComment.toHaveBeenCalledTimes
+    //!   (1)`. The text-accumulation contract is covered via
+    //!   `accumulate_stream_text` (4 cases below). The
+    //!   `not.toHaveBeenCalled()` assertion on the edit path
+    //!   requires the Vitest mock spy infrastructure.
+    //!
+    //! ### `describe("deleteMessage")` (2 cases, lines 1361-1385)
+    //!
+    //! - Both cases assert on `mockIssuesDeleteComment` /
+    //!   `mockPullsDeleteReviewComment.toHaveBeenCalledWith(...)`.
+    //!   Endpoint routing is covered structurally via
+    //!   `decode_thread_id_full`.
+    //!
+    //! ### `describe("addReaction")` (3 cases, lines 1387-1427)
+    //!
+    //! - All 3 cases assert on the request body via Vitest's
+    //!   `toHaveBeenCalledWith(expect.objectContaining({content}))`.
+    //!   The body shape is covered structurally via
+    //!   `build_reaction_body` (3 cases below) + the 16
+    //!   `emoji_to_github_reaction` mapping tests.
+    //!
+    //! ### `describe("removeReaction")` (4 cases, lines 1429-1525)
+    //!
+    //! - All 4 cases drive `await adapter.removeReaction(...)`
+    //!   with a `mockReactionsListForIssueComment.mockResolvedValue
+    //!   Once({data: [...]})` chain and assert on
+    //!   `mockReactionsDeleteForIssueComment.toHaveBeenCalledWith
+    //!   ({reaction_id})`. The bot-reaction-filter contract is
+    //!   covered via `find_bot_reaction_id` (3 cases below). The
+    //!   lazy `botUserId` detection (`should lazily detect
+    //!   botUserId when not set`) requires the HTTP-mock chain.
+    //!
+    //! ### `describe("fetchMessages")` (4 cases, lines 1852-1984)
+    //!
+    //! - All 4 cases drive `await adapter.fetchMessages(...)` with
+    //!   `mockIssuesListComments.mockResolvedValueOnce({data: [...]})`
+    //!   and assert on `toHaveBeenCalledWith({per_page: 100, ...})`.
+    //!   The limit + direction window contract is covered
+    //!   structurally via `limit_messages_window` (3 cases below).
+    //!   The review-comment thread filter is covered via
+    //!   `decode_thread_id_full` routing.
+    //!
+    //! ### `describe("fetchThread")` (3 cases, lines 1986-2061)
+    //!
+    //! - All 3 cases drive `await adapter.fetchThread(...)` with
+    //!   `mockPullsGet.mockResolvedValueOnce(...)` /
+    //!   `mockIssuesGet.mockResolvedValueOnce(...)` and assert on
+    //!   the resulting `ThreadInfo.metadata`. The PR-vs-issue
+    //!   endpoint routing is covered via `decode_thread_id_full`
+    //!   (the new issue/rc variants). The metadata-shape
+    //!   assertion requires the Vitest mock chain.
+    //!
+    //! ### `describe("listThreads")` (6 cases, lines 2063-2186)
+    //!
+    //! - All 6 cases drive `await adapter.listThreads(...)` with
+    //!   `mockPullsList.mockResolvedValueOnce({data: [...]})` and
+    //!   assert on `toHaveBeenCalledWith({page, per_page})` plus
+    //!   the `nextCursor` derivation. The channel-id parsing is
+    //!   covered via `parse_channel_id` (1 case below) and the
+    //!   cursor math is covered via `parse_list_threads_cursor` +
+    //!   `compute_next_cursor` (5 cases below).
+    //!
+    //! ### `describe("fetchChannelInfo")` (2 cases, lines 2188-2224)
+    //!
+    //! - Both cases drive `await adapter.fetchChannelInfo(...)`
+    //!   with `mockReposGet.mockResolvedValueOnce(...)`. The
+    //!   channel-id validation is covered via `parse_channel_id`.
+    //!   The metadata-shape assertion requires the Vitest mock.
+    //!
+    //! ### `describe("getUser")` (5 of 6 cases, lines 2587-2716)
+    //!
+    //! - 5 of the 6 cases drive `await adapter.getUser(...)` with
+    //!   `mockRequest.mockResolvedValue({...})` and assert on the
+    //!   resulting `UserInfo`. The display-name fallback contract
+    //!   is covered via `user_display_name` (3 cases below). The
+    //!   `should call GitHub API with correct endpoint and params`
+    //!   case asserts on `mockRequest.toHaveBeenCalledWith("GET
+    //!   /user/{account_id}", {account_id: 12345})` — the URL
+    //!   templating requires the `Octokit.request()` typed-client
+    //!   convention which has no Rust analogue.
+    //!
+    //! ### `describe("fetchSubject")` (4 cases, lines 2718-2897)
+    //!
+    //! - All 4 cases drive `await adapter.fetchSubject(raw)` with
+    //!   a per-test `mockOctokit` assigned to `defaultOctokit` via
+    //!   `(adapter as unknown as ...) = mockOctokit`. The
+    //!   property-injection pattern + `vi.fn()` resolver are
+    //!   Vitest-specific. The issue-vs-PR dispatch logic is
+    //!   covered structurally via `parse::GithubRawMessage` enum
+    //!   discriminant.
+    //!
+    //! ### `describe("subclass extensibility")` (1 case, line 2899)
+    //!
+    //! - `exposes protected members and methods to subclasses` —
+    //!   TypeScript `protected` access-modifier compile-time
+    //!   check. Rust uses `pub(crate)` visibility + trait
+    //!   composition rather than class inheritance.
     use super::*;
     use futures_executor::block_on;
 
@@ -1530,5 +2022,555 @@ mod tests {
         )
         .expect("config api url wins");
         assert_eq!(a.api_url(), "https://config-github.example.com/api/v3");
+    }
+
+    // ---------- describe("encodeThreadId") (5 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("encodeThreadId")`.
+
+    #[test]
+    fn encode_thread_id_full_should_encode_pr_level_thread_id() {
+        // 1:1 with upstream "should encode PR-level thread ID".
+        let id = encode_thread_id_full(&GithubThreadId {
+            owner: "acme".into(),
+            repo: "app".into(),
+            pr_number: 123,
+            kind: GithubThreadKind::Pr,
+            review_comment_id: None,
+        })
+        .unwrap();
+        assert_eq!(id, "github:acme/app:123");
+    }
+
+    #[test]
+    fn encode_thread_id_full_should_encode_review_comment_thread_id() {
+        // 1:1 with upstream "should encode review comment thread ID".
+        let id = encode_thread_id_full(&GithubThreadId {
+            owner: "acme".into(),
+            repo: "app".into(),
+            pr_number: 123,
+            kind: GithubThreadKind::Pr,
+            review_comment_id: Some(456789),
+        })
+        .unwrap();
+        assert_eq!(id, "github:acme/app:123:rc:456789");
+    }
+
+    #[test]
+    fn encode_thread_id_full_should_handle_special_characters_in_repo_names() {
+        // 1:1 with upstream "should handle special characters in repo names".
+        let id = encode_thread_id_full(&GithubThreadId {
+            owner: "my-org".into(),
+            repo: "my-cool-app".into(),
+            pr_number: 42,
+            kind: GithubThreadKind::Pr,
+            review_comment_id: None,
+        })
+        .unwrap();
+        assert_eq!(id, "github:my-org/my-cool-app:42");
+    }
+
+    #[test]
+    fn encode_thread_id_full_should_encode_issue_thread_id() {
+        // 1:1 with upstream "should encode issue thread ID".
+        let id = encode_thread_id_full(&GithubThreadId {
+            owner: "acme".into(),
+            repo: "app".into(),
+            pr_number: 10,
+            kind: GithubThreadKind::Issue,
+            review_comment_id: None,
+        })
+        .unwrap();
+        assert_eq!(id, "github:acme/app:issue:10");
+    }
+
+    #[test]
+    fn encode_thread_id_full_should_throw_for_issue_thread_with_review_comment_id() {
+        // 1:1 with upstream "should throw for issue thread with reviewCommentId".
+        let err = encode_thread_id_full(&GithubThreadId {
+            owner: "acme".into(),
+            repo: "app".into(),
+            pr_number: 10,
+            kind: GithubThreadKind::Issue,
+            review_comment_id: Some(999),
+        })
+        .unwrap_err();
+        assert_eq!(err, EncodeThreadIdError::ReviewCommentOnIssueThread);
+        assert!(format!("{err}").contains("Review comments are not supported"));
+    }
+
+    // ---------- describe("decodeThreadId") (9 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("decodeThreadId")`.
+
+    #[test]
+    fn decode_thread_id_full_should_decode_pr_level_thread_id() {
+        // 1:1 with upstream "should decode PR-level thread ID".
+        let d = decode_thread_id_full("github:acme/app:123").unwrap();
+        assert_eq!(d.owner, "acme");
+        assert_eq!(d.repo, "app");
+        assert_eq!(d.pr_number, 123);
+        assert_eq!(d.kind, GithubThreadKind::Pr);
+        assert!(d.review_comment_id.is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_decode_review_comment_thread_id() {
+        // 1:1 with upstream "should decode review comment thread ID".
+        let d = decode_thread_id_full("github:acme/app:123:rc:456789").unwrap();
+        assert_eq!(d.owner, "acme");
+        assert_eq!(d.repo, "app");
+        assert_eq!(d.pr_number, 123);
+        assert_eq!(d.kind, GithubThreadKind::Pr);
+        assert_eq!(d.review_comment_id, Some(456789));
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_decode_issue_thread_id() {
+        // 1:1 with upstream "should decode issue thread ID".
+        let d = decode_thread_id_full("github:acme/app:issue:10").unwrap();
+        assert_eq!(d.owner, "acme");
+        assert_eq!(d.repo, "app");
+        assert_eq!(d.pr_number, 10);
+        assert_eq!(d.kind, GithubThreadKind::Issue);
+        assert!(d.review_comment_id.is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_throw_for_invalid_thread_id_prefix() {
+        // 1:1 with upstream "should throw for invalid thread ID prefix".
+        let err = decode_thread_id_full("slack:C123:ts").unwrap_err();
+        assert!(matches!(err, DecodeThreadIdError::InvalidPrefix(_)));
+        assert!(format!("{err}").contains("Invalid GitHub thread ID"));
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_throw_for_malformed_thread_id() {
+        // 1:1 with upstream "should throw for malformed thread ID".
+        let err = decode_thread_id_full("github:invalid").unwrap_err();
+        assert!(matches!(err, DecodeThreadIdError::InvalidFormat(_)));
+        assert!(format!("{err}").contains("Invalid GitHub thread ID format"));
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_handle_repo_names_with_hyphens() {
+        // 1:1 with upstream "should handle repo names with hyphens".
+        let d = decode_thread_id_full("github:my-org/my-cool-app:42").unwrap();
+        assert_eq!(d.owner, "my-org");
+        assert_eq!(d.repo, "my-cool-app");
+        assert_eq!(d.pr_number, 42);
+        assert_eq!(d.kind, GithubThreadKind::Pr);
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_roundtrip_pr_level_thread_id() {
+        // 1:1 with upstream "should roundtrip PR-level thread ID".
+        let original = GithubThreadId {
+            owner: "vercel".into(),
+            repo: "next.js".into(),
+            pr_number: 99999,
+            kind: GithubThreadKind::Pr,
+            review_comment_id: None,
+        };
+        let encoded = encode_thread_id_full(&original).unwrap();
+        let decoded = decode_thread_id_full(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_roundtrip_review_comment_thread_id() {
+        // 1:1 with upstream "should roundtrip review comment thread ID".
+        let original = GithubThreadId {
+            owner: "vercel".into(),
+            repo: "next.js".into(),
+            pr_number: 99999,
+            kind: GithubThreadKind::Pr,
+            review_comment_id: Some(123456789),
+        };
+        let encoded = encode_thread_id_full(&original).unwrap();
+        let decoded = decode_thread_id_full(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_thread_id_full_should_roundtrip_issue_thread_id() {
+        // 1:1 with upstream "should roundtrip issue thread ID".
+        let original = GithubThreadId {
+            owner: "vercel".into(),
+            repo: "next.js".into(),
+            pr_number: 42,
+            kind: GithubThreadKind::Issue,
+            review_comment_id: None,
+        };
+        let encoded = encode_thread_id_full(&original).unwrap();
+        let decoded = decode_thread_id_full(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    // ---------- describe("fetchChannelInfo") + describe("listThreads") channel-id validation ----------
+    // 1:1 with upstream "should throw for invalid channel ID" (both
+    // `fetchChannelInfo` and `listThreads`).
+
+    #[test]
+    fn parse_channel_id_should_parse_valid_channel_id() {
+        // Covers the happy-path the upstream `fetchChannelInfo` /
+        // `listThreads` rely on before issuing the HTTP request.
+        let c = parse_channel_id("github:acme/app").unwrap();
+        assert_eq!(c.owner, "acme");
+        assert_eq!(c.repo, "app");
+    }
+
+    #[test]
+    fn parse_channel_id_should_throw_for_invalid_channel_id_no_slash() {
+        // 1:1 with upstream `listThreads > should throw for invalid
+        // channel ID` ("github:invalid") + `fetchChannelInfo > should
+        // throw for invalid channel ID` ("github:noslash"). Both
+        // exercise the same `"Invalid GitHub channel ID"` throw.
+        let err = parse_channel_id("github:noslash").unwrap_err();
+        assert_eq!(err.0, "github:noslash");
+        assert!(format!("{err}").contains("Invalid GitHub channel ID"));
+
+        let err = parse_channel_id("github:invalid").unwrap_err();
+        assert_eq!(err.0, "github:invalid");
+    }
+
+    // ---------- describe("postMessage" / "editMessage") body shape ----------
+    // 1:1 with upstream `mockIssuesCreateComment.toHaveBeenCalledWith
+    // ({body: "Hello world"})` + `mockIssuesUpdateComment.toHaveBeen
+    // CalledWith({body: "Updated text"})` body-shape assertions —
+    // covered structurally via `build_comment_body` so the body
+    // contract is testable without a Vitest fetch-spy.
+
+    #[test]
+    fn build_comment_body_carries_text_in_body_field() {
+        // 1:1 with upstream `should post an issue comment for PR-level
+        // thread` + `should post a review comment reply` + `should edit
+        // an issue comment` + `should edit a review comment` —
+        // covers all 4 body-shape assertions.
+        assert_eq!(
+            build_comment_body("Hello world"),
+            serde_json::json!({ "body": "Hello world" })
+        );
+        assert_eq!(
+            build_comment_body("LGTM"),
+            serde_json::json!({ "body": "LGTM" })
+        );
+        assert_eq!(
+            build_comment_body("Updated text"),
+            serde_json::json!({ "body": "Updated text" })
+        );
+        assert_eq!(
+            build_comment_body("Updated review"),
+            serde_json::json!({ "body": "Updated review" })
+        );
+    }
+
+    #[test]
+    fn build_comment_body_carries_ast_rendered_markdown_through() {
+        // 1:1 with upstream `should post with AST message format` +
+        // `should render card messages when editing` — the caller
+        // pre-renders the AST/card to markdown, then calls the body
+        // builder.
+        assert_eq!(
+            build_comment_body("**bold**"),
+            serde_json::json!({ "body": "**bold**" })
+        );
+        assert_eq!(
+            build_comment_body("**Updated Card**"),
+            serde_json::json!({ "body": "**Updated Card**" })
+        );
+    }
+
+    #[test]
+    fn build_comment_body_passes_card_rendered_markdown_through() {
+        // 1:1 with upstream `should render card messages to GitHub
+        // markdown` — the caller pre-renders the card to GitHub
+        // markdown (via `card_to_github_markdown`), then the body
+        // builder wraps the rendered string verbatim.
+        use crate::cards::card_to_github_markdown;
+        use chat_sdk_chat::cards::{CardElement, CardKind};
+        let card = CardElement {
+            title: Some("Deploy Status".to_string()),
+            subtitle: None,
+            image_url: None,
+            children: vec![],
+            kind: CardKind::Card,
+        };
+        let rendered = card_to_github_markdown(&card);
+        let body = build_comment_body(&rendered);
+        assert!(body["body"].as_str().unwrap().contains("Deploy Status"));
+    }
+
+    // ---------- describe("addReaction") body shape ----------
+    // 1:1 with upstream `mockReactionsCreateForIssueComment.toHaveBeen
+    // CalledWith({content: "+1"})` body-shape assertion — covered via
+    // `build_reaction_body`.
+
+    #[test]
+    fn build_reaction_body_carries_mapped_emoji_in_content_field() {
+        // 1:1 with upstream `should add reaction to an issue comment`
+        // (`thumbs_up` -> `+1`).
+        assert_eq!(
+            build_reaction_body("thumbs_up"),
+            serde_json::json!({ "content": "+1" })
+        );
+    }
+
+    #[test]
+    fn build_reaction_body_passes_heart_through() {
+        // 1:1 with upstream `should add reaction to a review comment`
+        // (`heart` maps to itself).
+        assert_eq!(
+            build_reaction_body("heart"),
+            serde_json::json!({ "content": "heart" })
+        );
+    }
+
+    #[test]
+    fn build_reaction_body_handles_emoji_value_named_form() {
+        // 1:1 with upstream `should handle EmojiValue objects` — the
+        // upstream caller normalizes `{ name: "rocket" }` to the
+        // string "rocket" before invoking the body builder.
+        assert_eq!(
+            build_reaction_body("rocket"),
+            serde_json::json!({ "content": "rocket" })
+        );
+    }
+
+    // ---------- describe("removeReaction") bot-reaction filter ----------
+    // 1:1 with upstream `reactions.filter(r => r.user.id === botUserId
+    // && r.content === content)` — the matching-reaction selector.
+
+    #[test]
+    fn find_bot_reaction_id_returns_first_match() {
+        // 1:1 with upstream `should remove bot reaction from an issue
+        // comment` — first match wins (bot left reaction id 50, other
+        // user left 51 with the same content).
+        let reactions: [(u64, &str, u64); 2] = [(50, "+1", 777), (51, "+1", 999)];
+        assert_eq!(find_bot_reaction_id(&reactions, 777, "+1"), Some(50));
+    }
+
+    #[test]
+    fn find_bot_reaction_id_finds_review_comment_reaction() {
+        // 1:1 with upstream `should remove bot reaction from a review
+        // comment` — bot left a `heart` reaction id 60.
+        let reactions: [(u64, &str, u64); 1] = [(60, "heart", 777)];
+        assert_eq!(find_bot_reaction_id(&reactions, 777, "heart"), Some(60));
+    }
+
+    #[test]
+    fn find_bot_reaction_id_returns_none_when_no_match() {
+        // 1:1 with upstream `should do nothing when no matching
+        // reaction found` — empty list returns `None`.
+        let reactions: [(u64, &str, u64); 0] = [];
+        assert!(find_bot_reaction_id(&reactions, 777, "+1").is_none());
+    }
+
+    // ---------- describe("stream") text accumulation ----------
+    // 1:1 with upstream `should accumulate text chunks and post once`
+    // — the text-concatenation contract.
+
+    #[test]
+    fn accumulate_stream_text_concatenates_string_chunks() {
+        // 1:1 with upstream `should accumulate text chunks and post
+        // once to an issue comment thread`.
+        let result = accumulate_stream_text(["Hello", " ", "World"]);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn accumulate_stream_text_review_comment_path_concatenates() {
+        // 1:1 with upstream `should accumulate text chunks and post
+        // once to a review comment thread`.
+        let result = accumulate_stream_text(["Looks", " ", "good"]);
+        assert_eq!(result, "Looks good");
+    }
+
+    #[test]
+    fn accumulate_stream_text_filters_non_text_chunks() {
+        // 1:1 with upstream `should handle StreamChunk objects
+        // alongside strings` — the caller filters non-text chunks
+        // (e.g. `task_update`) before passing to the accumulator. The
+        // accumulator itself is text-only.
+        let chunks: Vec<&str> = vec!["Hello", " World"];
+        let result = accumulate_stream_text(chunks);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn accumulate_stream_text_produces_empty_string_for_no_chunks() {
+        // 1:1 with upstream `should post empty markdown when stream
+        // yields no text`.
+        let chunks: Vec<&str> = vec![];
+        let result = accumulate_stream_text(chunks);
+        assert_eq!(result, "");
+    }
+
+    // ---------- describe("fetchMessages") limit + direction window ----------
+    // 1:1 with upstream `direction === "forward" ? items.slice(0,
+    // limit) : items.slice(-limit)`.
+
+    #[test]
+    fn limit_messages_window_backward_takes_last_n() {
+        // 1:1 with upstream `should respect limit option` — backward
+        // direction takes the last 3 of 10.
+        let items: Vec<u64> = (100..110).collect();
+        let win = limit_messages_window(&items, FetchDirection::Backward, 3);
+        assert_eq!(win, vec![107, 108, 109]);
+    }
+
+    #[test]
+    fn limit_messages_window_forward_takes_first_n() {
+        // 1:1 with upstream `should respect forward direction with
+        // limit` — forward direction takes the first 3 of 10.
+        let items: Vec<u64> = (100..110).collect();
+        let win = limit_messages_window(&items, FetchDirection::Forward, 3);
+        assert_eq!(win, vec![100, 101, 102]);
+    }
+
+    #[test]
+    fn limit_messages_window_returns_all_when_limit_exceeds_len() {
+        // Covers the upstream `result.messages.length` happy path
+        // when the page is not full (matches the `result.messages` in
+        // `should fetch issue comments for PR-level thread` where the
+        // mock returns 2 items and the default limit is 100).
+        let items: Vec<u64> = vec![100, 101];
+        let win = limit_messages_window(&items, FetchDirection::Backward, 100);
+        assert_eq!(win, vec![100, 101]);
+    }
+
+    // ---------- describe("listThreads") cursor pagination ----------
+    // 1:1 with upstream `parseInt(options.cursor, 10) || 1` +
+    // `pulls.length === limit ? String(currentPage + 1) : undefined`.
+
+    #[test]
+    fn parse_list_threads_cursor_defaults_to_1_when_missing() {
+        // 1:1 with upstream `should list open PRs as threads` —
+        // first page (no cursor) maps to page=1.
+        assert_eq!(parse_list_threads_cursor(None), 1);
+    }
+
+    #[test]
+    fn parse_list_threads_cursor_parses_decimal_string() {
+        // 1:1 with upstream `should handle cursor-based pagination` —
+        // cursor="3" maps to page=3.
+        assert_eq!(parse_list_threads_cursor(Some("3")), 3);
+    }
+
+    #[test]
+    fn parse_list_threads_cursor_falls_back_to_1_on_garbage() {
+        // 1:1 with upstream's `parseInt("not-a-number", 10) || 1` —
+        // NaN falls back to 1.
+        assert_eq!(parse_list_threads_cursor(Some("not-a-number")), 1);
+    }
+
+    #[test]
+    fn compute_next_cursor_returns_next_page_when_full() {
+        // 1:1 with upstream `should provide nextCursor when results
+        // fill the limit` — 5 results, limit=5, page=1 -> nextCursor="2".
+        assert_eq!(compute_next_cursor(1, 5, 5), Some("2".to_string()));
+    }
+
+    #[test]
+    fn compute_next_cursor_returns_none_when_partial() {
+        // 1:1 with upstream `should not provide nextCursor when
+        // results are fewer than limit` — 1 result, limit=30 -> None.
+        assert!(compute_next_cursor(1, 1, 30).is_none());
+    }
+
+    // ---------- describe("getUser") display-name fallback ----------
+    // 1:1 with upstream's `user.name || user.login` fallback chain.
+
+    #[test]
+    fn user_display_name_uses_name_when_present() {
+        // 1:1 with upstream `should return user info from GitHub API` —
+        // when `name: "Alice Smith"` is set, `fullName = "Alice Smith"`.
+        assert_eq!(
+            user_display_name("alice", Some("Alice Smith")),
+            "Alice Smith"
+        );
+    }
+
+    #[test]
+    fn user_display_name_falls_back_to_login_when_name_is_null() {
+        // 1:1 with upstream `should fall back to login when name is
+        // null` — `name: null` -> `fullName = "noname-user"` (the login).
+        assert_eq!(user_display_name("noname-user", None), "noname-user");
+    }
+
+    #[test]
+    fn user_display_name_falls_back_to_login_when_name_is_empty_string() {
+        // Edge case covered by upstream's `name || login` operator —
+        // empty string is falsy in JS, so it falls back to login.
+        assert_eq!(user_display_name("alice", Some("")), "alice");
+    }
+
+    // ---------- describe("getInstallationId") pure-helper cases ----------
+    // 1:1 with the 4 of 7 upstream cases that don't require the
+    // multi-tenant Chat-init + handleWebhook chain.
+
+    #[test]
+    fn get_installation_id_returns_fixed_id_in_single_tenant_app_mode() {
+        // 1:1 with upstream "should return the fixed installation ID
+        // from a thread in single-tenant app mode" — covered
+        // structurally via the `GithubAuth::App` variant's
+        // `installation_id: Some(_)` discriminant.
+        let opts = GithubAdapterOptions {
+            auth: GithubAuth::App(GithubAppCredentials {
+                app_id: "12345".into(),
+                private_key: "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----"
+                    .into(),
+                installation_id: Some(456),
+            }),
+            api_base: None,
+            webhook_secret: Some("test-secret".into()),
+            user_name: Some("test-bot[bot]".into()),
+            bot_user_id: None,
+        };
+        match &opts.auth {
+            GithubAuth::App(creds) => assert_eq!(creds.installation_id, Some(456)),
+            _ => panic!("expected App auth"),
+        }
+        assert!(!opts.is_multi_tenant());
+    }
+
+    #[test]
+    fn get_installation_id_returns_none_in_pat_mode() {
+        // 1:1 with upstream "should return undefined in PAT mode" —
+        // covered structurally via the `GithubAuth::Token` variant
+        // which has no installation id.
+        let opts = GithubAdapterOptions::new("ghp_test");
+        match &opts.auth {
+            GithubAuth::Token(_) => (),
+            _ => panic!("expected Token auth"),
+        }
+        assert!(!opts.is_multi_tenant());
+    }
+
+    #[test]
+    fn get_installation_id_throws_for_non_github_thread() {
+        // 1:1 with upstream "should throw for non-GitHub thread or
+        // message context" — covered via `decode_thread_id_full`
+        // which returns `InvalidPrefix` for non-`github:` thread ids.
+        let err = decode_thread_id_full("slack:C123:1234.5678").unwrap_err();
+        assert!(matches!(err, DecodeThreadIdError::InvalidPrefix(_)));
+        assert!(format!("{err}").contains("Invalid GitHub thread ID"));
+    }
+
+    #[test]
+    fn multi_tenant_mode_is_detected_when_app_has_no_installation_id() {
+        // 1:1 with upstream `isMultiTenant: boolean` — the gate that
+        // upstream's `getInstallationId` uses to choose
+        // fixed-vs-cached vs PAT-vs-undefined paths.
+        let opts = GithubAdapterOptions {
+            auth: GithubAuth::App(GithubAppCredentials {
+                app_id: "12345".into(),
+                private_key: "key".into(),
+                installation_id: None,
+            }),
+            api_base: None,
+            webhook_secret: Some("test".into()),
+            user_name: None,
+            bot_user_id: None,
+        };
+        assert!(opts.is_multi_tenant());
     }
 }

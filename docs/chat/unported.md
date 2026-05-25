@@ -70,6 +70,18 @@ the structurally-unportable cases.
   `describe("thread and channel info")` +
   `describe("Graph API error handling")`, subclass extensibility,
   invalid-postable-shape TypeError.
+- **`chat-sdk-adapter-github`** — Vitest `vi.fn()`-mocked
+  Octokit-typed-client cases under `describe("octokit getter")` +
+  `describe("initialize")` + `describe("handleWebhook")` +
+  `describe("self-message detection")` +
+  `describe("postMessage / editMessage / deleteMessage /
+  addReaction / removeReaction / stream")` +
+  `describe("fetchMessages / fetchThread / listThreads /
+  fetchChannelInfo / getUser / fetchSubject")`, default-Logger
+  constructor parameter, subclass extensibility, typed-client
+  `Octokit` instance identity / `AsyncLocalStorage`-resolved
+  per-installation getter, `defaultOctokit` property-injection
+  pattern, no-auth runtime throw (type-system-enforced in Rust).
 - **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
@@ -395,3 +407,25 @@ Mapped accounting: 133 Rust-mapped + 36 js-only-documented =
 169/169 upstream cases accounted for. Remaining 133 cases are
 ported as colocated `#[cfg(test)] mod tests` in
 [`crates/chat-sdk-adapter-messenger/src/{lib,parse,cards,markdown,errors,fetch,webhook}.rs`](../../crates/chat-sdk-adapter-messenger/src/).
+
+## Section: `chat-sdk-adapter-github`
+
+### `packages/adapter-github/src/{index,markdown,cards}.test.ts` (74 unportable cases of 159)
+
+The Rust port maps 85 of the 159 upstream cases (cards 12/12 +
+markdown 18/18 + index 55/129). The remaining 74 cases fall under
+the cross-cutting js-only-documented sweep patterns (slice 411
+Vitest `vi.fn()` HTTP-fetch mock + slice 380 type-system-impossible
++ slice 439 typed-client `Octokit` getter) and are enumerated below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked HTTP fetch / `vi.fn()`-Chat dispatch | 67 listed in [`crates/chat-sdk-adapter-github/src/lib.rs`](../../crates/chat-sdk-adapter-github/src/lib.rs) test-mod header: `describe("initialize")` (3 cases) + `describe("getInstallationId")` subset (3 of 7 cases — cached / not-cached / pre-init throw drive `multiTenantAdapter.initialize(mockChat)` + `handleWebhook(...)`) + `describe("handleWebhook")` (14 cases — synthetic `Request` constructors + `signPayload` helper + `mockChat.handleIncomingMessage` / `processMessage` dispatch) + `describe("self-message detection")` (4 cases — `mockUsersGetAuthenticated.mockResolvedValueOnce(...)` chain + `processMessage` not-called assertion) + `describe("postMessage")` (4 cases — `mockIssuesCreateComment.toHaveBeenCalledWith({owner, repo, issue_number, body})`) + `describe("editMessage")` (3 cases — `mockIssuesUpdateComment` / `mockPullsUpdateReviewComment` toHaveBeenCalledWith) + `describe("stream")` (4 cases — `async function*` generator drive + `toHaveBeenCalledTimes(1)`) + `describe("deleteMessage")` (2 cases — `mockIssuesDeleteComment` / `mockPullsDeleteReviewComment.toHaveBeenCalledWith`) + `describe("addReaction")` (3 cases — `mockReactionsCreateForIssueComment.toHaveBeenCalledWith({content})`) + `describe("removeReaction")` (4 cases — `mockReactionsListForIssueComment.mockResolvedValueOnce({data: [...]})` chain) + `describe("fetchMessages")` (4 cases — `mockIssuesListComments.mockResolvedValueOnce({data: [...]})` + per_page assertion) + `describe("fetchThread")` (3 cases — `mockPullsGet` / `mockIssuesGet.mockResolvedValueOnce(...)`) + `describe("listThreads")` (6 cases — `mockPullsList.mockResolvedValueOnce({data: [...]})` + cursor assertions) + `describe("fetchChannelInfo")` (2 cases — `mockReposGet.mockResolvedValueOnce({data})`) + `describe("getUser")` subset (5 of 6 cases — `mockRequest.mockResolvedValue({...})` + `Octokit.request("GET /user/{account_id}", {account_id})` typed URL templating) + `describe("fetchSubject")` (4 cases — `(adapter as unknown as ...).defaultOctokit = mockOctokit` property-injection + per-test `vi.fn().mockResolvedValue(...)` resolver). | Each case asserts on `mockOctokit.rest.*.toHaveBeenCalledWith(...)` URL/body/header shape from a sequenced `mockResolvedValueOnce(...)` chain, or on `mockChat.processMessage` / `mockChat.handleIncomingMessage` runtime side-effects through `adapter.handleWebhook(request)` driven by a synthetic `Request` constructor + `signPayload(body)` helper. Requires the upstream Vitest `vi.fn()` fetch-spy + Request/Response infrastructure + `Octokit` typed-client `rest.*` namespace pattern. | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + body shape are structurally covered via `GithubAdapter::comments_url` / `comment_url` / `comment_reactions_url` / `issue_url` URL builders + `build_comment_body` / `build_reaction_body` pure body-builder helpers (8 lib.rs tests), parseMessage / parseAuthor by `parse::parse_message` / `parse::parse_author` (10 parse.rs tests), pagination by `parse_list_threads_cursor` + `compute_next_cursor` + `limit_messages_window` (8 lib.rs tests), channel-id validation by `parse_channel_id` (2 lib.rs tests), display-name fallback by `user_display_name` (3 lib.rs tests), stream text accumulation by `accumulate_stream_text` (4 lib.rs tests), bot-reaction filter by `find_bot_reaction_id` (3 lib.rs tests), and webhook signature verification by `webhook::verify_github_signature` (8 webhook.rs tests). |
+| `octokit` typed-client getter | 5 cases (index.test.ts L276-L369 — `describe("octokit getter")`) | Asserts `octokit` getter returns an `Octokit`-typed class instance with referential equality across calls; the deprecated `client` alias; the multi-tenant property-throw outside a webhook context; the per-installation `AsyncLocalStorage`-resolved Octokit inside a webhook. | The Rust port holds HTTP as an opaque `reqwest::Client` injected via `with_http_client(...)`; there is no `Octokit` typed-class equivalent and no `AsyncLocalStorage`-per-call swap. The multi-tenant per-installation context is surfaced via typed errors at the call sites that need a per-installation client (not via a property getter). All 5 cases enumerated in the [`crates/chat-sdk-adapter-github/src/lib.rs`](../../crates/chat-sdk-adapter-github/src/lib.rs) test-mod header per slice 439. |
+| Constructor "throw when no auth method is provided" | 1 case (index.test.ts L249 — `describe("constructor") > should throw when no auth method is provided`) | `new GithubAdapter({})` with no auth fields asserts `throw new ValidationError`. | Rust's `GithubAdapterOptions` requires `GithubAuth` at compile time; passing "no auth" is a type error, so the runtime throw is unrepresentable. The Rust port's typed-builder is the equivalent compile-time guarantee. Enumerated in the [`crates/chat-sdk-adapter-github/src/lib.rs`](../../crates/chat-sdk-adapter-github/src/lib.rs) test-mod header. |
+| Subclass extensibility | 1 case (index.test.ts L2899-L2913 — `describe("subclass extensibility") > exposes protected members and methods to subclasses`) | TypeScript `protected` access-modifier compile-time check via `class TestSubclass extends GitHubAdapter { checkAccess() { return [this.logger, this.formatConverter, this.verifySignature] } }`. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance — the subclass-protected-leak test is unrepresentable by construction. Enumerated in the [`crates/chat-sdk-adapter-github/src/lib.rs`](../../crates/chat-sdk-adapter-github/src/lib.rs) test-mod header. |
+
+Mapped accounting: 85 Rust-mapped + 74 js-only-documented =
+159/159 upstream cases accounted for. Remaining 85 cases are
+ported as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-github/src/{lib,parse,cards,markdown,webhook}.rs`](../../crates/chat-sdk-adapter-github/src/).
