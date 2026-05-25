@@ -2464,6 +2464,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   override ordering, dynamic model plus generation-setting updates,
   active-tool and tool-choice updates, runtime/tool context updates, and
   agent-level callback forwarding/runtime context propagation.
+- 2026-05-26: WorkflowAgent message-propagation parity added named Rust
+  counterparts for upstream `workflow-agent.test.ts` `should pass messages to
+  multiple tools in parallel execution` and `should pass updated messages on
+  subsequent tool call rounds`, proving each local tool invocation sees the
+  current round prompt and that later tool-call rounds include prior tool
+  results.
 - 2026-05-22: WorkflowAgent finish callback parity added named Rust
   counterparts for upstream client-side stop and normal tool-completion cases:
   `workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools`

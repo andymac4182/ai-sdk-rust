@@ -3023,6 +3023,179 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_pass_messages_to_multiple_tools_in_parallel_execution() {
+        let received_messages = Arc::new(Mutex::new(BTreeMap::<String, WorkflowPrompt>::new()));
+        let received_messages_for_weather = Arc::clone(&received_messages);
+        let received_messages_for_news = Arc::clone(&received_messages);
+
+        let weather_tool =
+            Tool::new("weatherTool", object_schema()).with_execute(move |_, options| {
+                let received_messages = Arc::clone(&received_messages_for_weather);
+                async move {
+                    received_messages
+                        .lock()
+                        .expect("messages lock succeeds")
+                        .insert("weatherTool".to_string(), options.messages);
+                    Ok(json!({ "temp": 72 }))
+                }
+            });
+        let news_tool = Tool::new("newsTool", object_schema()).with_execute(move |_, options| {
+            let received_messages = Arc::clone(&received_messages_for_news);
+            async move {
+                received_messages
+                    .lock()
+                    .expect("messages lock succeeds")
+                    .insert("newsTool".to_string(), options.messages);
+                Ok(json!({ "headlines": ["News 1"] }))
+            }
+        });
+
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tools([weather_tool, news_tool]),
+        );
+        let conversation_messages = vec![
+            user_text_message("Weather and news please"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "weather-call",
+                        "weatherTool",
+                        json!({ "city": "NYC" }),
+                    ),
+                ),
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "news-call",
+                        "newsTool",
+                        json!({ "topic": "tech" }),
+                    ),
+                ),
+            ])),
+        ];
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "weather-call",
+                        "weatherTool",
+                        r#"{"city":"NYC"}"#,
+                    )),
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "news-call",
+                        "newsTool",
+                        r#"{"topic":"tech"}"#,
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(
+            vec![user_text_message("Weather and news please")],
+            executor,
+        )))
+        .expect("agent stream succeeds");
+
+        let received_messages = received_messages.lock().expect("messages lock succeeds");
+        assert_eq!(
+            received_messages.get("weatherTool"),
+            Some(&conversation_messages)
+        );
+        assert_eq!(
+            received_messages.get("newsTool"),
+            Some(&conversation_messages)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_updated_messages_on_subsequent_tool_call_rounds() {
+        let messages_per_round = Arc::new(Mutex::new(Vec::<WorkflowPrompt>::new()));
+        let messages_per_round_for_tool = Arc::clone(&messages_per_round);
+
+        let tool = Tool::new("searchTool", object_schema()).with_execute(move |_, options| {
+            let messages_per_round = Arc::clone(&messages_per_round_for_tool);
+            async move {
+                messages_per_round
+                    .lock()
+                    .expect("messages lock succeeds")
+                    .push(options.messages);
+                Ok(json!({ "found": true }))
+            }
+        });
+
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let first_round_messages = vec![
+            user_text_message("Search for cats"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "search-1",
+                        "searchTool",
+                        json!({ "query": "cats" }),
+                    ),
+                ),
+            ])),
+        ];
+        let second_round_messages = vec![
+            user_text_message("Search for cats"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "search-1",
+                        "searchTool",
+                        json!({ "query": "cats" }),
+                    ),
+                ),
+            ])),
+            LanguageModelMessage::Tool(ai_sdk_provider::LanguageModelToolMessage::new(vec![
+                ai_sdk_provider::LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "search-1",
+                        "searchTool",
+                        LanguageModelToolResultOutput::json(json!({ "found": true })),
+                    ),
+                ),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "search-2",
+                        "searchTool",
+                        json!({ "query": "dogs" }),
+                    ),
+                ),
+            ])),
+        ];
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new(
+                "search-1",
+                "searchTool",
+                r#"{"query":"cats"}"#,
+            )),
+            tool_call_step(LanguageModelToolCall::new(
+                "search-2",
+                "searchTool",
+                r#"{"query":"dogs"}"#,
+            )),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(
+            vec![user_text_message("Search for cats")],
+            executor,
+        )))
+        .expect("agent stream succeeds");
+
+        let messages_per_round = messages_per_round.lock().expect("messages lock succeeds");
+        assert_eq!(
+            *messages_per_round,
+            vec![first_round_messages, second_round_messages]
+        );
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context() {
         let received_context = Arc::new(Mutex::new(None));
         let received_context_for_tool = Arc::clone(&received_context);
