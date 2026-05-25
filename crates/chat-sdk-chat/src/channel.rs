@@ -368,7 +368,26 @@ impl Channel {
     /// adapter so subsequent edits / deletes / reactions route
     /// through the right platform. (slice 487)
     pub async fn post_sent_message(&self, text: &str) -> AdapterResult<crate::thread::SentMessage> {
-        let id = self.post(text).await?;
+        // 1:1 with upstream: prefer the richer
+        // `post_channel_message_sent` response when the adapter
+        // implements it (carries optional threadId override + raw
+        // payload). Falls back to the simple string-id flow on
+        // Unsupported. (slice 490)
+        let (id, message_thread_id, raw) = match self
+            .adapter
+            .post_channel_message_sent(&self.channel_id, text)
+            .await
+        {
+            Ok(posted) => {
+                let thread_id = posted.thread_id.unwrap_or_else(|| self.channel_id.clone());
+                (posted.id, thread_id, posted.raw)
+            }
+            Err(AdapterError::Unsupported(_)) => {
+                let id = self.post(text).await?;
+                (id, self.channel_id.clone(), serde_json::Value::Null)
+            }
+            Err(other) => return Err(other),
+        };
         let author = Author {
             user_id: String::new(),
             user_name: "bot".to_string(),
@@ -389,10 +408,10 @@ impl Channel {
         };
         let message = crate::message::Message::new(
             id,
-            &self.channel_id,
+            &message_thread_id,
             text,
             crate::markdown::root(vec![]),
-            serde_json::Value::Null,
+            raw,
             author,
             metadata,
             Vec::new(),
@@ -1025,6 +1044,46 @@ mod tests {
             ));
             Ok(())
         }
+    }
+
+    /// Adapter that returns a [`crate::types::PostedChannelMessage`]
+    /// with a threadId override — used by the slice-490
+    /// "postChannelMessage returning a threadId override" test.
+    #[derive(Debug)]
+    struct ThreadIdOverrideAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for ThreadIdOverrideAdapter {
+        fn name(&self) -> &str {
+            "thread-override"
+        }
+        async fn post_channel_message_sent(
+            &self,
+            _channel_id: &str,
+            _text: &str,
+        ) -> AdapterResult<crate::types::PostedChannelMessage> {
+            Ok(crate::types::PostedChannelMessage {
+                id: "msg-2".to_string(),
+                thread_id: Some("slack:C123:new-thread".to_string()),
+                raw: serde_json::Value::Null,
+            })
+        }
+    }
+
+    #[test]
+    fn channel_post_sent_message_handles_post_channel_message_returning_a_thread_id_override() {
+        // 1:1 with upstream `channel.test.ts > ChannelImpl.post error
+        // cases > "should handle postChannelMessage returning a
+        // threadId override"`. When the adapter's
+        // post_channel_message_sent response carries a
+        // threadId override, the resulting SentMessage's
+        // thread_id() returns the override (not the channel's id).
+        // (slice 490)
+        let adapter: Arc<dyn Adapter> = Arc::new(ThreadIdOverrideAdapter);
+        let channel = Channel::new(adapter, "slack:C123");
+        let sent = block_on(channel.post_sent_message("Hello!")).unwrap();
+        assert_eq!(sent.id(), "msg-2");
+        assert_eq!(sent.thread_id(), "slack:C123:new-thread");
     }
 
     #[test]
