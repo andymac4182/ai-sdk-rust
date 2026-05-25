@@ -2981,6 +2981,7 @@ focused tests for each portable behavior before changing rows to `verified`.
   JavaScript runtime boundary for Rust's dependency-light native smoother.
 - 2026-05-20: `streamText` arbitrary transform parity added
   `stream_text_transform_updates_text_response_and_callbacks`,
+  `stream_text_transform_updates_response_messages`,
   `stream_text_transform_applies_multiple_transforms_in_order`, and
   `stream_text_transform_updates_tool_calls_and_tool_results` in
   `src/stream_text.rs`, covering Rust-native transforms over collected

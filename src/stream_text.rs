@@ -8935,6 +8935,56 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_transform_updates_response_messages() {
+        let uppercase_text = StreamTextTransform::new(|parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::TextDelta(mut part) => {
+                        part.text = part.text.to_uppercase();
+                        TextStreamPart::TextDelta(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_transform(uppercase_text),
+        ));
+
+        assert_eq!(result.text, "HELLO, WORLD!");
+        assert_eq!(
+            serde_json::to_value(&result.response_messages).expect("response messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "text": "HELLO, WORLD!",
+                            "type": "text"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn stream_text_transform_updates_tool_calls_and_tool_results() {
         let uppercase_tool_data = StreamTextTransform::new(|parts| {
             parts
