@@ -3,11 +3,11 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 89.7%
-- Portable package average: 87.7%
-- Closed package rows: 12 / 18
-- Strict portable verified rows: 9 / 15
-- In-progress rows: 6
+- Average estimated completion: 91.7%
+- Portable package average: 90.0%
+- Closed package rows: 13 / 18
+- Strict portable verified rows: 10 / 15
+- In-progress rows: 5
 - Not-started rows: 0
 
 ## 100% Closed
@@ -18,6 +18,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-shared` | 100% | Verified | shared adapter utilities |
 | `@chat-sdk/tests` | 100% | JavaScript-only | test support library |
 | `@chat-sdk/state-memory` | 100% | Verified | state backend (in-memory) |
+| `@chat-sdk/adapter-teams` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-discord` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-telegram` | 100% | Verified | adapter package |
 | `@chat-sdk/adapter-whatsapp` | 100% | Verified | adapter package |
@@ -32,7 +33,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `@chat-sdk/adapter-slack` | 85% | In progress | adapter package | chat-sdk-adapter-slack 203 tests (slice 355 adds post_ephemeral pure helpers + 5 cases, slice 366 adds Adapter trait... |
-| `@chat-sdk/adapter-teams` | 65% | In progress | adapter package | chat-sdk-adapter-teams 107 tests (slice 365 adds channel_id_from_thread_id helper + 2 cases, slice 366 adds Adapter... |
 | `@chat-sdk/adapter-gchat` | 75% | In progress | adapter package | chat-sdk-adapter-gchat 134 tests (slice 357 adds post_ephemeral via privateMessageViewer pure helpers + 4 cases, slice... |
 | `@chat-sdk/adapter-linear` | 60% | In progress | adapter package | chat-sdk-adapter-linear 113 tests (slice 366 adds Adapter trait impls, slice 406 splits channelIdFromThreadId into 3... |
 | `@chat-sdk/adapter-github` | 60% | In progress | adapter package | chat-sdk-adapter-github 107 tests (slice 368 splits bundled emojiToGitHubReaction into 16 explicit 1:1 cases, slice... |

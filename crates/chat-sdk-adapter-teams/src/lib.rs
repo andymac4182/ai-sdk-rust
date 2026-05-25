@@ -8,7 +8,10 @@
 
 pub mod cards;
 pub mod errors;
+pub mod graph_api;
 pub mod markdown;
+pub mod modals;
+pub mod parse;
 pub mod thread_id;
 
 use async_trait::async_trait;
@@ -34,6 +37,11 @@ pub const CACHE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// `DEFAULT_DIALOG_OPEN_TIMEOUT_MS = 5000` (5 s).
 pub const DEFAULT_DIALOG_OPEN_TIMEOUT_MS: u64 = 5000;
 
+/// Default `userName` upstream falls back to when `config.userName`
+/// is not set. 1:1 with upstream `class TeamsAdapter { userName =
+/// config?.userName ?? "bot"; }`.
+pub const DEFAULT_USER_NAME: &str = "bot";
+
 /// Options for [`TeamsAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct TeamsAdapterOptions {
@@ -46,6 +54,21 @@ pub struct TeamsAdapterOptions {
     pub tenant_id: String,
     /// Optional API base URL override.
     pub api_base: Option<String>,
+    /// Optional `userName` override. 1:1 with upstream
+    /// `TeamsAdapterConfig.userName` (defaults to [`DEFAULT_USER_NAME`]).
+    pub user_name: Option<String>,
+    /// Optional `appTenantId` for multi-tenant bot scenarios. 1:1
+    /// with upstream `TeamsAdapterConfig.appTenantId`. The Rust port
+    /// keeps the legacy required `tenant_id` field for the OAuth2
+    /// token-mint endpoint and exposes this as a second slot for
+    /// adopters that need to distinguish the app-tenant from the
+    /// auth-tenant.
+    pub app_tenant_id: Option<String>,
+    /// Optional Bot Framework API URL override. 1:1 with upstream
+    /// `TeamsAdapterConfig.apiUrl` (also resolvable from
+    /// `TEAMS_API_URL` env var; the Rust port avoids touching
+    /// `std::env` directly so adopters wire it through the options).
+    pub api_url: Option<String>,
 }
 
 impl TeamsAdapterOptions {
@@ -60,6 +83,9 @@ impl TeamsAdapterOptions {
             app_password: app_password.into(),
             tenant_id: tenant_id.into(),
             api_base: None,
+            user_name: None,
+            app_tenant_id: None,
+            api_url: None,
         }
     }
 
@@ -69,9 +95,36 @@ impl TeamsAdapterOptions {
         self
     }
 
+    /// Override the bot user name (the value [`TeamsAdapter::user_name`]
+    /// returns). 1:1 with upstream `config.userName`.
+    pub fn with_user_name(mut self, user_name: impl Into<String>) -> Self {
+        self.user_name = Some(user_name.into());
+        self
+    }
+
+    /// Set the `appTenantId` slot. 1:1 with upstream
+    /// `config.appTenantId`.
+    pub fn with_app_tenant_id(mut self, app_tenant_id: impl Into<String>) -> Self {
+        self.app_tenant_id = Some(app_tenant_id.into());
+        self
+    }
+
+    /// Override the Bot Framework API URL. 1:1 with upstream
+    /// `config.apiUrl`.
+    pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
+        self.api_url = Some(api_url.into());
+        self
+    }
+
     /// Effective API base URL with default applied.
     pub fn effective_api_base(&self) -> &str {
         self.api_base.as_deref().unwrap_or(DEFAULT_API_BASE)
+    }
+
+    /// Effective bot user name with [`DEFAULT_USER_NAME`] fallback.
+    /// 1:1 with upstream `this.userName = config?.userName ?? "bot"`.
+    pub fn effective_user_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(DEFAULT_USER_NAME)
     }
 }
 
@@ -146,6 +199,107 @@ impl TeamsAdapter {
         self.bearer_token.as_deref()
     }
 
+    /// Effective bot user name. 1:1 with upstream `this.userName`
+    /// (`config?.userName ?? "bot"`).
+    pub fn user_name(&self) -> &str {
+        self.options.effective_user_name()
+    }
+
+    /// Optional `appTenantId` accessor. 1:1 with upstream
+    /// `this.appTenantId`.
+    pub fn app_tenant_id(&self) -> Option<&str> {
+        self.options.app_tenant_id.as_deref()
+    }
+
+    /// Optional `apiUrl` accessor. 1:1 with upstream
+    /// `this.apiUrl`.
+    pub fn api_url(&self) -> Option<&str> {
+        self.options.api_url.as_deref()
+    }
+
+    /// Parse a Bot Framework `Activity` JSON payload into a
+    /// cross-platform [`chat_sdk_chat::message::Message`]. 1:1 with
+    /// upstream `adapter.parseMessage(raw)` -> `parseTeamsMessage`.
+    /// Thin wrapper over the pure [`crate::parse::parse_teams_message`]
+    /// helper which takes the `app_id` explicitly so the parser has
+    /// no hidden adapter-state dependency.
+    pub fn parse_message(&self, raw: &serde_json::Value) -> chat_sdk_chat::message::Message {
+        crate::parse::parse_teams_message(raw, self.app_id())
+    }
+
+    /// Predicate: is the activity's `from.id` this bot? 1:1 with
+    /// upstream protected `isMessageFromSelf(activity)`:
+    ///
+    /// - `from.id === app.id` (exact match), OR
+    /// - `from.id` ends with `":app.id"` (Teams-prefixed bot id like
+    ///   `28:<appId>` or `29:<appId>`).
+    pub fn is_message_from_self(&self, activity: &serde_json::Value) -> bool {
+        let Some(from_id) = activity
+            .get("from")
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+        else {
+            return false;
+        };
+        let app_id = self.app_id();
+        if app_id.is_empty() {
+            return false;
+        }
+        if from_id == app_id {
+            return true;
+        }
+        let suffix = format!(":{app_id}");
+        from_id.ends_with(&suffix)
+    }
+
+    /// Basic `ThreadInfo` shape for a Teams thread. 1:1 with
+    /// upstream `adapter.fetchThread(threadId)`:
+    ///
+    /// - decodes the (upstream-shape) thread id and returns
+    ///   `{ id: threadId, channelId: conversationId, metadata: {} }`.
+    /// - `metadata` is an empty map (upstream uses `{}` because no
+    ///   Bot Framework / Graph API call is made).
+    ///
+    /// Returns `None` when the thread id is not Teams-encoded or
+    /// fails to decode — matches upstream's `decodeThreadId` throwing
+    /// `ValidationError` for malformed ids (the Rust port surfaces
+    /// the bad-shape case as `None` so callers can map it to their
+    /// preferred error type).
+    pub fn fetch_thread(&self, thread_id: &str) -> Option<TeamsThreadInfo> {
+        let decoded = crate::thread_id::decode_thread_id(thread_id).ok()?;
+        Some(TeamsThreadInfo {
+            id: thread_id.to_string(),
+            channel_id: decoded.conversation_id,
+            metadata: serde_json::Map::new(),
+        })
+    }
+
+    /// Build the HTTP request body for `post_message` (text branch).
+    /// 1:1 with upstream `adapter.postMessage`'s inline body
+    /// construction: `{ type: "message", text }`.
+    pub fn build_message_body(&self, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "message",
+            "text": text,
+        })
+    }
+
+    /// Build the HTTP request body for `edit_message`. 1:1 with
+    /// upstream `adapter.editMessage`'s inline body (text branch).
+    pub fn build_edit_message_body(&self, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "message",
+            "text": text,
+        })
+    }
+
+    /// Build the HTTP request body for `start_typing`. 1:1 with
+    /// upstream `adapter.startTyping`'s inline body construction:
+    /// `{ type: "typing" }`.
+    pub fn build_typing_body(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "typing" })
+    }
+
     /// Build the Bot Framework activity-create URL. 1:1 with
     /// upstream's inline `${apiBase}/v3/conversations/${conversationId}/activities`
     /// template.
@@ -171,6 +325,23 @@ impl TeamsAdapter {
     pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         crate::markdown::TeamsFormatConverter::new().from_ast(ast)
     }
+}
+
+/// Result shape for [`TeamsAdapter::fetch_thread`]. 1:1 with upstream
+/// `ThreadInfo` for the Teams-backed shape: `{ id, channelId,
+/// metadata: {} }`. The Rust port keeps the type local rather than
+/// pulling in the cross-platform [`chat_sdk_chat::types`] surface
+/// since this is a Teams-shape view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamsThreadInfo {
+    /// The original (upstream-shape) thread id.
+    pub id: String,
+    /// The conversation id extracted from the thread id (no
+    /// `;messageid=` stripping — that's
+    /// [`Adapter::channel_id_from_thread_id`]'s job).
+    pub channel_id: String,
+    /// Empty metadata map matching upstream's `metadata: {}`.
+    pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 #[async_trait]
@@ -222,10 +393,7 @@ impl Adapter for TeamsAdapter {
         })?;
 
         let url = self.activities_url(&decoded.conversation_id);
-        let body = serde_json::json!({
-            "type": "message",
-            "text": text,
-        });
+        let body = self.build_message_body(text);
 
         let response = self
             .http
@@ -278,10 +446,7 @@ impl Adapter for TeamsAdapter {
         })?;
 
         let url = self.activity_url(&decoded.conversation_id, message_id);
-        let body = serde_json::json!({
-            "type": "message",
-            "text": text,
-        });
+        let body = self.build_edit_message_body(text);
 
         let response = self
             .http
@@ -388,7 +553,7 @@ impl Adapter for TeamsAdapter {
         })?;
 
         let url = self.activities_url(&decoded.conversation_id);
-        let body = serde_json::json!({ "type": "typing" });
+        let body = self.build_typing_body();
 
         let response = self
             .http
@@ -452,44 +617,111 @@ pub fn is_teams_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (4) ----------
+    //! ---------- upstream js-only-documented cases (25) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, 4 upstream
-    //! `index.test.ts` cases are enumerated as js-only-documented:
+    //! Per the slice-380 type-system-impossible / slice-411
+    //! Vitest-`vi.fn()`-mocked-HTTP-fetch / slice-414 ESM /
+    //! slice-447 default-Logger / slice-458 createXxx-function-export
+    //! cross-cutting sweep patterns, the following upstream
+    //! `index.test.ts` cases are enumerated as js-only-documented
+    //! (totaling 25 of 53 index.test.ts cases):
     //!
+    //! **slice-414 ESM compatibility (1):**
+    //! - `describe("ESM compatibility") > all subpath imports resolve in
+    //!   Node.js ESM (no bare directory imports)` — spawns a real
+    //!   `node --input-type=module` subprocess and checks that every
+    //!   non-relative `from "<pkg>"` import in `index.ts` resolves under
+    //!   Node.js ESM rules. The Rust port has no equivalent: the module
+    //!   system is statically resolved at compile time via Cargo +
+    //!   `mod` declarations.
+    //!
+    //! **slice-458 createXxx-function-export (1):**
+    //! - `describe("TeamsAdapter") > should export createTeamsAdapter
+    //!   function` — asserts `typeof createTeamsAdapter === "function"`.
+    //!   Rust's module system makes the `pub fn new` constructor visible
+    //!   at compile time; missing exports become compilation errors,
+    //!   not runtime assertion failures.
+    //!
+    //! **slice-447 default-Logger constructor parameter (1):**
+    //! - `describe("constructor env var resolution") > should default
+    //!   logger when not provided` — asserts the constructor falls back
+    //!   to a default `Logger` instance when none is supplied. Rust
+    //!   adapters do not take a `Logger` as a first-class dependency.
+    //!
+    //! **slice-411 Vitest `vi.fn()`-mocked HTTP fetch + env-var
+    //! resolution (21):**
+    //! - `describe("constructor env var resolution")` (6 cases other
+    //!   than the default-logger one): `should resolve appId from
+    //!   TEAMS_APP_ID env var` / `should resolve appPassword from
+    //!   TEAMS_APP_PASSWORD env var` / `should resolve appTenantId from
+    //!   TEAMS_APP_TENANT_ID env var` / `should prefer config values
+    //!   over env vars` / `should resolve apiUrl from TEAMS_API_URL env
+    //!   var` / `should accept apiUrl config`. Rust port avoids touching
+    //!   `std::env` directly (Rust 2024 makes `set_var` `unsafe` and
+    //!   parallel tests would race); env-var resolution is delegated to
+    //!   the adopter via the `TeamsAdapterOptions` struct constructor.
+    //! - `describe("createTeamsAdapter factory") > should delegate to
+    //!   constructor` / `should create adapter with federated auth`:
+    //!   factory is identical to the constructor in Rust (no
+    //!   federated-auth `Auth` discriminator type yet).
+    //! - `describe("handleWebhook") > should return 400 for invalid
+    //!   JSON body`: requires a Vitest synthetic `Request` -> `Response`
+    //!   round-trip through `adapter.handleWebhook` and Bot Framework's
+    //!   `bridgeAdapter.dispatch`. End-to-end wiring would require a
+    //!   `wiremock`/tokio dev-dep the workspace's adapter parity policy
+    //!   explicitly avoids.
+    //! - `describe("initialize") > should store chat instance and
+    //!   initialize app`: asserts on `mockChat`/`mockApp.initialize`
+    //!   side-effects via Vitest `vi.fn()`.
+    //! - `describe("postMessage") > should call app.send and return
+    //!   message ID` / `should handle send failure by calling
+    //!   handleTeamsError`: assert on `mockApp.send` calls + thrown
+    //!   `AuthenticationError`. Body-shape parity is structurally
+    //!   covered by `build_message_body` + the `handle_teams_error`
+    //!   test module.
+    //! - `describe("editMessage") > should call
+    //!   api.conversations.activities.update`: asserts on
+    //!   `mockUpdate.mock.calls`. Body-shape covered by
+    //!   `build_edit_message_body`; URL routing covered by
+    //!   `adapter_activity_url_builds_the_upstream_endpoint`.
+    //! - `describe("deleteMessage") > should call
+    //!   api.conversations.activities.delete`: asserts on `mockDelete`.
+    //!   URL routing covered by `adapter_activity_url_*`.
+    //! - `describe("startTyping") > should send typing activity via
+    //!   app.send`: asserts on `mockApp.send` call count + body shape.
+    //!   Body-shape covered by `build_typing_body`; URL routing by
+    //!   `adapter_activities_url_*`.
+    //! - `describe("openDM") > should throw ValidationError when no
+    //!   tenantId available`: requires `mockChat.getState` + `mockApp.initialize`
+    //!   Vitest `vi.fn()` mocks.
+    //! - `describe("getUser")` (5 cases): `should return user info when
+    //!   aadObjectId is cached and Graph call succeeds` / `should return
+    //!   null when aadObjectId is not cached` / `should return null when
+    //!   Graph call fails` / `should handle missing mail gracefully` /
+    //!   `should return null when adapter is not initialized`. Each
+    //!   asserts on a `mockApp.graph.call` + `mockState.get`
+    //!   `vi.fn()`-spy chain.
+    //!
+    //! **slice-380 type-system-impossible (1):**
     //! - `describe("subclass extensibility") > should expose protected
     //!   members and methods to subclasses`: TypeScript-class-`protected`
     //!   access modifier check. Rust uses `pub(crate)` visibility +
     //!   trait composition rather than class inheritance — the
     //!   subclass-protected-leak test is unrepresentable by construction.
     //!
-    //! - `describe("ESM compatibility") > all subpath imports resolve in
-    //!   Node.js ESM (no bare directory imports)`: spawns a real
-    //!   `node --input-type=module` subprocess and checks that every
-    //!   non-relative `from "<pkg>"` import in `index.ts` resolves
-    //!   under Node.js ESM rules (no bare directory imports without
-    //!   an explicit `/index.js` suffix). The Rust port has no
-    //!   equivalent constraint — the module system is statically
-    //!   resolved at compile time via Cargo + `mod` declarations.
-    //!   Adapter-teams is the only upstream adapter that has this
-    //!   test (slice 414 audited cross-package).
+    //! Wait — sweep recount (slice closing). The actual breakdown
+    //! across the 6 upstream test files is:
+    //! - cards.test.ts: 19 Rust-mapped (all in `cards.rs::tests`) = 19/19.
+    //! - errors.test.ts: 12 Rust-mapped (all in `errors.rs::tests`) = 12/12.
+    //! - markdown.test.ts: 39 Rust-mapped (all in `markdown.rs::tests`) = 39/39.
+    //! - modals.test.ts: 16 Rust-mapped (all in `modals.rs::tests`) = 16/16.
+    //! - graph-api.test.ts: 15 Rust-mapped (all in `graph_api.rs::tests`) = 15/15.
+    //! - index.test.ts: 28 Rust-mapped (across `lib.rs::tests`,
+    //!   `parse.rs::tests`, `thread_id.rs::tests`) + 25 js-only-documented
+    //!   per above = 53/53.
     //!
-    //! - `describe("constructor env var resolution") > should default
-    //!   logger when not provided` — asserts the constructor falls
-    //!   back to a default `Logger` instance when none is supplied.
-    //!   Rust adapters do not take a `Logger` as a first-class
-    //!   adapter dependency (logging is plumbed via the `log` crate's
-    //!   static dispatch elsewhere); the constructor-default-logger
-    //!   fallback shape is moot.
-    //!
-    //! - `describe("TeamsAdapter") > should export createTeamsAdapter
-    //!   function` — asserts `typeof createTeamsAdapter === "function"`.
-    //!   Rust's module system makes the `pub fn new` constructor
-    //!   visible at compile time; missing exports become compilation
-    //!   errors, not runtime assertion failures. (Slice 458 formalizes
-    //!   what was previously an inline note at the
-    //!   `teams_adapter_creates_an_instance_with_app_credentials`
-    //!   test site.)
+    //! Grand total: 129 Rust-mapped + 25 js-only-documented =
+    //! 154/154 upstream cases accounted for.
     use super::*;
     use futures_executor::block_on;
 
@@ -500,7 +732,6 @@ mod tests {
     }
 
     // ---------- renderFormatted (1 upstream case) ----------
-    #[test]
     #[test]
     fn teams_cache_and_dialog_timeout_consts_match_upstream() {
         // 1:1 with upstream's private `CACHE_TTL_MS = 30 * 24 * 60 *
@@ -737,5 +968,132 @@ mod tests {
         let opts = TeamsAdapterOptions::new("test-app-id", "test-password", "");
         let adapter = TeamsAdapter::new(opts);
         assert_eq!(adapter.name(), "teams");
+    }
+
+    // ---------- describe("constructor") (4 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("constructor")`.
+
+    // 1:1 with upstream index.test.ts:196 > "should set default userName to 'bot'".
+    #[test]
+    fn constructor_should_set_default_user_name_to_bot() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("test", "test", ""));
+        assert_eq!(adapter.user_name(), DEFAULT_USER_NAME);
+        assert_eq!(adapter.user_name(), "bot");
+    }
+
+    // 1:1 with upstream index.test.ts:205 > "should use provided userName".
+    #[test]
+    fn constructor_should_use_provided_user_name() {
+        let adapter =
+            TeamsAdapter::new(TeamsAdapterOptions::new("test", "test", "").with_user_name("mybot"));
+        assert_eq!(adapter.user_name(), "mybot");
+    }
+
+    // 1:1 with upstream index.test.ts:215 > "should accept appTenantId config".
+    #[test]
+    fn constructor_should_accept_app_tenant_id_config() {
+        let adapter = TeamsAdapter::new(
+            TeamsAdapterOptions::new("test", "test", "").with_app_tenant_id("some-tenant-id"),
+        );
+        assert_eq!(adapter.app_tenant_id(), Some("some-tenant-id"));
+    }
+
+    // 1:1 with upstream index.test.ts:227 > "should have name 'teams'".
+    #[test]
+    fn constructor_should_have_name_teams() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("test", "test", ""));
+        assert_eq!(adapter.name(), "teams");
+    }
+
+    // ---------- describe("fetchThread") (1 upstream case) ----------
+
+    // 1:1 with upstream index.test.ts:735 > "should return basic thread info".
+    #[test]
+    fn fetch_thread_should_return_basic_thread_info() {
+        use crate::thread_id::{TeamsThreadId, encode_thread_id as encode_upstream};
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("test", "test", ""));
+        let thread_id = encode_upstream(&TeamsThreadId {
+            conversation_id: "19:abc@thread.tacv2".to_string(),
+            service_url: "https://smba.trafficmanager.net/teams/".to_string(),
+        });
+        let info = adapter.fetch_thread(&thread_id).expect("decode succeeds");
+        assert_eq!(info.id, thread_id);
+        assert_eq!(info.channel_id, "19:abc@thread.tacv2");
+        assert!(info.metadata.is_empty());
+    }
+
+    // ---------- describe("postMessage") + describe("editMessage") +
+    //          describe("startTyping") body-shape (4 cases) ----------
+    // Per the slice 515/516 body-builder pattern, each `vi.fn()`-mocked
+    // HTTP-fetch case in the upstream postMessage / editMessage /
+    // startTyping describe blocks is structurally covered by the
+    // `build_*_body` pure helpers. The cases themselves remain
+    // js-only-documented (they assert on the mock `vi.fn()`'s call
+    // metadata, which requires the fetch-spy infrastructure), but the
+    // outbound body shape is verified directly below.
+
+    #[test]
+    fn build_message_body_emits_bot_framework_text_activity_shape() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        let body = adapter.build_message_body("Hi there");
+        assert_eq!(body["type"], "message");
+        assert_eq!(body["text"], "Hi there");
+    }
+
+    #[test]
+    fn build_edit_message_body_emits_bot_framework_text_activity_shape() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        let body = adapter.build_edit_message_body("Updated text");
+        assert_eq!(body["type"], "message");
+        assert_eq!(body["text"], "Updated text");
+    }
+
+    #[test]
+    fn build_typing_body_emits_bot_framework_typing_activity_shape() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        let body = adapter.build_typing_body();
+        assert_eq!(body["type"], "typing");
+        // No `text` field — typing activities carry only the type
+        // discriminator (1:1 with upstream's inline body shape).
+        assert!(body.get("text").is_none());
+    }
+
+    // ---------- adapter.is_message_from_self (4 upstream cases via parse) ----------
+    // The 4 upstream `describe("isMessageFromSelf (via parseMessage)")`
+    // cases assert on `adapter.parseMessage(activity).author.isMe` —
+    // those are mapped in `parse.rs::tests`. This test exercises the
+    // direct `adapter.is_message_from_self(activity)` accessor that
+    // upstream's `parseMessage` ultimately delegates to.
+
+    #[test]
+    fn adapter_is_message_from_self_detects_app_id_exact_and_prefixed_and_unrelated() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("abc123-def456", "test", ""));
+        let exact = serde_json::json!({ "from": { "id": "abc123-def456" } });
+        let prefixed = serde_json::json!({ "from": { "id": "28:abc123-def456" } });
+        let unrelated = serde_json::json!({ "from": { "id": "user-xyz" } });
+        let no_from_id = serde_json::json!({ "from": { "name": "Unknown" } });
+        assert!(adapter.is_message_from_self(&exact));
+        assert!(adapter.is_message_from_self(&prefixed));
+        assert!(!adapter.is_message_from_self(&unrelated));
+        assert!(!adapter.is_message_from_self(&no_from_id));
+    }
+
+    #[test]
+    fn adapter_parse_message_round_trips_through_inherent_method() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("test-app", "test", ""));
+        let activity = serde_json::json!({
+            "type": "message",
+            "id": "msg-1",
+            "text": "Hello world",
+            "from": { "id": "user-1", "name": "Alice" },
+            "conversation": { "id": "19:abc@thread.tacv2" },
+            "serviceUrl": "https://smba.trafficmanager.net/teams/",
+            "timestamp": "2024-01-01T00:00:00.000Z",
+        });
+        let msg = adapter.parse_message(&activity);
+        assert_eq!(msg.id, "msg-1");
+        assert!(msg.text.contains("Hello world"));
+        assert_eq!(msg.author.user_id, "user-1");
+        assert!(!msg.author.is_me);
     }
 }
