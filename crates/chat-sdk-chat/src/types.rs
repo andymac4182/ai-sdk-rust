@@ -1870,6 +1870,23 @@ pub trait StateAdapter: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    /// Dequeue (pop oldest) a message payload from the per-key
+    /// queue. 1:1 with upstream `dequeue(key): Promise<Message |
+    /// null>`. Used by [`crate::chat::Chat::handle_incoming_message`]'s
+    /// queue-drain branch (slice 495). Default returns `Ok(None)`
+    /// so backends without queue support compile unchanged.
+    async fn dequeue(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+        Ok(None)
+    }
+
+    /// Return the current depth of the per-key queue. 1:1 with
+    /// upstream `queueDepth(key): Promise<number>`. Used by the
+    /// queue-drain dispatcher to short-circuit when the queue is
+    /// empty (slice 495). Default returns `Ok(0)`.
+    async fn queue_depth(&self, _key: &str) -> StateResult<usize> {
+        Ok(0)
+    }
+
     /// Acquire a per-thread lock. 1:1 with upstream
     /// `acquireLock(threadId, ttlMs): Promise<Lock | null>`. Returns
     /// `Ok(None)` when a non-expired lock is already held for the

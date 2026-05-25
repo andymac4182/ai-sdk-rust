@@ -328,10 +328,37 @@ pub type HandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> 
 /// 1:1 with upstream `MentionHandler<TState>` — invoked when a new
 /// `@bot` mention arrives in a non-subscribed thread. The closure
 /// receives a [`Thread`] handle bound to the matched adapter + a clone
-/// of the message; the upstream third `context` parameter is deferred
-/// behind a `MessageContext` port.
+/// of the message. Handlers that want the optional third `context`
+/// argument (queue-drain skipped-message context, slice 495) register
+/// via [`Chat::on_new_mention_with_context`] instead.
 pub type MentionHandler =
     Arc<dyn Fn(Thread, crate::message::Message) -> HandlerFuture + Send + Sync + 'static>;
+
+/// Queue-drain context delivered to handlers registered via
+/// [`Chat::on_new_mention_with_context`]. 1:1 with upstream
+/// `MessageContext { skipped: Message[], totalSinceLastHandler:
+/// number }`. `skipped` carries the older messages drained from
+/// the per-lock-key queue alongside the latest; `total_since_last_handler`
+/// is the total count of messages drained in this batch
+/// (inclusive of the one passed as the handler's `message` arg).
+/// `None` for non-drain dispatches. (slice 495)
+#[derive(Debug, Clone)]
+pub struct MessageContext {
+    pub skipped: Vec<crate::message::Message>,
+    pub total_since_last_handler: usize,
+}
+
+/// Handler variant that receives the optional [`MessageContext`].
+/// 1:1 with upstream's 3-arg handler signature. Registered via
+/// [`Chat::on_new_mention_with_context`]. Direct (non-drain)
+/// dispatches pass `None`; queue-drain dispatches pass `Some`
+/// with the skipped messages.
+pub type MentionHandlerWithContext = Arc<
+    dyn Fn(Thread, crate::message::Message, Option<MessageContext>) -> HandlerFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// 1:1 with upstream `SubscribedMessageHandler<TState>` — invoked for
 /// every message in a thread previously subscribed via
@@ -749,6 +776,10 @@ struct OptionsLoadRegistration {
 #[derive(Clone, Default)]
 struct ChatHandlers {
     mention: Arc<std::sync::Mutex<Vec<MentionHandler>>>,
+    /// With-context mention handlers (slice 495). Fired by both
+    /// direct dispatch (context=None) and queue-drain dispatch
+    /// (context=Some).
+    mention_with_context: Arc<std::sync::Mutex<Vec<MentionHandlerWithContext>>>,
     subscribed: Arc<std::sync::Mutex<Vec<SubscribedMessageHandler>>>,
     direct_message: Arc<std::sync::Mutex<Vec<DirectMessageHandler>>>,
     message_patterns: Arc<std::sync::Mutex<Vec<MessagePattern>>>,
@@ -1187,6 +1218,25 @@ impl Chat {
     {
         self.handlers
             .mention
+            .lock()
+            .unwrap()
+            .push(Arc::new(handler));
+    }
+
+    /// Variant of [`Self::on_new_mention`] that exposes upstream's
+    /// optional 3rd `MessageContext` argument. Direct dispatches
+    /// pass `None`; queue-drain dispatches (when `concurrency =
+    /// Queue` and the lock was previously held) pass `Some` with
+    /// the skipped messages from the drained queue. (slice 495)
+    pub fn on_new_mention_with_context<F>(&self, handler: F)
+    where
+        F: Fn(Thread, crate::message::Message, Option<MessageContext>) -> HandlerFuture
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handlers
+            .mention_with_context
             .lock()
             .unwrap()
             .push(Arc::new(handler));
@@ -2062,6 +2112,60 @@ impl Chat {
         // early-return branches.
         self.dispatch_handlers(adapter, _thread_id, message).await;
 
+        // 1:1 with upstream `concurrency: "queue"` drain semantics
+        // (slice 495). When this dispatch acquired the lock AND
+        // there are previously-enqueued messages, drain them all
+        // and fire the with-context handlers ONCE with the latest
+        // queued message as `message` + the older queued messages
+        // as `skipped`.
+        if matches!(self.concurrency, Concurrency::Queue) && effective_lock.is_some() {
+            let depth = self.state.queue_depth(&lock_key).await.unwrap_or(0);
+            if depth > 0 {
+                let mut drained: Vec<serde_json::Value> = Vec::with_capacity(depth);
+                while let Ok(Some(entry)) = self.state.dequeue(&lock_key).await {
+                    drained.push(entry);
+                }
+                if let Some(latest_value) = drained.pop() {
+                    let total = drained.len() + 1;
+                    let skipped: Vec<crate::message::Message> = drained
+                        .into_iter()
+                        .filter_map(|v| {
+                            serde_json::from_value::<crate::message::SerializedMessage>(v).ok()
+                        })
+                        .map(crate::message::Message::from_serialized)
+                        .collect();
+                    if let Ok(serialized) =
+                        serde_json::from_value::<crate::message::SerializedMessage>(latest_value)
+                    {
+                        let mut latest = crate::message::Message::from_serialized(serialized);
+                        let ctx_handlers: Vec<MentionHandlerWithContext> =
+                            self.handlers.mention_with_context.lock().unwrap().clone();
+                        let adapter_arc_for_drain =
+                            adapter_arc_for_lock.clone().unwrap_or_else(|| {
+                                self.adapters
+                                    .get(adapter.name())
+                                    .cloned()
+                                    .expect("adapter registered by name at dispatch entry")
+                            });
+                        for handler in ctx_handlers {
+                            let thread = Thread::with_state_adapter(
+                                adapter_arc_for_drain.clone(),
+                                _thread_id,
+                                self.state.clone(),
+                            );
+                            let ctx = MessageContext {
+                                skipped: skipped.clone(),
+                                total_since_last_handler: total,
+                            };
+                            handler(thread, latest.clone(), Some(ctx)).await;
+                        }
+                        // Mark the latest as consumed.
+                        let _ = &mut latest; // silence unused-mut warning if any
+                    }
+                }
+            }
+        }
+
         // Release the per-thread lock if we held one (slice 431).
         if let Some(lock) = effective_lock {
             let _ = self.state.release_lock(&lock).await;
@@ -2142,6 +2246,15 @@ impl Chat {
             for handler in handlers_snapshot {
                 let thread = make_thread(adapter_arc.clone());
                 handler(thread, message.clone()).await;
+            }
+            // 1:1 with upstream's 3-arg handler: with-context
+            // handlers also fire for direct dispatches, with
+            // `context = None`. (slice 495)
+            let ctx_handlers: Vec<MentionHandlerWithContext> =
+                self.handlers.mention_with_context.lock().unwrap().clone();
+            for handler in ctx_handlers {
+                let thread = make_thread(adapter_arc.clone());
+                handler(thread, message.clone(), None).await;
             }
             return;
         }
@@ -7139,6 +7252,20 @@ mod tests {
                 .push((key.to_string(), value));
             Ok(())
         }
+        async fn dequeue(&self, key: &str) -> StateResult<Option<serde_json::Value>> {
+            // Drain enqueue_calls in FIFO order matching the given key.
+            let mut calls = self.enqueue_calls.lock().unwrap();
+            if let Some(pos) = calls.iter().position(|(k, _)| k == key) {
+                let (_, value) = calls.remove(pos);
+                Ok(Some(value))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn queue_depth(&self, key: &str) -> StateResult<usize> {
+            let calls = self.enqueue_calls.lock().unwrap();
+            Ok(calls.iter().filter(|(k, _)| k == key).count())
+        }
     }
 
     #[test]
@@ -7560,6 +7687,146 @@ mod tests {
         for (key, _payload) in enqueue_calls.iter() {
             assert_eq!(key, "telegram:C123");
         }
+    }
+
+    // ---------- describe("concurrency: queue") — slice 495 ----------
+    //
+    // 1:1 with upstream `chat.test.ts > describe("concurrency: queue")`.
+    // 2 cases ported via the queue-drain dispatcher added in slice 495:
+    // a `MessageContext { skipped, total_since_last_handler }` is
+    // delivered to handlers registered via
+    // `Chat::on_new_mention_with_context` when the dispatcher drains
+    // the per-lock-key queue after the lock holder releases.
+
+    #[test]
+    fn concurrency_queue_should_process_queued_messages_with_skipped_context_after_handler_finishes()
+     {
+        // 1:1 with upstream "should process queued messages with
+        // skipped context after handler finishes". First message
+        // processes immediately (lock acquired), the with-context
+        // handler receives `context = None` (no prior queue).
+        let state = Arc::new(LockTrackingState::default());
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            concurrency: Concurrency::Queue,
+            ..Default::default()
+        });
+        let received: Arc<Mutex<Vec<(String, Option<usize>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let r = received.clone();
+        chat.on_new_mention_with_context(move |_thread, msg, ctx| {
+            let r = r.clone();
+            let text = msg.text.clone();
+            let total = ctx.as_ref().map(|c| c.total_since_last_handler);
+            Box::pin(async move {
+                r.lock().unwrap().push((text, total));
+            })
+        });
+        let mut msg1 = dispatched_message("msg-q-1", false);
+        msg1.text = "Hey @slack-bot first".to_string();
+        msg1.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg1,
+        ))
+        .unwrap();
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0, "Hey @slack-bot first");
+        assert!(
+            received[0].1.is_none(),
+            "first dispatch should have no context"
+        );
+    }
+
+    #[test]
+    fn concurrency_queue_should_enqueue_messages_when_lock_is_held_and_drain_after() {
+        // 1:1 with upstream "should enqueue messages when lock is
+        // held and drain after". Pre-hold the lock, send 3 messages
+        // (all enqueue, no handler fires), force-release, send a 4th
+        // (acquires lock + dispatches direct, then drains queue
+        // firing handler once with latest queued + older as skipped +
+        // total = 3).
+        let state = Arc::new(LockTrackingState::default());
+        state.preset_held("slack:C123:1234.5678");
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(NamedAdapter {
+            name: "slack".to_string(),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            concurrency: Concurrency::Queue,
+            ..Default::default()
+        });
+        let received: Arc<Mutex<Vec<(String, Option<(Vec<String>, usize)>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let r = received.clone();
+        chat.on_new_mention_with_context(move |_thread, msg, ctx| {
+            let r = r.clone();
+            let text = msg.text.clone();
+            let ctx_tuple = ctx.map(|c| {
+                (
+                    c.skipped.iter().map(|m| m.text.clone()).collect::<Vec<_>>(),
+                    c.total_since_last_handler,
+                )
+            });
+            Box::pin(async move {
+                r.lock().unwrap().push((text, ctx_tuple));
+            })
+        });
+        // Send 3 messages while lock is pre-held — they all enqueue.
+        for (id, text) in [
+            ("msg-q-2", "Hey @slack-bot second"),
+            ("msg-q-3", "Hey @slack-bot third"),
+            ("msg-q-4", "Hey @slack-bot fourth"),
+        ] {
+            let mut msg = dispatched_message(id, false);
+            msg.text = text.to_string();
+            msg.is_mention = Some(true);
+            futures_executor::block_on(chat.handle_incoming_message(
+                adapter.as_ref(),
+                "slack:C123:1234.5678",
+                &mut msg,
+            ))
+            .unwrap();
+        }
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "no handler fires while lock held"
+        );
+        // Force-release; next message acquires lock + drains queue.
+        futures_executor::block_on(state.force_release_lock("slack:C123:1234.5678")).unwrap();
+        let mut msg4 = dispatched_message("msg-q-5", false);
+        msg4.text = "Hey @slack-bot fifth".to_string();
+        msg4.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "slack:C123:1234.5678",
+            &mut msg4,
+        ))
+        .unwrap();
+        let received = received.lock().unwrap();
+        // Two handler calls: direct (msg4, ctx=None) then drain
+        // (latest from queue with skipped + total context).
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].0, "Hey @slack-bot fifth");
+        assert!(received[0].1.is_none());
+        assert_eq!(received[1].0, "Hey @slack-bot fourth");
+        let (skipped, total) = received[1]
+            .1
+            .as_ref()
+            .expect("drain dispatch carries context");
+        assert_eq!(
+            skipped.as_slice(),
+            &["Hey @slack-bot second", "Hey @slack-bot third"]
+        );
+        assert_eq!(*total, 3);
     }
 
     // ---------- describe("concurrency: queue") deferred enumeration ----------
