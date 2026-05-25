@@ -9501,6 +9501,53 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_to_ui_message_stream_supports_send_reasoning_true() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "r1", "hidden",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "visible")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_message_id("msg-123")
+                .with_send_reasoning(true),
+        );
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start", "messageId": "msg-123" },
+                { "type": "start-step" },
+                { "type": "reasoning-start", "id": "r1" },
+                { "type": "reasoning-delta", "id": "r1", "delta": "hidden" },
+                { "type": "reasoning-end", "id": "r1" },
+                { "type": "text-start", "id": "1" },
+                { "type": "text-delta", "id": "1", "delta": "visible" },
+                { "type": "text-end", "id": "1" },
+                { "type": "finish-step" },
+                { "type": "finish", "finishReason": "stop" }
+            ])
+        );
+    }
+
+    #[test]
     fn stream_text_result_ui_message_stream_options_use_persistence_message_ids() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
