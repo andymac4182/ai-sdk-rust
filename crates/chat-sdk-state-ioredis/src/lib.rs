@@ -181,7 +181,6 @@ mod tests {
     use super::*;
     use futures_executor::block_on;
 
-    #[test]
     // ---------- generate_token (additive) ----------
     // No standalone upstream tests; the helper is exercised through
     // `acquireLock` and friends. The Rust suite locks in the shape.
@@ -309,6 +308,8 @@ mod tests {
 
     // ---------- upstream js-only-documented cases (per slice-380 pattern) ----------
     //
+    // Catalogued in `docs/chat/unported.md > chat-sdk-state-ioredis`.
+    //
     // The following 4 upstream `index.test.ts` cases are js-only or
     // require a live Redis cluster and have no matching Rust test:
     //
@@ -318,27 +319,40 @@ mod tests {
     // - 3 `describe.skip("integration tests")` cases — explicitly
     //   skipped upstream too; would need a live Redis cluster
     //   (cluster mode + Sentinel).
-    //
-    // Remaining upstream cases are mapped (5 method-existence mapped
-    // to NotConnected smoke tests below + 8 NotConnected smoke
-    // tests + 3 generate_token additive tests).
 
-    // ---------- upstream "should have X method" mappings (2 of 5) ----------
+    // ---------- upstream "should have X method" mappings (5 of 5) ----------
     // 1:1 with upstream `index.test.ts` cases:
     //
-    // - `should have appendToList method` → mapped to
+    // - `should have appendToList method` -> mapped to
     //   `adapter_append_to_list_returns_not_connected_until_client_lands`
     //   above (calling the method proves it exists; the upstream
     //   test only asserts `typeof adapter.appendToList === "function"`).
-    // - `should have getList method` → mapped to
+    // - `should have getList method` -> mapped to
     //   `adapter_get_list_returns_not_connected_until_client_lands`.
-    //
-    // The remaining 3 upstream method-existence cases (`enqueue` /
-    // `dequeue` / `queueDepth`) are deferred until the chat-sdk-chat
-    // `StateAdapter` trait gets extended with the queue-primitive
-    // methods (currently only `state-memory` has them as inherent
-    // methods, not trait surface). They're tracked as deferred in
-    // `docs/chat/goal-refinements.md`.
+    // - `should have enqueue method` -> mapped to
+    //   `adapter_enqueue_default_trait_impl_is_no_op` below.
+    // - `should have dequeue method` -> mapped to
+    //   `adapter_dequeue_default_trait_impl_returns_none` below.
+    // - `should have queueDepth method` -> mapped to
+    //   `adapter_queue_depth_default_trait_impl_returns_zero` below.
+
+    #[test]
+    fn adapter_enqueue_default_trait_impl_is_no_op() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        assert!(block_on(adapter.enqueue("k", serde_json::json!(1), None)).is_ok());
+    }
+
+    #[test]
+    fn adapter_dequeue_default_trait_impl_returns_none() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        assert_eq!(block_on(adapter.dequeue("k")).unwrap(), None);
+    }
+
+    #[test]
+    fn adapter_queue_depth_default_trait_impl_returns_zero() {
+        let adapter = IoredisStateAdapter::new(IoredisStateAdapterOptions::new("redis://n1"));
+        assert_eq!(block_on(adapter.queue_depth("k")).unwrap(), 0);
+    }
 
     #[test]
     fn adapter_set_if_not_exists_returns_not_connected_until_client_lands() {
