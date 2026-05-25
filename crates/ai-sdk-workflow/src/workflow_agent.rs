@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
-    FinishReason, InputTokenUsage, LanguageModelMessage, LanguageModelToolResultOutput,
-    LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
+    FinishReason, InputTokenUsage, LanguageModelAbortSignal, LanguageModelMessage,
+    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+    OutputTokenUsage,
 };
 use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions, execute_tool,
@@ -258,6 +259,8 @@ impl WorkflowAgent {
         let stream_on_tool_execution_end = options.on_tool_execution_end;
         let constructor_on_finish = self.on_finish.clone();
         let stream_on_finish = options.on_finish;
+        let abort_signal = options.abort_signal.clone();
+        let on_abort = options.on_abort;
 
         let initial_prompt = options.prompt.clone();
         let initial_runtime_context = options.runtime_context.clone();
@@ -303,6 +306,25 @@ impl WorkflowAgent {
         let mut last_tool_calls = Vec::new();
         let mut last_tool_results = Vec::new();
         let mut missing_provider_executed_tool_results = Vec::new();
+
+        if abort_signal
+            .as_ref()
+            .is_some_and(LanguageModelAbortSignal::is_aborted)
+        {
+            if let Some(on_abort) = on_abort {
+                on_abort.call(WorkflowAgentAbortInfo { steps: Vec::new() });
+            }
+
+            return Ok(WorkflowAgentStreamResult {
+                messages,
+                steps,
+                tool_calls: last_tool_calls,
+                tool_results: last_tool_results,
+                runtime_context,
+                tools_context,
+                missing_provider_executed_tool_results,
+            });
+        }
 
         loop {
             call_step_start_callbacks(
@@ -527,6 +549,12 @@ pub struct WorkflowAgentStreamOptions<E> {
 
     /// Stream-level finish callback that runs after any constructor callback.
     pub on_finish: Option<WorkflowAgentOnFinishCallback>,
+
+    /// Stream-level abort signal that short-circuits the agent before the first step.
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+
+    /// Stream-level abort callback that runs when the stream is already aborted.
+    pub on_abort: Option<WorkflowAgentOnAbortCallback>,
 }
 
 impl<E> WorkflowAgentStreamOptions<E> {
@@ -547,6 +575,8 @@ impl<E> WorkflowAgentStreamOptions<E> {
             on_tool_execution_start: None,
             on_tool_execution_end: None,
             on_finish: None,
+            abort_signal: None,
+            on_abort: None,
         }
     }
 
@@ -633,6 +663,56 @@ impl<E> WorkflowAgentStreamOptions<E> {
         self.on_finish = Some(on_finish);
         self
     }
+
+    /// Sets a stream-level abort signal.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets a stream-level abort callback.
+    pub fn with_on_abort(mut self, on_abort: WorkflowAgentOnAbortCallback) -> Self {
+        self.on_abort = Some(on_abort);
+        self
+    }
+}
+
+/// Callback invoked when [`WorkflowAgent::stream`] observes an already aborted signal.
+#[derive(Clone)]
+pub struct WorkflowAgentOnAbortCallback {
+    callback: Arc<dyn Fn(WorkflowAgentAbortInfo) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnAbortCallback {
+    /// Creates an abort callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowAgentAbortInfo) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowAgentAbortInfo) {
+        (self.callback)(info);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnAbortCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnAbortCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Abort information passed to workflow-agent abort callbacks.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentAbortInfo {
+    /// Steps completed before the abort was observed.
+    pub steps: Vec<WorkflowStreamStep>,
 }
 
 /// Callback invoked before [`WorkflowAgent::stream`] starts iterating steps.
@@ -1287,11 +1367,12 @@ mod tests {
 
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::{
-        FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelFinishReason, LanguageModelStreamFinish,
-        LanguageModelStreamPart, LanguageModelTextDelta, LanguageModelTextEnd,
-        LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
+        FinishReason, InputTokenUsage, LanguageModelAbortController,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
+        LanguageModelFinishReason, LanguageModelStreamFinish, LanguageModelStreamPart,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+        LanguageModelToolCall, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
     };
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
     use serde_json::json;
@@ -3378,7 +3459,7 @@ mod tests {
             }),
         ));
         let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
-        let runtime_context = serde_json::from_value(json!({
+        let runtime_context: WorkflowRuntimeContext = serde_json::from_value(json!({
             "tenantId": "tenant_123"
         }))
         .expect("runtime context");
@@ -3412,6 +3493,38 @@ mod tests {
             .expect("finish info was captured");
         assert_eq!(captured_finish.runtime_context, runtime_context);
         assert_eq!(captured_finish.tools_context, tools_context);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_call_on_abort_when_abort_signal_is_already_aborted() {
+        let captured_abort = Arc::new(Mutex::new(None));
+        let captured_abort_for_callback = Arc::clone(&captured_abort);
+        let abort_controller = LanguageModelAbortController::new();
+        abort_controller.abort();
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_abort_signal(abort_controller.signal())
+                    .with_on_abort(WorkflowAgentOnAbortCallback::new(move |info| {
+                        *captured_abort_for_callback
+                            .lock()
+                            .expect("abort lock succeeds") = Some(info);
+                    })),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let captured_abort = captured_abort
+            .lock()
+            .expect("abort lock succeeds")
+            .clone()
+            .expect("abort info was captured");
+        assert!(captured_abort.steps.is_empty());
+        assert_eq!(result.messages, user_prompt());
+        assert!(result.steps.is_empty());
     }
 
     #[test]
