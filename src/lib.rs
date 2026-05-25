@@ -22,6 +22,7 @@ pub mod generate_image;
 pub mod generate_object;
 pub mod generate_speech;
 pub mod generate_text;
+pub mod generate_text_output;
 pub mod generate_video;
 pub mod headers;
 pub mod huggingface;
