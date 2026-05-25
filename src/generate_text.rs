@@ -17610,6 +17610,38 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_passes_runtime_context_to_prepare_step() {
+        let model = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
+            LanguageModelText::new("Hello, world!"),
+        )]);
+        let runtime_context = json!({ "myData": "test-value" })
+            .as_object()
+            .expect("runtime context is an object")
+            .clone();
+        let captured_context = Arc::new(Mutex::new(None::<JsonObject>));
+        let captured_context_for_callback = Arc::clone(&captured_context);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test")])
+                .with_runtime_context(runtime_context.clone())
+                .with_prepare_step(move |options| {
+                    let captured_context = Arc::clone(&captured_context_for_callback);
+                    async move {
+                        *captured_context.lock().expect("captured context lock") =
+                            Some(options.runtime_context);
+                        PrepareStepResult::new()
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            *captured_context.lock().expect("captured context lock"),
+            Some(runtime_context)
+        );
+    }
+
+    #[test]
     fn generate_text_prepare_step_can_override_model_with_same_model_type() {
         let primary = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
             LanguageModelText::new("primary"),
