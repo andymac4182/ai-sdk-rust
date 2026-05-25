@@ -2474,6 +2474,24 @@ focused tests for each portable behavior before changing rows to `verified`.
   for upstream `workflow-agent-e2e.integration.test.ts` `basic text response`,
   proving the agent can stream a single non-tool round-trip from prompt to
   assistant text result.
+- 2026-05-26: WorkflowAgent core tool e2e parity added explicit ledger
+  mappings for the remaining portable upstream
+  `workflow-agent-e2e.integration.test.ts` core cases: `single tool call` is
+  represented by `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`,
+  `multiple sequential tool calls` is represented by
+  `workflow_agent_upstream_should_pass_updated_messages_on_subsequent_tool_call_rounds`,
+  and `tool error recovery` is represented by
+  `workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result`.
+  The upstream `tools with zod input schemas work across step boundaries` case
+  is represented by the workflow tool-schema serialization coverage plus
+  `workflow_agent_upstream_should_successfully_execute_tools_that_return_normally`,
+  while `callback survives serialization and repairs malformed tool input`
+  is represented by
+  `workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator`
+  together with the lower-level stream-text repair tests. The callback-order
+  e2e cases remain represented by the existing workflow compat tests for
+  `fires constructor + stream callbacks in order with step data` and
+  `fires constructor + stream callbacks in order with event data`.
 - 2026-05-26: WorkflowAgent timeout e2e parity added the named Rust
   counterpart `workflow_agent_upstream_should_complete_within_timeout` for
   upstream `workflow-agent-e2e.integration.test.ts` `completes within
