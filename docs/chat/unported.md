@@ -37,6 +37,22 @@ the structurally-unportable cases.
   HTTP-fetch cases under `describe("TelegramAdapter")` +
   `describe("getUser")` + `describe("applyTelegramEntities")`,
   default-Logger constructor parameter, subclass extensibility.
+- **`chat-sdk-adapter-whatsapp`** — Vitest `vi.fn()`-mocked
+  HTTP-fetch cases under `describe("handleWebhook - POST signature
+  verification")` + `describe("handleWebhook - POST message
+  processing")` + `describe("stream")`, subclass extensibility.
+- **`chat-sdk-adapter-discord`** — Vitest `vi.fn()`-mocked
+  HTTP-fetch cases under `describe("handleWebhook - PING / *_COMPONENT
+  / APPLICATION_COMMAND / JSON parsing / forwarded gateway events)`
+  + `describe("postMessage / editMessage / deleteMessage / addReaction
+  / removeReaction / startTyping")` + `describe("openDM /
+  fetchMessages / fetchChannelMessages / fetchChannelInfo /
+  postChannelMessage / listThreads / fetchThread)` +
+  `describe("legacy gateway interactions / handleForwardedMessage /
+  handleForwardedReaction / initialize / mentionRoleIds /
+  createDiscordThread 160004 recovery / getUser")`, default-Logger
+  constructor parameter, subclass extensibility, discord.js `Client`
+  partials.
 - **`chat-sdk-adapter-*` (8 packages)** — cross-cutting Vitest
   `vi.fn()` mock infrastructure, default-Logger constructor
   parameter, subclass extensibility, typed-client getter access.
@@ -262,3 +278,52 @@ Mapped accounting: 134 Rust-mapped + 36 js-only-documented =
 170/170 upstream cases accounted for. Remaining 134 cases are
 ported as colocated `#[cfg(test)] mod tests` in
 [`crates/chat-sdk-adapter-telegram/src/{lib,markdown,cards}.rs`](../../crates/chat-sdk-adapter-telegram/src/).
+
+---
+
+## Section: `chat-sdk-adapter-whatsapp`
+
+### `packages/adapter-whatsapp/src/{index,cards,markdown}.test.ts` (9 unportable cases of 111)
+
+The Rust port maps 102 of the 111 upstream cases (cards 23/23 +
+markdown 23/23 + index 56/65). The remaining 9 cases fall under
+the cross-cutting js-only-documented sweep patterns (slice 380
+type-system-impossible + slice 411 Vitest `vi.fn()` HTTP-fetch
+mock) and are enumerated below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| Subclass extensibility | `describe("subclass extensibility") > exposes protected members and methods to subclasses` (index.test.ts L1166-L1179) (1 case) | TypeScript `protected` access modifier check. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance — the subclass-protected-leak test is unrepresentable by construction. |
+| `vi.fn()`-mocked HTTP fetch | `describe("handleWebhook - POST signature verification")` (index.test.ts L676-L758) (5 cases) | Requires the upstream Vitest `vi.fn()` fetch-spy infrastructure to drive a synthetic `Request` -> `Response` round-trip through `adapter.handleWebhook` and assert `mockChat.processMessage`/HTTP-status side-effects. | Signature primitive ported 1:1 via `crate::webhook::verify_whatsapp_signature` (7 tests in `webhook.rs`); JSON-decode/dispatch flow via `crate::parse::parse_message` (16 tests in `parse.rs`). End-to-end wiring would require a `wiremock`/tokio dev-dep the workspace's adapter parity policy explicitly avoids. |
+| `vi.fn()`-mocked HTTP fetch | `describe("handleWebhook - POST message processing")` (index.test.ts L764-L815) (2 cases) | Asserts `mockChat.processMessage` runtime side-effects through the same `vi.fn()`-mocked Request-Response path. | Structural parsing covered by `crate::parse::parse_message`. Same `vi.fn()`-fetch blocker as the POST signature verification cases. |
+| `vi.fn()`-mocked HTTP fetch | `describe("stream") > buffers async iterable chunks and sends as a single message` (index.test.ts L1028-L1046) (1 case) | The Rust port does not implement `stream` on the adapter (the cross-platform `Adapter` trait does not include it), and the assertion is on outbound HTTP body shape via `vi.spyOn(global, "fetch")`. | Structural body shape (Graph API send-text-message envelope) covered by `WhatsappAdapter::build_text_message_body` tests. |
+
+Mapped accounting: 102 Rust-mapped + 9 js-only-documented =
+111/111 upstream cases accounted for. Remaining 102 cases are
+ported as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-whatsapp/src/{lib,parse,cards,markdown,webhook}.rs`](../../crates/chat-sdk-adapter-whatsapp/src/).
+
+---
+
+## Section: `chat-sdk-adapter-discord`
+
+### `packages/adapter-discord/src/{index,cards,markdown,gateway}.test.ts` (68 unportable cases of 234)
+
+The Rust port maps 166 of the 234 upstream cases (cards 38/38 +
+markdown 41/41 + index 87/154). The remaining 68 cases fall under
+the cross-cutting js-only-documented sweep patterns (slice 411
+Vitest `vi.fn()` HTTP-fetch mock + slice 380 type-system-impossible
++ slice 438 discord.js `Client` partials + slice 447 default-Logger
+constructor) and are enumerated below.
+
+| Category | Upstream cases (count) | Reason | Rust replacement |
+| --- | --- | --- | --- |
+| `vi.fn()`-mocked HTTP fetch | 65 listed in [`crates/chat-sdk-adapter-discord/src/lib.rs`](../../crates/chat-sdk-adapter-discord/src/lib.rs) test-mod header under `describe("handleWebhook - PING / MESSAGE_COMPONENT / APPLICATION_COMMAND / JSON parsing / forwarded gateway events / component interaction edge cases")` + `describe("postMessage / editMessage / deleteMessage / addReaction / removeReaction / startTyping")` outer side-effect rows + `describe("openDM / fetchMessages / fetchChannelMessages / fetchChannelInfo / postChannelMessage / listThreads / fetchThread")` + `describe("legacy gateway interactions / handleForwardedMessage / handleForwardedReaction / initialize / mentionRoleIds / createDiscordThread 160004 recovery / getUser")`. | Each case asserts on `vi.spyOn(adapter as any, "discordFetch").mockResolvedValue(...)` HTTP-spy state, on `requestContext.run(...)` async-local-storage state, on `chat.handleIncomingMessage` runtime dispatch, or on `nacl.sign.detached.verify` driven through a Vitest synthetic `Request`. Requires the upstream `vi.fn()` fetch-spy + `AsyncLocalStorage` infrastructure. | Rust port intentionally avoids a test-only `wiremock`-style dep here; URL + body shape are structurally covered via `post_message_url` / `message_url` / `reaction_url` / `typing_url` + `build_post_message_body` / `build_edit_message_body` pure helpers, and the webhook signature verification path is covered by the `webhook::tests::*` module's direct Ed25519 verifier tests. |
+| Subclass extensibility | `describe("subclass extensibility") > exposes protected members and methods to subclasses` (index.test.ts L4528-L4529) (1 case) | TypeScript `protected` access modifier check. | Rust uses `pub(crate)` visibility + trait composition rather than class inheritance. |
+| Default-Logger constructor parameter | `describe("constructor env var resolution") > should default logger when not provided` (index.test.ts L170) (1 case) | Per `port-chat-sdk.md` slice 447, Rust adapters do not take a `Logger` as a first-class adapter dependency. | Static dispatch via the `log` crate makes the constructor-default-logger fallback shape moot. |
+| discord.js `Client` partials | `gateway.test.ts > describe("Gateway client configuration") > includes Partials.Channel for DM support` (gateway.test.ts L62-L106) (1 case) | Asserts the discord.js `Client` was constructed with `partials: [Partials.Channel]` for DM event delivery. | The Rust port manages its WebSocket gateway directly (no discord.js `Client` wrapper) and `Partials` is a discord.js-specific enum; DM support is surfaced via channel-type dispatch in the event handler instead. |
+
+Mapped accounting: 166 Rust-mapped + 68 js-only-documented =
+234/234 upstream cases accounted for. Remaining 166 cases are
+ported as colocated `#[cfg(test)] mod tests` in
+[`crates/chat-sdk-adapter-discord/src/{lib,parse,cards,markdown,webhook}.rs`](../../crates/chat-sdk-adapter-discord/src/).

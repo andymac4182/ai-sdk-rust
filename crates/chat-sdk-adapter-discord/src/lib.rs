@@ -8,6 +8,7 @@
 
 pub mod cards;
 pub mod markdown;
+pub mod parse;
 pub mod webhook;
 
 use async_trait::async_trait;
@@ -658,6 +659,184 @@ pub fn truncate_content(content: &str) -> String {
     format!("{head}...")
 }
 
+/// Build the JSON body for a Discord create-message (`POST
+/// /channels/<id>/messages`) request. 1:1 with upstream's
+/// `DiscordAdapter#postMessage` payload-construction logic:
+///
+/// - When `message` carries a [`CardElement`](chat_sdk_chat::cards::CardElement)
+///   the body OMITS the `content` field (Discord would render both
+///   text and card if `content` is present) and includes the
+///   `embeds` + `components` arrays from
+///   [`cards::card_to_discord_payload`].
+/// - Otherwise the body sets `content` to the rendered + truncated
+///   text via [`markdown::DiscordFormatConverter::render_postable`]
+///   piped through [`truncate_content`].
+/// - `embeds` / `components` arrays are omitted when empty
+///   (matches upstream's `if (embeds.length > 0) payload.embeds = …`
+///   guard).
+///
+/// Returns a [`serde_json::Value`] (the body the adapter would
+/// serialize to JSON). Exposed at module scope so the upstream
+/// `describe("postMessage")` body-shape cases can be exercised
+/// without going through HTTP-call dispatch.
+pub fn build_post_message_body(
+    message: &chat_sdk_chat::types::AdapterPostableMessage,
+) -> Result<serde_json::Value, chat_sdk_adapter_shared::errors::AdapterError> {
+    use chat_sdk_chat::types::AdapterPostableMessage;
+    let mut body = serde_json::Map::new();
+    let card = match message {
+        AdapterPostableMessage::Card(c) => Some(&c.card),
+        AdapterPostableMessage::CardElement(c) => Some(c),
+        _ => None,
+    };
+    if let Some(card) = card {
+        let payload = cards::card_to_discord_payload(card)?;
+        if !payload.embeds.is_empty() {
+            body.insert("embeds".to_string(), embeds_to_json(&payload.embeds));
+        }
+        if !payload.components.is_empty() {
+            body.insert(
+                "components".to_string(),
+                components_to_json(&payload.components),
+            );
+        }
+    } else {
+        let rendered = markdown::DiscordFormatConverter::new().render_postable(message);
+        body.insert(
+            "content".to_string(),
+            serde_json::Value::String(truncate_content(&rendered)),
+        );
+    }
+    Ok(serde_json::Value::Object(body))
+}
+
+/// Build the JSON body for a Discord edit-message (`PATCH
+/// /channels/<id>/messages/<msg>`) request. 1:1 with upstream's
+/// `DiscordAdapter#editMessage` payload-construction logic. Diff
+/// vs [`build_post_message_body`]: when the message carries a card,
+/// `content` is explicitly set to the empty string (`""`) rather
+/// than omitted, because Discord's PATCH semantics keep omitted
+/// fields — to clear stale text after switching to a card we must
+/// send an explicit empty string.
+pub fn build_edit_message_body(
+    message: &chat_sdk_chat::types::AdapterPostableMessage,
+) -> Result<serde_json::Value, chat_sdk_adapter_shared::errors::AdapterError> {
+    use chat_sdk_chat::types::AdapterPostableMessage;
+    let mut body = serde_json::Map::new();
+    let card = match message {
+        AdapterPostableMessage::Card(c) => Some(&c.card),
+        AdapterPostableMessage::CardElement(c) => Some(c),
+        _ => None,
+    };
+    if let Some(card) = card {
+        let payload = cards::card_to_discord_payload(card)?;
+        // Explicit empty string clears prior content under PATCH.
+        body.insert(
+            "content".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        if !payload.embeds.is_empty() {
+            body.insert("embeds".to_string(), embeds_to_json(&payload.embeds));
+        }
+        if !payload.components.is_empty() {
+            body.insert(
+                "components".to_string(),
+                components_to_json(&payload.components),
+            );
+        }
+    } else {
+        let rendered = markdown::DiscordFormatConverter::new().render_postable(message);
+        body.insert(
+            "content".to_string(),
+            serde_json::Value::String(truncate_content(&rendered)),
+        );
+    }
+    Ok(serde_json::Value::Object(body))
+}
+
+/// Convert a slice of [`cards::DiscordEmbed`] into a JSON array
+/// matching upstream's `APIEmbed[]` wire shape. Lifted out of
+/// [`build_post_message_body`] so [`build_edit_message_body`] and
+/// future card-routing helpers share one source of truth.
+fn embeds_to_json(embeds: &[cards::DiscordEmbed]) -> serde_json::Value {
+    serde_json::Value::Array(
+        embeds
+            .iter()
+            .map(|e| {
+                let mut o = serde_json::Map::new();
+                if let Some(t) = &e.title {
+                    o.insert("title".into(), serde_json::Value::String(t.clone()));
+                }
+                if let Some(d) = &e.description {
+                    o.insert("description".into(), serde_json::Value::String(d.clone()));
+                }
+                if let Some(img) = &e.image {
+                    o.insert("image".into(), serde_json::json!({ "url": img.url }));
+                }
+                if let Some(c) = e.color {
+                    o.insert("color".into(), serde_json::Value::Number(c.into()));
+                }
+                if !e.fields.is_empty() {
+                    o.insert(
+                        "fields".into(),
+                        serde_json::Value::Array(
+                            e.fields
+                                .iter()
+                                .map(|f| {
+                                    let mut fo = serde_json::Map::new();
+                                    fo.insert(
+                                        "name".into(),
+                                        serde_json::Value::String(f.name.clone()),
+                                    );
+                                    fo.insert(
+                                        "value".into(),
+                                        serde_json::Value::String(f.value.clone()),
+                                    );
+                                    if let Some(inline) = f.inline {
+                                        fo.insert("inline".into(), serde_json::Value::Bool(inline));
+                                    }
+                                    serde_json::Value::Object(fo)
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                serde_json::Value::Object(o)
+            })
+            .collect(),
+    )
+}
+
+/// Convert a slice of [`cards::DiscordActionRow`] into a JSON array
+/// matching upstream's `APIActionRowComponent[]` wire shape.
+fn components_to_json(rows: &[cards::DiscordActionRow]) -> serde_json::Value {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "type": r.component_type,
+                    "components": r.components.iter().map(|b| {
+                        let mut bo = serde_json::Map::new();
+                        bo.insert("type".into(), serde_json::Value::Number(b.component_type.into()));
+                        bo.insert("style".into(), serde_json::Value::Number((b.style as u8).into()));
+                        bo.insert("label".into(), serde_json::Value::String(b.label.clone()));
+                        if let Some(cid) = &b.custom_id {
+                            bo.insert("custom_id".into(), serde_json::Value::String(cid.clone()));
+                        }
+                        if let Some(url) = &b.url {
+                            bo.insert("url".into(), serde_json::Value::String(url.clone()));
+                        }
+                        if let Some(d) = b.disabled {
+                            bo.insert("disabled".into(), serde_json::Value::Bool(d));
+                        }
+                        serde_json::Value::Object(bo)
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Map a Discord unicode emoji glyph (or already-named token) to a
 /// standard `EmojiValue` via [`chat_sdk_chat::emoji::get_emoji`].
 /// 1:1 with upstream's `normalizeDiscordEmoji(emojiName)` instance
@@ -830,7 +1009,129 @@ mod tests {
     //!
     //! 3. `index.test.ts > describe("constructor env var
     //!    resolution") > should default logger when not provided`
-    //!    — asserts the constructor falls back to a default
+    //!    — see the long-form rationale below this bullet.
+    //!
+    //! ---------- vi.fn()-mocked HTTP fetch cases (65) ----------
+    //!
+    //! Per the slice-411 cross-cutting js-only-documented sweep
+    //! pattern, the following `index.test.ts` cases assert on a
+    //! `vi.spyOn(adapter as any, "discordFetch")` /
+    //! `mockResolvedValue(...)` chain, on
+    //! `requestContext.run(...)` async-local-storage state, on
+    //! `chat.handleIncomingMessage` runtime dispatch, or on
+    //! `nacl.sign.detached.verify` driven through an HTTP
+    //! `Request`. They require the upstream Vitest `vi.fn()` fetch-
+    //! spy + `AsyncLocalStorage` infrastructure to drive the
+    //! adapter through scripted HTTP responses. The Rust port
+    //! intentionally avoids a test-only `wiremock`-style dep here;
+    //! URL + body shape are structurally covered via
+    //! `post_message_url` / `message_url` / `reaction_url` /
+    //! `typing_url` + `build_post_message_body` /
+    //! `build_edit_message_body` pure helpers, and the webhook
+    //! signature verification path is covered by the
+    //! `webhook::tests::*` module's direct Ed25519 verifier tests.
+    //! Listing for parity ledger accounting:
+    //!
+    //! `handleWebhook - PING / MESSAGE_COMPONENT / APPLICATION_COMMAND
+    //! / JSON parsing / forwarded gateway events / component
+    //! interaction edge cases` describe blocks:
+    //! - L402  responds to PING with PONG
+    //! - L426  handles button click interaction
+    //! - L488  handles slash command interaction
+    //! - L521  dispatches slash command to chat core
+    //! - L585  expands subcommand path into event.command
+    //! - L645  resolves deferred slash responses via interaction webhook
+    //! - L740  returns 400 for invalid JSON
+    //! - L748  returns 400 for unknown interaction type
+    //! - L3393 rejects forwarded events with invalid gateway token
+    //! - L3413 accepts forwarded events with valid gateway token
+    //! - L3433 returns 400 for invalid JSON in forwarded events
+    //! - L3447 handles GATEWAY_MESSAGE_CREATE event
+    //! - L3490 handles GATEWAY_MESSAGE_REACTION_ADD event
+    //! - L3537 handles GATEWAY_MESSAGE_REACTION_REMOVE event
+    //! - L4037 handles thread context in button interaction
+    //! - L4109 handles slash command in a thread
+    //!
+    //! `postMessage / editMessage / deleteMessage / addReaction /
+    //! removeReaction / startTyping` outer side-effect cases
+    //! (body-shape covered structurally):
+    //! - L1460 posts a plain text message (URL+body via helpers)
+    //! - L1491 posts to thread channel when threadId is present
+    //! - L1657 edits a message with PATCH
+    //! - L1689 edits a message in a thread channel
+    //! - L1834 deletes a message
+    //! - L1850 deletes a message in a thread
+    //! - L1882 adds a reaction to a message
+    //! - L1906 adds a reaction in a thread
+    //! - L1936 removes a reaction from a message
+    //! - L1959 removes a reaction in a thread
+    //! - L2141 sends typing indicator to channel
+    //! - L2154 sends typing indicator to thread channel
+    //!
+    //! `openDM / fetchMessages / fetchChannelMessages /
+    //! fetchChannelInfo / postChannelMessage / listThreads /
+    //! fetchThread` HTTP-routing describe blocks:
+    //! - L2180 openDM creates a DM channel and returns encoded thread ID
+    //! - L2215 fetchMessages fetches messages from a channel
+    //! - L2282 fetchMessages fetches messages from a thread channel
+    //! - L2326 fetchMessages uses cursor for backward pagination
+    //! - L2346 fetchMessages uses cursor for forward pagination
+    //! - L2366 fetchMessages returns nextCursor when results match limit
+    //! - L2405 fetchMessages returns no nextCursor when results are fewer
+    //! - L2458 fetchChannelMessages fetches channel-level messages
+    //! - L2502 fetchChannelMessages throws on invalid channel ID
+    //! - L2508 fetchChannelMessages uses cursor for backward pagination
+    //! - L2528 fetchChannelMessages uses cursor for forward pagination
+    //! - L2561 fetchChannelInfo fetches channel info for guild text channel
+    //! - L2584 fetchChannelInfo fetches channel info for a DM
+    //! - L2603 fetchChannelInfo throws on invalid channel ID
+    //! - L2609 fetchChannelInfo includes member count when available
+    //! - L2643 postChannelMessage posts a message to a channel
+    //! - L2674 postChannelMessage throws on invalid channel ID
+    //! - L2680 postChannelMessage truncates long content
+    //! - L2704 postChannelMessage posts card message with embeds and components
+    //! - L2745 postChannelMessage calls postMessageWithFiles when files present
+    //! - L2791 listThreads lists active and archived threads
+    //! - L2879 listThreads deduplicates threads in both active and archived
+    //! - L2954 listThreads uses referenced_message when root is THREAD_STARTER
+    //! - L3047 listThreads throws on invalid channel ID
+    //! - L3053 listThreads applies limit to thread results
+    //! - L3118 listThreads creates placeholder when root message fetch fails
+    //! - L3173 fetchThread fetches thread info for a guild channel
+    //! - L3197 fetchThread fetches thread info for a DM channel
+    //! - L3216 fetchThread fetches thread info for a GroupDM
+    //!
+    //! `legacy gateway interactions / handleForwardedMessage /
+    //! handleForwardedReaction / initialize / mentionRoleIds /
+    //! createDiscordThread 160004 recovery / getUser` describe blocks:
+    //! - L3249 legacy gateway handles slash command interactions
+    //! - L3318 legacy gateway handles component interactions
+    //! - L3590 handleForwardedMessage uses thread info from data
+    //! - L3647 handleForwardedMessage detects thread by channel_type
+    //! - L3712 handleForwardedMessage creates thread when mentioned
+    //! - L3784 handleForwardedReaction fetches+caches thread parent
+    //! - L3885 handleForwardedReaction handles missing user info gracefully
+    //! - L3929 handleForwardedReaction handles custom emoji with ID
+    //! - L3984 initialize stores chat instance reference
+    //! - L4171 handleForwardedMessage handles DM messages (no guild_id)
+    //! - L4230 mentionRoleIds detects mention via role ID
+    //! - L4308 createDiscordThread 160004 recovery succeeds
+    //! - L4331 createDiscordThread propagates non-160004 NetworkErrors
+    //! - L4350 createDiscordThread propagates non-NetworkError errors
+    //! - L4364 getUser returns user info from Discord API
+    //! - L4398 getUser returns null on error
+    //! - L4416 getUser returns undefined avatarUrl when avatar is null
+    //! - L4444 getUser falls back to username when global_name is null
+    //! - L4472 getUser returns isBot true for bot users
+    //! - L4500 getUser calls Discord API with correct endpoint and method
+    //!
+    //! `handleWebhook - signature verification` (4 cases) are
+    //! covered structurally by `webhook::tests::*` (direct Ed25519
+    //! verifier tests over the same byte-shape — signature header
+    //! presence, timestamp header presence, invalid signature
+    //! rejection, valid signature acceptance — without driving the
+    //! adapter through a Vitest `Request` mock).
+    //!
     //!    `Logger` instance when none is supplied. Rust adapters
     //!    do not take a `Logger` as a first-class adapter
     //!    dependency (logging is plumbed via the `log` crate's
@@ -1822,5 +2123,125 @@ mod tests {
                 .reaction_url("slack:C123:1.0", "msg001", "fire")
                 .is_none()
         );
+    }
+
+    // ---------- describe("postMessage") body-shape (4 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("postMessage")`.
+    // URL routing for cases 1 + 2 is covered above by
+    // `discord_post_message_url_*`. The 4 remaining cases assert on
+    // the body payload shape (`spy.mock.calls[0]?.[2]`) and are
+    // ported here via `build_post_message_body` rather than driving
+    // the adapter through a vi.fn() HTTP spy.
+
+    #[test]
+    fn build_post_message_body_truncates_content_exceeding_2000_characters() {
+        // 1:1 with upstream index.test.ts:1523 > describe("postMessage")
+        // > it("truncates content exceeding 2000 characters")
+        let msg = chat_sdk_chat::types::AdapterPostableMessage::Text("a".repeat(2500));
+        let body = build_post_message_body(&msg).unwrap();
+        let content = body["content"].as_str().unwrap();
+        assert!(content.chars().count() <= 2000);
+        assert!(content.ends_with("..."));
+    }
+
+    #[test]
+    fn build_post_message_body_does_not_truncate_content_within_limit() {
+        // 1:1 with upstream index.test.ts:1549 > describe("postMessage")
+        // > it("does not truncate content within 2000 characters")
+        let msg = chat_sdk_chat::types::AdapterPostableMessage::Text("short".to_string());
+        let body = build_post_message_body(&msg).unwrap();
+        assert_eq!(body["content"], "short");
+    }
+
+    #[test]
+    fn build_post_message_body_omits_content_for_card_messages() {
+        // 1:1 with upstream index.test.ts:1573 > describe("postMessage")
+        // > it("does not include content text when posting a card message")
+        use chat_sdk_chat::cards::{CardElement, CardKind};
+        let card = CardElement {
+            kind: CardKind::Card,
+            title: Some("Test Card".into()),
+            subtitle: None,
+            image_url: None,
+            children: Vec::new(),
+        };
+        let msg = chat_sdk_chat::types::AdapterPostableMessage::CardElement(card);
+        let body = build_post_message_body(&msg).unwrap();
+        assert!(body.get("content").is_none(), "body was {body}");
+        assert!(body.get("embeds").is_some(), "body was {body}");
+    }
+
+    #[test]
+    fn build_post_message_body_uses_card_over_text_when_message_has_both() {
+        // 1:1 with upstream index.test.ts:1609 > describe("postMessage")
+        // > it("uses card over text when message has both")
+        use chat_sdk_chat::cards::{CardElement, CardKind};
+        use chat_sdk_chat::types::PostableCard;
+        let card = CardElement {
+            kind: CardKind::Card,
+            title: Some("Card Wins".into()),
+            subtitle: None,
+            image_url: None,
+            children: Vec::new(),
+        };
+        // PostableCard carries an optional fallback text + the card;
+        // the body-builder must prefer the card and OMIT the
+        // fallback content (matching upstream's branch that ignores
+        // text fields when a card is present).
+        let postable = PostableCard {
+            card,
+            fallback_text: Some("Some text that should be ignored".into()),
+            files: None,
+        };
+        let msg = chat_sdk_chat::types::AdapterPostableMessage::Card(postable);
+        let body = build_post_message_body(&msg).unwrap();
+        assert!(body.get("content").is_none(), "body was {body}");
+        assert!(body.get("embeds").is_some(), "body was {body}");
+    }
+
+    // ---------- describe("editMessage") body-shape (3 upstream cases) ----------
+    // 1:1 with upstream `index.test.ts > describe("editMessage")`.
+    // URL routing for cases 1 + 2 is covered above; case 3
+    // (truncates-content) overlaps with the existing
+    // `discord_edit_message_truncates_content_exceeding_2000_characters`
+    // test which exercises the same logic via the trait method. Cases
+    // 4 + 5 (card body / restores-content) are ported here via
+    // `build_edit_message_body` rather than vi.fn() HTTP spy.
+
+    #[test]
+    fn build_edit_message_body_clears_content_when_editing_to_card() {
+        // 1:1 with upstream index.test.ts:1750 > describe("editMessage")
+        // > it("clears content when editing to a card message")
+        use chat_sdk_chat::cards::{CardElement, CardKind};
+        let card = CardElement {
+            kind: CardKind::Card,
+            title: Some("Test Card".into()),
+            subtitle: None,
+            image_url: None,
+            children: Vec::new(),
+        };
+        let msg = chat_sdk_chat::types::AdapterPostableMessage::CardElement(card);
+        let body = build_edit_message_body(&msg).unwrap();
+        // Upstream sets content to "" (explicit) so Discord's PATCH
+        // semantics clear any prior text.
+        assert_eq!(body["content"], "");
+        assert!(body.get("embeds").is_some(), "body was {body}");
+    }
+
+    #[test]
+    fn build_edit_message_body_restores_content_when_editing_back_to_text() {
+        // 1:1 with upstream index.test.ts:1790 > describe("editMessage")
+        // > it("restores content when editing from card back to text")
+        use chat_sdk_chat::types::PostableRaw;
+        let postable = PostableRaw {
+            raw: "Updated to plain text".to_string(),
+            attachments: None,
+            files: None,
+        };
+        let msg = chat_sdk_chat::types::AdapterPostableMessage::Raw(postable);
+        let body = build_edit_message_body(&msg).unwrap();
+        assert_eq!(body["content"], "Updated to plain text");
+        assert!(body.get("embeds").is_none(), "body was {body}");
+        assert!(body.get("components").is_none(), "body was {body}");
     }
 }

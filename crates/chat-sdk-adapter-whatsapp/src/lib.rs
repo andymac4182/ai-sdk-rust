@@ -219,6 +219,111 @@ impl WhatsappAdapter {
     ) -> chat_sdk_chat::message::Message {
         parse::parse_message(raw, &self.options.phone_number_id)
     }
+
+    /// Handle the WhatsApp webhook GET verification challenge. 1:1
+    /// with upstream `WhatsAppAdapter.handleVerificationChallenge`.
+    /// See [`crate::webhook::handle_whatsapp_verification_challenge`]
+    /// for full semantics.
+    pub fn handle_webhook_verification(
+        &self,
+        query: &crate::webhook::WhatsappVerificationQuery<'_>,
+    ) -> crate::webhook::WhatsappVerificationResponse {
+        crate::webhook::handle_whatsapp_verification_challenge(query, &self.options.verify_token)
+    }
+
+    /// Build the WhatsApp Cloud API send-text-message JSON body. 1:1
+    /// with upstream's inline `{messaging_product, recipient_type,
+    /// to, type: "text", text: { preview_url: false, body }}` in
+    /// `sendSingleTextMessage`. Extracted as a pure helper so the
+    /// outbound payload shape can be unit-tested without HTTP. (The
+    /// `recipient_type: "individual"` field matches upstream
+    /// verbatim; the existing `post_message` runtime path historically
+    /// omitted it — slice 515 aligns both with upstream.)
+    pub fn build_text_message_body(to: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "text",
+            "text": { "preview_url": false, "body": text },
+        })
+    }
+
+    /// Build the WhatsApp Cloud API send-reaction JSON body. 1:1
+    /// with upstream's inline body in `addReaction` /
+    /// `removeReaction`. Pass `""` for `emoji` to clear the bot's
+    /// reaction (upstream removeReaction semantics). Extracted as a
+    /// pure helper so the outbound payload shape can be unit-tested
+    /// without HTTP.
+    pub fn build_reaction_body(to: &str, message_id: &str, emoji: &str) -> serde_json::Value {
+        serde_json::json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "reaction",
+            "reaction": {
+                "message_id": message_id,
+                "emoji": emoji,
+            },
+        })
+    }
+
+    /// 1:1 with upstream `adapter.fetchMessages(threadId)` —
+    /// WhatsApp Cloud API does not expose message history, so this
+    /// always returns the empty `FetchResult` shape `{ messages: []
+    /// }`. The Rust port returns the empty `Vec` directly because
+    /// the cross-platform `FetchResult` envelope in
+    /// `chat_sdk_chat` is generic and pulling it through to this
+    /// signature would require platform-specific wiring beyond the
+    /// scope of this method. Upstream's body is also literally
+    /// `return { messages: [] }` with no HTTP call.
+    pub fn fetch_messages(&self, _thread_id: &str) -> Vec<chat_sdk_chat::message::Message> {
+        Vec::new()
+    }
+
+    /// 1:1 with upstream `adapter.fetchThread(threadId)` — builds
+    /// a [`WhatsappThreadInfo`] from the decoded thread id. No HTTP
+    /// call (WhatsApp Cloud API doesn't expose a thread metadata
+    /// endpoint; the adapter synthesizes it deterministically from
+    /// the thread id's `phoneNumberId` + `userWaId` components).
+    /// Returns `None` for thread ids that fail to decode (upstream
+    /// throws `ValidationError` in the same case).
+    pub fn fetch_thread(&self, thread_id: &str) -> Option<WhatsappThreadInfo> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(WhatsappThreadInfo {
+            id: thread_id.to_string(),
+            channel_id: format!("whatsapp:{}", decoded.phone_number_id),
+            channel_name: format!("WhatsApp: {}", decoded.customer_phone),
+            is_dm: true,
+            phone_number_id: decoded.phone_number_id,
+            user_wa_id: decoded.customer_phone,
+        })
+    }
+}
+
+/// Cross-platform-shaped thread info returned by
+/// [`WhatsappAdapter::fetch_thread`]. 1:1 with upstream
+/// `ThreadInfo` from the chat package narrowed to the WhatsApp-specific
+/// metadata fields the upstream test asserts on:
+/// `id`, `channelId`, `isDM`, `metadata: { phoneNumberId, userWaId }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsappThreadInfo {
+    /// Thread id, identical to the input. 1:1 with upstream `info.id`.
+    pub id: String,
+    /// `whatsapp:<phone_number_id>` — WhatsApp's "channel" is the
+    /// bound business phone number. 1:1 with upstream
+    /// `whatsapp:${phoneNumberId}`.
+    pub channel_id: String,
+    /// `WhatsApp: <customer_phone>` — human-readable label.
+    pub channel_name: String,
+    /// Always `true` on WhatsApp.
+    pub is_dm: bool,
+    /// Decoded `phoneNumberId` (the business phone number id). 1:1
+    /// with upstream `info.metadata.phoneNumberId`.
+    pub phone_number_id: String,
+    /// Decoded `userWaId` (the customer phone number). 1:1 with
+    /// upstream `info.metadata.userWaId`.
+    pub user_wa_id: String,
 }
 
 #[async_trait]
@@ -296,12 +401,7 @@ impl Adapter for WhatsappAdapter {
         }
 
         let url = self.send_url();
-        let body = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "to": decoded.customer_phone,
-            "type": "text",
-            "text": { "body": text },
-        });
+        let body = Self::build_text_message_body(&decoded.customer_phone, text);
 
         let response = self
             .http
@@ -388,16 +488,7 @@ impl Adapter for WhatsappAdapter {
         }
 
         let url = self.send_url();
-        let body = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": decoded.customer_phone,
-            "type": "reaction",
-            "reaction": {
-                "message_id": message_id,
-                "emoji": emoji,
-            },
-        });
+        let body = Self::build_reaction_body(&decoded.customer_phone, message_id, emoji);
 
         let response = self
             .http
@@ -448,16 +539,7 @@ impl Adapter for WhatsappAdapter {
         }
 
         let url = self.send_url();
-        let body = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": decoded.customer_phone,
-            "type": "reaction",
-            "reaction": {
-                "message_id": message_id,
-                "emoji": "",
-            },
-        });
+        let body = Self::build_reaction_body(&decoded.customer_phone, message_id, "");
 
         let response = self
             .http
@@ -715,17 +797,63 @@ pub fn is_whatsapp_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (1) ----------
+    //! ---------- upstream js-only-documented cases (9) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the 1
-    //! upstream `index.test.ts > describe("subclass extensibility")`
-    //! case is enumerated as js-only-documented here:
+    //! Per the slice-380 type-system-impossible pattern + the slice-411
+    //! cross-cutting `vi.fn()`-mocked HTTP-fetch sweep pattern (also
+    //! used by `chat-sdk-adapter-telegram` slice 512), the following
+    //! upstream `index.test.ts` cases are enumerated as
+    //! js-only-documented because they exercise behavior unrepresentable
+    //! in the Rust port by construction OR require the upstream's
+    //! Vitest `vi.fn()` fetch-spy infrastructure that has no test-only
+    //! equivalent in Rust without pulling in a `wiremock`/tokio
+    //! dev-dep (the workspace's adapter parity policy is to stop at
+    //! body-shape parity via pure helpers, not full HTTP-mock parity).
     //!
-    //! - `should expose protected members and methods to subclasses`:
+    //! Type-system-impossible (1):
+    //!
+    //! - `describe("subclass extensibility") > exposes protected
+    //!   members and methods to subclasses` (L1166-L1179):
     //!   TypeScript-class-`protected` access modifier check. Rust
     //!   uses `pub(crate)` visibility + trait composition rather
     //!   than class inheritance — the subclass-protected-leak test
     //!   is unrepresentable by construction.
+    //!
+    //! `vi.fn()`-mocked HTTP fetch (7):
+    //!
+    //! - `describe("handleWebhook - POST signature verification")`
+    //!   (L676-L758, 5 cases): valid-signature-200,
+    //!   invalid-signature-401, missing-signature-401, invalid-JSON-400,
+    //!   status-update-without-messages-array-200. The Rust port
+    //!   covers the signature primitive 1:1 via
+    //!   `crate::webhook::verify_whatsapp_signature` (7 tests in
+    //!   `webhook.rs`) and the JSON-decode/dispatch flow via
+    //!   `crate::parse::parse_message` (16 tests in `parse.rs`).
+    //!   The POST end-to-end wiring asserts a synthetic
+    //!   `vi.fn()`-driven `Request` -> `Response` round-trip with
+    //!   `expect(mockChat.processMessage).toHaveBeenCalled()` and
+    //!   has no test-only equivalent without an HTTP framework.
+    //!
+    //! - `describe("handleWebhook - POST message processing")`
+    //!   (L764-L815, 2 cases): text-message-calls-processMessage,
+    //!   non-messages-field-change-skipped. Same `vi.fn()`-mocked
+    //!   `mockChat.processMessage` runtime side-effect pattern as
+    //!   above; structural parsing is covered by
+    //!   `crate::parse::parse_message`.
+    //!
+    //! - `describe("stream") > buffers async iterable chunks and
+    //!   sends as a single message` (L1028-L1046, 1 case):
+    //!   asserts on `fetchSpy.mock.calls[0][1]?.body` after
+    //!   buffering an `AsyncIterable<string>`. The Rust port does
+    //!   not yet implement `stream` on the adapter (the cross-platform
+    //!   `Adapter` trait does not include it), and the assertion is
+    //!   on outbound HTTP body shape — both blockers. Structural
+    //!   body shape (Graph API send-text-message envelope) is
+    //!   covered by `build_text_message_body` tests.
+    //!
+    //! Mapped accounting: 102 Rust-mapped + 9 js-only-documented =
+    //! 111/111 upstream cases accounted for across
+    //! `{index,cards,markdown}.test.ts`.
     use super::*;
     use futures_executor::block_on;
 
@@ -1270,5 +1398,198 @@ mod tests {
             adapter.graph_api_url(),
             "https://custom-graph.example.com/v19.0"
         );
+    }
+
+    // ---------- handleWebhook verification challenge wrapper (3 cases) ----------
+    // 1:1 with upstream `WhatsAppAdapter.handleWebhook` GET-branch
+    // delegation to `handleVerificationChallenge` — covered as 3
+    // colocated tests in `crate::webhook::tests` against the pure
+    // `handle_whatsapp_verification_challenge` helper. Mirror them
+    // here as adapter-method tests so the upstream
+    // `describe("handleWebhook - verification challenge")` 3 cases
+    // are mapped to `WhatsappAdapter::handle_webhook_verification`
+    // exactly as upstream invokes them through the adapter.
+
+    #[test]
+    fn adapter_handle_webhook_verification_responds_to_valid_challenge() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new(
+            "123456789",
+            "test-token",
+            "test-verify-token",
+        ));
+        let query = crate::webhook::WhatsappVerificationQuery {
+            hub_mode: Some("subscribe"),
+            hub_verify_token: Some("test-verify-token"),
+            hub_challenge: Some("1234567890"),
+        };
+        let response = adapter.handle_webhook_verification(&query);
+        assert_eq!(response.status(), 200);
+        match response {
+            crate::webhook::WhatsappVerificationResponse::Ok(body) => {
+                assert_eq!(body, "1234567890");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_handle_webhook_verification_rejects_invalid_verify_token() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new(
+            "123456789",
+            "test-token",
+            "test-verify-token",
+        ));
+        let query = crate::webhook::WhatsappVerificationQuery {
+            hub_mode: Some("subscribe"),
+            hub_verify_token: Some("wrong-token"),
+            hub_challenge: Some("1234567890"),
+        };
+        let response = adapter.handle_webhook_verification(&query);
+        assert_eq!(response.status(), 403);
+    }
+
+    #[test]
+    fn adapter_handle_webhook_verification_rejects_wrong_mode() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new(
+            "123456789",
+            "test-token",
+            "test-verify-token",
+        ));
+        let query = crate::webhook::WhatsappVerificationQuery {
+            hub_mode: Some("unsubscribe"),
+            hub_verify_token: Some("test-verify-token"),
+            hub_challenge: Some("1234567890"),
+        };
+        let response = adapter.handle_webhook_verification(&query);
+        assert_eq!(response.status(), 403);
+    }
+
+    // ---------- postMessage send-payload (2 cases) ----------
+    // 1:1 with upstream
+    // `packages/adapter-whatsapp/src/index.test.ts > describe(
+    // "postMessage")` (L822-L865). Upstream asserts on
+    // `fetchSpy.mock.calls[0]` URL + body shape after a
+    // `vi.spyOn(global, "fetch")`-driven send. The Rust port factors
+    // the outbound body into the pure
+    // [`WhatsappAdapter::build_text_message_body`] helper and the
+    // URL into `send_url()` so both can be asserted without an HTTP
+    // mock. The "splits and sends multiple requests" assertion is
+    // covered structurally by `split_message` returning N chunks
+    // (existing `split_message_*` tests above) — the post-N-times
+    // count assertion would require an HTTP mock and is documented
+    // js-only-adjacent.
+
+    #[test]
+    fn post_message_body_includes_correct_to_type_and_text_for_plain_text() {
+        // 1:1 with upstream "plain text calls Graph API with correct
+        // payload" (L841-L854). Asserts `sent.type === "text"`,
+        // `sent.to === "15551234567"`, and that the send URL contains
+        // `/123456789/messages`.
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new(
+            "123456789",
+            "test-token",
+            "test-verify-token",
+        ));
+        let body = WhatsappAdapter::build_text_message_body("15551234567", "Hello there");
+        assert_eq!(body["type"], "text");
+        assert_eq!(body["to"], "15551234567");
+        assert_eq!(body["text"]["body"], "Hello there");
+        assert_eq!(body["messaging_product"], "whatsapp");
+        // URL-shape assertion mirrors upstream's
+        // `expect(String(url)).toContain("/123456789/messages")`.
+        assert!(adapter.send_url().contains("/123456789/messages"));
+    }
+
+    #[test]
+    fn post_message_long_message_splits_into_multiple_chunks() {
+        // 1:1 with upstream "long message splits and sends multiple
+        // requests" (L856-L864) — structural parity via
+        // [`split_message`]. Upstream's assertion is
+        // `expect(fetchSpy).toHaveBeenCalledTimes(2)` for a 5000-char
+        // input; the Rust port asserts the same chunk count.
+        let long_text = "a".repeat(5000);
+        let chunks = split_message(&long_text);
+        assert_eq!(chunks.len(), 2);
+    }
+
+    // ---------- addReaction / removeReaction send-payload (2 cases) ----------
+    // 1:1 with upstream
+    // `packages/adapter-whatsapp/src/index.test.ts > describe(
+    // "addReaction / removeReaction")` (L899-L945). Upstream asserts
+    // on `fetchSpy.mock.calls[0][1]?.body` shape. The Rust port
+    // factors the outbound body into the pure
+    // [`WhatsappAdapter::build_reaction_body`] helper so the
+    // payload shape can be asserted without an HTTP mock.
+
+    #[test]
+    fn add_reaction_body_sets_reaction_type_and_truthy_emoji() {
+        // 1:1 with upstream "addReaction sends reaction with the
+        // given emoji" (L917-L930). Asserts `body.type === "reaction"`,
+        // `body.reaction.message_id === "wamid.msg1"`, and
+        // `body.reaction.emoji` is truthy (non-empty).
+        let body = WhatsappAdapter::build_reaction_body("15551234567", "wamid.msg1", "👍");
+        assert_eq!(body["type"], "reaction");
+        assert_eq!(body["reaction"]["message_id"], "wamid.msg1");
+        let emoji = body["reaction"]["emoji"]
+            .as_str()
+            .expect("emoji is a string");
+        assert!(!emoji.is_empty(), "emoji should be truthy, got: {emoji:?}");
+    }
+
+    #[test]
+    fn remove_reaction_body_sets_reaction_type_with_empty_emoji() {
+        // 1:1 with upstream "removeReaction sends reaction with empty
+        // emoji" (L932-L944). Asserts `body.type === "reaction"` and
+        // `body.reaction.emoji === ""`. The Rust adapter's
+        // `remove_reaction` builds the body via
+        // `Self::build_reaction_body(..., "")` (the user-supplied
+        // emoji is intentionally ignored, matching upstream).
+        let body = WhatsappAdapter::build_reaction_body("15551234567", "wamid.msg1", "");
+        assert_eq!(body["type"], "reaction");
+        assert_eq!(body["reaction"]["emoji"], "");
+    }
+
+    // ---------- fetchMessages (1 case) ----------
+    // 1:1 with upstream
+    // `packages/adapter-whatsapp/src/index.test.ts > describe(
+    // "fetchMessages") > "returns empty messages array"`
+    // (L964-L972). WhatsApp Cloud API does not expose message
+    // history — upstream returns the literal `{ messages: [] }`
+    // with no HTTP call; the Rust port mirrors with
+    // [`WhatsappAdapter::fetch_messages`] returning an empty `Vec`.
+
+    #[test]
+    fn fetch_messages_returns_empty_messages_array() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new(
+            "123456789",
+            "test-token",
+            "test-verify-token",
+        ));
+        let result = adapter.fetch_messages("whatsapp:123456789:15551234567");
+        assert!(result.is_empty(), "expected empty messages, got {result:?}");
+    }
+
+    // ---------- fetchThread (1 case) ----------
+    // 1:1 with upstream
+    // `packages/adapter-whatsapp/src/index.test.ts > describe(
+    // "fetchThread") > "returns correct ThreadInfo"`
+    // (L978-L990). Synthesized from the decoded thread id — no
+    // HTTP call.
+
+    #[test]
+    fn fetch_thread_returns_correct_thread_info() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new(
+            "123456789",
+            "test-token",
+            "test-verify-token",
+        ));
+        let info = adapter
+            .fetch_thread("whatsapp:123456789:15551234567")
+            .expect("valid thread id");
+        assert_eq!(info.id, "whatsapp:123456789:15551234567");
+        assert_eq!(info.channel_id, "whatsapp:123456789");
+        assert!(info.is_dm);
+        assert_eq!(info.phone_number_id, "123456789");
+        assert_eq!(info.user_wa_id, "15551234567");
     }
 }
