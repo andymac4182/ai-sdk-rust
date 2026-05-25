@@ -4699,6 +4699,85 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_should_pass_strict_tool_settings() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false,
+            "$schema": "http://json-schema.org/draft-07/schema#"
+        })
+        .as_object()
+        .cloned()
+        .expect("schema is an object");
+
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-3.5-turbo", |options| {
+                options
+                    .with_tool(LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new("strict-tool", input_schema.clone())
+                            .with_description("A strict tool")
+                            .with_strict(true),
+                    ))
+                    .with_tool(LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new("non-strict-tool", input_schema.clone())
+                            .with_description("A non-strict tool")
+                            .with_strict(false),
+                    ))
+                    .with_tool(LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new("default-tool", input_schema.clone())
+                            .with_description("A tool without strict setting"),
+                    ))
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "strict-tool",
+                            "description": "A strict tool",
+                            "parameters": input_schema.clone(),
+                            "strict": true
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "non-strict-tool",
+                            "description": "A non-strict tool",
+                            "parameters": input_schema.clone(),
+                            "strict": false
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "default-tool",
+                            "description": "A tool without strict setting",
+                            "parameters": input_schema.clone()
+                        }
+                    }
+                ]
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn openai_chat_should_use_json_schema_and_strict_with_response_format_json() {
         let (body, warnings) =
             openai_chat_captured_body_and_warnings_with_options("gpt-4o-2024-08-06", |options| {

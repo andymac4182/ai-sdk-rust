@@ -3518,6 +3518,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-chat-language-model.test.ts` `should pass tools and toolChoice` to
   the OpenAI provider facade by asserting function-tool JSON Schema request
   shaping and specific `tool_choice` serialization.
+- 2026-05-25: OpenAI chat strict tool-settings parity added
+  `openai_chat_should_pass_strict_tool_settings`, mapping upstream
+  `openai-chat-prepare-tools.test.ts` strict function-tool cases to the OpenAI
+  provider facade by asserting `strict: true`, `strict: false`, and omitted
+  `strict` serialization across mixed function tools.
 - 2026-05-24: OpenAI chat basic generate parity added
   `openai_chat_should_extract_text_response`,
   `openai_chat_should_extract_usage`,
