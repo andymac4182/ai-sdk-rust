@@ -1853,6 +1853,23 @@ pub trait StateAdapter: Send + Sync + std::fmt::Debug {
         Ok(true)
     }
 
+    /// Enqueue a message payload onto the per-key queue. 1:1 with
+    /// upstream `enqueue(key, message): Promise<void>`. Used by
+    /// [`crate::chat::Chat::handle_incoming_message`] when
+    /// `concurrency = Queue` and the per-thread/channel lock is
+    /// held by another instance: rather than dropping the message,
+    /// the dispatcher stores it under the lock key for the holder
+    /// to drain when it releases. Default no-op so backends
+    /// without queue support compile unchanged. (slice 492)
+    async fn enqueue(
+        &self,
+        _key: &str,
+        _value: serde_json::Value,
+        _ttl_ms: Option<u64>,
+    ) -> StateResult<()> {
+        Ok(())
+    }
+
     /// Acquire a per-thread lock. 1:1 with upstream
     /// `acquireLock(threadId, ttlMs): Promise<Lock | null>`. Returns
     /// `Ok(None)` when a non-expired lock is already held for the

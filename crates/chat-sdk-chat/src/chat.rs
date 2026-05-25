@@ -193,6 +193,28 @@ impl std::fmt::Debug for LockScope {
     }
 }
 
+/// 1:1 with upstream `ChatConfig.concurrency: "drop" | "queue"`.
+/// Determines how the dispatcher handles per-thread lock contention
+/// when a second message arrives for an already-locked thread/channel.
+///
+/// - `Drop` (default): proceed with handler dispatch using the
+///   existing OnLockConflict policy (which itself defaults to Drop
+///   semantics — see [`OnLockConflict`]).
+/// - `Queue`: when `acquire_lock` returns `None` (lock held by
+///   another instance), enqueue the incoming message to
+///   `StateAdapter::enqueue(lock_key, ...)` and return without
+///   dispatching. The other holder drains the queue when it
+///   releases. (slice 492)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Concurrency {
+    /// 1:1 with upstream `"drop"`. Default.
+    #[default]
+    Drop,
+    /// 1:1 with upstream `"queue"`. Enqueue when lock can't be
+    /// acquired.
+    Queue,
+}
+
 /// Resolution returned by [`OnLockConflict::Callback`] when a lock
 /// conflict occurs. 1:1 with upstream string union `"drop" | "force"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -787,6 +809,8 @@ pub struct Chat {
     /// callback-URL POST is skipped (handlers still fire with the
     /// rewritten value). (slice 480).
     http_poster: Option<Arc<dyn crate::callback_url::HttpPoster>>,
+    /// Per-instance concurrency policy. (slice 492)
+    concurrency: Concurrency,
 }
 
 /// Identity resolver. 1:1 (in shape) with upstream `identity?:
@@ -879,6 +903,12 @@ pub struct ChatOptions {
     /// inject any client (reqwest/ureq/mock) implementing
     /// [`crate::callback_url::HttpPoster`]. (slice 480).
     pub http_poster: Option<Arc<dyn crate::callback_url::HttpPoster>>,
+    /// Per-instance concurrency policy. 1:1 with upstream
+    /// `ChatConfig.concurrency`. Defaults to
+    /// [`Concurrency::Drop`]; set to [`Concurrency::Queue`] to
+    /// enqueue contended messages instead of proceeding without
+    /// a lock. (slice 492)
+    pub concurrency: Concurrency,
 }
 
 impl Default for ChatOptions {
@@ -897,6 +927,7 @@ impl Default for ChatOptions {
             on_lock_conflict: OnLockConflict::default(),
             lock_scope: LockScope::default(),
             http_poster: None,
+            concurrency: Concurrency::default(),
         }
     }
 }
@@ -1001,6 +1032,7 @@ impl Chat {
             on_lock_conflict: options.on_lock_conflict,
             lock_scope: options.lock_scope,
             http_poster: options.http_poster,
+            concurrency: options.concurrency,
         })
     }
 
@@ -1917,6 +1949,21 @@ impl Chat {
             .acquire_lock(&lock_key, DEFAULT_LOCK_TTL_MS)
             .await
             .unwrap_or(None);
+        // 1:1 with upstream `concurrency: "queue"`: when the lock
+        // could not be acquired AND the per-instance concurrency
+        // policy is Queue, enqueue the message under the lock key
+        // (channel- or thread-derived) instead of proceeding
+        // without a lock. The holder drains the queue when it
+        // releases. (slice 492)
+        if lock_acquired.is_none() && matches!(self.concurrency, Concurrency::Queue) {
+            let payload =
+                serde_json::to_value(message.to_serialized()).unwrap_or(serde_json::Value::Null);
+            let _ = self
+                .state
+                .enqueue(&lock_key, payload, Some(DEFAULT_LOCK_TTL_MS))
+                .await;
+            return Ok(false);
+        }
         let lock = match lock_acquired {
             Some(lock) => Some(lock),
             None => {
@@ -2942,6 +2989,7 @@ mod tests {
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
             http_poster: None,
+            concurrency: Concurrency::default(),
         })
         .expect_err("expected construction-time failure");
         assert!(matches!(err, ChatBuildError::TranscriptsRequiresIdentity));
@@ -2961,6 +3009,7 @@ mod tests {
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
             http_poster: None,
+            concurrency: Concurrency::default(),
         });
         assert!(result.is_ok());
     }
@@ -2979,6 +3028,7 @@ mod tests {
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
             http_poster: None,
+            concurrency: Concurrency::default(),
         });
         assert!(result.is_ok());
     }
@@ -2998,6 +3048,7 @@ mod tests {
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
             http_poster: None,
+            concurrency: Concurrency::default(),
         })
         .unwrap();
         // Panics — matches upstream's `throw new Error(...)` getter.
@@ -3018,6 +3069,7 @@ mod tests {
             on_lock_conflict: OnLockConflict::Drop,
             lock_scope: LockScope::default(),
             http_poster: None,
+            concurrency: Concurrency::default(),
         })
         .unwrap();
         // Returns a real TranscriptsApiImpl handle.
@@ -6974,6 +7026,11 @@ mod tests {
         acquire_calls: Mutex<Vec<String>>,
         release_calls: Mutex<Vec<String>>,
         force_release_calls: Mutex<Vec<String>>,
+        /// Records every `enqueue` call as (key, payload). Used by
+        /// the slice-492 lockScope queue test to assert the queue
+        /// dispatcher routed to the channel-derived lock key when
+        /// the lock was pre-held.
+        enqueue_calls: Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     impl LockTrackingState {
@@ -7057,6 +7114,18 @@ mod tests {
                 .unwrap()
                 .push(thread_id.to_string());
             self.held.lock().unwrap().remove(thread_id);
+            Ok(())
+        }
+        async fn enqueue(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            self.enqueue_calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), value));
             Ok(())
         }
     }
@@ -7431,6 +7500,55 @@ mod tests {
             state.acquire_calls.lock().unwrap().as_slice(),
             ["telegram:C123"]
         );
+    }
+
+    #[test]
+    fn lock_scope_channel_with_concurrency_queue_enqueues_on_channel_lock_key() {
+        // 1:1 with upstream `chat.test.ts > describe("lockScope") >
+        // "should queue on channel-scoped lock key"` (slice 492).
+        // With concurrency=Queue + lockScope=Channel on the adapter,
+        // when the channel-derived lock is pre-held, both messages
+        // (from different topics within the same channel) get
+        // enqueued under the channel key (not the topic keys).
+        let state = Arc::new(LockTrackingState::default());
+        // Pre-hold the channel lock so subsequent acquire_lock
+        // returns None and the dispatcher enters the Queue branch.
+        state.preset_held("telegram:C123");
+        let state_dyn: Arc<dyn StateAdapter> = state.clone();
+        let adapter: Arc<dyn Adapter> = Arc::new(LockScopeAdapter {
+            name: "telegram".to_string(),
+            scope: Some("channel".to_string()),
+        });
+        let chat = Chat::new(ChatOptions {
+            state: state_dyn,
+            adapters: vec![adapter.clone()],
+            concurrency: Concurrency::Queue,
+            ..Default::default()
+        });
+        chat.on_new_mention(|_thread, _msg| Box::pin(async move {}));
+        // First message — different topic within C123.
+        let mut msg1 = dispatched_message("msg-ls-5", false);
+        msg1.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "telegram:C123:topic1",
+            &mut msg1,
+        ))
+        .unwrap();
+        // Second message — different topic within same C123.
+        let mut msg2 = dispatched_message("msg-ls-6", false);
+        msg2.is_mention = Some(true);
+        futures_executor::block_on(chat.handle_incoming_message(
+            adapter.as_ref(),
+            "telegram:C123:topic2",
+            &mut msg2,
+        ))
+        .unwrap();
+        let enqueue_calls = state.enqueue_calls.lock().unwrap();
+        assert_eq!(enqueue_calls.len(), 2);
+        for (key, _payload) in enqueue_calls.iter() {
+            assert_eq!(key, "telegram:C123");
+        }
     }
 
     // ---------- describe("thread.isSubscribed()") — slice 432 ----------
