@@ -4760,14 +4760,14 @@ mod tests {
         LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoningDelta,
         LanguageModelReasoningFile, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
         LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTextDelta,
+        LanguageModelTextPart, LanguageModelToolApprovalRequest,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
+        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
+        LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultContentPart,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
@@ -6596,6 +6596,109 @@ mod tests {
         assert_eq!(result.tool_results.len(), 1);
         assert_eq!(result.tool_results[0].output["description"], "step sandbox");
         assert_eq!(result.tool_results[0].output["stdout"], "pwd");
+    }
+
+    #[test]
+    fn stream_text_messages_support_models_that_use_context_in_supported_urls() {
+        #[derive(Clone, Debug)]
+        struct SupportedUrlsStreamModel {
+            supported_urls_called: Arc<Mutex<bool>>,
+        }
+
+        impl SupportedUrlsStreamModel {
+            fn new(supported_urls_called: Arc<Mutex<bool>>) -> Self {
+                Self {
+                    supported_urls_called,
+                }
+            }
+        }
+
+        impl LanguageModel for SupportedUrlsStreamModel {
+            type SupportedUrlsFuture<'a>
+                = std::future::Ready<LanguageModelSupportedUrls>
+            where
+                Self: 'a;
+
+            type GenerateFuture<'a>
+                = std::future::Ready<LanguageModelGenerateResult>
+            where
+                Self: 'a;
+
+            type Stream = Vec<LanguageModelStreamPart>;
+
+            type StreamFuture<'a>
+                = std::future::Ready<LanguageModelStreamResult<Self::Stream>>
+            where
+                Self: 'a;
+
+            fn provider(&self) -> &str {
+                "test-provider"
+            }
+
+            fn model_id(&self) -> &str {
+                "mock-model-id"
+            }
+
+            fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+                *self
+                    .supported_urls_called
+                    .lock()
+                    .expect("supported urls called lock") = self.model_id() == "mock-model-id";
+
+                ready(LanguageModelSupportedUrls::from([(
+                    "image/*".to_string(),
+                    vec![r"^https://.*$".to_string()],
+                )]))
+            }
+
+            fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+                ready(LanguageModelGenerateResult::new(
+                    Vec::<LanguageModelContent>::new(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Other,
+                        raw: None,
+                    },
+                    LanguageModelUsage::default(),
+                ))
+            }
+
+            fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+                ready(LanguageModelStreamResult::new(vec![
+                    LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                    LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                    LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                    LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                    LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                    LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                        usage(),
+                        finish_reason(),
+                    )),
+                ]))
+            }
+        }
+
+        let supported_urls_called = Arc::new(Mutex::new(false));
+        let model = SupportedUrlsStreamModel::new(Arc::clone(&supported_urls_called));
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                        },
+                        "image/jpeg",
+                    ),
+                )],
+            ))],
+        )));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert!(
+            *supported_urls_called
+                .lock()
+                .expect("supported urls called lock")
+        );
     }
 
     #[test]

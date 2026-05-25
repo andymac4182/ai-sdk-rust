@@ -1118,6 +1118,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   proving the upstream telemetry integrations receive the filtered `toolsContext`
   payload across start, step-start, step-finish, and end events when
   `includeToolsContext` is configured.
+- 2026-05-25: `packages/ai` `streamText` `options.messages` supportedUrls
+  context parity added
+  `stream_text_messages_support_models_that_use_context_in_supported_urls`,
+  proving the `supportedUrls()` hook can read `self.model_id()` while still
+  accepting URL-backed message files.
 - 2026-05-25: `packages/ai` `generateText` telemetry context-filtering parity
   added `generate_text_telemetry_includes_configured_runtime_context_properties`,
   `generate_text_telemetry_includes_configured_tools_context_properties`,
@@ -2883,12 +2888,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   `generate_object_messages_with_url_file_calls_model_supported_urls`,
   `generate_text_messages_with_url_file_calls_model_supported_urls`,
   `stream_text_messages_with_url_file_calls_model_supported_urls`, and
+  `stream_text_messages_support_models_that_use_context_in_supported_urls`,
   `stream_object_messages_with_url_file_calls_model_supported_urls`, mapping
   upstream `options.messages` coverage for image URL prompts against models
   whose `supportedUrls` hooks read model state. Rust has no JavaScript `this`,
   so the equivalent proof is that each high-level API invokes the model trait
   method for URL file prompts and the generation still resolves to the expected
   text or object.
+- 2026-05-25: `streamText` `options.messages` supportedUrls context parity
+  added `stream_text_messages_support_models_that_use_context_in_supported_urls`,
+  proving the `supportedUrls()` hook can read `self.model_id()` while still
+  accepting URL-backed message files.
 - 2026-05-25: `packages/ai` `streamText` prepare-step URL-file model-switch
   parity added
   `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
@@ -5154,6 +5164,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    proving approved and denied provider-executed approval responses are sent to
    the model exactly once without replaying the assistant approval-request
    part, and that provider-executed tool results/text are surfaced afterward.
+   The upstream `streamText` `options.messages` supportedUrls context case now
+   has the named Rust counterpart
+   `stream_text_messages_support_models_that_use_context_in_supported_urls`,
+   proving the `supportedUrls()` hook can read `self.model_id()` while still
+   accepting URL-backed message files.
    The upstream `streamText` prepare-step model switch with image URLs case now
    has the named Rust counterpart
    `stream_text_prepare_step_model_switch_uses_step_model_supported_urls`,
