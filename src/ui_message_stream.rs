@@ -4723,6 +4723,42 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_on_error_receives_execute_error_text() {
+        let captured_errors = Arc::new(Mutex::new(Vec::new()));
+        let captured_errors_for_callback = Arc::clone(&captured_errors);
+
+        let chunks = create_ui_message_stream_with_result(
+            CreateUiMessageStreamOptions::new().with_on_error(move |error| {
+                captured_errors_for_callback
+                    .lock()
+                    .expect("captured errors lock")
+                    .push(error.to_string());
+                format!("masked {error}")
+            }),
+            |writer| {
+                writer.write(UiMessageChunk::text_delta("text-1", "before-error"));
+                Err("execute-error")
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            captured_errors
+                .lock()
+                .expect("captured errors lock")
+                .as_slice(),
+            ["execute-error"]
+        );
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "text-delta", "id": "text-1", "delta": "before-error" },
+                { "type": "error", "errorText": "masked execute-error" }
+            ])
+        );
+    }
+
+    #[test]
     fn ui_message_chunk_serializes_portable_tool_source_and_file_chunks() {
         let chunks = vec![
             UiMessageChunk::file("text/plain", "data:text/plain;base64,aGk="),
