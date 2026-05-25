@@ -16,11 +16,23 @@
 //!
 //! **What is still deferred:**
 //!
-//! - `post_object` / `edit_message` / `delete_message` /
-//!   `add_reaction` / `start_typing` / other Adapter trait
-//!   methods. Each follows the same recipe.
+//! - `edit_message` / `delete_message` / `add_reaction` /
+//!   `start_typing` / other Adapter trait methods. Each follows
+//!   the same recipe.
 //! - Markdown / card rendering for Telegram's `MarkdownV2` /
 //!   inline-keyboard layout.
+//!
+//! **Intentionally not implemented (1:1 with upstream):**
+//!
+//! - `post_object` / `edit_object`: upstream
+//!   `packages/adapter-telegram/src/index.ts` does NOT implement
+//!   `postObject` or `editObject` (verified: no method on the
+//!   class, no `describe("postObject", ...)` block in
+//!   `index.test.ts`). Only `adapter-slack` implements them.
+//!   The default `Adapter::post_object` returns
+//!   `AdapterError::Unsupported("post_object")`, which matches
+//!   upstream's "method absent" behavior used by
+//!   `packages/chat/src/plan.ts` (`!!adapter.postObject`).
 
 pub mod cards;
 pub mod markdown;
