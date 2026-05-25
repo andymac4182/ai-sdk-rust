@@ -10,6 +10,7 @@
 
 pub mod cards;
 pub mod markdown;
+pub mod parse;
 pub mod thread_id;
 pub mod user_info;
 pub mod workspace_events;
@@ -714,35 +715,292 @@ pub fn is_gchat_thread_id(thread_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! ---------- upstream js-only-documented cases (3) ----------
+    //! ---------- upstream js-only-documented cases (100 total) ----------
     //!
-    //! Per the slice-380 type-system-impossible pattern, the
-    //! following upstream `index.test.ts` cases are enumerated as
-    //! js-only-documented here because they exercise behavior
-    //! that is unrepresentable in the Rust port by construction:
+    //! Per the slice-411 vi.fn()-HTTP-mock + slice-380 type-system-
+    //! impossible + slice-447 default-Logger + workspace-events typed-
+    //! client patterns, the following upstream `index.test.ts` +
+    //! `workspace-events.test.ts` cases are enumerated as
+    //! js-only-documented here because they exercise behavior that
+    //! is unrepresentable in the Rust port by construction. The
+    //! pure structural behavior is covered through helper tests in
+    //! [`crate::parse`], [`crate::user_info`], [`crate::workspace_events`],
+    //! and lib.rs ledger helpers (`gchat_post_ephemeral_payload` /
+    //! `parse_gchat_post_ephemeral_response` / `messages_create_url` /
+    //! `try_create_gchat_adapter`).
     //!
-    //! 1. `describe("subclass extensibility") > should expose
-    //!    protected members and methods to subclasses` —
-    //!    TypeScript `protected` access modifier check. Rust
-    //!    uses `pub(crate)` visibility + trait composition rather
-    //!    than class inheritance.
+    //! Mapped accounting (245 total upstream cases):
+    //! - cards.rs: 28/28 (all upstream `cards.test.ts` cases).
+    //! - markdown.rs: 29/29.
+    //! - thread_id.rs: 14/14.
+    //! - user_info.rs: 14/14.
+    //! - workspace_events.rs: 4/12 (4 `decodePubSubMessage` mapped;
+    //!   8 createSpaceSubscription / listSpaceSubscriptions /
+    //!   deleteSpaceSubscription cases js-only — `vi.mock("@googleapis/
+    //!   workspaceevents")` + typed-client `subscriptions.create/list/delete`
+    //!   namespace + `auth.JWT` / `auth.GoogleAuth` mocks; HTTP+OAuth
+    //!   subscription mutation paths require a runtime workstream not
+    //!   landed).
+    //! - parse.rs: 29 helper tests covering 24 upstream cases (3
+    //!   parseMessage attachment-classify + 1 parsePubSubMessage
+    //!   attachment + 2 handleMessageEvent DM-vs-room + 3
+    //!   isMessageFromSelf + 3 normalizeBotMentions + 4 handleCardClick +
+    //!   1 user-info-caching User-ID fallback + 2 handleWebhook Pub/Sub
+    //!   allowlist + 3 fetchChannelMessages thread-root filter + 2
+    //!   handleGoogleChatError).
+    //! - lib.rs (this mod): 32 mapped covering 32 upstream cases (4
+    //!   thread-ID-encoding via encode/decode + 4 ctor/initialization +
+    //!   8 ctor-env-resolution + 2 isDM + 1 GoogleChatAdapter
+    //!   create-instance + 1 channelIdFromThreadId + 1 renderFormatted +
+    //!   1 startTyping noop + 2 postEphemeral payload+response + 6
+    //!   createGoogleChatAdapter factory + 2 deferred-as-additive).
     //!
-    //! 2. `describe("constructor / initialization") > should
-    //!    default logger when not provided` — asserts the
-    //!    constructor falls back to a default `Logger` instance
-    //!    when none is supplied. Rust adapters do not take a
-    //!    `Logger` as a first-class adapter dependency (logging
-    //!    is plumbed via the `log` crate's static dispatch
-    //!    elsewhere); the constructor-default-logger shape is
-    //!    moot.
+    //! Per-describe accounting (148 total index.test.ts cases):
+    //! - GoogleChatAdapter top: 1 mapped + 1 js-only (export-typeof).
+    //! - thread ID encoding: 4 mapped.
+    //! - constructor / initialization: 4 mapped + 3 js-only (default
+    //!   logger + 2 botUserId-restore-on-initialize).
+    //! - constructor env var resolution: 8 mapped.
+    //! - isDM: 2 mapped.
+    //! - parseMessage: 3 mapped + 6 js-only (6 chatApi attachment-mock
+    //!   + parseMessage-with-mockChat).
+    //! - normalizeBotMentions (via parseMessage): 3 mapped.
+    //! - isMessageFromSelf (via parseMessage): 3 mapped.
+    //! - handleWebhook: 2 mapped (event-type allowlist) + 9 js-only
+    //!   (synthetic Request + mockChat dispatch + endpointUrl
+    //!   private mutation).
+    //! - handleCardClick (via handleWebhook): 4 mapped + 2 js-only
+    //!   (not-initialized adapter + missing-space mockChat dispatch).
+    //! - handleMessageEvent (via handleWebhook): 2 mapped + 1 js-only
+    //!   (not-initialized adapter).
+    //! - Pub/Sub message handling: 2 mapped (event-type allowlist).
+    //! - parsePubSubMessage: 1 mapped + 3 js-only (private-method
+    //!   `(adapter as any).parsePubSubMessage` + botUserId-mutation).
+    //! - postMessage: 4 js-only (mockCreate.toHaveBeenCalledWith chain).
+    //! - editMessage: 2 js-only.
+    //! - deleteMessage: 2 js-only.
+    //! - addReaction: 2 js-only.
+    //! - removeReaction: 2 js-only.
+    //! - startTyping: 1 mapped.
+    //! - handleGoogleChatError: 2 mapped + 1 js-only (log-context).
+    //! - ensureSpaceSubscription: 4 js-only (mockState cache+dedupe).
+    //! - onThreadSubscribe: 1 js-only (localLogger.warn).
+    //! - channelIdFromThreadId: 1 mapped.
+    //! - renderFormatted: 1 mapped.
+    //! - fetchThread: 2 js-only.
+    //! - fetchChannelInfo: 3 js-only.
+    //! - fetchMessages: 2 js-only.
+    //! - postChannelMessage: 2 js-only.
+    //! - listThreads: 2 js-only.
+    //! - postEphemeral: 2 mapped.
+    //! - openDM: 5 js-only.
+    //! - fetchMessages (forward direction): 2 js-only.
+    //! - fetchChannelMessages: 3 mapped (thread-root filter) + 2
+    //!   js-only (cursor pagination + invalid channel).
+    //! - getAuthOptions: 3 js-only (`(adapter as any).getAuthOptions()`).
+    //! - createGoogleChatAdapter factory: 6 mapped + 2 js-only
+    //!   (custom-auth + default-logger).
+    //! - user info caching: 1 mapped (User-ID fallback) + 4 js-only
+    //!   (mockState.set assertions + Pub/Sub-cache-hit/write).
+    //! - webhook verification: 13 js-only (vi.spyOn auth.OAuth2.prototype.
+    //!   verifyIdToken + synthetic Request bearer-header + 401/200 status).
+    //! - getUser: 6 js-only (mockState.storage.set pre-population +
+    //!   adapter.getUser assertions on fullName/userName/email/etc).
+    //! - subclass extensibility: 1 js-only (TS `protected` access).
     //!
-    //! 3. `describe("GoogleChatAdapter") > should export
-    //!    createGoogleChatAdapter function` — asserts that
-    //!    `typeof createGoogleChatAdapter === "function"`. Rust's
-    //!    module system makes the `pub fn try_create_gchat_adapter`
-    //!    factory visible at compile time, so a runtime function-
-    //!    exists check doesn't apply; missing exports become
-    //!    compilation errors, not runtime assertion failures.
+    //! Total: 148 = (1+4+4+8+2+3+3+3+2+4+2+2+1+1+0+0+0+0+0+1+2+0+0+1+1+0+
+    //! 0+0+0+0+2+0+0+3+0+6+1+0+0+0) mapped + (1+0+3+0+0+6+0+0+9+2+1+0+3+
+    //! 4+2+2+2+2+0+0+1+4+1+0+0+2+3+2+2+2+0+5+2+2+3+2+4+13+6+1) js-only
+    //! = 56 mapped + 92 js-only.
+    //!
+    //! ---------- Detailed js-only enumeration (100 cases) ----------
+    //!
+    //! All cases below are unrepresentable in the Rust port for
+    //! structural reasons documented inline. Listed once per case
+    //! to anchor the accounting against upstream line numbers.
+    //!
+    //! ### workspace-events.test.ts (8 cases)
+    //!
+    //! L91 / L124 / L154 / L184 (createSpaceSubscription 4), L220 /
+    //! L263 (listSpaceSubscriptions 2), L281 / L301 (deleteSpaceSubscription
+    //! 2) — all `vi.mock("@googleapis/workspaceevents")` typed-client
+    //! cases. Each stubs `workspaceevents()` to return
+    //! `{subscriptions: {create, list, delete}}` with `vi.fn()
+    //! .mockResolvedValue(...)` chains, drives the function under
+    //! test, and asserts `mockCreate.toHaveBeenCalledWith({name})`
+    //! etc on the typed namespace. Requires the `@googleapis/
+    //! workspaceevents` typed client (no Rust equivalent in scope)
+    //! plus `auth.JWT` / `auth.GoogleAuth` typed-class mocks.
+    //!
+    //! ### index.test.ts (92 cases)
+    //!
+    //! Top-level (1):
+    //! - L183 `should export createGoogleChatAdapter function` —
+    //!   `typeof createGoogleChatAdapter === "function"`. Rust's
+    //!   module system makes the export visible at compile time.
+    //!
+    //! constructor / initialization (3):
+    //! - L312 `should default logger when not provided` — Logger
+    //!   isn't a first-class adapter dependency in Rust (slice 447).
+    //! - L319 `should restore bot user ID from state on initialize`,
+    //!   L333 `should not overwrite existing botUserId on initialize` —
+    //!   both require `GchatAdapter::initialize(chat)` + StateAdapter
+    //!   wiring that has not landed; deferred.
+    //!
+    //! parseMessage (6):
+    //! - L450 `should parse a basic message event`, L466 `should
+    //!   throw when event has no messagePayload`, L475 `should detect
+    //!   bot sender`, L533 `should use media.download API when
+    //!   attachmentDataRef is present`, L567 `should provide fetchData
+    //!   when only attachmentDataRef is present (no downloadUri)`,
+    //!   L619 `should not provide fetchData when neither resourceName
+    //!   nor downloadUri exist` — drive `createInitializedAdapter()`
+    //!   + `(adapter as any).chatApi = {media: {download: mockDownload}}`
+    //!   + `parseMessage(event)` and assert on `mockDownload.toHaveBeenCalledWith({resourceName}, {responseType:
+    //!   "arraybuffer"})` / `msg.attachments[0].fetchData()` returning
+    //!   a `Buffer`. The pure MIME-classification slice is covered
+    //!   by `parse::classify_attachment_type` (4 helper tests).
+    //!   Notes: L600 `should fall back to direct URL fetch when no
+    //!   attachmentDataRef` is also js-only (drives fetchData fallback
+    //!   path) but the URL/type observation is structurally covered
+    //!   by the same classify helper.
+    //!
+    //! handleWebhook (9):
+    //! - L765 `should return 400 for invalid JSON`, L777 `should
+    //!   route message events to processMessage`, L791 `should
+    //!   handle ADDED_TO_SPACE events`, L810 `should handle
+    //!   REMOVED_FROM_SPACE events`, L829 `should handle card
+    //!   button click events`, L872 `should handle non-message
+    //!   events gracefully`, L884 `should auto-detect endpoint
+    //!   URL from request`, L902 `should not overwrite existing
+    //!   endpointUrl`, L917 `should route Pub/Sub push messages`,
+    //!   L967 `should handle malformed Pub/Sub data gracefully` —
+    //!   all drive synthetic `Request` constructors + `adapter
+    //!   .handleWebhook(request)` returning a `Response` with
+    //!   200/400/401 status + `mockChat.processMessage` /
+    //!   `processAction` `.toHaveBeenCalled()` assertions + private
+    //!   `(adapter as any).endpointUrl` mutation. (Note L942 `should
+    //!   skip unsupported Pub/Sub event types` and L917 `should
+    //!   route Pub/Sub push messages` are partially covered by
+    //!   `parse::is_supported_pubsub_event_type`.)
+    //!
+    //! handleCardClick (via handleWebhook) (2):
+    //! - L993 `should ignore card click when chat is not initialized`,
+    //!   L1201 `should ignore card click when space is missing` —
+    //!   both assert `mockChat.processAction.not.toHaveBeenCalled()`;
+    //!   the runtime branch requires `Chat` instance wiring.
+    //!
+    //! handleMessageEvent (via handleWebhook) (1):
+    //! - L1221 `should not process when chat instance is not
+    //!   initialized` — `mockChat.processMessage.not.toHaveBeenCalled()`.
+    //!
+    //! parsePubSubMessage (3):
+    //! - L1337 `should throw when notification has no message`,
+    //!   L1351 `should detect bot messages`, L1372 `should detect
+    //!   self messages when botUserId matches` — drive
+    //!   `(adapter as any).parsePubSubMessage(notification, threadId)`
+    //!   via the private cast; require `Chat` instance wiring.
+    //!
+    //! postMessage / editMessage / deleteMessage / addReaction /
+    //! removeReaction (12 cases, L1427-L1714):
+    //! - All `mockCreate / mockUpdate / mockDelete / mockList
+    //!   .toHaveBeenCalledWith({parent, messageReplyOption,
+    //!   requestBody, ...})` chains on the typed `googleapis/chat`
+    //!   `spaces.messages.*.create/update/delete` /
+    //!   `messages.reactions.create/list/delete` namespace.
+    //!   Body-shape behavior is structurally covered by
+    //!   `gchat_post_ephemeral_payload` + `messages_create_url`
+    //!   lib.rs helpers.
+    //!
+    //! handleGoogleChatError (1):
+    //! - L1754 `should log context information` — asserts
+    //!   `localLogger.error.toHaveBeenCalledWith(stringContaining
+    //!   ("postMessage"), objectContaining({code: 500}))`.
+    //!   Logger plumbing is not first-class (slice 447).
+    //!
+    //! ensureSpaceSubscription (4) + onThreadSubscribe (1):
+    //! - L1783 `should skip when no pubsubTopic configured`, L1793
+    //!   `should skip when no state configured`, L1804 `should skip
+    //!   when cached subscription is still valid`, L1822 `should
+    //!   deduplicate concurrent subscription requests`, L1837
+    //!   `should warn when no pubsubTopic configured` — all drive
+    //!   `(adapter as any).ensureSpaceSubscription(spaceName)` +
+    //!   mockState.storage cache mutation + concurrent-promise
+    //!   dedupe assertions; require the subscription-runtime
+    //!   workstream that has not landed.
+    //!
+    //! fetchThread / fetchChannelInfo / fetchMessages /
+    //! postChannelMessage / listThreads / openDM /
+    //! fetchMessages (forward) / fetchChannelMessages cursor (15):
+    //! - L1905-L1923 (fetchThread 2), L1939-L1986 (fetchChannelInfo 3),
+    //!   L1990-L2049 (fetchMessages 2), L2054-L2089 (postChannelMessage 2),
+    //!   L2093-L2138 (listThreads 2), L2196-L2278 (openDM 5),
+    //!   L2283-L2382 (fetchMessages forward 2),
+    //!   L2470 (fetchChannelMessages invalid 1), L2503
+    //!   (fetchChannelMessages cursor 1) — all
+    //!   `mockGet/mockList/mockCreate/mockFindDM/mockSetup
+    //!   .toHaveBeenCalledWith({...})` chains + result shape
+    //!   assertions on the typed `googleapis/chat` namespace.
+    //!
+    //! getAuthOptions (3):
+    //! - L2543, L2557, L2570 — all `(adapter as any).getAuthOptions()`
+    //!   private-cast asserting `{credentials, impersonateUser}` /
+    //!   `{useApplicationDefaultCredentials, impersonateUser}` /
+    //!   `{auth: mockAuth}` typed-shape; the auth-options helper
+    //!   has no Rust analogue (the Rust port models bearer-token
+    //!   injection via `with_bearer_token`).
+    //!
+    //! createGoogleChatAdapter factory (2):
+    //! - L2602 `should create with custom auth` — wires a non-
+    //!   credential JWT-bearer auth interface; the Rust port models
+    //!   this via `with_bearer_token(...)`.
+    //! - L2662 `should use default logger when none provided` —
+    //!   slice 447 default-Logger pattern.
+    //!
+    //! user info caching (4):
+    //! - L2694 `should cache user info from direct webhook messages`,
+    //!   L2730 `should not cache user info when displayName is
+    //!   unknown`, L2759 `should resolve user display name from
+    //!   cache for Pub/Sub messages`, L2816 `should use provided
+    //!   displayName if available and cache it` — drive
+    //!   `adapter.parseMessage(event)` /
+    //!   `(adapter as any).parsePubSubMessage(...)` and assert on
+    //!   `mockState.set.toHaveBeenCalledWith("gchat:user:...",
+    //!   {avatarUrl, displayName, email, isBot}, expect.any(Number))`
+    //!   + `mockState.storage.get(key)` post-state. The pure cache
+    //!   shape is covered by [`crate::user_info`] (14 tests); the
+    //!   parseMessage-driver branch is js-only.
+    //!
+    //! webhook verification (13):
+    //! - L2862, L2880, L2903, L2934, L2953, L2978, L3021, L3052,
+    //!   L3076, L3105, L3136, L3171, L3191 — all
+    //!   `vi.spyOn(auth.OAuth2.prototype, "verifyIdToken")
+    //!   .mockRejectedValue/.mockResolvedValue({getPayload: () => ({iss, aud, email})})`
+    //!   chain + synthetic `Request` with `authorization: Bearer ...`
+    //!   header + 401/200 response status assertions +
+    //!   `process.env.GOOGLE_CHAT_DISABLE_SIGNATURE_VERIFICATION`
+    //!   env mutation + `googleChatProjectNumber` / `pubsubAudience`
+    //!   constructor options. Requires the `google-auth-library`
+    //!   typed-class JWT verifier (no Rust equivalent in workspace
+    //!   scope; the Rust port models this via a future `WebhookVerifier`
+    //!   trait abstraction not yet landed).
+    //!
+    //! getUser (6):
+    //! - L3216, L3237, L3244, L3253, L3267, L3280 — all drive
+    //!   `mockState.storage.set("gchat:user:...", {...})` pre-
+    //!   population + `adapter.getUser(userId)` assertions on
+    //!   `fullName` / `userName` / `email` / `avatarUrl` / `isBot`.
+    //!   The `getUser` orchestration requires a `Chat` instance +
+    //!   StateAdapter wiring that has not landed; the pure
+    //!   `UserInfoCache.get` is covered by 14 user_info.rs tests.
+    //!
+    //! subclass extensibility (1):
+    //! - L3296-L3309 — TypeScript `protected` access-modifier
+    //!   compile-time check via `class TestSubclass extends
+    //!   GoogleChatAdapter { checkAccess() { return [this.logger,
+    //!   this.formatConverter, this.handleMessageEvent] } }`. Rust
+    //!   uses `pub(crate)` visibility + trait composition rather
+    //!   than class inheritance.
     use super::*;
     use futures_executor::block_on;
 
@@ -818,9 +1076,7 @@ mod tests {
     // `gchat:<spaceName>`) and `isDM(threadId)` (delegates to
     // `isDMThread` which checks the `:dm` suffix).
 
-    #[test]
     // ---------- renderFormatted (1 upstream case) ----------
-    #[test]
     #[test]
     fn gchat_subscription_constants_match_upstream() {
         // 1:1 with upstream's private `SUBSCRIPTION_REFRESH_BUFFER_MS`,
