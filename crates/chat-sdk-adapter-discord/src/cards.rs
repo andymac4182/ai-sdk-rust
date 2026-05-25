@@ -497,11 +497,14 @@ mod tests {
 
     // ---------- cardToFallbackText (7 upstream cases) ----------
 
-    // ---------- cardToDiscordPayload (7 of 31 portable cases) ----------
-    // 1:1 with upstream `cards.test.ts > describe("cardToDiscordPayload")`.
-    // Covers the 7 cases that don't require the deferred Action-Row
-    // (buttons / sections / link-buttons / table / CardLink) renderer.
+    // ---------- cardToDiscordPayload (15 of 15 upstream cases) ----------
+    // 1:1 with upstream `cards.test.ts > describe("cardToDiscordPayload")`
+    // at lines 24-295. All 15 `it(...)` cases are portable; per-case
+    // upstream line references appear above each test below. There are
+    // no `vi.fn` / mock-HTTP cases in this describe block — every case
+    // calls the pure `cardToDiscordPayload(card)` renderer.
 
+    // 1:1 with upstream cards.test.ts:25 > "converts a simple card with title"
     #[test]
     fn converts_a_simple_card_with_title() {
         let c = card(Some("Welcome"), None, vec![]);
@@ -511,6 +514,7 @@ mod tests {
         assert_eq!(payload.components.len(), 0);
     }
 
+    // 1:1 with upstream cards.test.ts:34 > "converts a card with title and subtitle"
     #[test]
     fn converts_a_card_with_title_and_subtitle() {
         let c = card(
@@ -530,6 +534,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:46 > "converts a card with header image"
     #[test]
     fn converts_a_card_with_header_image() {
         let c = CardElement {
@@ -549,6 +554,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:59 > "sets default color to Discord blurple"
     #[test]
     fn sets_default_color_to_discord_blurple() {
         let c = card(Some("Test"), None, vec![]);
@@ -556,6 +562,7 @@ mod tests {
         assert_eq!(payload.embeds[0].color, Some(0x5865f2));
     }
 
+    // 1:1 with upstream cards.test.ts:66 > "converts text elements"
     #[test]
     fn converts_text_elements() {
         use chat_sdk_chat::cards::TextStyle;
@@ -582,6 +589,7 @@ mod tests {
         assert!(description.contains("*Muted text*"), "got: {description}");
     }
 
+    // 1:1 with upstream cards.test.ts:81 > "converts image elements (in children)"
     #[test]
     fn converts_image_elements_in_children_no_op() {
         use chat_sdk_chat::cards::{ImageElement, ImageKind};
@@ -600,6 +608,7 @@ mod tests {
         assert_eq!(payload.embeds.len(), 1);
     }
 
+    // 1:1 with upstream cards.test.ts:93 > "converts divider elements to horizontal line markers"
     #[test]
     fn converts_divider_elements_to_horizontal_line_markers() {
         let c = card(
@@ -620,7 +629,9 @@ mod tests {
         assert!(description.contains("After"), "got: {description}");
     }
 
-    // ---------- cardToDiscordPayload Action Row + Section + Fields (8 cases) ----------
+    // ---------- cardToDiscordPayload Action Row + Section + Fields ----------
+    // Continuation of the same upstream `describe("cardToDiscordPayload")`
+    // block (cases 8-15 of 15). Per-case upstream line markers below.
 
     fn button(
         id: &str,
@@ -640,6 +651,7 @@ mod tests {
         }
     }
 
+    // 1:1 with upstream cards.test.ts:104 > "converts actions with buttons"
     #[test]
     fn converts_actions_with_buttons() {
         let c = card(
@@ -704,6 +716,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:149 > "sets disabled on button when specified"
     #[test]
     fn sets_disabled_on_button_when_specified() {
         let mut cancel = button("cancel", "Cancelled", Some(ButtonStyle::Danger), None);
@@ -744,6 +757,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:184 > "converts link buttons using Link style"
     #[test]
     fn converts_link_buttons_using_link_style() {
         let c = card(
@@ -777,6 +791,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:211 > "converts fields to embed fields"
     #[test]
     fn converts_fields_to_embed_fields() {
         let c = card(
@@ -818,6 +833,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:235 > "flattens section children"
     #[test]
     fn flattens_section_children() {
         let c = card(
@@ -839,6 +855,7 @@ mod tests {
         assert!(description.contains("───────────"), "got: {description}");
     }
 
+    // 1:1 with upstream cards.test.ts:245 > "converts a complete card"
     #[test]
     fn converts_a_complete_card() {
         let c = CardElement {
@@ -892,6 +909,7 @@ mod tests {
         assert_eq!(payload.components[0].components.len(), 1);
     }
 
+    // 1:1 with upstream cards.test.ts:273 > "handles card with no title or subtitle"
     #[test]
     fn handles_card_with_no_title_or_subtitle() {
         let c = card(None, None, vec![text("Just content")]);
@@ -903,6 +921,7 @@ mod tests {
         );
     }
 
+    // 1:1 with upstream cards.test.ts:283 > "combines title subtitle and content"
     #[test]
     fn combines_title_subtitle_and_content() {
         let c = card(Some("Title"), Some("Subtitle"), vec![text("Content")]);
