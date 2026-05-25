@@ -2503,6 +2503,41 @@ focused tests for each portable behavior before changing rows to `verified`.
   remains represented by
   `workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator`
   together with the lower-level stream-text repair tests.
+- 2026-05-26: WorkflowAgent GAP integration cases now map to the existing
+  Rust callback and approval coverage instead of remaining implicit: upstream
+  `experimental_onStart` maps to
+  `workflow_agent_compat_should_call_experimental_on_start_from_constructor`,
+  `workflow_agent_compat_should_call_experimental_on_start_from_stream_method`,
+  `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order`,
+  and
+  `workflow_agent_compat_should_pass_experimental_on_start_event_information`;
+  upstream `experimental_onStepStart` maps to the corresponding
+  `workflow_agent_compat_should_call_experimental_on_step_start_from_constructor`,
+  `workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method`,
+  `workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order`,
+  and
+  `workflow_agent_compat_should_pass_experimental_on_step_start_event_information`;
+  upstream `onToolExecutionStart` maps to the matching
+  `workflow_agent_compat_should_call_on_tool_execution_start_from_constructor`,
+  `workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method`,
+  `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order`,
+  and
+  `workflow_agent_compat_should_pass_tool_execution_start_event_information`;
+  upstream `onToolExecutionEnd` maps to the matching
+  `workflow_agent_compat_should_call_on_tool_execution_end_from_constructor`,
+  `workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method`,
+  `workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order`,
+  and
+  `workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success`;
+  upstream `prepareCall` maps to the existing
+  `workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator`,
+  `workflow_agent_upstream_should_provide_step_information_to_prepare_step_callback`,
+  and
+  `workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop`
+  tests; and upstream `tool approval` maps to
+  `workflow_agent_upstream_should_pause_when_tool_needs_approval`,
+  `workflow_agent_upstream_should_support_needs_approval_as_a_function`, and
+  `workflow_agent_upstream_should_execute_approved_tools_before_streaming`.
   The callback-order e2e cases remain represented by the existing workflow
   compat tests for `fires constructor + stream callbacks in order with step
   data` and `fires constructor + stream callbacks in order with event data`.
