@@ -688,6 +688,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 - 2026-05-24: `packages/ai` `processUIMessageStream` data-part parity added
   named Rust counterparts for upstream persistent, transient, and id-replacement
   data UI part cases: `process_ui_message_stream_appends_data_parts`,
+  `process_ui_message_stream_appends_custom_parts`,
   `process_ui_message_stream_skips_transient_data_parts`, and
   `process_ui_message_stream_replaces_data_parts_with_matching_id`, and
   `process_ui_message_stream_replaces_object_data_parts_with_matching_id`. Rust now

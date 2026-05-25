@@ -7051,6 +7051,50 @@ mod tests {
     }
 
     #[test]
+    fn process_ui_message_stream_appends_custom_parts() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "cmp_123"
+            }
+        }))
+        .expect("provider metadata serializes");
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::Custom {
+                    kind: "test-provider.compaction".to_string(),
+                    provider_metadata: Some(provider_metadata),
+                },
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "custom",
+                        "kind": "test-provider.compaction",
+                        "providerMetadata": {
+                            "openai": {
+                                "itemId": "cmp_123"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn process_ui_message_stream_skips_transient_data_parts() {
         let mut state = StreamingUiMessageState::new("msg-123", None);
 
