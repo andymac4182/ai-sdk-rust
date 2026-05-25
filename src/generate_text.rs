@@ -16190,6 +16190,73 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_passes_full_runtime_context_to_callbacks() {
+        let model = FakeLanguageModel::new();
+        let runtime_context = json!({
+            "userId": "user-123",
+            "requestId": "request-123",
+        })
+        .as_object()
+        .expect("runtime context is an object")
+        .clone();
+        let callback_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let on_start_contexts = Arc::clone(&callback_contexts);
+        let on_step_start_contexts = Arc::clone(&callback_contexts);
+        let on_step_finish_contexts = Arc::clone(&callback_contexts);
+        let on_finish_contexts = Arc::clone(&callback_contexts);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")])
+                .with_runtime_context(runtime_context.clone())
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("generate-text-test")
+                        .with_runtime_context_key("requestId", true),
+                )
+                .with_on_start(move |event| {
+                    on_start_contexts
+                        .lock()
+                        .expect("runtime context lock")
+                        .push(JsonValue::Object(event.runtime_context.clone()));
+                    ready(())
+                })
+                .with_on_step_start(move |event| {
+                    on_step_start_contexts
+                        .lock()
+                        .expect("runtime context lock")
+                        .push(JsonValue::Object(event.runtime_context.clone()));
+                    ready(())
+                })
+                .with_on_step_finish(move |step| {
+                    on_step_finish_contexts
+                        .lock()
+                        .expect("runtime context lock")
+                        .push(JsonValue::Object(step.runtime_context.clone()));
+                    ready(())
+                })
+                .with_on_finish(move |event| {
+                    on_finish_contexts
+                        .lock()
+                        .expect("runtime context lock")
+                        .push(JsonValue::Object(event.runtime_context.clone()));
+                    ready(())
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        let callback_contexts = callback_contexts.lock().expect("runtime context lock");
+        assert_eq!(
+            callback_contexts.as_slice(),
+            [
+                json!({ "userId": "user-123", "requestId": "request-123" }),
+                json!({ "userId": "user-123", "requestId": "request-123" }),
+                json!({ "userId": "user-123", "requestId": "request-123" }),
+                json!({ "userId": "user-123", "requestId": "request-123" }),
+            ]
+        );
+    }
+
+    #[test]
     fn generate_text_response_messages_preserve_tool_approval_requests() {
         let model = FakeLanguageModel::new().with_content(vec![
             LanguageModelContent::ToolCall(
