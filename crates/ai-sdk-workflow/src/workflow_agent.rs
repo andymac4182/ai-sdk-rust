@@ -3172,6 +3172,37 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_pass_through_messages_without_approval_responses_unchanged() {
+        let prompt = user_prompt();
+        let captured_messages = Arc::new(Mutex::new(None::<WorkflowPrompt>));
+        let captured_messages_for_prepare_step = Arc::clone(&captured_messages);
+        let tool = Tool::new("getWeather", object_schema())
+            .with_execute(|_, _| async { Ok(json!({ "temperature": 72 })) });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        let result = poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(prompt.clone(), executor).with_prepare_step(
+                WorkflowPrepareStepCallback::new(move |info| {
+                    *captured_messages_for_prepare_step
+                        .lock()
+                        .expect("prepare step capture lock succeeds") = Some(info.messages.clone());
+                    WorkflowPrepareStepResult::default()
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        let captured_messages = captured_messages
+            .lock()
+            .expect("prepare step capture lock succeeds")
+            .clone()
+            .expect("prepare step was called");
+        assert_eq!(captured_messages, prompt);
+        assert_eq!(result.messages, prompt);
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_pass_messages_to_multiple_tools_in_parallel_execution() {
         let received_messages = Arc::new(Mutex::new(BTreeMap::<String, WorkflowPrompt>::new()));
         let received_messages_for_weather = Arc::clone(&received_messages);
