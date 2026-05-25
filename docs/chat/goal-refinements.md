@@ -5785,3 +5785,166 @@ close every one of them.
   was not part of the Stop hook's enumerated items.
 - Inherit prior unchanged deferreds (attachment rehydration,
   `MemoryStateAdapter::no_op()` test helper).
+
+## Cycle 500..510 (close state-backend trio + start adapter follow-through)
+
+Session-2 second wave. 10 slices land across 11 merge cycles
+(slices 506+507 batched). State backends fully verified; adapter
+work pivots from new tests to alignment+provenance plus targeted
+real implementation (whatsapp parseMessage + telegram message
+length limits, extractPlainText).
+
+**Slices**
+
+- Slice 500: promote `@chat-sdk/state-redis` to verified. Added 3
+  method-existence smoke tests (enqueue / dequeue / queue_depth)
+  mapping to `should have <method> method` cases. Updated test-mod
+  header js-only enumeration from 8 to 9 (off-by-one fix). Wrote
+  `chat-sdk-state-redis` section in unported.md cataloguing 9
+  unportable upstream cases (node-redis client injection,
+  EventEmitter wait-for-ready, integration `describe.skip`).
+  Removed from estimates.tsv.
+- Slice 501: promote `@chat-sdk/state-ioredis` to verified. Same
+  pattern: +3 queue-method smoke tests, unported.md section (4
+  cases), estimates.tsv removed. Removed a duplicate `#[test]`
+  attribute on `generate_token_has_ioredis_prefix_and_two_underscores`.
+- Slice 502: promote `@chat-sdk/state-pg` to verified. Added 10
+  ensureConnected+queue mappings (subscribe/unsubscribe/is_subscribed
+  via trait-default fallthrough; acquire/release/extend lock; enqueue/
+  dequeue/queue_depth defaults). Bulk-enumerated ~50 unportable
+  upstream cases by category in unported.md per the cross-cutting
+  js-only-documented sweep pattern: 2 module-loader exports, 1
+  existing-client injection, 1 default-Logger constructor, 3 env-var
+  fallback (slice-305 deferred), ~40 `with mock client` describe
+  block, 1 getClient typed-class-getter, `describe.skip`
+  integration. Removed a duplicate `#[test]` attribute on
+  `generate_token_has_pg_prefix_and_v4_uuid_suffix`.
+- Slice 503: real port of `WhatsappAdapter::parse_message` end-to-
+  end. New `parse` module (783 LOC): typed `WhatsAppRawMessage` /
+  `WhatsAppMessage` / `WhatsAppContact` envelope structs, async
+  `Adapter::parse_message` trait override. Ports all 16 portable
+  upstream `parseMessage` / `parseMessage - media attachments` /
+  `parseMessage - isMention and threadId` cases (text, missing-
+  contact phone fallback, image+caption, ISO-8601 dateSent from
+  unix ms, image/document/audio/video/sticker/voice/location
+  attachment kinds, location no-name fallback, plain-text empty
+  attachments, isMention None for DM, threadId encoded). Tests:
+  107 -> 123 (+16). Estimate 70% -> 88%.
+- Slice 504: port telegram `describe("message length limits")` (9
+  cases). The production helpers (`truncate_for_telegram`,
+  `TELEGRAM_MESSAGE_LIMIT` 4096, `TELEGRAM_CAPTION_LIMIT` 1024) were
+  already shipped in slice 232; this slice exercises them at the
+  limit-boundary corpus. Tests: 133 -> 142.
+- Slice 505: port telegram `describe("extractPlainText")` (9 cases).
+  Adds `TelegramFormatConverter::extract_plain_text(text)` delegating
+  to `chat_sdk_chat::markdown::to_plain_text(self.to_ast(text))` —
+  the inherited `BaseFormatConverter.extractPlainText` shape. Tests:
+  142 -> 151.
+- Slice 506: annotate telegram `fromAst block structures` (6 cases)
+  + tighten table-conversion assertion to mirror upstream's
+  `TABLE_PIPE_PATTERN` regex via per-line scan.
+- Slice 507: annotate discord `cardToDiscordPayload` (15 cases) with
+  per-case upstream-line provenance.
+- Slice 508: align discord `extractPlainText` (10 cases) inputs and
+  assertions with upstream verbatim text (`<@123>` -> `<@U123>`,
+  loose `contains` -> strict `assert_eq!` where upstream uses
+  `toBe`). Added provenance comments.
+- Slice 509: align teams `fromAst (AST -> Teams format)` (16 cases)
+  inputs with upstream verbatim list nesting; `assert_eq!` exact-
+  match where upstream uses `toBe`. Added `TeamsFormatConverter::from_markdown`
+  shorthand 1:1 with `BaseFormatConverter.fromMarkdown` (toAst ->
+  fromAst pipeline).
+- Slice 510: align teams `toAst (Teams HTML -> AST)` (11 cases)
+  inputs with upstream verbatim; added provenance + the
+  `expect(ast.type).toBe("root")` upstream assertion.
+
+**What the brief got wrong or left out**
+
+- **The audit's "GAP count" is approximate** — sub-agents that grep
+  Rust test files for matching test names systematically undercount
+  the mapped set. Many upstream cases are already covered by Rust
+  tests with different names (e.g. discord's `extractPlainText`
+  audit reported 10 missing cases; actual missing count was 0 — all
+  10 cases existed but with drifted inputs and missing provenance
+  comments). The next session should not trust the GAP column as
+  ground truth — re-audit each describe block by reading the actual
+  Rust tests first.
+
+- **Slice-451-style "split and rename" generalises to "align and
+  provenance"** — slices 506-510 are a variant: existing Rust tests
+  that already cover the upstream cases but lack the brief-required
+  `// 1:1 with upstream <file>:<line> > "<description>"` traceability
+  comments. This is a legitimate slice shape because it strengthens
+  the parity audit trail (catches future drift between Rust and
+  upstream) without behavior change. The brief's "split and rename"
+  section should be extended to cover this case.
+
+- **The state-backend verification path** (slices 500-502) showed
+  that the cross-cutting js-only-documented sweep pattern (slice
+  411) scales: state-pg with ~50 unportable cases enumerated in one
+  bulk table by category is more readable than transcribing each
+  individually, and the unported.md table format (Upstream | Reason
+  | Rust replacement) is clean.
+
+- **`unported.md` should be a top-level registry, not a per-crate
+  appendix** — slice 500 expanded the file's scope from
+  `chat-sdk-chat`-only to a Rust-port-wide index with one section
+  per crate. This is the right shape for the 9-adapter promotion
+  effort because each adapter has its own js-only categories
+  (webhook signature wiring, typed-client getter, env-var fallback,
+  default Logger).
+
+**Stale or misleading guidance**
+
+- The brief's "Phase 1.5 trait-extension session" + "Phase 2 / Phase
+  3 prep" sections remain accurate but are now ancient. Should be
+  marked as "historic context" with a forward pointer to the current
+  per-adapter promotion table.
+
+- The brief's "Slice 65 multi-session reality" entry estimates
+  150-300 slices per adapter. Post-slice-509 reality: 4 of 9 adapters
+  (whatsapp, telegram, discord, teams) are at 88%+ with under 30
+  slices remaining each; the slack adapter remains the biggest at
+  ~240 gap. Brief should be updated with the empirical numbers.
+
+**Edits applied**
+
+- `crates/chat-sdk-state-{redis,ioredis,pg}/src/lib.rs`: queue smoke
+  tests + js-only header docs.
+- `crates/chat-sdk-adapter-whatsapp/src/{lib.rs, parse.rs}`: new
+  parse module (783 LOC).
+- `crates/chat-sdk-adapter-telegram/src/{lib.rs, markdown.rs}`:
+  message length limits + extractPlainText + block-structure
+  alignment.
+- `crates/chat-sdk-adapter-discord/src/{cards.rs, markdown.rs}`:
+  cardToDiscordPayload + extractPlainText alignment.
+- `crates/chat-sdk-adapter-teams/src/markdown.rs`: fromAst + toAst
+  alignment + `from_markdown` shorthand.
+- `docs/chat/unported.md`: re-organised as top-level registry; added
+  `chat-sdk-state-{redis,ioredis,pg}` sections (9+4+~50 cases each).
+- `docs/chat/upstream-parity.md`: 3 state-backend rows promoted to
+  `verified`; whatsapp/telegram row basis text extended with new
+  slice annotations.
+- `docs/chat/package-progress-estimates.tsv`: 3 state-backend rows
+  removed; whatsapp 70 -> 88; telegram 72 -> 82.
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- Promote whatsapp once webhook GET verification + send-payload
+  tests + fetchMessages/fetchThread/stream methods land (~10
+  remaining genuine gaps).
+- Promote telegram once post_object + getUser + remaining block-
+  structure fromAst variants land (~4 remaining genuine gaps).
+- Promote teams once normalizeMentions + remaining toAst/fromAst
+  drift cases land (~20 remaining).
+- Promote discord once webhook + remaining HTTP-mock cases land
+  (~24 remaining per audit, but actual count needs re-audit per the
+  "approximate audit" finding above).
+- The 4 remaining adapters (slack, gchat, linear, github) need
+  substantial multi-slice work — ~10-50 slices each.
+- Mark stale brief sections per "Stale or misleading guidance".
+- Inherit prior unchanged deferreds (attachment rehydration,
+  `MemoryStateAdapter::no_op()` test helper, webhook infrastructure
+  for concurrency:queue drain branch, persistThreadHistory home-tab
+  variant).

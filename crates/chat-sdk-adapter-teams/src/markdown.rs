@@ -615,54 +615,65 @@ mod tests {
 
     // ---------- toAst (Teams HTML -> AST), 11 upstream cases ----------
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:121 > "should convert <at> mentions to @mentions"
     #[test]
     fn to_ast_should_convert_at_mentions_to_at_signs() {
-        let r = c().extract_plain_text("<at>Alice</at> hi");
-        assert!(r.contains("@Alice"), "got: {r}");
+        let r = c().extract_plain_text("<at>John</at> said hi");
+        assert!(r.contains("@John"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:126 > "should convert <b> tags to bold"
     #[test]
     fn to_ast_should_convert_b_tags_to_bold() {
-        let r = c().from_ast(&c().to_ast("This is <b>bold</b>"));
+        let ast = c().to_ast("<b>bold</b>");
+        assert!(matches!(ast, Node::Root(_)), "expected root, got: {ast:?}");
+        let r = c().from_ast(&ast);
         assert!(r.contains("**bold**"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:133 > "should convert <strong> tags to bold"
     #[test]
     fn to_ast_should_convert_strong_tags_to_bold() {
-        let r = c().from_ast(&c().to_ast("This is <strong>bold</strong>"));
+        let r = c().from_ast(&c().to_ast("<strong>bold</strong>"));
         assert!(r.contains("**bold**"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:139 > "should convert <i> tags to italic"
     #[test]
     fn to_ast_should_convert_i_tags_to_italic() {
-        let r = c().from_ast(&c().to_ast("This is <i>italic</i>"));
+        let r = c().from_ast(&c().to_ast("<i>italic</i>"));
         assert!(r.contains("_italic_"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:145 > "should convert <em> tags to italic"
     #[test]
     fn to_ast_should_convert_em_tags_to_italic() {
-        let r = c().from_ast(&c().to_ast("This is <em>italic</em>"));
+        let r = c().from_ast(&c().to_ast("<em>italic</em>"));
         assert!(r.contains("_italic_"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:151 > "should convert <s> tags to strikethrough"
     #[test]
     fn to_ast_should_convert_s_tags_to_strikethrough() {
-        let r = c().from_ast(&c().to_ast("This is <s>struck</s>"));
+        let r = c().from_ast(&c().to_ast("<s>struck</s>"));
         assert!(r.contains("~~struck~~"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:157 > "should convert <a> tags to links"
     #[test]
     fn to_ast_should_convert_a_tags_to_links() {
-        let r = c().from_ast(&c().to_ast("<a href=\"https://x.com\">link</a>"));
-        assert!(r.contains("[link](https://x.com)"), "got: {r}");
+        let r = c().from_ast(&c().to_ast("<a href=\"https://example.com\">link</a>"));
+        assert!(r.contains("[link](https://example.com)"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:163 > "should convert <code> tags to inline code"
     #[test]
     fn to_ast_should_convert_code_tags_to_inline_code() {
-        let r = c().from_ast(&c().to_ast("Use <code>x</code>"));
-        assert!(r.contains("`x`"), "got: {r}");
+        let r = c().from_ast(&c().to_ast("<code>const x</code>"));
+        assert!(r.contains("`const x`"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:169 > "should convert <pre> tags to code blocks"
     #[test]
     fn to_ast_should_convert_pre_tags_to_code_blocks() {
         let r = c().from_ast(&c().to_ast("<pre>const x = 1;</pre>"));
@@ -670,20 +681,20 @@ mod tests {
         assert!(r.contains("const x = 1;"), "got: {r}");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:176 > "should strip remaining HTML tags"
     #[test]
     fn to_ast_should_strip_remaining_html_tags() {
-        let r = c().extract_plain_text("<div>hello</div>");
-        assert!(r.contains("hello"), "got: {r}");
-        assert!(!r.contains("<div"), "got: {r}");
+        let r = c().extract_plain_text("<div><span>hello</span></div>");
+        assert_eq!(r, "hello");
     }
 
+    // 1:1 with upstream packages/adapter-teams/src/markdown.test.ts:181 > "should decode HTML entities"
     #[test]
     fn to_ast_should_decode_html_entities() {
-        let r = c().extract_plain_text("a &amp; b &lt;c&gt; &quot;d&quot; &#39;e&#39;");
-        assert!(r.contains("a & b"), "got: {r}");
-        assert!(r.contains("<c>"), "got: {r}");
-        assert!(r.contains("\"d\""), "got: {r}");
-        assert!(r.contains("'e'"), "got: {r}");
+        let r = c().extract_plain_text("&lt;b&gt;not bold&lt;/b&gt; &amp; &quot;quoted&quot;");
+        assert!(r.contains("<b>"), "got: {r}");
+        assert!(r.contains("&"), "got: {r}");
+        assert!(r.contains("\"quoted\""), "got: {r}");
     }
 
     // ---------- renderPostable (5 upstream cases) ----------
