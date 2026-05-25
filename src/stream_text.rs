@@ -6483,6 +6483,46 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_on_step_start_omits_telemetry_metadata() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let step_start_event = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let step_start_event_for_callback = Arc::clone(&step_start_event);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_function_id("test-function"),
+                )
+                .with_on_step_start(move |event| {
+                    let step_start_event = Arc::clone(&step_start_event_for_callback);
+                    async move {
+                        *step_start_event.lock().expect("step-start event lock") =
+                            Some(serde_json::to_value(event).expect("event serializes"));
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let step_start_event = step_start_event
+            .lock()
+            .expect("step-start event lock")
+            .clone()
+            .expect("step-start event captured");
+        assert!(step_start_event.get("functionId").is_none());
+    }
+
+    #[test]
     fn stream_text_prepare_step_sandbox_override_reaches_tool_execution() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
