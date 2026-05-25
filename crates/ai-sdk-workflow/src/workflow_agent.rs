@@ -7,10 +7,11 @@ use std::time::Instant;
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
     FinishReason, InputTokenUsage, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
-    LanguageModelAssistantMessage, LanguageModelMessage, LanguageModelTextPart,
-    LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolContentPart,
-    LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-    LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+    LanguageModelAssistantMessage, LanguageModelMessage, LanguageModelSystemMessage,
+    LanguageModelTextPart, LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart,
+    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+    LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
+    LanguageModelUserMessage, OutputTokenUsage,
 };
 use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions,
@@ -37,6 +38,9 @@ pub struct WorkflowAgentOptions {
 
     /// Runtime tools available to the agent.
     pub tools: BTreeMap<String, Tool>,
+
+    /// Default system instructions for every stream call on this agent.
+    pub instructions: Option<String>,
 
     /// Default generation settings.
     pub generation_settings: WorkflowGenerationSettings,
@@ -88,6 +92,7 @@ impl WorkflowAgentOptions {
             id: None,
             model,
             tools: BTreeMap::new(),
+            instructions: None,
             generation_settings: WorkflowGenerationSettings::default(),
             active_tools: None,
             tool_choice: None,
@@ -121,6 +126,12 @@ impl WorkflowAgentOptions {
     pub fn with_tools(mut self, tools: impl IntoIterator<Item = Tool>) -> Self {
         self.tools
             .extend(tools.into_iter().map(|tool| (tool.name.clone(), tool)));
+        self
+    }
+
+    /// Sets constructor-level instructions.
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 
@@ -274,6 +285,7 @@ pub struct WorkflowAgent {
     id: Option<String>,
     model: WorkflowModelInfo,
     tools: BTreeMap<String, Tool>,
+    instructions: Option<String>,
     generation_settings: WorkflowGenerationSettings,
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
@@ -297,6 +309,7 @@ impl WorkflowAgent {
             id: options.id,
             model: options.model,
             tools: options.tools,
+            instructions: options.instructions,
             generation_settings: options.generation_settings,
             active_tools: options.active_tools,
             tool_choice: options.tool_choice,
@@ -375,6 +388,13 @@ impl WorkflowAgent {
         let initial_runtime_context = options.runtime_context.clone();
         let initial_tools_context = options.tools_context.clone();
         let mut prompt = options.prompt;
+
+        if let Some(instructions) = self.instructions.as_ref() {
+            prompt.insert(
+                0,
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(instructions.clone())),
+            );
+        }
 
         apply_tool_approvals_before_stream(
             &mut prompt,
@@ -4216,6 +4236,27 @@ mod tests {
         let calls = calls.lock().expect("calls lock succeeds");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].prompt, prompt);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_string_instructions_to_the_model() {
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_instructions("You are a pirate."),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new("ahoy", executor)))
+            .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].prompt,
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("You are a pirate.")),
+                user_text_message("ahoy"),
+            ]
+        );
     }
 
     #[test]
