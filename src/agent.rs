@@ -3971,6 +3971,58 @@ mod tests {
     }
 
     #[test]
+    fn create_agent_ui_stream_response_passes_sandbox_to_tool_execution() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_test_tool_call_result(), stream_text_result("Done")]);
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let received_sandbox = Arc::new(Mutex::new(None::<Arc<dyn ExperimentalSandbox>>));
+        let received_sandbox_for_closure = Arc::clone(&received_sandbox);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_tool(
+            Tool::new("testTool", value_schema()).with_execute(move |input, options| {
+                let received_sandbox = Arc::clone(&received_sandbox_for_closure);
+                async move {
+                    let value = input
+                        .get("value")
+                        .and_then(JsonValue::as_str)
+                        .expect("tool input includes value");
+                    *received_sandbox.lock().expect("sandbox lock") = options.experimental_sandbox;
+                    Ok(json!(format!("{value}-result")))
+                }
+            }),
+        ));
+
+        let response = poll_ready(create_agent_ui_stream_response(
+            AgentUiStreamResponseOptions::new(
+                &agent,
+                vec![
+                    UiMessage::new("msg-1", crate::ui_message_stream::UiMessageRole::User)
+                        .with_part(json!({
+                            "type": "text",
+                            "text": "Run the test tool"
+                        })),
+                ],
+            )
+            .with_experimental_sandbox(Arc::clone(&sandbox)),
+        ))
+        .expect("agent UI stream response succeeds");
+
+        let received_sandbox = received_sandbox.lock().expect("sandbox lock");
+        assert!(Arc::ptr_eq(
+            received_sandbox
+                .as_ref()
+                .expect("tool execution receives sandbox"),
+            &sandbox
+        ));
+        assert!(
+            response
+                .decoded_body()
+                .expect("response body decodes")
+                .iter()
+                .any(|chunk| chunk.contains(r#""type":"finish""#))
+        );
+    }
+
+    #[test]
     fn tool_loop_agent_stream_calls_on_start_from_constructor() {
         let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
         let calls = Rc::new(RefCell::new(Vec::new()));
