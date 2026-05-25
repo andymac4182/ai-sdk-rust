@@ -2459,7 +2459,7 @@ focused tests for each portable behavior before changing rows to `verified`.
   and callback exchange, token exchange, auth-provider transport config
   creation, protected tool listing/calling, and authenticated session cleanup
   without external credentials.
-- 2026-05-26: MCP hosted OAuth HTTP example confirmed locally
+- 2026-05-26: MCP hosted OAuth HTTP example revalidated locally
   `cargo run -p ai-sdk-mcp --example hosted_oauth_http` completed end to end
   with local server connection, protected tool discovery, protected tool
   execution, and request counting.
@@ -3799,7 +3799,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   serialized through the Vercel AI Gateway OpenAI-compatible tool-call request,
   executed by the package-owned MCP client bridge, and returned to the model as
   tool-role continuation content. The ignored live test
-  `live_vercel_ai_gateway_openai_compatible_generate_text_mcp_tool_loop` ran
+  `live_vercel_ai_gateway_openai_compatible_generate_text_mcp_tool_loop` was
+  revalidated locally and ran
   against a real Vercel AI Gateway model with `.env.local` credentials and
   asserted the MCP tool call/result path without printing secrets.
 - 2026-05-20: MCP SSE typed-tool example added
