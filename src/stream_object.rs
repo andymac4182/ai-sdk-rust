@@ -3701,6 +3701,40 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_on_step_start_omits_telemetry_metadata() {
+        let model = MockLanguageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model")
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+        let step_start_event = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let step_start_event_for_callback = Arc::clone(&step_start_event);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_function_id("test-function"),
+                )
+                .with_experimental_on_step_start(move |event| {
+                    let step_start_event = Arc::clone(&step_start_event_for_callback);
+                    async move {
+                        *step_start_event.lock().expect("step start event lock") =
+                            Some(serde_json::to_value(event).expect("event serializes"));
+                    }
+                }),
+        ));
+
+        let event = step_start_event
+            .lock()
+            .expect("step start event lock")
+            .clone()
+            .expect("step start event captured");
+        assert!(event.get("functionId").is_none());
+    }
+
+    #[test]
     fn stream_object_on_step_finish_runs_after_model_call() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let model = RecordingStreamModel::new(Arc::clone(&events));
