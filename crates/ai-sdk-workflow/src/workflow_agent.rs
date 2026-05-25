@@ -6,12 +6,15 @@ use std::time::Instant;
 
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
-    FinishReason, InputTokenUsage, LanguageModelAbortSignal, LanguageModelMessage,
+    FinishReason, InputTokenUsage, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
+    LanguageModelAssistantMessage, LanguageModelMessage, LanguageModelToolApprovalResponsePart,
+    LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
     OutputTokenUsage,
 };
 use ai_sdk_provider_utils::{
-    ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions, execute_tool,
+    ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions,
+    ToolNeedsApprovalOptions, execute_tool,
 };
 use ai_sdk_rust::StopCondition;
 use serde::{Deserialize, Serialize};
@@ -314,12 +317,25 @@ impl WorkflowAgent {
         let abort_signal = options.abort_signal.clone();
         let on_abort = options.on_abort;
 
-        let initial_prompt = options.prompt.clone();
         let initial_runtime_context = options.runtime_context.clone();
         let initial_tools_context = options.tools_context.clone();
+        let mut prompt = options.prompt;
+
+        apply_tool_approvals_before_stream(
+            &mut prompt,
+            &self.tools,
+            &initial_tools_context,
+            &constructor_on_tool_execution_start,
+            &stream_on_tool_execution_start,
+            &constructor_on_tool_execution_end,
+            &stream_on_tool_execution_end,
+        )
+        .await?;
+
+        let initial_prompt = prompt.clone();
 
         let mut iterator = StreamTextIterator::from_runtime_tools(
-            options.prompt,
+            prompt,
             self.tools.values().cloned(),
             options.executor,
         )
@@ -521,43 +537,30 @@ impl WorkflowAgent {
             }
 
             let context = validated_tool_context(tool, tool_call, &yield_value.tools_context)?;
-            let event_messages = messages_before_current_tool_calls(&yield_value.messages);
-            let start_info = WorkflowAgentToolExecutionStartInfo {
-                tool_call: tool_call.clone(),
-                messages: event_messages.clone(),
-                tool_context: context.clone(),
-                step_number: yield_value.step.step_number,
-            };
-            call_tool_execution_start_callbacks(
-                constructor_on_tool_execution_start,
-                stream_on_tool_execution_start,
-                &start_info,
-            );
-
-            let started_at = Instant::now();
-            let tool_result = execute_local_tool(
+            if tool_needs_approval(
                 tool,
                 tool_call,
                 yield_value.messages.clone(),
                 context.clone(),
             )
-            .await?;
-            let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let end_info = WorkflowAgentToolExecutionEndInfo {
-                tool_call: tool_call.clone(),
-                messages: event_messages,
-                tool_context: context,
-                step_number: yield_value.step.step_number,
-                duration_ms,
-                success: tool_result.success,
-                output: tool_result.output.clone(),
-                error: tool_result.error.clone(),
-            };
-            call_tool_execution_end_callbacks(
+            .await
+            {
+                execution.has_unresolved_client_tools = true;
+                continue;
+            }
+
+            let tool_result = execute_local_tool_with_callbacks(
+                tool,
+                tool_call,
+                yield_value.messages.clone(),
+                context,
+                yield_value.step.step_number,
+                constructor_on_tool_execution_start,
+                stream_on_tool_execution_start,
                 constructor_on_tool_execution_end,
                 stream_on_tool_execution_end,
-                &end_info,
-            );
+            )
+            .await?;
 
             execution.tool_results.push(tool_result.tool_result);
         }
@@ -1308,13 +1311,6 @@ fn sum_optional_u64(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64
     saw_value.then_some(total)
 }
 
-fn messages_before_current_tool_calls(messages: &[LanguageModelMessage]) -> WorkflowPrompt {
-    match messages.last() {
-        Some(LanguageModelMessage::Assistant(_)) => messages[..messages.len() - 1].to_vec(),
-        _ => messages.to_vec(),
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct WorkflowAgentToolExecution {
     tool_results: Vec<LanguageModelToolResultPart>,
@@ -1380,6 +1376,259 @@ async fn execute_local_tool(
     })
 }
 
+async fn execute_local_tool_with_callbacks(
+    tool: &Tool,
+    tool_call: &ParsedToolCall,
+    messages: WorkflowPrompt,
+    context: Option<JsonValue>,
+    step_number: usize,
+    constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+    stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+    constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+    stream_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+) -> Result<WorkflowAgentLocalToolResult, WorkflowAgentError> {
+    let start_info = WorkflowAgentToolExecutionStartInfo {
+        tool_call: tool_call.clone(),
+        messages: messages.clone(),
+        tool_context: context.clone(),
+        step_number,
+    };
+    call_tool_execution_start_callbacks(
+        constructor_on_tool_execution_start,
+        stream_on_tool_execution_start,
+        &start_info,
+    );
+
+    let started_at = Instant::now();
+    let tool_result =
+        execute_local_tool(tool, tool_call, messages.clone(), context.clone()).await?;
+    let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let end_info = WorkflowAgentToolExecutionEndInfo {
+        tool_call: tool_call.clone(),
+        messages,
+        tool_context: context,
+        step_number,
+        duration_ms,
+        success: tool_result.success,
+        output: tool_result.output.clone(),
+        error: tool_result.error.clone(),
+    };
+    call_tool_execution_end_callbacks(
+        constructor_on_tool_execution_end,
+        stream_on_tool_execution_end,
+        &end_info,
+    );
+
+    Ok(tool_result)
+}
+
+#[derive(Clone, Debug)]
+struct CollectedToolApproval {
+    approval_response: LanguageModelToolApprovalResponsePart,
+    tool_call: LanguageModelToolCallPart,
+}
+
+fn parsed_tool_call_from_language_model_tool_call(
+    tool_call: &LanguageModelToolCallPart,
+) -> ParsedToolCall {
+    ParsedToolCall {
+        kind: "tool-call".to_string(),
+        tool_call_id: tool_call.tool_call_id.clone(),
+        tool_name: tool_call.tool_name.clone(),
+        input: tool_call.input.clone(),
+        provider_executed: tool_call.provider_executed,
+        provider_metadata: None,
+        dynamic: None,
+        invalid: None,
+        error: None,
+    }
+}
+
+fn collect_workflow_tool_approvals(
+    messages: &[LanguageModelMessage],
+) -> (Vec<CollectedToolApproval>, Vec<CollectedToolApproval>) {
+    let Some(LanguageModelMessage::Tool(last_message)) = messages.last() else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut tool_calls_by_id = BTreeMap::new();
+    let mut approval_requests_by_id = BTreeMap::new();
+    for message in messages {
+        let LanguageModelMessage::Assistant(message) = message else {
+            continue;
+        };
+
+        for part in &message.content {
+            match part {
+                LanguageModelAssistantContentPart::ToolCall(part) => {
+                    tool_calls_by_id.insert(part.tool_call_id.clone(), part.clone());
+                }
+                LanguageModelAssistantContentPart::ToolApprovalRequest(part) => {
+                    approval_requests_by_id.insert(part.approval_id.clone(), part.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let existing_tool_results = last_message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelToolContentPart::ToolResult(part) => Some(part.tool_call_id.clone()),
+            LanguageModelToolContentPart::ToolApprovalResponse(_) => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut approved = Vec::new();
+    let mut denied = Vec::new();
+
+    for response in last_message.content.iter().filter_map(|part| match part {
+        LanguageModelToolContentPart::ToolApprovalResponse(part) => Some(part.clone()),
+        LanguageModelToolContentPart::ToolResult(_) => None,
+    }) {
+        let Some(approval_request) = approval_requests_by_id.get(&response.approval_id) else {
+            continue;
+        };
+        if existing_tool_results.contains(&approval_request.tool_call_id) {
+            continue;
+        }
+        let Some(tool_call) = tool_calls_by_id.get(&approval_request.tool_call_id) else {
+            continue;
+        };
+
+        let approval = CollectedToolApproval {
+            approval_response: response,
+            tool_call: tool_call.clone(),
+        };
+
+        if approval.approval_response.approved {
+            approved.push(approval);
+        } else {
+            denied.push(approval);
+        }
+    }
+
+    (approved, denied)
+}
+
+async fn apply_tool_approvals_before_stream(
+    prompt: &mut WorkflowPrompt,
+    tools: &BTreeMap<String, Tool>,
+    tools_context: &WorkflowToolsContext,
+    constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+    stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+    constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+    stream_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+) -> Result<(), WorkflowAgentError> {
+    let (approved_tool_approvals, denied_tool_approvals) =
+        collect_workflow_tool_approvals(prompt.as_slice());
+
+    if approved_tool_approvals.is_empty() && denied_tool_approvals.is_empty() {
+        return Ok(());
+    }
+
+    let mut tool_result_content = Vec::new();
+
+    for approval in approved_tool_approvals {
+        let Some(tool) = tools.get(&approval.tool_call.tool_name) else {
+            continue;
+        };
+        if !tool.is_executable() {
+            continue;
+        }
+
+        let parsed_tool_call = parsed_tool_call_from_language_model_tool_call(&approval.tool_call);
+        let context = validated_tool_context(tool, &parsed_tool_call, tools_context)?;
+        let result = execute_local_tool_with_callbacks(
+            tool,
+            &parsed_tool_call,
+            prompt.clone(),
+            context,
+            0,
+            constructor_on_tool_execution_start,
+            stream_on_tool_execution_start,
+            constructor_on_tool_execution_end,
+            stream_on_tool_execution_end,
+        )
+        .await?;
+        tool_result_content.push(LanguageModelToolContentPart::ToolResult(result.tool_result));
+    }
+
+    for denial in denied_tool_approvals {
+        let mut output = LanguageModelToolResultOutput::execution_denied();
+        if let Some(reason) = &denial.approval_response.reason {
+            output = output.with_reason(reason.clone());
+        }
+        tool_result_content.push(LanguageModelToolContentPart::ToolResult(
+            LanguageModelToolResultPart::new(
+                denial.tool_call.tool_call_id.clone(),
+                denial.tool_call.tool_name.clone(),
+                output,
+            ),
+        ));
+    }
+
+    let mut cleaned_messages = Vec::new();
+    for message in prompt.iter() {
+        match message {
+            LanguageModelMessage::Assistant(assistant_message) => {
+                let filtered: Vec<LanguageModelAssistantContentPart> = assistant_message
+                    .content
+                    .iter()
+                    .filter(|part| {
+                        !matches!(
+                            part,
+                            LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                if !filtered.is_empty() {
+                    let provider_options = assistant_message.provider_options.clone();
+                    let mut cleaned_assistant_message =
+                        LanguageModelAssistantMessage::new(filtered);
+                    if let Some(provider_options) = provider_options {
+                        cleaned_assistant_message =
+                            cleaned_assistant_message.with_provider_options(provider_options);
+                    }
+                    cleaned_messages
+                        .push(LanguageModelMessage::Assistant(cleaned_assistant_message));
+                }
+            }
+            LanguageModelMessage::Tool(tool_message) => {
+                let filtered: Vec<LanguageModelToolContentPart> = tool_message
+                    .content
+                    .iter()
+                    .filter(|part| {
+                        !matches!(part, LanguageModelToolContentPart::ToolApprovalResponse(_))
+                    })
+                    .cloned()
+                    .collect();
+                if !filtered.is_empty() {
+                    let provider_options = tool_message.provider_options.clone();
+                    let mut cleaned_tool_message = LanguageModelToolMessage::new(filtered);
+                    if let Some(provider_options) = provider_options {
+                        cleaned_tool_message =
+                            cleaned_tool_message.with_provider_options(provider_options);
+                    }
+                    cleaned_messages.push(LanguageModelMessage::Tool(cleaned_tool_message));
+                }
+            }
+            _ => cleaned_messages.push(message.clone()),
+        }
+    }
+
+    if !tool_result_content.is_empty() {
+        cleaned_messages.push(LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            tool_result_content,
+        )));
+    }
+
+    *prompt = cleaned_messages;
+    Ok(())
+}
+
 fn validated_tool_context(
     tool: &Tool,
     tool_call: &ParsedToolCall,
@@ -1407,6 +1656,29 @@ fn validated_tool_context(
     }
 
     Ok(context)
+}
+
+async fn tool_needs_approval(
+    tool: &Tool,
+    tool_call: &ParsedToolCall,
+    messages: WorkflowPrompt,
+    context: Option<JsonValue>,
+) -> bool {
+    if let Some(needs_approval) = tool.needs_approval() {
+        return needs_approval;
+    }
+
+    let Some(approval_future) = tool.resolve_needs_approval(tool_call.input.clone(), {
+        let mut options = ToolNeedsApprovalOptions::new(tool_call.tool_call_id.clone(), messages);
+        if let Some(context) = context {
+            options = options.with_context(context);
+        }
+        options
+    }) else {
+        return false;
+    };
+
+    approval_future.await
 }
 
 fn final_tool_output(outputs: Vec<ExecuteToolOutput>) -> Option<JsonValue> {
@@ -3407,6 +3679,148 @@ mod tests {
             .expect("prepare step was called");
         assert_eq!(captured_messages, prompt);
         assert_eq!(result.messages, prompt);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pause_when_tool_needs_approval() {
+        let executions = Arc::new(Mutex::new(0_usize));
+        let executions_for_tool = Arc::clone(&executions);
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(move |_, _| {
+                let executions_for_tool = Arc::clone(&executions_for_tool);
+                async move {
+                    *executions_for_tool
+                        .lock()
+                        .expect("execution count lock succeeds") += 1;
+                    Ok(json!("approved-result"))
+                }
+            })
+            .with_needs_approval(true);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([tool_call_step(
+            LanguageModelToolCall::new("test-call-id", "testTool", r#"{"value":"test"}"#),
+        )]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(
+            *executions.lock().expect("execution count lock succeeds"),
+            0
+        );
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "testTool");
+        assert!(result.tool_results.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_support_needs_approval_as_a_function() {
+        let approval_input = Arc::new(Mutex::new(None::<JsonValue>));
+        let approval_input_for_tool = Arc::clone(&approval_input);
+        let executions = Arc::new(Mutex::new(0_usize));
+        let executions_for_tool = Arc::clone(&executions);
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(move |_, _| {
+                let executions_for_tool = Arc::clone(&executions_for_tool);
+                async move {
+                    *executions_for_tool
+                        .lock()
+                        .expect("execution count lock succeeds") += 1;
+                    Ok(json!("approved-result"))
+                }
+            })
+            .with_needs_approval_function(move |input, _options| {
+                let approval_input_for_tool = Arc::clone(&approval_input_for_tool);
+                async move {
+                    *approval_input_for_tool
+                        .lock()
+                        .expect("approval input lock succeeds") = Some(input);
+                    true
+                }
+            });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([tool_call_step(
+            LanguageModelToolCall::new("test-call-id", "testTool", r#"{"value":"test"}"#),
+        )]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(
+            *approval_input.lock().expect("approval input lock succeeds"),
+            Some(json!({ "value": "test" }))
+        );
+        assert_eq!(
+            *executions.lock().expect("execution count lock succeeds"),
+            0
+        );
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert!(result.tool_results.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_execute_approved_tools_before_streaming() {
+        let executions = Arc::new(Mutex::new(0_usize));
+        let executions_for_tool = Arc::clone(&executions);
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(move |_, _| {
+                let executions_for_tool = Arc::clone(&executions_for_tool);
+                async move {
+                    *executions_for_tool
+                        .lock()
+                        .expect("execution count lock succeeds") += 1;
+                    Ok(json!("approved-result"))
+                }
+            })
+            .with_needs_approval(true);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let prompt = vec![
+            user_text_message("test"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "call-1",
+                        "testTool",
+                        json!({ "value": "test" }),
+                    ),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    ai_sdk_provider::LanguageModelToolApprovalRequestPart::new(
+                        "approval-call-1",
+                        "call-1",
+                    ),
+                ),
+            ])),
+            LanguageModelMessage::Tool(ai_sdk_provider::LanguageModelToolMessage::new(vec![
+                ai_sdk_provider::LanguageModelToolContentPart::ToolApprovalResponse(
+                    ai_sdk_provider::LanguageModelToolApprovalResponsePart::new(
+                        "approval-call-1",
+                        true,
+                    ),
+                ),
+            ])),
+        ];
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(prompt.clone(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(
+            *executions.lock().expect("execution count lock succeeds"),
+            1
+        );
+        assert_eq!(result.messages.len(), 3);
+        let tool_message = tool_message_from_prompt(&result.messages);
+        let tool_result = first_tool_result(tool_message);
+        assert_eq!(
+            tool_result.output,
+            ai_sdk_provider::LanguageModelToolResultOutput::text("approved-result")
+        );
     }
 
     #[test]
