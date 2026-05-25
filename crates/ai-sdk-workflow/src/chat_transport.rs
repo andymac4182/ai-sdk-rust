@@ -750,6 +750,18 @@ mod tests {
     }
 
     #[test]
+    fn workflow_chat_transport_uses_custom_api_endpoint_and_builds_reconnect_request() {
+        let transport = WorkflowChatTransport::new().with_api("/custom/chat");
+        let request =
+            transport.reconnect_request(&ReconnectToStreamOptions::new("chat-1"), Some("run-1"), 7);
+
+        assert_eq!(
+            request,
+            WorkflowChatRequest::get("/custom/chat/run-1/stream?startIndex=7", None)
+        );
+    }
+
+    #[test]
     fn workflow_chat_transport_sends_messages_and_reports_chat_end() {
         let transport = WorkflowChatTransport::new();
         let mut client = ScriptedWorkflowChatClient::new([WorkflowChatResponse::ok([
