@@ -17769,6 +17769,68 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_uses_sandbox_returned_from_prepare_step_for_that_step_only() {
+        let model = MultiStepToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("default sandbox"));
+        let step_sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("step sandbox"));
+        let recorded_sandboxes = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let recorded_sandboxes_for_tool = Arc::clone(&recorded_sandboxes);
+        let step_sandbox_for_prepare = Arc::clone(&step_sandbox);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("t1", input_schema).with_execute(move |_input, options| {
+                        let recorded_sandboxes = Arc::clone(&recorded_sandboxes_for_tool);
+                        async move {
+                            recorded_sandboxes
+                                .lock()
+                                .expect("recorded sandboxes lock")
+                                .push(
+                                    options
+                                        .experimental_sandbox
+                                        .as_ref()
+                                        .map(|sandbox| sandbox.description().to_string()),
+                                );
+                            Ok(json!({ "value": "ok" }))
+                        }
+                    }),
+                )
+                .with_experimental_sandbox(Arc::clone(&sandbox))
+                .with_prepare_step(move |options| {
+                    let step_sandbox = Arc::clone(&step_sandbox_for_prepare);
+                    async move {
+                        if options.step_number == 0 {
+                            PrepareStepResult::new().with_experimental_sandbox(step_sandbox)
+                        } else {
+                            PrepareStepResult::new()
+                        }
+                    }
+                })
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *recorded_sandboxes.lock().expect("recorded sandboxes lock"),
+            vec![
+                Some("step sandbox".to_string()),
+                Some("default sandbox".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn generate_text_prepare_step_can_override_model_with_same_model_type() {
         let primary = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
             LanguageModelText::new("primary"),
@@ -18477,6 +18539,104 @@ mod tests {
                 tool_call_provider_metadata: None,
                 first_step_prefix,
             }
+        }
+    }
+
+    struct MultiStepToolLoopLanguageModel {
+        calls: RefCell<Vec<LanguageModelCallOptions>>,
+    }
+
+    impl MultiStepToolLoopLanguageModel {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LanguageModel for MultiStepToolLoopLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(BTreeMap::new())
+        }
+
+        fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            let step_number = self.calls.borrow().len();
+            self.calls.borrow_mut().push(options);
+
+            let (tool_call_id, tool_input, content, finish_reason) = match step_number {
+                0 => (
+                    "call-1",
+                    r#"{"value":"first"}"#,
+                    vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                        "call-1",
+                        "t1",
+                        r#"{"value":"first"}"#,
+                    ))],
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: Some("tool_calls".to_string()),
+                    },
+                ),
+                1 => (
+                    "call-2",
+                    r#"{"value":"second"}"#,
+                    vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                        "call-2",
+                        "t1",
+                        r#"{"value":"second"}"#,
+                    ))],
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: Some("tool_calls".to_string()),
+                    },
+                ),
+                _ => (
+                    "",
+                    "",
+                    vec![LanguageModelContent::Text(LanguageModelText::new("done"))],
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("stop".to_string()),
+                    },
+                ),
+            };
+
+            let _ = (tool_call_id, tool_input);
+
+            ready(LanguageModelGenerateResult::new(
+                content,
+                finish_reason,
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
         }
     }
 
