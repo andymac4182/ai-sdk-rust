@@ -2770,6 +2770,31 @@ pub fn process_ui_message_stream<I>(
 where
     I: IntoIterator<Item = UiMessageChunk>,
 {
+    process_ui_message_stream_with_callbacks(
+        state,
+        stream,
+        terminate_on_error,
+        &mut noop_ui_message_chunk_callback,
+        &mut noop_ui_message_chunk_callback,
+        &mut noop_ui_message_process_error_callback,
+    )
+}
+
+/// Applies UI-message stream chunks and returns cloned message states after writes.
+pub fn process_ui_message_stream_with_callbacks<I, FData, FToolCall, FError>(
+    state: &mut StreamingUiMessageState,
+    stream: I,
+    terminate_on_error: bool,
+    on_data: &mut FData,
+    on_tool_call: &mut FToolCall,
+    on_error: &mut FError,
+) -> Result<Vec<UiMessage>, UiMessageStreamProcessError>
+where
+    I: IntoIterator<Item = UiMessageChunk>,
+    FData: for<'a> FnMut(&'a UiMessageChunk),
+    FToolCall: for<'a> FnMut(&'a UiMessageChunk),
+    FError: for<'a> FnMut(&'a UiMessageStreamProcessError),
+{
     let mut updates = Vec::new();
 
     for chunk in stream {
@@ -2974,6 +2999,16 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                 dynamic,
                 title,
             } => {
+                on_tool_call(&UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: input.clone(),
+                    provider_executed,
+                    provider_metadata: provider_metadata.clone(),
+                    tool_metadata: tool_metadata.clone(),
+                    dynamic,
+                    title: title.clone(),
+                });
                 state.active_tool_input_parts.remove(&tool_call_id);
                 state.tool_input_text.remove(&tool_call_id);
                 let index = upsert_tool_part(
@@ -3188,6 +3223,13 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                 data,
                 transient,
             } => {
+                on_data(&UiMessageChunk::Data {
+                    data_type: data_type.clone(),
+                    id: id.clone(),
+                    data: data.clone(),
+                    transient,
+                });
+
                 if transient.unwrap_or(false) {
                     continue;
                 }
@@ -3217,7 +3259,9 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
             }
             UiMessageChunk::Error { error_text } => {
                 if terminate_on_error {
-                    return Err(UiMessageStreamProcessError::new("error", "", error_text));
+                    let error = UiMessageStreamProcessError::new("error", "", error_text);
+                    on_error(&error);
+                    return Err(error);
                 }
             }
             UiMessageChunk::Abort { reason } => {
@@ -3268,6 +3312,10 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
 
     Ok(updates)
 }
+
+fn noop_ui_message_chunk_callback(_: &UiMessageChunk) {}
+
+fn noop_ui_message_process_error_callback(_: &UiMessageStreamProcessError) {}
 
 /// Reads UI-message stream chunks into cloned message states.
 pub fn read_ui_message_stream(
@@ -7128,6 +7176,161 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn process_ui_message_stream_calls_on_data_with_transient_part() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let captured_data = Arc::new(Mutex::new(Vec::new()));
+        let captured_data_for_callback = Arc::clone(&captured_data);
+
+        process_ui_message_stream_with_callbacks(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::data("data-test", json!("example-data-can-be-anything"))
+                    .with_transient(true),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+            &mut |chunk| {
+                captured_data_for_callback
+                    .lock()
+                    .expect("captured data lock")
+                    .push(serde_json::to_value(chunk).expect("chunk serializes"));
+            },
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .expect("stream processes");
+
+        assert_eq!(
+            captured_data.lock().expect("captured data lock").as_slice(),
+            [json!({
+                "type": "data-test",
+                "data": "example-data-can-be-anything",
+                "transient": true
+            })]
+        );
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_calls_on_tool_call_for_client_executed_tools() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let invoked = Arc::new(Mutex::new(false));
+        let invoked_for_callback = Arc::clone(&invoked);
+
+        process_ui_message_stream_with_callbacks(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-id".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: None,
+                    title: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+            &mut |_| {},
+            &mut |_| {
+                *invoked_for_callback.lock().expect("invoked lock") = true;
+            },
+            &mut |_| {},
+        )
+        .expect("stream processes");
+
+        assert!(*invoked.lock().expect("invoked lock"));
+    }
+
+    #[test]
+    fn process_ui_message_stream_calls_on_tool_call_for_dynamic_tools() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let invoked = Arc::new(Mutex::new(false));
+        let invoked_for_callback = Arc::clone(&invoked);
+
+        process_ui_message_stream_with_callbacks(
+            &mut state,
+            [
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: "tool-call-id".to_string(),
+                    tool_name: "tool-name".to_string(),
+                    input: json!({ "query": "test" }),
+                    provider_executed: None,
+                    provider_metadata: None,
+                    tool_metadata: None,
+                    dynamic: Some(true),
+                    title: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ],
+            false,
+            &mut |_| {},
+            &mut |_| {
+                *invoked_for_callback.lock().expect("invoked lock") = true;
+            },
+            &mut |_| {},
+        )
+        .expect("stream processes");
+
+        assert!(*invoked.lock().expect("invoked lock"));
+    }
+
+    #[test]
+    fn process_ui_message_stream_calls_on_error_for_error_chunks() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let captured_errors = Arc::new(Mutex::new(Vec::new()));
+        let captured_errors_for_callback = Arc::clone(&captured_errors);
+
+        let error = process_ui_message_stream_with_callbacks(
+            &mut state,
+            [UiMessageChunk::Error {
+                error_text: "test error".to_string(),
+            }],
+            true,
+            &mut |_| {},
+            &mut |_| {},
+            &mut |error| {
+                captured_errors_for_callback
+                    .lock()
+                    .expect("captured errors lock")
+                    .push(error.to_string());
+            },
+        )
+        .expect_err("error chunk terminates");
+
+        assert_eq!(
+            captured_errors
+                .lock()
+                .expect("captured errors lock")
+                .as_slice(),
+            [error.to_string()]
+        );
+        assert_eq!(error.chunk_type(), "error");
+        assert_eq!(error.chunk_id(), "");
+        assert_eq!(error.message(), "test error");
     }
 
     #[test]
