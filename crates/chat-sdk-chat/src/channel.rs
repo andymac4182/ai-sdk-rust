@@ -32,6 +32,42 @@ use crate::types::{
     PostEphemeralOptions, StateAdapter, StateResult,
 };
 
+/// Format current UTC time as ISO 8601 / RFC 3339 string
+/// (`YYYY-MM-DDTHH:MM:SS.mmmZ`). Used by
+/// [`Channel::post_sent_message`] to populate the synthesized
+/// Message's `metadata.date_sent`. Avoids pulling in `chrono` —
+/// builds the string from `SystemTime` directly. (slice 487)
+fn now_iso_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = now.as_secs();
+    let millis = now.subsec_millis();
+    // Days from epoch 1970-01-01.
+    let days = (total_secs / 86_400) as i64;
+    let secs_of_day = total_secs % 86_400;
+    let h = secs_of_day / 3_600;
+    let m = (secs_of_day % 3_600) / 60;
+    let s = secs_of_day % 60;
+    // Convert days to Y-M-D using a simple algorithm (Howard
+    // Hinnant's date math): valid for all civil dates.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y_civil = if mo <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y_civil, mo, d, h, m, s, millis
+    )
+}
+
 /// 1:1 with upstream's private
 /// `const CHANNEL_STATE_KEY_PREFIX = "channel-state:"`.
 pub const CHANNEL_STATE_KEY_PREFIX: &str = "channel-state:";
@@ -316,6 +352,55 @@ impl Channel {
             text: accumulated,
             id,
         })
+    }
+
+    /// 1:1 port of upstream `Channel.post(text)` overload that
+    /// returns a `SentMessage` (with edit/delete/addReaction/
+    /// removeReaction methods). POSTs `text` via
+    /// [`Adapter::post_channel_message`] (falling back to
+    /// [`Adapter::post_message`] on `Unsupported`, same as
+    /// [`Self::post`]), then synthesizes a [`crate::message::Message`]
+    /// from the returned id + the posted text + a bot-author shell
+    /// (no userId is known to the chat-sdk layer; adapters that
+    /// want richer Message provenance can override the
+    /// post-and-return path). Returns a
+    /// [`crate::thread::SentMessage`] bound to the channel's
+    /// adapter so subsequent edits / deletes / reactions route
+    /// through the right platform. (slice 487)
+    pub async fn post_sent_message(&self, text: &str) -> AdapterResult<crate::thread::SentMessage> {
+        let id = self.post(text).await?;
+        let author = Author {
+            user_id: String::new(),
+            user_name: "bot".to_string(),
+            full_name: "Bot".to_string(),
+            is_bot: crate::types::BotStatus::Known(true),
+            is_me: true,
+        };
+        let metadata = crate::types::MessageMetadata {
+            // 1:1 with upstream: the bot-posted message's dateSent
+            // is the moment of posting. Formatted as RFC 3339 /
+            // ISO 8601 from the current SystemTime (no chrono dep
+            // in this crate); adopters that need a platform-
+            // provided timestamp can read it from the adapter via
+            // a follow-up fetch.
+            date_sent: now_iso_utc(),
+            edited: false,
+            edited_at: None,
+        };
+        let message = crate::message::Message::new(
+            id,
+            &self.channel_id,
+            text,
+            crate::markdown::root(vec![]),
+            serde_json::Value::Null,
+            author,
+            metadata,
+            Vec::new(),
+        );
+        Ok(crate::thread::SentMessage::new(
+            message,
+            self.adapter.clone(),
+        ))
     }
 
     /// 1:1 port of upstream `Channel.startTyping(status?)`. Delegates
@@ -864,6 +949,161 @@ mod tests {
         // Verify post_channel_message recorder is empty (the call
         // returned Unsupported and was not recorded).
         assert!(adapter.post_channel_message.lock().unwrap().is_empty());
+    }
+
+    /// Adapter that records every post / edit / delete /
+    /// add_reaction / remove_reaction call — used by the slice-487
+    /// SentMessage-flow tests on `Channel::post_sent_message`.
+    #[derive(Debug, Default)]
+    struct SentFlowAdapter {
+        post_channel: Mutex<Vec<(String, String)>>,
+        edit_calls: Mutex<Vec<(String, String, String)>>,
+        delete_calls: Mutex<Vec<(String, String)>>,
+        add_reaction_calls: Mutex<Vec<(String, String, String)>>,
+        remove_reaction_calls: Mutex<Vec<(String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for SentFlowAdapter {
+        fn name(&self) -> &str {
+            "sent-flow"
+        }
+        async fn post_channel_message(
+            &self,
+            channel_id: &str,
+            text: &str,
+        ) -> AdapterResult<String> {
+            self.post_channel
+                .lock()
+                .unwrap()
+                .push((channel_id.to_string(), text.to_string()));
+            Ok("M-NEW".to_string())
+        }
+        async fn edit_message(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            text: &str,
+        ) -> AdapterResult<String> {
+            self.edit_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                text.to_string(),
+            ));
+            Ok("M-EDIT".to_string())
+        }
+        async fn delete_message(&self, thread_id: &str, message_id: &str) -> AdapterResult<()> {
+            self.delete_calls
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), message_id.to_string()));
+            Ok(())
+        }
+        async fn add_reaction(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> AdapterResult<()> {
+            self.add_reaction_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                emoji.to_string(),
+            ));
+            Ok(())
+        }
+        async fn remove_reaction(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            emoji: &str,
+        ) -> AdapterResult<()> {
+            self.remove_reaction_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                emoji.to_string(),
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn channel_post_sent_message_returns_sent_message_with_edit_delete_capabilities() {
+        // 1:1 with upstream `channel.test.ts > "ChannelImpl.post error
+        // cases" > "should return a SentMessage with edit/delete
+        // capabilities"`. The returned SentMessage carries the
+        // posted text + the adapter-assigned id and exposes edit /
+        // delete / addReaction / removeReaction methods.
+        let adapter = Arc::new(SentFlowAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let sent = block_on(channel.post_sent_message("Hello!")).unwrap();
+        assert_eq!(sent.id(), "M-NEW");
+        assert_eq!(sent.text(), "Hello!");
+        assert_eq!(sent.thread_id(), "slack:C123");
+        // Verify the post landed.
+        let posts = adapter.post_channel.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, "slack:C123");
+        assert_eq!(posts[0].1, "Hello!");
+    }
+
+    #[test]
+    fn channel_post_sent_message_should_allow_editing_a_sent_message() {
+        // 1:1 with upstream "should allow editing a sent message"
+        // (slice 487).
+        let adapter = Arc::new(SentFlowAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let sent = block_on(channel.post_sent_message("Hello!")).unwrap();
+        block_on(sent.edit("Updated!")).unwrap();
+        let edits = adapter.edit_calls.lock().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].0, "slack:C123");
+        assert_eq!(edits[0].1, "M-NEW");
+        assert_eq!(edits[0].2, "Updated!");
+    }
+
+    #[test]
+    fn channel_post_sent_message_should_allow_deleting_a_sent_message() {
+        // 1:1 with upstream "should allow deleting a sent message"
+        // (slice 487).
+        let adapter = Arc::new(SentFlowAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let sent = block_on(channel.post_sent_message("Hello!")).unwrap();
+        block_on(sent.delete()).unwrap();
+        let deletes = adapter.delete_calls.lock().unwrap();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].0, "slack:C123");
+        assert_eq!(deletes[0].1, "M-NEW");
+    }
+
+    #[test]
+    fn channel_post_sent_message_should_allow_adding_a_reaction_to_a_sent_message() {
+        // 1:1 with upstream "should allow adding a reaction to a
+        // sent message" (slice 487).
+        let adapter = Arc::new(SentFlowAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let sent = block_on(channel.post_sent_message("Hello!")).unwrap();
+        block_on(sent.add_reaction("thumbs_up")).unwrap();
+        let reacts = adapter.add_reaction_calls.lock().unwrap();
+        assert_eq!(reacts.len(), 1);
+        assert_eq!(reacts[0].0, "slack:C123");
+        assert_eq!(reacts[0].1, "M-NEW");
+        assert_eq!(reacts[0].2, "thumbs_up");
+    }
+
+    #[test]
+    fn channel_post_sent_message_should_allow_removing_a_reaction_from_a_sent_message() {
+        // 1:1 with upstream "should allow removing a reaction from
+        // a sent message" (slice 487).
+        let adapter = Arc::new(SentFlowAdapter::default());
+        let channel = Channel::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123");
+        let sent = block_on(channel.post_sent_message("Hello!")).unwrap();
+        block_on(sent.remove_reaction("thumbs_up")).unwrap();
+        let reacts = adapter.remove_reaction_calls.lock().unwrap();
+        assert_eq!(reacts.len(), 1);
+        assert_eq!(reacts[0].0, "slack:C123");
+        assert_eq!(reacts[0].1, "M-NEW");
+        assert_eq!(reacts[0].2, "thumbs_up");
     }
 
     /// Adapter that records every `post_channel_message_postable`
