@@ -2158,9 +2158,10 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelReasoningEffort, LanguageModelResponseFormat, LanguageModelStreamPart,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolChoice, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelResponseFormat,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolChoice, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -4775,6 +4776,39 @@ mod tests {
             })
         );
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_chat_should_warn_for_unsupported_provider_defined_tools() {
+        let (body, warnings) =
+            openai_chat_captured_body_and_warnings_with_options("gpt-3.5-turbo", |options| {
+                options.with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "some.unsupported_tool",
+                    "unsupported_tool",
+                    JsonObject::new(),
+                )))
+            });
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "tools": []
+            })
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "provider-defined tool some.unsupported_tool".to_string(),
+                details: None,
+            }]
+        );
     }
 
     #[test]

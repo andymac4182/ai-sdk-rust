@@ -3523,6 +3523,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-chat-prepare-tools.test.ts` strict function-tool cases to the OpenAI
   provider facade by asserting `strict: true`, `strict: false`, and omitted
   `strict` serialization across mixed function tools.
+- 2026-05-25: OpenAI chat unsupported provider-tool parity added
+  `openai_chat_should_warn_for_unsupported_provider_defined_tools`, mapping
+  upstream `openai-chat-prepare-tools.test.ts` unsupported provider-defined
+  tool handling to the OpenAI provider facade by asserting empty tool output
+  plus the provider-defined tool warning.
 - 2026-05-24: OpenAI chat basic generate parity added
   `openai_chat_should_extract_text_response`,
   `openai_chat_should_extract_usage`,
