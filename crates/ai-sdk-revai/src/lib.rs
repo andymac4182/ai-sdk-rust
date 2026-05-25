@@ -8,14 +8,14 @@ use ai_sdk_rust::{
     FetchErrorInfo, FileDataContent, FormData, FormDataValue, GetFromApiOptions, HandledFetchError,
     Headers, JsonObject, JsonValue, LoadApiKeyError, LoadApiKeyOptions, ModelType,
     NoSuchModelError, OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel,
-    OpenAICompatibleImageModel, PostFormDataToApiOptions, Provider, ProviderApiRequest,
+    OpenAICompatibleImageModel, PostToApiOptions, Provider, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithTranscriptionModel,
     RuntimeEnvironment, TranscriptionModel, TranscriptionModelCallOptions,
     TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment, Warning,
     combine_headers, convert_base64_to_bytes, create_json_error_response_handler,
-    create_json_response_handler, delay, get_from_api, load_api_key, parse_provider_options,
-    post_form_data_to_api, with_user_agent_suffix,
+    create_json_response_handler, delay, get_from_api, load_api_key, media_type_to_extension,
+    parse_provider_options, post_to_api, with_user_agent_suffix,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -295,6 +295,8 @@ impl RevaiTranscriptionModel {
                 );
             }
         };
+        let request_body_values = revai_form_data_request_body_values(&form_data);
+        let (content_type, body) = revai_multipart_body(&form_data, Some(&options.media_type));
         let request_headers = match self.request_headers(options.headers.as_ref()) {
             Ok(headers) => headers,
             Err(error) => {
@@ -308,13 +310,16 @@ impl RevaiTranscriptionModel {
                 );
             }
         };
-        let submit_options =
-            PostFormDataToApiOptions::new(revai_url("/speechtotext/v1/jobs"), form_data)
-                .with_headers(request_headers.clone())
-                .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
-        let submit = match post_form_data_to_api(
-            submit_options,
+        let submit = match post_to_api(
+            PostToApiOptions::new(
+                revai_url("/speechtotext/v1/jobs"),
+                ProviderApiRequestBody::bytes(body),
+                request_body_values,
+            )
+            .with_headers(request_headers.clone())
+            .with_header("content-type", content_type)
+            .with_environment(RuntimeEnvironment::unknown()),
             move |request| (transport)(request),
             |request, response| {
                 create_json_response_handler(
@@ -594,6 +599,32 @@ fn revai_transcription_form_data(
     form_data.append("config", FormDataValue::text(config_json));
 
     Ok((form_data, Vec::new()))
+}
+
+fn revai_form_data_request_body_values(form_data: &FormData) -> JsonValue {
+    let mut values = JsonObject::new();
+
+    for entry in &form_data.entries {
+        values.insert(
+            entry.name.clone(),
+            revai_form_data_value_to_request_body_value(&entry.value),
+        );
+    }
+
+    JsonValue::Object(values)
+}
+
+fn revai_form_data_value_to_request_body_value(value: &FormDataValue) -> JsonValue {
+    match value {
+        FormDataValue::Text { value } => JsonValue::String(value.clone()),
+        FormDataValue::Bytes { value } => JsonValue::Array(
+            value
+                .iter()
+                .copied()
+                .map(JsonValue::from)
+                .collect::<Vec<_>>(),
+        ),
+    }
 }
 
 fn revai_audio_bytes(audio: &FileDataContent) -> Result<Vec<u8>, String> {
@@ -907,7 +938,7 @@ fn execute_revai_post_request(
     request: ProviderApiRequest,
 ) -> Result<ProviderApiResponse, FetchErrorInfo> {
     let form_body = request.body.as_ref().and_then(|body| match body {
-        ProviderApiRequestBody::FormData { content } => Some(revai_multipart_body(content)),
+        ProviderApiRequestBody::FormData { content } => Some(revai_multipart_body(content, None)),
         _ => None,
     });
     let mut builder = ureq::post(&request.url);
@@ -933,8 +964,12 @@ fn execute_revai_post_request(
     revai_provider_api_response(response)
 }
 
-fn revai_multipart_body(form_data: &FormData) -> (String, Vec<u8>) {
+fn revai_multipart_body(form_data: &FormData, media_type: Option<&str>) -> (String, Vec<u8>) {
     let boundary = "----ai-sdk-rust-revai-boundary";
+    let audio_filename = media_type
+        .map(revai_audio_filename)
+        .unwrap_or_else(|| "audio".to_string());
+    let media_type = media_type.unwrap_or("application/octet-stream");
     let mut body = Vec::new();
 
     for entry in &form_data.entries {
@@ -955,8 +990,8 @@ fn revai_multipart_body(form_data: &FormData) -> (String, Vec<u8>) {
             FormDataValue::Bytes { value } => {
                 body.extend_from_slice(
                     format!(
-                        "content-disposition: form-data; name=\"{}\"; filename=\"audio\"\r\ncontent-type: application/octet-stream\r\n\r\n",
-                        entry.name
+                        "content-disposition: form-data; name=\"{}\"; filename=\"{}\"\r\ncontent-type: {}\r\n\r\n",
+                        entry.name, audio_filename, media_type
                     )
                     .as_bytes(),
                 );
@@ -968,6 +1003,16 @@ fn revai_multipart_body(form_data: &FormData) -> (String, Vec<u8>) {
 
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+fn revai_audio_filename(media_type: &str) -> String {
+    let extension = media_type_to_extension(media_type);
+
+    if extension.is_empty() {
+        "audio".to_string()
+    } else {
+        format!("audio.{extension}")
+    }
 }
 
 fn revai_provider_api_response(
@@ -1006,8 +1051,8 @@ mod tests {
         RevaiTransportFuture, create_revai, revai,
     };
     use ai_sdk_rust::{
-        FileDataContent, FormDataValue, ModelType, Provider, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
+        FileDataContent, ModelType, Provider, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
         ProviderWithTranscriptionModel, TranscriptionModel, TranscriptionModelCallOptions,
         TranscriptionModelSegment,
     };
@@ -1119,17 +1164,28 @@ mod tests {
         (requests, transport)
     }
 
-    fn form_config_json(request: &ProviderApiRequest) -> serde_json::Value {
-        let form_data = request
+    fn multipart_body_as_str(request: &ProviderApiRequest) -> String {
+        let body = request
             .body
             .as_ref()
-            .and_then(ProviderApiRequestBody::as_form_data)
-            .expect("request body is form data");
-        let Some(FormDataValue::Text { value }) = form_data.get("config") else {
-            panic!("expected config form field");
-        };
+            .and_then(ProviderApiRequestBody::as_bytes)
+            .expect("request body is bytes");
 
-        serde_json::from_str(value).expect("config form field is JSON")
+        String::from_utf8(body.to_vec()).expect("multipart body is utf-8 for assertions")
+    }
+
+    fn multipart_config_json(request: &ProviderApiRequest) -> serde_json::Value {
+        let multipart = multipart_body_as_str(request);
+        let config_section = multipart
+            .split("content-disposition: form-data; name=\"config\"\r\n\r\n")
+            .nth(1)
+            .expect("config form field is present");
+        let config_text = config_section
+            .split("\r\n--")
+            .next()
+            .unwrap_or(config_section);
+
+        serde_json::from_str(config_text).expect("config form field is JSON")
     }
 
     #[test]
@@ -1218,17 +1274,19 @@ mod tests {
                 .get("user-agent")
                 .is_some_and(|value| value.contains("ai-sdk/revai/"))
         );
-        let form_data = requests[0]
-            .body
-            .as_ref()
-            .and_then(ProviderApiRequestBody::as_form_data)
-            .expect("request body is form data");
         assert_eq!(
-            form_data.get("media"),
-            Some(&FormDataValue::bytes(vec![1, 2, 3, 4]))
+            requests[0].headers.get("content-type").map(String::as_str),
+            Some("multipart/form-data; boundary=----ai-sdk-rust-revai-boundary")
         );
+        let multipart = multipart_body_as_str(&requests[0]);
+        assert!(
+            multipart
+                .contains("content-disposition: form-data; name=\"media\"; filename=\"audio.wav\"")
+        );
+        assert!(multipart.contains("content-type: audio/wav"));
+        assert!(multipart.contains("content-disposition: form-data; name=\"config\""));
         assert_eq!(
-            form_config_json(&requests[0]),
+            multipart_config_json(&requests[0]),
             json!({
                 "transcriber": "machine",
                 "metadata": "job-1",
@@ -1241,6 +1299,24 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn revai_transcription_multipart_uses_media_type_extension_for_filename() {
+        let (form_data, _) = super::revai_transcription_form_data(
+            "machine",
+            &TranscriptionModelCallOptions::new(
+                FileDataContent::Bytes(vec![1, 2, 3, 4]),
+                "audio/mpeg",
+            ),
+        )
+        .expect("form data builds");
+
+        let (_, multipart) = super::revai_multipart_body(&form_data, Some("audio/mpeg"));
+        let multipart = String::from_utf8(multipart).expect("multipart body is utf-8");
+
+        assert!(multipart.contains("filename=\"audio.mp3\""));
+        assert!(multipart.contains("content-type: audio/mpeg"));
     }
 
     #[test]
