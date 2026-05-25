@@ -16161,6 +16161,35 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_passes_runtime_context_to_finish_callback() {
+        let model = FakeLanguageModel::new();
+        let runtime_context = json!({ "context": "test" })
+            .as_object()
+            .expect("runtime context is an object")
+            .clone();
+        let captured_context = Arc::new(Mutex::new(None::<JsonObject>));
+        let captured_context_for_callback = Arc::clone(&captured_context);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_runtime_context(runtime_context.clone())
+                .with_on_finish(move |event| {
+                    let captured_context = Arc::clone(&captured_context_for_callback);
+                    async move {
+                        *captured_context.lock().expect("captured context lock") =
+                            Some(event.runtime_context);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            *captured_context.lock().expect("captured context lock"),
+            Some(runtime_context)
+        );
+    }
+
+    #[test]
     fn generate_text_response_messages_preserve_tool_approval_requests() {
         let model = FakeLanguageModel::new().with_content(vec![
             LanguageModelContent::ToolCall(
