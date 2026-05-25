@@ -815,6 +815,7 @@ mod tests {
 
     #[test]
     fn renders_headings_as_bold_all_levels() {
+        // 1:1 with upstream markdown.test.ts:176 > "renders headings as bold (all levels)"
         for level in 1..=6 {
             let hashes = "#".repeat(level);
             let output = rt(&format!("{hashes} Title"));
@@ -824,6 +825,7 @@ mod tests {
 
     #[test]
     fn renders_unordered_lists_with_escaped_dashes() {
+        // 1:1 with upstream markdown.test.ts:184 > "renders unordered lists with escaped dashes"
         let output = rt("- one\n- two");
         assert!(output.contains("\\- one"), "got: {output}");
         assert!(output.contains("\\- two"), "got: {output}");
@@ -831,6 +833,7 @@ mod tests {
 
     #[test]
     fn renders_ordered_lists_with_escaped_periods() {
+        // 1:1 with upstream markdown.test.ts:190 > "renders ordered lists with escaped periods"
         let output = rt("1. first\n2. second");
         assert!(output.contains("1\\. first"), "got: {output}");
         assert!(output.contains("2\\. second"), "got: {output}");
@@ -838,26 +841,34 @@ mod tests {
 
     #[test]
     fn renders_blockquotes_with_gt_prefix_per_line() {
+        // 1:1 with upstream markdown.test.ts:196 > "renders blockquotes with > prefix per line"
         let output = rt("> quoted text");
         assert!(output.contains(">quoted text"), "got: {output}");
     }
 
     #[test]
     fn renders_thematic_break_as_escaped_em_dashes() {
+        // 1:1 with upstream markdown.test.ts:202 > "renders thematic break as escaped em-dashes"
         assert_eq!(rt("---"), "———");
     }
 
     #[test]
     fn converts_tables_to_ascii_code_blocks_and_drops_pipe_syntax() {
+        // 1:1 with upstream markdown.test.ts:206 > "converts tables to ASCII code blocks and drops pipe syntax"
         let output = rt("| Name | Age |\n|------|-----|\n| Alice | 30 |");
         assert!(output.contains("```"), "got: {output}");
         assert!(output.contains("Name"), "got: {output}");
         assert!(output.contains("Alice"), "got: {output}");
-        // Should not contain raw pipe-table syntax (a `|` adjacent to text).
-        assert!(
-            !output.contains("| Name "),
-            "raw pipe syntax leaked: {output}"
-        );
+        // Mirrors upstream `TABLE_PIPE_PATTERN = /\|.*Name.*\|/` —
+        // assert no line still has `Name` between two `|` chars.
+        let leaked = output.lines().any(|line| {
+            line.find('|').is_some_and(|first| {
+                let rest = &line[first + 1..];
+                let name_idx = rest.find("Name");
+                name_idx.is_some_and(|i| rest[i + "Name".len()..].contains('|'))
+            })
+        });
+        assert!(!leaked, "raw pipe syntax leaked: {output}");
     }
 
     // ---------- nested formatting (3 upstream cases) ----------
