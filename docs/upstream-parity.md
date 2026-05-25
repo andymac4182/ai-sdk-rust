@@ -2544,7 +2544,9 @@ focused tests for each portable behavior before changing rows to `verified`.
   tests; and upstream `tool approval` maps to
   `workflow_agent_upstream_should_pause_when_tool_needs_approval`,
   `workflow_agent_upstream_should_support_needs_approval_as_a_function`, and
-  `workflow_agent_upstream_should_execute_approved_tools_before_streaming`.
+  `workflow_agent_upstream_should_execute_approved_tools_and_continue_with_results`,
+  plus `workflow_agent_upstream_should_create_denial_results_for_denied_tools_and_continue`
+  for the approved and denied continuation cases.
   The callback-order e2e cases remain represented by the existing workflow
   compat tests for `fires constructor + stream callbacks in order with step
   data` and `fires constructor + stream callbacks in order with event data`.
@@ -2572,10 +2574,13 @@ focused tests for each portable behavior before changing rows to `verified`.
 - 2026-05-26: WorkflowAgent tool-approval parity added named Rust
   counterparts for the upstream `workflow-agent-e2e.integration.test.ts`
   pause case plus the `workflow-agent-compat.test.ts` `needsApproval` boolean
-  and function cases, proving tools requiring approval pause the loop before
-  execution, function-form approval callbacks receive the tool input, and
-  approved tool-approval response messages are executed before the next
-  streamed model call.
+  and function cases, plus the upstream `workflow-agent-e2e.integration.test.ts`
+  approved and denied approval-response continuation cases, proving tools
+  requiring approval pause the loop before execution, function-form approval
+  callbacks receive the tool input, approved tool-approval response messages
+  are executed before the next streamed model call, and denied approval
+  responses produce execution-denied tool results while the workflow
+  continues.
 - 2026-05-26: WorkflowAgent stream-option forwarding parity added named Rust
   counterparts for the upstream constructor-default and stream-override
   `stopWhen` cases, the constructor-default and stream-level

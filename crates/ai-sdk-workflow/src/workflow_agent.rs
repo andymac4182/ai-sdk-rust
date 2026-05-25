@@ -3883,7 +3883,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_agent_upstream_should_execute_approved_tools_before_streaming() {
+    fn workflow_agent_upstream_should_execute_approved_tools_and_continue_with_results() {
         let executions = Arc::new(Mutex::new(0_usize));
         let executions_for_tool = Arc::clone(&executions);
         let tool = Tool::new("testTool", object_schema())
@@ -3940,6 +3940,69 @@ mod tests {
         assert_eq!(
             tool_result.output,
             ai_sdk_provider::LanguageModelToolResultOutput::text("approved-result")
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_create_denial_results_for_denied_tools_and_continue() {
+        let executions = Arc::new(Mutex::new(0_usize));
+        let executions_for_tool = Arc::clone(&executions);
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(move |_, _| {
+                let executions_for_tool = Arc::clone(&executions_for_tool);
+                async move {
+                    *executions_for_tool
+                        .lock()
+                        .expect("execution count lock succeeds") += 1;
+                    Ok(json!("denied-result"))
+                }
+            })
+            .with_needs_approval(true);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let prompt = vec![
+            user_text_message("test"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "call-1",
+                        "testTool",
+                        json!({ "value": "test" }),
+                    ),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    ai_sdk_provider::LanguageModelToolApprovalRequestPart::new(
+                        "approval-call-1",
+                        "call-1",
+                    ),
+                ),
+            ])),
+            LanguageModelMessage::Tool(ai_sdk_provider::LanguageModelToolMessage::new(vec![
+                ai_sdk_provider::LanguageModelToolContentPart::ToolApprovalResponse(
+                    ai_sdk_provider::LanguageModelToolApprovalResponsePart::new(
+                        "approval-call-1",
+                        false,
+                    )
+                    .with_reason("Too dangerous"),
+                ),
+            ])),
+        ];
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(prompt.clone(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(
+            *executions.lock().expect("execution count lock succeeds"),
+            0
+        );
+        assert_eq!(result.messages.len(), 3);
+        let tool_message = tool_message_from_prompt(&result.messages);
+        let tool_result = first_tool_result(tool_message);
+        assert_eq!(
+            tool_result.output,
+            ai_sdk_provider::LanguageModelToolResultOutput::execution_denied()
+                .with_reason("Too dangerous")
         );
     }
 
