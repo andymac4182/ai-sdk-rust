@@ -13159,6 +13159,70 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_telemetry_includes_configured_runtime_context_properties() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let telemetry_contexts = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&telemetry_contexts);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(
+                    event
+                        .event
+                        .get("runtimeContext")
+                        .cloned()
+                        .expect("runtimeContext field"),
+                );
+            });
+        }
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_runtime_context(
+                    json!({
+                        "userId": "user-123",
+                        "requestId": "request-123",
+                    })
+                    .as_object()
+                    .expect("runtime context is object")
+                    .clone(),
+                )
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("stream-text-test")
+                        .with_integration(integration)
+                        .with_runtime_context_key("requestId", true),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let telemetry_contexts = telemetry_contexts.lock().expect("telemetry event lock");
+        assert_eq!(
+            telemetry_contexts.as_slice(),
+            [
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+                json!({ "requestId": "request-123" }),
+            ]
+        );
+    }
+
+    #[test]
     fn stream_text_telemetry_includes_configured_tools_context_properties() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
