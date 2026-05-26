@@ -2765,6 +2765,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   `workflow_agent_upstream_should_use_constructor_stop_conditions_when_not_specified_in_stream`,
   `workflow_agent_upstream_should_validate_per_tool_context_against_context_schema`,
   `workflow_chat_transport_accepts_and_stores_callback_functions`,
+  `workflow_chat_transport_uses_default_fetch_when_not_provided` (JavaScript-only because Rust uses an injected client abstraction instead of a built-in global fetch path),
+  `workflow_chat_transport_uses_custom_fetch_when_provided` (JavaScript-only because Rust uses an injected client abstraction instead of a built-in global fetch path),
   `workflow_chat_transport_accepts_custom_max_consecutive_errors`,
   `workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header`,
   `workflow_chat_transport_reconnect_formats_consecutive_errors`,
