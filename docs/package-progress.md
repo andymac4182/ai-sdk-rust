@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 49.5%
-- Portable package average: 37.5%
-- Closed package rows: 17 / 52
-- Strict portable verified rows: 7 / 42
-- In-progress rows: 20
+- Average estimated completion: 52.6%
+- Portable package average: 41.3%
+- Closed package rows: 20 / 52
+- Strict portable verified rows: 10 / 42
+- In-progress rows: 17
 - Not-started rows: 15
 
 ## 100% Closed
@@ -19,6 +19,9 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/gateway` | 100% | Verified | provider package |
 | `@ai-sdk/openai-compatible` | 100% | Verified | provider base package |
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
+| `@ai-sdk/assemblyai` | 100% | Verified | provider package |
+| `@ai-sdk/deepseek` | 100% | Verified | provider package |
+| `@ai-sdk/perplexity` | 100% | Verified | provider package |
 | `@ai-sdk/otel` | 100% | Verified | telemetry package |
 | `@ai-sdk/test-server` | 100% | Verified | testing support package |
 | `@ai-sdk/devtools` | 100% | JavaScript-only | JavaScript devtools package |
@@ -36,7 +39,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/assemblyai` | 50% | In progress | provider package | Initial provider crate exists; abort handling is covered, while live-provider validation and exact thrown-error parity... |
 | `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
@@ -44,14 +46,12 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/cerebras` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/deepgram` | 40% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/deepinfra` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
-| `@ai-sdk/deepseek` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/huggingface` | 40% | In progress | provider package | Initial provider wrapper exists; SSE/tool parity and broader package behavior remain. |
 | `@ai-sdk/hume` | 40% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/lmnt` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/luma` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/mistral` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/moonshotai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
-| `@ai-sdk/perplexity` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/revai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/togetherai` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/vercel` | 40% | In progress | provider package | Construction wrapper exists; live validation and full package test parity remain. |
