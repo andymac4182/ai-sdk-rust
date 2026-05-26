@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::env;
 use std::future::{Future, Ready, ready};
@@ -16,9 +16,14 @@ use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse, LanguageModelSource,
-    LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
-    LanguageModelText, LanguageModelToolCall, LanguageModelToolResult, LanguageModelUrlSource,
+    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
+    LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelSource, LanguageModelStreamFinish, LanguageModelStreamPart,
+    LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+    LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+    LanguageModelToolInputStart, LanguageModelToolResult, LanguageModelUrlSource,
     LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
@@ -26,11 +31,12 @@ use crate::provider::{
     ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions, SpecificationVersion,
 };
 use crate::provider_utils::{
-    FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
+    FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
-    create_json_error_response_handler, create_json_response_handler, get_top_level_media_type,
-    post_json_to_api, resolve_full_media_type, with_user_agent_suffix, without_trailing_slash,
+    create_event_source_response_handler, create_json_error_response_handler,
+    create_json_response_handler, get_top_level_media_type, post_json_to_api,
+    resolve_full_media_type, with_user_agent_suffix, without_trailing_slash,
 };
 use crate::warning::Warning;
 
@@ -312,7 +318,7 @@ impl HuggingFaceResponsesLanguageModel {
                 request_body_for_response,
                 warnings,
             ),
-            Err(error) => self.generate_result_from_error(error, request_body_for_error),
+            Err(error) => self.generate_result_from_error(error, request_body_for_error, warnings),
         }
     }
 
@@ -320,20 +326,64 @@ impl HuggingFaceResponsesLanguageModel {
         &self,
         options: LanguageModelCallOptions,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
-        let request_body = huggingface_responses_request_body(&self.model_id, &options, true)
-            .map(|(body, _)| body)
-            .unwrap_or_else(|message| {
-                json!({
-                    "model": self.model_id,
-                    "stream": true,
-                    "error": message
-                })
-            });
+        let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
+        let (mut request_body, warnings) =
+            match huggingface_responses_request_body(&self.model_id, &options, true) {
+                Ok(result) => result,
+                Err(message) => {
+                    return huggingface_error_stream_result(
+                        message,
+                        json!({
+                            "model": self.model_id,
+                            "stream": true
+                        }),
+                    );
+                }
+            };
+        if let JsonValue::Object(body) = &mut request_body {
+            body.insert("stream".to_string(), JsonValue::Bool(true));
+        }
 
-        huggingface_error_stream_result(
-            "Hugging Face Responses streaming is not implemented yet.",
-            request_body,
+        let request_body_for_error = request_body.clone();
+        let request_body_for_response = request_body.clone();
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let post_options =
+            PostJsonToApiOptions::new(format!("{}/responses", self.config.base_url), request_body)
+                .with_headers(request_headers)
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(options.abort_signal.clone());
+        let transport = Arc::clone(&self.config.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |_request, response| {
+                create_event_source_response_handler(
+                    response.event_source_response_handler_options(),
+                    |value| Ok::<JsonValue, Infallible>(value.clone()),
+                )
+                .map_err(|error| ProviderApiResponseHandlerError::other(error.to_string()))
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    |value| Ok::<JsonValue, Infallible>(value.clone()),
+                    huggingface_error_message,
+                    |_, _| None,
+                ))
+            },
         )
+        .await
+        {
+            Ok(response) => huggingface_stream_result_from_response(
+                response.value,
+                response.response_headers,
+                request_body_for_response,
+                warnings,
+                include_raw_chunks,
+            ),
+            Err(error) => self.stream_result_from_error(error, request_body_for_error),
+        }
     }
 
     fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
@@ -418,13 +468,32 @@ impl HuggingFaceResponsesLanguageModel {
         &self,
         error: HandledFetchError,
         request_body: JsonValue,
+        warnings: Vec<Warning>,
     ) -> LanguageModelGenerateResult {
         let message = match error {
             HandledFetchError::Original { error } => error.message().to_string(),
             HandledFetchError::ApiCall { error } => error.message().to_string(),
         };
 
-        huggingface_error_generate_result(message, request_body)
+        let mut result = huggingface_error_generate_result(message, request_body);
+        for warning in warnings {
+            result = result.with_warning(warning);
+        }
+
+        result
+    }
+
+    fn stream_result_from_error(
+        &self,
+        error: HandledFetchError,
+        request_body: JsonValue,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let message = match error {
+            HandledFetchError::Original { error } => error.message().to_string(),
+            HandledFetchError::ApiCall { error } => error.message().to_string(),
+        };
+
+        huggingface_error_stream_result(message, request_body)
     }
 }
 
@@ -1022,6 +1091,1076 @@ fn huggingface_error_stream_result(
     .with_request(LanguageModelRequest::new().with_body(request_body))
 }
 
+fn huggingface_stream_result_from_response(
+    events: Vec<ParseJsonResult<JsonValue>>,
+    response_headers: Option<Headers>,
+    request_body: JsonValue,
+    warnings: Vec<Warning>,
+    include_raw_chunks: bool,
+) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+    let mut stream = vec![LanguageModelStreamPart::StreamStart(
+        LanguageModelStreamStart::new(warnings),
+    )];
+    let mut finish_reason = LanguageModelFinishReason {
+        unified: FinishReason::Other,
+        raw: None,
+    };
+    let mut usage = LanguageModelUsage::default();
+    let mut response_id = None::<String>;
+    let mut saw_error_event = false;
+    let mut saw_tool_calls = false;
+
+    let mut text_buffers = BTreeMap::<String, String>::new();
+    let mut active_text = BTreeSet::<String>::new();
+    let mut ended_text = BTreeSet::<String>::new();
+
+    let mut reasoning_buffers = BTreeMap::<String, String>::new();
+    let mut active_reasoning = BTreeSet::<String>::new();
+    let mut ended_reasoning = BTreeSet::<String>::new();
+
+    let mut pending_tool_calls = BTreeMap::<String, HuggingFacePendingToolCall>::new();
+    let mut active_tool_inputs = BTreeSet::<String>::new();
+    let mut ended_tool_inputs = BTreeSet::<String>::new();
+    let mut emitted_tool_calls = BTreeSet::<String>::new();
+    let mut emitted_tool_results = BTreeSet::<String>::new();
+
+    for event in events {
+        match event {
+            ParseJsonResult::Success { value, raw_value } => {
+                if include_raw_chunks {
+                    stream.push(LanguageModelStreamPart::Raw(
+                        LanguageModelRawStreamPart::new(raw_value.clone()),
+                    ));
+                }
+
+                let event_type = value.get("type").and_then(JsonValue::as_str);
+                let has_error = value.get("error").is_some_and(|error| !error.is_null())
+                    || matches!(event_type, Some("error"));
+                if has_error {
+                    finish_reason = LanguageModelFinishReason {
+                        unified: FinishReason::Error,
+                        raw: Some(event_type.unwrap_or("huggingface-error").to_string()),
+                    };
+                    saw_error_event = matches!(event_type, Some("error"));
+                    stream.push(huggingface_stream_event_error(
+                        &value,
+                        Some(&raw_value.to_string()),
+                    ));
+                    continue;
+                }
+
+                match event_type {
+                    Some("response.created") => {
+                        if let Some(response) = value.get("response") {
+                            huggingface_emit_response_metadata(&mut stream, response);
+                            if response_id.is_none() {
+                                response_id = response
+                                    .get("id")
+                                    .and_then(JsonValue::as_str)
+                                    .map(ToString::to_string);
+                            }
+                        }
+                    }
+                    Some("response.output_item.added") => {
+                        if let Some(item) = value.get("item") {
+                            match item.get("type").and_then(JsonValue::as_str) {
+                                Some("message") => {
+                                    let id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .map(ToString::to_string)
+                                        .unwrap_or_else(|| {
+                                            huggingface_stream_block_id("txt", &value)
+                                        });
+                                    huggingface_start_text_block(
+                                        &mut stream,
+                                        &mut active_text,
+                                        &ended_text,
+                                        &id,
+                                        Some(huggingface_item_metadata(&id)),
+                                    );
+                                }
+                                Some("reasoning") => {
+                                    let id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .map(ToString::to_string)
+                                        .unwrap_or_else(|| {
+                                            huggingface_stream_block_id("reasoning", &value)
+                                        });
+                                    huggingface_start_reasoning_block(
+                                        &mut stream,
+                                        &mut active_reasoning,
+                                        &ended_reasoning,
+                                        &id,
+                                        Some(huggingface_item_metadata(&id)),
+                                    );
+                                }
+                                Some("function_call") => {
+                                    let item_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .or_else(|| item.get("id").and_then(JsonValue::as_str))
+                                        .unwrap_or_default();
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let arguments = item
+                                        .get("arguments")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    pending_tool_calls.insert(
+                                        item_id.to_string(),
+                                        HuggingFacePendingToolCall::new(
+                                            tool_call_id,
+                                            tool_name,
+                                            arguments,
+                                        ),
+                                    );
+                                    huggingface_start_tool_input(
+                                        &mut stream,
+                                        &mut active_tool_inputs,
+                                        &ended_tool_inputs,
+                                        tool_call_id,
+                                        tool_name,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some("response.output_text.delta") => {
+                        let id = huggingface_stream_text_id(&value);
+                        if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                            && !delta.is_empty()
+                        {
+                            huggingface_push_text_delta(
+                                &mut stream,
+                                &mut text_buffers,
+                                &mut active_text,
+                                &ended_text,
+                                &id,
+                                delta,
+                                Some(huggingface_item_metadata(&id)),
+                            );
+                        }
+                    }
+                    Some("response.output_text.done") => {
+                        let id = huggingface_stream_text_id(&value);
+                        let text = value.get("text").and_then(JsonValue::as_str);
+                        huggingface_finish_text_block(
+                            &mut stream,
+                            &mut text_buffers,
+                            &mut active_text,
+                            &mut ended_text,
+                            &id,
+                            text,
+                            Some(huggingface_item_metadata(&id)),
+                        );
+                    }
+                    Some("response.reasoning_text.delta") => {
+                        let id = huggingface_stream_reasoning_id(&value);
+                        if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                            && !delta.is_empty()
+                        {
+                            huggingface_push_reasoning_delta(
+                                &mut stream,
+                                &mut reasoning_buffers,
+                                &mut active_reasoning,
+                                &ended_reasoning,
+                                &id,
+                                delta,
+                                Some(huggingface_item_metadata(&id)),
+                            );
+                        }
+                    }
+                    Some("response.reasoning_text.done") => {
+                        let id = huggingface_stream_reasoning_id(&value);
+                        let text = value.get("text").and_then(JsonValue::as_str);
+                        huggingface_finish_reasoning_block(
+                            &mut stream,
+                            &mut reasoning_buffers,
+                            &mut active_reasoning,
+                            &mut ended_reasoning,
+                            &id,
+                            text,
+                            Some(huggingface_item_metadata(&id)),
+                        );
+                    }
+                    Some("response.function_call_arguments.delta") => {
+                        if let Some(item_id) = value.get("item_id").and_then(JsonValue::as_str) {
+                            let delta = value.get("delta").and_then(JsonValue::as_str);
+                            if let Some(delta) = delta.filter(|delta| !delta.is_empty()) {
+                                huggingface_append_tool_call_arguments(
+                                    &mut pending_tool_calls,
+                                    item_id,
+                                    delta,
+                                );
+                                if let Some(tool_call) = pending_tool_calls.get(item_id) {
+                                    huggingface_start_tool_input(
+                                        &mut stream,
+                                        &mut active_tool_inputs,
+                                        &ended_tool_inputs,
+                                        &tool_call.tool_call_id,
+                                        &tool_call.tool_name,
+                                    );
+                                    stream.push(LanguageModelStreamPart::ToolInputDelta(
+                                        LanguageModelToolInputDelta::new(
+                                            &tool_call.tool_call_id,
+                                            delta,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Some("response.function_call_arguments.done") => {
+                        if let Some(item_id) = value.get("item_id").and_then(JsonValue::as_str) {
+                            let arguments = value.get("arguments").and_then(JsonValue::as_str);
+                            huggingface_finalize_tool_call(
+                                &mut stream,
+                                &mut active_tool_inputs,
+                                &mut ended_tool_inputs,
+                                &mut pending_tool_calls,
+                                &mut emitted_tool_calls,
+                                &mut emitted_tool_results,
+                                item_id,
+                                arguments,
+                                None,
+                            );
+                            saw_tool_calls = true;
+                        }
+                    }
+                    Some("response.output_item.done") => {
+                        if let Some(item) = value.get("item") {
+                            match item.get("type").and_then(JsonValue::as_str) {
+                                Some("message") => {
+                                    let id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let text = item
+                                        .get("content")
+                                        .and_then(JsonValue::as_array)
+                                        .and_then(|content| {
+                                            content.iter().find_map(|part| {
+                                                (part.get("type").and_then(JsonValue::as_str)
+                                                    == Some("output_text"))
+                                                .then(|| {
+                                                    part.get("text").and_then(JsonValue::as_str)
+                                                })
+                                                .flatten()
+                                            })
+                                        });
+                                    huggingface_finish_text_block(
+                                        &mut stream,
+                                        &mut text_buffers,
+                                        &mut active_text,
+                                        &mut ended_text,
+                                        id,
+                                        text,
+                                        Some(huggingface_item_metadata(id)),
+                                    );
+                                }
+                                Some("reasoning") => {
+                                    let id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let text = item
+                                        .get("content")
+                                        .or_else(|| item.get("summary"))
+                                        .and_then(JsonValue::as_array)
+                                        .and_then(|content| {
+                                            content.iter().find_map(|part| {
+                                                part.get("text").and_then(JsonValue::as_str)
+                                            })
+                                        });
+                                    huggingface_finish_reasoning_block(
+                                        &mut stream,
+                                        &mut reasoning_buffers,
+                                        &mut active_reasoning,
+                                        &mut ended_reasoning,
+                                        id,
+                                        text,
+                                        Some(huggingface_item_metadata(id)),
+                                    );
+                                }
+                                Some("function_call") => {
+                                    let item_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let arguments =
+                                        item.get("arguments").and_then(JsonValue::as_str);
+                                    let output = item.get("output");
+                                    huggingface_finalize_tool_call(
+                                        &mut stream,
+                                        &mut active_tool_inputs,
+                                        &mut ended_tool_inputs,
+                                        &mut pending_tool_calls,
+                                        &mut emitted_tool_calls,
+                                        &mut emitted_tool_results,
+                                        item_id,
+                                        arguments,
+                                        output,
+                                    );
+                                    saw_tool_calls = true;
+                                }
+                                Some("mcp_call") => {
+                                    let item_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let arguments =
+                                        item.get("arguments").and_then(JsonValue::as_str);
+                                    pending_tool_calls.insert(
+                                        item_id.to_string(),
+                                        HuggingFacePendingToolCall::new(
+                                            tool_call_id,
+                                            format!("mcp.{tool_name}"),
+                                            arguments.unwrap_or("{}"),
+                                        ),
+                                    );
+                                    if let Some(output) = item.get("output") {
+                                        huggingface_finalize_tool_call(
+                                            &mut stream,
+                                            &mut active_tool_inputs,
+                                            &mut ended_tool_inputs,
+                                            &mut pending_tool_calls,
+                                            &mut emitted_tool_calls,
+                                            &mut emitted_tool_results,
+                                            item_id,
+                                            arguments,
+                                            Some(output),
+                                        );
+                                    }
+                                    saw_tool_calls = true;
+                                }
+                                Some("mcp_list_tools") => {
+                                    let item_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name = "list_tools";
+                                    let tool_call_id = item_id;
+                                    let arguments = item
+                                        .get("server_label")
+                                        .and_then(JsonValue::as_str)
+                                        .map(|server_label| {
+                                            json!({ "server_label": server_label }).to_string()
+                                        });
+                                    pending_tool_calls.insert(
+                                        item_id.to_string(),
+                                        HuggingFacePendingToolCall::new(
+                                            tool_call_id,
+                                            tool_name,
+                                            arguments.as_deref().unwrap_or("{}"),
+                                        ),
+                                    );
+                                    if let Some(tools) = item.get("tools") {
+                                        huggingface_finalize_tool_call(
+                                            &mut stream,
+                                            &mut active_tool_inputs,
+                                            &mut ended_tool_inputs,
+                                            &mut pending_tool_calls,
+                                            &mut emitted_tool_calls,
+                                            &mut emitted_tool_results,
+                                            item_id,
+                                            arguments.as_deref(),
+                                            Some(&json!({ "tools": tools })),
+                                        );
+                                    }
+                                    saw_tool_calls = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some("response.completed") => {
+                        if let Some(response) = value.get("response") {
+                            if response_id.is_none() {
+                                response_id = response
+                                    .get("id")
+                                    .and_then(JsonValue::as_str)
+                                    .map(ToString::to_string);
+                            }
+                            huggingface_emit_response_metadata(&mut stream, response);
+                            usage = huggingface_responses_usage(response.get("usage"));
+                            if let Some(reason) = response
+                                .get("incomplete_details")
+                                .and_then(|details| details.get("reason"))
+                                .and_then(JsonValue::as_str)
+                            {
+                                finish_reason =
+                                    map_huggingface_responses_finish_reason(Some(reason));
+                            } else {
+                                let response_has_tool_calls = response
+                                    .get("output")
+                                    .and_then(JsonValue::as_array)
+                                    .is_some_and(|items| {
+                                        items.iter().any(|item| {
+                                            matches!(
+                                                item.get("type").and_then(JsonValue::as_str),
+                                                Some(
+                                                    "function_call" | "mcp_call" | "mcp_list_tools"
+                                                )
+                                            )
+                                        })
+                                    });
+                                finish_reason = map_huggingface_responses_finish_reason(Some(
+                                    if response_has_tool_calls || saw_tool_calls {
+                                        "tool_calls"
+                                    } else {
+                                        "stop"
+                                    },
+                                ));
+                            }
+
+                            if let Some(output) =
+                                response.get("output").and_then(JsonValue::as_array)
+                            {
+                                for item in output {
+                                    match item.get("type").and_then(JsonValue::as_str) {
+                                        Some("message") => {
+                                            let id = item
+                                                .get("id")
+                                                .and_then(JsonValue::as_str)
+                                                .unwrap_or_default();
+                                            let text = item
+                                                .get("content")
+                                                .and_then(JsonValue::as_array)
+                                                .and_then(|content| {
+                                                    content.iter().find_map(|part| {
+                                                        (part
+                                                            .get("type")
+                                                            .and_then(JsonValue::as_str)
+                                                            == Some("output_text"))
+                                                        .then(|| {
+                                                            part.get("text")
+                                                                .and_then(JsonValue::as_str)
+                                                        })
+                                                        .flatten()
+                                                    })
+                                                });
+                                            huggingface_finish_text_block(
+                                                &mut stream,
+                                                &mut text_buffers,
+                                                &mut active_text,
+                                                &mut ended_text,
+                                                id,
+                                                text,
+                                                Some(huggingface_item_metadata(id)),
+                                            );
+                                        }
+                                        Some("reasoning") => {
+                                            let id = item
+                                                .get("id")
+                                                .and_then(JsonValue::as_str)
+                                                .unwrap_or_default();
+                                            let text = item
+                                                .get("content")
+                                                .or_else(|| item.get("summary"))
+                                                .and_then(JsonValue::as_array)
+                                                .and_then(|content| {
+                                                    content.iter().find_map(|part| {
+                                                        part.get("text").and_then(JsonValue::as_str)
+                                                    })
+                                                });
+                                            huggingface_finish_reasoning_block(
+                                                &mut stream,
+                                                &mut reasoning_buffers,
+                                                &mut active_reasoning,
+                                                &mut ended_reasoning,
+                                                id,
+                                                text,
+                                                Some(huggingface_item_metadata(id)),
+                                            );
+                                        }
+                                        Some("function_call") => {
+                                            let item_id = item
+                                                .get("id")
+                                                .and_then(JsonValue::as_str)
+                                                .unwrap_or_default();
+                                            huggingface_finalize_tool_call(
+                                                &mut stream,
+                                                &mut active_tool_inputs,
+                                                &mut ended_tool_inputs,
+                                                &mut pending_tool_calls,
+                                                &mut emitted_tool_calls,
+                                                &mut emitted_tool_results,
+                                                item_id,
+                                                item.get("arguments").and_then(JsonValue::as_str),
+                                                item.get("output"),
+                                            );
+                                            saw_tool_calls = true;
+                                        }
+                                        Some("mcp_call") => {
+                                            let item_id = item
+                                                .get("id")
+                                                .and_then(JsonValue::as_str)
+                                                .unwrap_or_default();
+                                            huggingface_finalize_tool_call(
+                                                &mut stream,
+                                                &mut active_tool_inputs,
+                                                &mut ended_tool_inputs,
+                                                &mut pending_tool_calls,
+                                                &mut emitted_tool_calls,
+                                                &mut emitted_tool_results,
+                                                item_id,
+                                                item.get("arguments").and_then(JsonValue::as_str),
+                                                item.get("output"),
+                                            );
+                                            saw_tool_calls = true;
+                                        }
+                                        Some("mcp_list_tools") => {
+                                            let item_id = item
+                                                .get("id")
+                                                .and_then(JsonValue::as_str)
+                                                .unwrap_or_default();
+                                            huggingface_finalize_tool_call(
+                                                &mut stream,
+                                                &mut active_tool_inputs,
+                                                &mut ended_tool_inputs,
+                                                &mut pending_tool_calls,
+                                                &mut emitted_tool_calls,
+                                                &mut emitted_tool_results,
+                                                item_id,
+                                                item.get("server_label")
+                                                    .and_then(JsonValue::as_str)
+                                                    .map(|server_label| {
+                                                        json!({ "server_label": server_label })
+                                                            .to_string()
+                                                    })
+                                                    .as_deref(),
+                                                item.get("tools")
+                                                    .map(|tools| json!({ "tools": tools }))
+                                                    .as_ref(),
+                                            );
+                                            saw_tool_calls = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some("response.incomplete") => {
+                        if let Some(response) = value.get("response") {
+                            usage = huggingface_responses_usage(response.get("usage"));
+                            finish_reason = map_huggingface_responses_finish_reason(
+                                response
+                                    .get("incomplete_details")
+                                    .and_then(|details| details.get("reason"))
+                                    .and_then(JsonValue::as_str),
+                            );
+                        }
+                    }
+                    Some("response.failed") => {
+                        if let Some(response) = value.get("response") {
+                            usage = huggingface_responses_usage(response.get("usage"));
+                            if let Some(incomplete_reason) = response
+                                .get("incomplete_details")
+                                .and_then(|details| details.get("reason"))
+                                .and_then(JsonValue::as_str)
+                            {
+                                finish_reason = map_huggingface_responses_finish_reason(Some(
+                                    incomplete_reason,
+                                ));
+                            } else if !saw_error_event {
+                                finish_reason = LanguageModelFinishReason {
+                                    unified: FinishReason::Error,
+                                    raw: Some("huggingface-error".to_string()),
+                                };
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ParseJsonResult::Failure { error, raw_value } => {
+                finish_reason = LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("huggingface-parse-error".to_string()),
+                };
+                stream.push(huggingface_stream_error(
+                    error.to_string(),
+                    raw_value.as_ref().map(JsonValue::to_string).as_deref(),
+                ));
+            }
+        }
+    }
+
+    for id in active_reasoning.clone() {
+        huggingface_finish_reasoning_block(
+            &mut stream,
+            &mut reasoning_buffers,
+            &mut active_reasoning,
+            &mut ended_reasoning,
+            &id,
+            None,
+            Some(huggingface_item_metadata(&id)),
+        );
+    }
+
+    for id in active_text.clone() {
+        huggingface_finish_text_block(
+            &mut stream,
+            &mut text_buffers,
+            &mut active_text,
+            &mut ended_text,
+            &id,
+            None,
+            Some(huggingface_item_metadata(&id)),
+        );
+    }
+
+    for id in active_tool_inputs.clone() {
+        huggingface_finalize_tool_call(
+            &mut stream,
+            &mut active_tool_inputs,
+            &mut ended_tool_inputs,
+            &mut pending_tool_calls,
+            &mut emitted_tool_calls,
+            &mut emitted_tool_results,
+            &id,
+            None,
+            None,
+        );
+    }
+
+    let mut finish = LanguageModelStreamFinish::new(usage, finish_reason);
+    if let Some(response_id) = response_id.as_deref() {
+        finish = finish.with_provider_metadata(huggingface_response_metadata(response_id));
+    }
+    stream.push(LanguageModelStreamPart::Finish(finish));
+
+    let mut result = LanguageModelStreamResult::new(stream)
+        .with_request(LanguageModelRequest::new().with_body(request_body));
+    if let Some(headers) = response_headers {
+        result = result.with_response(huggingface_stream_response_with_headers(headers));
+    }
+    result
+}
+
+fn huggingface_stream_error(
+    message: impl Into<String>,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamPart {
+    let mut error = JsonObject::new();
+    error.insert("message".to_string(), JsonValue::String(message.into()));
+    if let Some(raw_body) = raw_body {
+        error.insert("body".to_string(), JsonValue::String(raw_body.to_string()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
+}
+
+fn huggingface_stream_event_error(
+    value: &JsonValue,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamPart {
+    let mut error = value.as_object().cloned().unwrap_or_default();
+    if !error.contains_key("error") {
+        error
+            .entry("message".to_string())
+            .or_insert_with(|| JsonValue::String(huggingface_error_message(value)));
+    }
+    if let Some(raw_body) = raw_body {
+        error
+            .entry("body".to_string())
+            .or_insert_with(|| JsonValue::String(raw_body.to_string()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
+}
+
+fn huggingface_stream_response_with_headers(headers: Headers) -> LanguageModelStreamResultResponse {
+    let mut response = LanguageModelStreamResultResponse::new();
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+    response
+}
+
+fn huggingface_emit_response_metadata(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    response: &JsonValue,
+) -> bool {
+    let mut metadata = LanguageModelStreamResponseMetadata::new();
+    let mut emitted = false;
+    if let Some(id) = response.get("id").and_then(JsonValue::as_str) {
+        metadata = metadata.with_id(id);
+        emitted = true;
+    }
+    if let Some(timestamp) = response
+        .get("created_at")
+        .and_then(JsonValue::as_i64)
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+    {
+        metadata = metadata.with_timestamp(timestamp);
+        emitted = true;
+    }
+    if let Some(model_id) = response.get("model").and_then(JsonValue::as_str) {
+        metadata = metadata.with_model_id(model_id);
+        emitted = true;
+    }
+    if emitted {
+        stream.push(LanguageModelStreamPart::ResponseMetadata(metadata));
+    }
+    emitted
+}
+
+fn huggingface_stream_block_id(prefix: &str, value: &JsonValue) -> String {
+    let mut parts = vec![prefix.to_string()];
+    if let Some(item_id) = huggingface_stream_item_id(value) {
+        parts.push(item_id);
+    }
+    if let Some(output_index) = value
+        .get("output_index")
+        .and_then(JsonValue::as_u64)
+        .map(|index| index.to_string())
+    {
+        parts.push(output_index);
+    }
+    if parts.len() == 1 {
+        parts.push("0".to_string());
+    }
+    parts.join("-")
+}
+
+fn huggingface_stream_item_id(value: &JsonValue) -> Option<String> {
+    value
+        .get("item_id")
+        .or_else(|| value.get("item").and_then(|item| item.get("id")))
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+}
+
+fn huggingface_stream_text_id(value: &JsonValue) -> String {
+    huggingface_stream_item_id(value).unwrap_or_else(|| huggingface_stream_block_id("txt", value))
+}
+
+fn huggingface_stream_reasoning_id(value: &JsonValue) -> String {
+    huggingface_stream_item_id(value)
+        .unwrap_or_else(|| huggingface_stream_block_id("reasoning", value))
+}
+
+fn huggingface_start_text_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    active_text: &mut BTreeSet<String>,
+    ended_text: &BTreeSet<String>,
+    id: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    if active_text.insert(id.to_string()) {
+        let mut start = LanguageModelTextStart::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            start = start.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::TextStart(start));
+    }
+}
+
+fn huggingface_push_text_delta(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    text_buffers: &mut BTreeMap<String, String>,
+    active_text: &mut BTreeSet<String>,
+    ended_text: &BTreeSet<String>,
+    id: &str,
+    delta: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    huggingface_start_text_block(stream, active_text, ended_text, id, provider_metadata);
+    text_buffers
+        .entry(id.to_string())
+        .or_default()
+        .push_str(delta);
+    stream.push(LanguageModelStreamPart::TextDelta(
+        LanguageModelTextDelta::new(id, delta),
+    ));
+}
+
+fn huggingface_finish_text_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    text_buffers: &mut BTreeMap<String, String>,
+    active_text: &mut BTreeSet<String>,
+    ended_text: &mut BTreeSet<String>,
+    id: &str,
+    final_text: Option<&str>,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    let buffered = text_buffers.remove(id).unwrap_or_default();
+    let emitted_final_text = buffered.is_empty() && final_text.is_some_and(|text| !text.is_empty());
+    if emitted_final_text && let Some(text) = final_text {
+        huggingface_push_text_delta(
+            stream,
+            text_buffers,
+            active_text,
+            ended_text,
+            id,
+            text,
+            provider_metadata.clone(),
+        );
+        text_buffers.remove(id);
+    }
+
+    if active_text.remove(id) || !buffered.is_empty() || emitted_final_text {
+        let mut end = LanguageModelTextEnd::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            end = end.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::TextEnd(end));
+        ended_text.insert(id.to_string());
+    }
+}
+
+fn huggingface_start_reasoning_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    active_reasoning: &mut BTreeSet<String>,
+    ended_reasoning: &BTreeSet<String>,
+    id: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_reasoning.contains(id) {
+        return;
+    }
+
+    if active_reasoning.insert(id.to_string()) {
+        let mut start = LanguageModelReasoningStart::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            start = start.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::ReasoningStart(start));
+    }
+}
+
+fn huggingface_push_reasoning_delta(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    reasoning_buffers: &mut BTreeMap<String, String>,
+    active_reasoning: &mut BTreeSet<String>,
+    ended_reasoning: &BTreeSet<String>,
+    id: &str,
+    delta: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_reasoning.contains(id) {
+        return;
+    }
+
+    huggingface_start_reasoning_block(
+        stream,
+        active_reasoning,
+        ended_reasoning,
+        id,
+        provider_metadata.clone(),
+    );
+    reasoning_buffers
+        .entry(id.to_string())
+        .or_default()
+        .push_str(delta);
+    let mut reasoning_delta = LanguageModelReasoningDelta::new(id, delta);
+    if let Some(provider_metadata) = provider_metadata {
+        reasoning_delta = reasoning_delta.with_provider_metadata(provider_metadata);
+    }
+    stream.push(LanguageModelStreamPart::ReasoningDelta(reasoning_delta));
+}
+
+fn huggingface_finish_reasoning_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    reasoning_buffers: &mut BTreeMap<String, String>,
+    active_reasoning: &mut BTreeSet<String>,
+    ended_reasoning: &mut BTreeSet<String>,
+    id: &str,
+    final_text: Option<&str>,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_reasoning.contains(id) {
+        return;
+    }
+
+    let buffered = reasoning_buffers.remove(id).unwrap_or_default();
+    let emitted_final_text = buffered.is_empty() && final_text.is_some_and(|text| !text.is_empty());
+    if emitted_final_text && let Some(text) = final_text {
+        huggingface_push_reasoning_delta(
+            stream,
+            reasoning_buffers,
+            active_reasoning,
+            ended_reasoning,
+            id,
+            text,
+            provider_metadata.clone(),
+        );
+        reasoning_buffers.remove(id);
+    }
+
+    if active_reasoning.remove(id) || !buffered.is_empty() || emitted_final_text {
+        let mut end = LanguageModelReasoningEnd::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            end = end.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::ReasoningEnd(end));
+        ended_reasoning.insert(id.to_string());
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct HuggingFacePendingToolCall {
+    tool_call_id: String,
+    tool_name: String,
+    arguments: String,
+}
+
+impl HuggingFacePendingToolCall {
+    fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            arguments: arguments.into(),
+        }
+    }
+}
+
+fn huggingface_start_tool_input(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    active_tool_inputs: &mut BTreeSet<String>,
+    ended_tool_inputs: &BTreeSet<String>,
+    tool_call_id: &str,
+    tool_name: &str,
+) {
+    if ended_tool_inputs.contains(tool_call_id) {
+        return;
+    }
+
+    if active_tool_inputs.insert(tool_call_id.to_string()) {
+        stream.push(LanguageModelStreamPart::ToolInputStart(
+            LanguageModelToolInputStart::new(tool_call_id, tool_name),
+        ));
+    }
+}
+
+fn huggingface_append_tool_call_arguments(
+    pending_tool_calls: &mut BTreeMap<String, HuggingFacePendingToolCall>,
+    item_id: &str,
+    delta: &str,
+) {
+    pending_tool_calls
+        .entry(item_id.to_string())
+        .or_default()
+        .arguments
+        .push_str(delta);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn huggingface_finalize_tool_call(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    active_tool_inputs: &mut BTreeSet<String>,
+    ended_tool_inputs: &mut BTreeSet<String>,
+    pending_tool_calls: &mut BTreeMap<String, HuggingFacePendingToolCall>,
+    emitted_tool_calls: &mut BTreeSet<String>,
+    emitted_tool_results: &mut BTreeSet<String>,
+    item_id: &str,
+    final_arguments: Option<&str>,
+    output: Option<&JsonValue>,
+) {
+    let pending = pending_tool_calls
+        .entry(item_id.to_string())
+        .or_insert_with(|| HuggingFacePendingToolCall::new(item_id, item_id, ""));
+
+    if pending.tool_call_id.is_empty() {
+        pending.tool_call_id = item_id.to_string();
+    }
+    if pending.tool_name.is_empty() {
+        pending.tool_name = item_id.to_string();
+    }
+
+    if pending.arguments.is_empty()
+        && !ended_tool_inputs.contains(&pending.tool_call_id)
+        && let Some(arguments) = final_arguments
+        && !arguments.is_empty()
+    {
+        huggingface_start_tool_input(
+            stream,
+            active_tool_inputs,
+            ended_tool_inputs,
+            &pending.tool_call_id,
+            &pending.tool_name,
+        );
+        stream.push(LanguageModelStreamPart::ToolInputDelta(
+            LanguageModelToolInputDelta::new(&pending.tool_call_id, arguments),
+        ));
+        pending.arguments.push_str(arguments);
+    }
+
+    if (active_tool_inputs.remove(&pending.tool_call_id) || !pending.arguments.is_empty())
+        && !ended_tool_inputs.contains(&pending.tool_call_id)
+    {
+        stream.push(LanguageModelStreamPart::ToolInputEnd(
+            LanguageModelToolInputEnd::new(&pending.tool_call_id),
+        ));
+        ended_tool_inputs.insert(pending.tool_call_id.clone());
+    }
+
+    let tool_call_key = format!("call:{}", pending.tool_call_id);
+    if emitted_tool_calls.insert(tool_call_key) {
+        let mut tool_call = LanguageModelToolCall::new(
+            &pending.tool_call_id,
+            &pending.tool_name,
+            if pending.arguments.is_empty() {
+                final_arguments.unwrap_or("{}").to_string()
+            } else {
+                pending.arguments.clone()
+            },
+        );
+        let metadata = huggingface_item_metadata(item_id);
+        tool_call = tool_call.with_provider_metadata(metadata);
+        stream.push(LanguageModelStreamPart::ToolCall(tool_call));
+    }
+
+    if let Some(output) = output.filter(|value| !value.is_null()) {
+        let result_key = format!("result:{}", pending.tool_call_id);
+        if emitted_tool_results.insert(result_key)
+            && let Ok(result) = NonNullJsonValue::new(output.clone())
+        {
+            let mut tool_result =
+                LanguageModelToolResult::new(&pending.tool_call_id, &pending.tool_name, result);
+            if output.is_object() && pending.tool_name.starts_with("mcp.") {
+                tool_result = tool_result.with_provider_metadata(ProviderMetadata::new());
+            }
+            stream.push(LanguageModelStreamPart::ToolResult(tool_result));
+        }
+    }
+}
+
 fn huggingface_response_metadata(response_id: &str) -> ProviderMetadata {
     let mut metadata = ProviderMetadata::new();
     let mut provider = JsonObject::new();
@@ -1157,8 +2296,9 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
-        LanguageModelResponseFormat, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelToolMessage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelToolMessage, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -1660,19 +2800,29 @@ mod tests {
     }
 
     #[test]
-    fn huggingface_responses_maps_warnings_errors_and_stream_deferral() {
+    fn huggingface_responses_maps_warnings_and_stream_errors() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: HuggingFaceTransport =
-            Arc::new(move |_request| -> HuggingFaceTransportFuture {
+            Arc::new(move |request| -> HuggingFaceTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
                 Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
+                    400,
+                    "Bad Request",
                     json!({
                         "error": {
                             "message": "Hugging Face rejected the request"
                         }
                     })
                     .to_string(),
-                ))))
+                )
+                .with_headers(Headers::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )])))))
             });
         let provider = HuggingFaceProvider::new()
             .with_api_key("test-api-key")
@@ -1720,14 +2870,353 @@ mod tests {
 
         let stream = poll_ready(model.do_stream(options));
         match stream.stream.as_slice() {
-            [crate::language_model::LanguageModelStreamPart::Error(error)] => {
+            [LanguageModelStreamPart::Error(error)] => {
                 assert_eq!(
                     error.error.get("message").and_then(JsonValue::as_str),
-                    Some("Hugging Face Responses streaming is not implemented yet.")
+                    Some("Hugging Face rejected the request")
                 );
             }
             parts => panic!("expected one error stream part, got {parts:?}"),
         }
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "deepseek-ai/DeepSeek-V3-0324",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "stream": true
+            }))
+        );
+    }
+
+    #[test]
+    fn huggingface_responses_streams_text_with_request_and_response_metadata() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: HuggingFaceTransport = Arc::new(
+            move |request| -> HuggingFaceTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_hf_stream","created_at":1711115037,"model":"deepseek-ai/DeepSeek-V3-0324"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_hf_stream","output_index":0,"content_index":0,"delta":"Hello"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_hf_stream","output_index":0,"content_index":0,"delta":" from Hugging Face"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"msg_hf_stream","output_index":0,"content_index":0,"text":"Hello from Hugging Face"}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_hf_stream","created_at":1711115037,"model":"deepseek-ai/DeepSeek-V3-0324","usage":{"input_tokens":5,"output_tokens":4}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport);
+        let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_max_output_tokens(16)
+                .with_temperature(0.0),
+            ),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            }),
+            Some(metadata)
+                if metadata.id.as_deref() == Some("resp_hf_stream")
+                    && metadata.model_id.as_deref() == Some("deepseek-ai/DeepSeek-V3-0324")
+        ));
+        let text_deltas = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_deltas, vec!["Hello", " from Hugging Face"]);
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                _ => None,
+            }),
+            Some(end) if end.id == "msg_hf_stream"
+        ));
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            }),
+            Some(finish)
+                if finish.finish_reason.unified == FinishReason::Stop
+                    && finish.usage.input_tokens.total == Some(5)
+                    && finish.usage.output_tokens.total == Some(4)
+        ));
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("content-type"))
+                .map(String::as_str),
+            Some("text/event-stream")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "deepseek-ai/DeepSeek-V3-0324",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "max_output_tokens": 16,
+                "temperature": 0.0,
+                "stream": true
+            }))
+        );
+    }
+
+    #[test]
+    fn huggingface_responses_streams_reasoning_text_and_tool_calls() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: HuggingFaceTransport = Arc::new(
+            move |request| -> HuggingFaceTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_hf_tool_stream","created_at":1711115037,"model":"deepseek-ai/DeepSeek-V3-0324"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"reasoning_hf","type":"reasoning","content":[],"summary":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_text.delta","item_id":"reasoning_hf","output_index":0,"content_index":0,"delta":"Thinking"}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_text.done","item_id":"reasoning_hf","output_index":0,"content_index":0,"text":"Thinking"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"reasoning_hf","type":"reasoning","content":[{"type":"reasoning_text","text":"Thinking"}],"summary":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_hf_tool_stream","type":"message","role":"assistant","content":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_hf_tool_stream","output_index":1,"content_index":0,"delta":"I"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_hf_tool_stream","output_index":1,"content_index":0,"delta":"'ll get"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"msg_hf_tool_stream","output_index":1,"content_index":0,"text":"I'll get"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_hf_tool_stream","type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll get"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_hf_tool_stream","type":"function_call","call_id":"call_weather","name":"weather","arguments":""}}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_hf_tool_stream","output_index":2,"delta":"{\"location\""}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_hf_tool_stream","output_index":2,"delta":":\"Brisbane\"}"}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.done","item_id":"fc_hf_tool_stream","output_index":2,"arguments":"{\"location\":\"Brisbane\"}"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_hf_tool_stream","type":"function_call","call_id":"call_weather","name":"weather","arguments":"{\"location\":\"Brisbane\"}","output":"sunny"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_hf_tool_stream","created_at":1711115037,"model":"deepseek-ai/DeepSeek-V3-0324","output":[{"id":"reasoning_hf","type":"reasoning","content":[{"type":"reasoning_text","text":"Thinking"}],"summary":[]},{"id":"msg_hf_tool_stream","type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll get"}]},{"id":"fc_hf_tool_stream","type":"function_call","call_id":"call_weather","name":"weather","arguments":"{\"location\":\"Brisbane\"}","output":"sunny"}],"usage":{"input_tokens":6,"output_tokens":3}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport);
+        let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "Weather in Brisbane?",
+                )),
+            ])),
+        ])));
+
+        let reasoning_deltas = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning_deltas, vec!["Thinking"]);
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(start) => Some(start),
+                _ => None,
+            }),
+            Some(start) if start.id == "reasoning_hf"
+        ));
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningEnd(end) => Some(end),
+                _ => None,
+            }),
+            Some(end) if end.id == "reasoning_hf"
+        ));
+
+        let text_deltas = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_deltas, vec!["I", "'ll get"]);
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            }),
+            Some(start) if start.id == "msg_hf_tool_stream"
+        ));
+        assert!(matches!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                _ => None,
+            }),
+            Some(end) if end.id == "msg_hf_tool_stream"
+        ));
+
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes a tool call");
+        assert_eq!(tool_call.tool_call_id, "call_weather");
+        assert_eq!(tool_call.tool_name, "weather");
+        assert_eq!(tool_call.input, r#"{"location":"Brisbane"}"#);
+
+        let tool_result = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("stream includes a tool result");
+        assert_eq!(tool_result.tool_call_id, "call_weather");
+        assert_eq!(tool_result.tool_name, "weather");
+        assert_eq!(tool_result.result.as_value(), &json!("sunny"));
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(finish.usage.input_tokens.total, Some(6));
+        assert_eq!(finish.usage.output_tokens.total, Some(3));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "deepseek-ai/DeepSeek-V3-0324",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Weather in Brisbane?"
+                            }
+                        ]
+                    }
+                ],
+                "stream": true
+            }))
+        );
     }
 
     #[test]

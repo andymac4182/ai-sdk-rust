@@ -9,7 +9,7 @@ bytedance	45	Initial provider crate exists; full upstream test and live-provider
 cerebras	60	Initial provider wrapper exists; deterministic upstream provider inventory is mapped, with live-provider validation still credential-gated.
 deepgram	50	Initial provider crate exists; full upstream test and live-provider parity remain.
 deepinfra	45	Initial provider wrapper exists; broader package behavior and live proof remain.
-huggingface	40	Initial provider wrapper exists; SSE/tool parity and broader package behavior remain.
+huggingface	55	Initial provider wrapper exists; SSE streaming, warning propagation, and broader package behavior remain.
 hume	45	Initial provider crate exists; deterministic upstream speech/error parity is mapped, with live-provider validation remaining.
 lmnt	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 luma	45	Initial provider crate exists; full upstream test and live-provider parity remain.
