@@ -3,8 +3,8 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 54.0%
-- Portable package average: 43.1%
+- Average estimated completion: 54.4%
+- Portable package average: 43.6%
 - Closed package rows: 21 / 52
 - Strict portable verified rows: 11 / 42
 - In-progress rows: 16
@@ -42,7 +42,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | --- | ---: | --- | --- | --- |
 | `@ai-sdk/azure` | 50% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
-| `@ai-sdk/black-forest-labs` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
+| `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
 | `@ai-sdk/bytedance` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/cerebras` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/deepgram` | 50% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |

@@ -817,11 +817,15 @@ fn black_forest_labs_image_request_body(
         );
     }
 
-    let (size_width, size_height) = options
-        .size
-        .as_deref()
-        .and_then(parse_size)
-        .unwrap_or((None, None));
+    let (size_width, size_height) = if options.aspect_ratio.is_some() {
+        (None, None)
+    } else {
+        options
+            .size
+            .as_deref()
+            .and_then(parse_size)
+            .unwrap_or((None, None))
+    };
     insert_option_u64(&mut body, "width", provider_options.width.or(size_width));
     insert_option_u64(&mut body, "height", provider_options.height.or(size_height));
     insert_option_u64(&mut body, "steps", provider_options.steps);
@@ -1224,8 +1228,11 @@ mod tests {
     use serde_json::json;
     use std::future::Future;
     use std::future::ready;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
     use url::Url;
 
@@ -1253,6 +1260,29 @@ mod tests {
         }
     }
 
+    fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        future.as_mut().poll(&mut context)
+    }
+
+    fn poll_pinned_until_ready<F: Future>(mut future: Pin<&mut F>, timeout: Duration) -> F::Output {
+        let start = Instant::now();
+
+        loop {
+            match poll_once(future.as_mut()) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => {
+                    assert!(
+                        start.elapsed() <= timeout,
+                        "future did not complete within {timeout:?}"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
     fn fixed_timestamp() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
     }
@@ -1265,6 +1295,52 @@ mod tests {
         Arc<Mutex<Vec<ProviderApiRequest>>>,
         BlackForestLabsTransport,
     ) {
+        recorded_transport(|request| match (request.method, request.url.as_str()) {
+            (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                json_response(json!({
+                    "id": "req-123",
+                    "polling_url": "https://api.example.com/poll",
+                    "cost": 0.08,
+                    "input_mp": 1.5,
+                    "output_mp": 2.0
+                }))
+            }
+            (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                json_response(json!({
+                    "status": "Ready",
+                    "result": {
+                        "sample": "https://api.example.com/image.png",
+                        "seed": 12345,
+                        "start_time": 10.0,
+                        "end_time": 12.5,
+                        "duration": 2.5
+                    }
+                }))
+            }
+            (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
+                ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3]).with_headers(
+                    [("x-image-id".to_string(), "img-123".to_string())]
+                        .into_iter()
+                        .collect(),
+                )
+            }
+            _ => ProviderApiResponse::text(
+                404,
+                "Not Found",
+                json!({"message": "unexpected request"}).to_string(),
+            ),
+        })
+    }
+
+    fn recorded_transport<F>(
+        handler: F,
+    ) -> (
+        Arc<Mutex<Vec<ProviderApiRequest>>>,
+        BlackForestLabsTransport,
+    )
+    where
+        F: Fn(&ProviderApiRequest) -> ProviderApiResponse + Send + Sync + 'static,
+    {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let requests_for_transport = Arc::clone(&requests);
         let transport: BlackForestLabsTransport =
@@ -1274,43 +1350,7 @@ mod tests {
                     .expect("request list mutex is not poisoned")
                     .push(request.clone());
 
-                let response = match (request.method, request.url.as_str()) {
-                    (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
-                        json_response(json!({
-                            "id": "req-123",
-                            "polling_url": "https://api.example.com/poll",
-                            "cost": 0.08,
-                            "input_mp": 1.5,
-                            "output_mp": 2.0
-                        }))
-                    }
-                    (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
-                        json_response(json!({
-                            "status": "Ready",
-                            "result": {
-                                "sample": "https://api.example.com/image.png",
-                                "seed": 12345,
-                                "start_time": 10.0,
-                                "end_time": 12.5,
-                                "duration": 2.5
-                            }
-                        }))
-                    }
-                    (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
-                        ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3]).with_headers(
-                            [("x-image-id".to_string(), "img-123".to_string())]
-                                .into_iter()
-                                .collect(),
-                        )
-                    }
-                    _ => ProviderApiResponse::text(
-                        404,
-                        "Not Found",
-                        json!({"message": "unexpected request"}).to_string(),
-                    ),
-                };
-
-                Box::pin(ready(Ok(response)))
+                Box::pin(ready(Ok(handler(&request))))
             });
 
         (requests, transport)
@@ -1595,5 +1635,1044 @@ mod tests {
         assert_eq!(settings.poll_timeout_millis, Some(30));
         assert_eq!(provider.base_url, "https://api.example.com/v1");
         assert_eq!(DEFAULT_BLACK_FOREST_LABS_BASE_URL, "https://api.bfl.ai/v1");
+    }
+
+    #[test]
+    fn black_forest_labs_provider_creates_image_models_via_image_and_image_model() {
+        let provider = black_forest_labs();
+
+        let image_model = provider.image("flux-pro-1.1");
+        let image_model2 = provider
+            .image_model("flux-pro-1.1-ultra")
+            .expect("image model is supported");
+
+        assert_eq!(image_model.provider(), "black-forest-labs.image");
+        assert_eq!(image_model.model_id(), "flux-pro-1.1");
+        assert_eq!(image_model2.model_id(), "flux-pro-1.1-ultra");
+        assert_eq!(image_model2.provider(), "black-forest-labs.image");
+        assert_eq!(image_model2.specification_version().as_str(), "v4");
+    }
+
+    #[test]
+    fn black_forest_labs_provider_configures_base_url_and_headers_correctly() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1")
+                .with_header("x-extra-header", "extra"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let model = provider.image("flux-pro-1.1");
+
+        let result = poll_ready(model.do_generate(
+            ImageModelCallOptions::new(1).with_prompt("A serene mountain landscape at sunset"),
+        ));
+
+        assert_eq!(result.images, vec![FileDataContent::Bytes(vec![1, 2, 3])]);
+        assert_eq!(result.response.model_id, "flux-pro-1.1");
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests[0].method, ProviderApiRequestMethod::Post);
+        assert_eq!(requests[0].url, "https://api.example.com/v1/flux-pro-1.1");
+        assert_eq!(
+            requests[0].headers.get("x-key"),
+            Some(&"test-api-key".to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("x-extra-header"),
+            Some(&"extra".to_string())
+        );
+        assert!(
+            requests[0]
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/black-forest-labs/"))
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_provider_uses_provider_polling_options_for_timeout_behavior() {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    json_response(json!({
+                        "id": "req-123",
+                        "polling_url": "https://api.example.com/poll"
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                    json_response(json!({
+                        "status": "Pending"
+                    }))
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1")
+                .with_poll_interval_millis(10)
+                .with_poll_timeout_millis(25),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let model = provider.image("flux-pro-1.1");
+        let mut future = Box::pin(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Timeout test")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+        let result = poll_pinned_until_ready(future.as_mut(), Duration::from_millis(200));
+
+        assert!(result.images.is_empty());
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert_eq!(
+            metadata.extra.get("errorMessage"),
+            Some(&json!("Black Forest Labs generation timed out."))
+        );
+        let poll_calls = requests
+            .lock()
+            .expect("request list mutex is not poisoned")
+            .iter()
+            .filter(|request| {
+                request.method == ProviderApiRequestMethod::Get
+                    && request.url.starts_with("https://api.example.com/poll")
+            })
+            .count();
+        assert_eq!(poll_calls, 3);
+    }
+
+    #[test]
+    fn black_forest_labs_provider_throws_nosuchmodelerror_for_unsupported_model_types() {
+        let provider = black_forest_labs();
+
+        let language_error = match provider.language_model("some-model") {
+            Ok(_) => panic!("language models are unsupported"),
+            Err(error) => error,
+        };
+        let embedding_error = match provider.embedding_model("some-model") {
+            Ok(_) => panic!("embedding models are unsupported"),
+            Err(error) => error,
+        };
+
+        assert_eq!(language_error.model_type(), ModelType::LanguageModel);
+        assert_eq!(embedding_error.model_type(), ModelType::EmbeddingModel);
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_passes_correct_parameters_including_aspect_ratio_and_provider_options()
+     {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "blackForestLabs".to_string(),
+            serde_json::from_value(json!({
+                "promptUpsampling": true,
+                "unsupportedProperty": "value"
+            }))
+            .expect("object provider options deserialize"),
+        );
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("16:9")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.images, vec![FileDataContent::Bytes(vec![1, 2, 3])]);
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            request_body_json(&requests[0]),
+            json!({
+                "aspect_ratio": "16:9",
+                "prompt": "A cute baby sea otter",
+                "prompt_upsampling": true
+            })
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_includes_seed_in_provider_metadata_images_when_provided_by_api()
+     {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert_eq!(
+            metadata.images[0],
+            json!({"seed": 12345, "start_time": 10.0, "end_time": 12.5, "duration": 2.5, "cost": 0.08, "inputMegapixels": 1.5, "outputMegapixels": 2.0})
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_includes_all_cost_and_megapixel_fields_when_provided_by_submit_api()
+     {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert_eq!(metadata.images[0]["cost"], json!(0.08));
+        assert_eq!(metadata.images[0]["inputMegapixels"], json!(1.5));
+        assert_eq!(metadata.images[0]["outputMegapixels"], json!(2.0));
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_omits_cost_and_megapixel_fields_from_provider_metadata_when_not_provided_by_submit_api()
+     {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    json_response(json!({
+                        "id": "req-123",
+                        "polling_url": "https://api.example.com/poll"
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                    json_response(json!({
+                        "status": "Ready",
+                        "result": {
+                            "sample": "https://api.example.com/image.png"
+                        }
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
+                    ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3])
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert!(
+            !metadata.images[0]
+                .as_object()
+                .expect("image metadata object")
+                .contains_key("cost")
+        );
+        assert!(
+            !metadata.images[0]
+                .as_object()
+                .expect("image metadata object")
+                .contains_key("inputMegapixels")
+        );
+        assert!(
+            !metadata.images[0]
+                .as_object()
+                .expect("image metadata object")
+                .contains_key("outputMegapixels")
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_handles_null_cost_and_megapixel_fields_from_submit_api() {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    json_response(json!({
+                        "id": "req-123",
+                        "polling_url": "https://api.example.com/poll",
+                        "cost": null,
+                        "input_mp": null,
+                        "output_mp": null
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                    json_response(json!({
+                        "status": "Ready",
+                        "result": {
+                            "sample": "https://api.example.com/image.png"
+                        }
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
+                    ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3])
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert!(
+            !metadata.images[0]
+                .as_object()
+                .expect("image metadata object")
+                .contains_key("cost")
+        );
+        assert!(
+            !metadata.images[0]
+                .as_object()
+                .expect("image metadata object")
+                .contains_key("inputMegapixels")
+        );
+        assert!(
+            !metadata.images[0]
+                .as_object()
+                .expect("image metadata object")
+                .contains_key("outputMegapixels")
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_calls_the_expected_urls_in_sequence() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let _ = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests[0].method, ProviderApiRequestMethod::Post);
+        assert_eq!(requests[0].url, "https://api.example.com/v1/flux-pro-1.1");
+        assert_eq!(requests[1].method, ProviderApiRequestMethod::Get);
+        assert_eq!(requests[1].url, "https://api.example.com/poll?id=req-123");
+        assert_eq!(requests[2].method, ProviderApiRequestMethod::Get);
+        assert_eq!(requests[2].url, "https://api.example.com/image.png");
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_merges_provider_and_request_headers_for_submit_call() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1")
+                .with_header("x-custom-provider-header", "provider-header-value"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let _ = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1")
+                    .with_header("x-custom-request-header", "request-header-value"),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            requests[0].headers.get("x-custom-provider-header"),
+            Some(&"provider-header-value".to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("x-custom-request-header"),
+            Some(&"request-header-value".to_string())
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_passes_merged_headers_to_polling_requests() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1")
+                .with_header("x-custom-provider-header", "provider-header-value"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let _ = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1")
+                    .with_header("x-custom-request-header", "request-header-value"),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            requests[1].headers.get("x-custom-provider-header"),
+            Some(&"provider-header-value".to_string())
+        );
+        assert_eq!(
+            requests[1].headers.get("x-custom-request-header"),
+            Some(&"request-header-value".to_string())
+        );
+        assert_eq!(
+            requests[2].headers.get("x-custom-provider-header"),
+            Some(&"provider-header-value".to_string())
+        );
+        assert_eq!(
+            requests[2].headers.get("x-custom-request-header"),
+            Some(&"request-header-value".to_string())
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_warns_and_derives_aspect_ratio_when_size_is_provided() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "blackForestLabs".to_string(),
+            serde_json::from_value(json!({
+                "height": 512,
+                "imagePrompt": "style ref",
+                "imagePromptStrength": 0.7,
+                "outputFormat": "png",
+                "pollIntervalMillis": 1,
+                "pollTimeoutMillis": 10,
+                "raw": true,
+                "safetyTolerance": 3,
+                "steps": 12,
+                "webhookUrl": "https://example.com/webhook"
+            }))
+            .expect("object provider options deserialize"),
+        );
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A generated image")
+                    .with_size("1024x512")
+                    .with_seed(7)
+                    .with_files(vec![
+                        ImageModelFile::file("image/png", FileDataContent::Bytes(vec![1, 2, 3])),
+                        ImageModelFile::url(
+                            Url::parse("https://example.com/input.png").expect("valid URL"),
+                        ),
+                    ])
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("bWFzaw==".to_string()),
+                    ))
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "size".to_string(),
+                details: Some("Deriving aspect_ratio from size. Use the width and height provider options to specify dimensions for models that support them.".to_string()),
+            }]
+        );
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            request_body_json(&requests[0]),
+            json!({
+                "aspect_ratio": "2:1",
+                "height": 512,
+                "image_prompt": "style ref",
+                "image_prompt_strength": 0.7,
+                "input_image": "AQID",
+                "input_image_2": "https://example.com/input.png",
+                "mask": "bWFzaw==",
+                "output_format": "png",
+                "prompt": "A generated image",
+                "raw": true,
+                "safety_tolerance": 3,
+                "seed": 7,
+                "steps": 12,
+                "webhook_url": "https://example.com/webhook",
+                "width": 1024
+            })
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_warns_and_ignores_size_when_both_size_and_aspect_ratio_are_provided()
+     {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A generated image")
+                    .with_size("1024x512")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "size".to_string(),
+                details: Some("Black Forest Labs ignores size when aspectRatio is provided. Use the width and height provider options to specify dimensions for models that support them".to_string()),
+            }]
+        );
+        assert_eq!(
+            request_body_json(&requests.lock().expect("request list mutex is not poisoned")[0]),
+            json!({
+                "aspect_ratio": "1:1",
+                "prompt": "A generated image"
+            })
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_handles_api_errors_with_message_and_detail() {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    ProviderApiResponse::text(
+                        400,
+                        "Bad Request",
+                        json!({
+                            "message": "Top-level message",
+                            "detail": {"error": "Invalid prompt"}
+                        })
+                        .to_string(),
+                    )
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Invalid prompt")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert_eq!(
+            metadata.extra.get("errorMessage"),
+            Some(&json!("{\"error\":\"Invalid prompt\"}"))
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_handles_poll_responses_with_state_instead_of_status() {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    json_response(json!({
+                        "id": "req-123",
+                        "polling_url": "https://api.example.com/poll"
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                    json_response(json!({
+                        "state": "Ready",
+                        "result": {
+                            "sample": "https://api.example.com/image.png"
+                        }
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
+                    ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3])
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        assert_eq!(result.images, vec![FileDataContent::Bytes(vec![1, 2, 3])]);
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_polls_multiple_times_using_configured_interval_until_ready() {
+        let poll_calls = Arc::new(Mutex::new(0usize));
+        let poll_calls_for_transport = Arc::clone(&poll_calls);
+        let (requests, transport) =
+            recorded_transport(
+                move |request| match (request.method, request.url.as_str()) {
+                    (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                        json_response(json!({
+                            "id": "req-123",
+                            "polling_url": "https://api.example.com/poll"
+                        }))
+                    }
+                    (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                        let mut calls = poll_calls_for_transport
+                            .lock()
+                            .expect("poll counter mutex is not poisoned");
+                        *calls += 1;
+                        match *calls {
+                            1 | 2 => json_response(json!({
+                                "status": "Pending"
+                            })),
+                            _ => json_response(json!({
+                                "status": "Ready",
+                                "result": {
+                                    "sample": "https://api.example.com/image.png"
+                                }
+                            })),
+                        }
+                    }
+                    (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
+                        ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3])
+                    }
+                    _ => ProviderApiResponse::text(
+                        404,
+                        "Not Found",
+                        json!({"message": "unexpected request"}).to_string(),
+                    ),
+                },
+            );
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1")
+                .with_poll_interval_millis(10)
+                .with_poll_timeout_millis(100),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let model = provider.image("flux-pro-1.1");
+        let mut future = Box::pin(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+        let result = poll_pinned_until_ready(future.as_mut(), Duration::from_millis(200));
+
+        assert_eq!(result.images, vec![FileDataContent::Bytes(vec![1, 2, 3])]);
+        assert_eq!(
+            *poll_calls
+                .lock()
+                .expect("poll counter mutex is not poisoned"),
+            3
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_uses_configured_poll_timeout_millis_and_poll_interval_millis_to_time_out()
+     {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    json_response(json!({
+                        "id": "req-123",
+                        "polling_url": "https://api.example.com/poll"
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                    json_response(json!({
+                        "status": "Pending"
+                    }))
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1")
+                .with_poll_interval_millis(10)
+                .with_poll_timeout_millis(25),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let model = provider.image("flux-pro-1.1");
+        let mut future = Box::pin(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Timeout test")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+        let result = poll_pinned_until_ready(future.as_mut(), Duration::from_millis(200));
+
+        assert!(result.images.is_empty());
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert_eq!(
+            metadata.extra.get("errorMessage"),
+            Some(&json!("Black Forest Labs generation timed out."))
+        );
+        let poll_calls = requests
+            .lock()
+            .expect("request list mutex is not poisoned")
+            .iter()
+            .filter(|request| {
+                request.method == ProviderApiRequestMethod::Get
+                    && request.url.starts_with("https://api.example.com/poll")
+            })
+            .count();
+        assert_eq!(poll_calls, 3);
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_throws_when_poll_is_ready_but_sample_is_missing() {
+        let (requests, transport) =
+            recorded_transport(|request| match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.1") => {
+                    json_response(json!({
+                        "id": "req-123",
+                        "polling_url": "https://api.example.com/poll"
+                    }))
+                }
+                (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                    json_response(json!({
+                        "status": "Ready",
+                        "result": {}
+                    }))
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            });
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata")
+            .remove("blackForestLabs")
+            .expect("Black Forest Labs metadata");
+        assert_eq!(
+            metadata.extra.get("errorMessage"),
+            Some(&json!(
+                "Black Forest Labs poll response is Ready but missing result.sample"
+            ))
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_throws_when_poll_returns_error_or_failed() {
+        for status in ["Error", "Failed"] {
+            let (requests, transport) =
+                recorded_transport(
+                    move |request| match (request.method, request.url.as_str()) {
+                        (
+                            ProviderApiRequestMethod::Post,
+                            "https://api.example.com/v1/flux-pro-1.1",
+                        ) => json_response(json!({
+                            "id": "req-123",
+                            "polling_url": "https://api.example.com/poll"
+                        })),
+                        (
+                            ProviderApiRequestMethod::Get,
+                            "https://api.example.com/poll?id=req-123",
+                        ) => json_response(json!({
+                            "status": status
+                        })),
+                        _ => ProviderApiResponse::text(
+                            404,
+                            "Not Found",
+                            json!({"message": "unexpected request"}).to_string(),
+                        ),
+                    },
+                );
+            let provider = create_black_forest_labs(
+                BlackForestLabsProviderSettings::new()
+                    .with_api_key("test-api-key")
+                    .with_base_url("https://api.example.com/v1"),
+            )
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+            let result = poll_ready(
+                provider.image("flux-pro-1.1").do_generate(
+                    ImageModelCallOptions::new(1)
+                        .with_prompt("A cute baby sea otter")
+                        .with_aspect_ratio("1:1"),
+                ),
+            );
+
+            assert!(result.images.is_empty());
+            let metadata = result
+                .provider_metadata
+                .expect("provider metadata")
+                .remove("blackForestLabs")
+                .expect("Black Forest Labs metadata");
+            assert_eq!(
+                metadata.extra.get("errorMessage"),
+                Some(&json!("Black Forest Labs generation failed."))
+            );
+            assert_eq!(
+                requests
+                    .lock()
+                    .expect("request list mutex is not poisoned")
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_includes_timestamp_headers_and_model_id_in_response_metadata()
+    {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1"),
+            ),
+        );
+
+        assert_eq!(result.response.model_id, "flux-pro-1.1");
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert_eq!(
+            result
+                .response
+                .headers
+                .expect("image response headers")
+                .get("x-image-id"),
+            Some(&"img-123".to_string())
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_exposes_correct_provider_and_model_information() {
+        let provider = black_forest_labs();
+        let image_model = provider.image("flux-pro-1.1");
+
+        assert_eq!(image_model.provider(), "black-forest-labs.image");
+        assert_eq!(image_model.model_id(), "flux-pro-1.1");
+        assert_eq!(image_model.specification_version().as_str(), "v4");
     }
 }

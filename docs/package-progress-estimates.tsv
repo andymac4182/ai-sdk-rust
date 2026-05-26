@@ -4,7 +4,7 @@
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
 azure	50	Initial provider crate exists; full upstream test and live-provider parity remain.
 baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
-black-forest-labs	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+black-forest-labs	65	Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still credential-gated.
 bytedance	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 cerebras	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 deepgram	50	Initial provider crate exists; full upstream test and live-provider parity remain.
