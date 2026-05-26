@@ -2,7 +2,6 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-assemblyai	50	Initial provider crate exists; abort handling is covered, while live-provider validation and exact thrown-error parity remain.
 azure	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
 black-forest-labs	45	Initial provider crate exists; full upstream test and live-provider parity remain.
@@ -10,14 +9,12 @@ bytedance	45	Initial provider crate exists; full upstream test and live-provider
 cerebras	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 deepgram	40	Initial provider crate exists; full upstream test and live-provider parity remain.
 deepinfra	45	Initial provider wrapper exists; broader package behavior and live proof remain.
-deepseek	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 huggingface	40	Initial provider wrapper exists; SSE/tool parity and broader package behavior remain.
 hume	40	Initial provider crate exists; full upstream test and live-provider parity remain.
 lmnt	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 luma	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 mistral	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 moonshotai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
-perplexity	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 revai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 togetherai	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 vercel	40	Construction wrapper exists; live validation and full package test parity remain.
