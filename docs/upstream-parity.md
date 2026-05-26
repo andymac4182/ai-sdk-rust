@@ -2470,6 +2470,31 @@ focused tests for each portable behavior before changing rows to `verified`.
   `mcp_client_records_downgraded_protocol_version_when_server_negotiates_an_older_supported_version`
   now explicitly covers the supported older-protocol negotiation case in the
   MCP client init flow.
+- 2026-05-26: MCP exact-name audit added explicit ledger mappings for the
+  remaining portable MCP helper cases already covered in Rust but not yet
+  named in the ledger. Upstream `mcp-apps.test.ts` now maps `mcp app client
+  capabilities`, `mcp app client capabilities` shape matching,
+  `mcp app resource from read result` text/html/blob decoding, `mcp app tool
+  meta` resource URI handling, and `mcp provider metadata` title/app metadata
+  propagation to the existing Rust counterparts
+  `mcp_app_client_capabilities`,
+  `mcp_app_client_capabilities_match_upstream_extension_shape`,
+  `mcp_app_resource_from_read_result_decodes_blob_html`,
+  `mcp_app_resource_from_read_result_extracts_text_html_and_meta`,
+  `mcp_app_tool_meta_reads_ui_and_legacy_resource_uris`,
+  `mcp_app_tool_meta_rejects_invalid_resource_uri`, and
+  `mcp_provider_metadata_includes_title_and_app_metadata`. The upstream
+  `mcp-http-transport.test.ts` cases map to
+  `mcp_http_transport_parses_sse_message_responses`,
+  `mcp_http_transport_posts_json_and_cleans_up_session`, and
+  `mcp_http_transport_reports_http_errors_with_sse_hint`; and the upstream
+  `mcp-to-model-output.test.ts` cases map to
+  `mcp_to_model_output`,
+  `mcp_to_model_output_converts_text_images_and_unknown_content`, and
+  `mcp_to_model_output_falls_back_to_json_without_content_array`. The
+  MCP hosted OAuth HTTP example was revalidated locally on 2026-05-26 and
+  completed end to end with protected tool discovery, protected tool
+  execution, and request counting.
 - 2026-05-22: Workflow `prepareStep` parity added deterministic Rust
   counterparts for upstream `workflow-agent.test.ts` prepare-step cases in
   `crates/ai-sdk-workflow`: iterator message override, system-after-messages
