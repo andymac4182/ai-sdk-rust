@@ -13,7 +13,6 @@ huggingface	40	Initial provider wrapper exists; SSE/tool parity and broader pack
 hume	45	Initial provider crate exists; deterministic upstream speech/error parity is mapped, with live-provider validation remaining.
 lmnt	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 luma	45	Initial provider crate exists; full upstream test and live-provider parity remain.
-mistral	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 moonshotai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 revai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 togetherai	45	Initial provider wrapper exists; broader package behavior and live proof remain.

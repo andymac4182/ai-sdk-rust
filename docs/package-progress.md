@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 52.7%
-- Portable package average: 41.4%
-- Closed package rows: 20 / 52
-- Strict portable verified rows: 10 / 42
-- In-progress rows: 17
+- Average estimated completion: 53.8%
+- Portable package average: 42.7%
+- Closed package rows: 21 / 52
+- Strict portable verified rows: 11 / 42
+- In-progress rows: 16
 - Not-started rows: 15
 
 ## 100% Closed
@@ -21,6 +21,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
 | `@ai-sdk/deepseek` | 100% | Verified | provider package |
+| `@ai-sdk/mistral` | 100% | Verified | provider package |
 | `@ai-sdk/perplexity` | 100% | Verified | provider package |
 | `@ai-sdk/otel` | 100% | Verified | telemetry package |
 | `@ai-sdk/test-server` | 100% | Verified | testing support package |
@@ -50,7 +51,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/hume` | 45% | In progress | provider package | Initial provider crate exists; deterministic upstream speech/error parity is mapped, with live-provider validation... |
 | `@ai-sdk/lmnt` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/luma` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
-| `@ai-sdk/mistral` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/moonshotai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/revai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/togetherai` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
