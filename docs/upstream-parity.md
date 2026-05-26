@@ -1432,6 +1432,10 @@ focused tests for each portable behavior before changing rows to `verified`.
   proving an abort that fires while `do_stream` is pending still produces the
   expected start-step/abort chunk sequence and `onAbort` callback once the
   delayed model future resolves.
+- 2026-05-26: `packages/ai` `streamText` provider-executed replay-across-steps
+  parity added `stream_text_preserves_provider_metadata_when_replaying_the_next_step`,
+  proving provider-executed tool-call and tool-result metadata are preserved
+  when the next step is replayed through the prompt.
 - 2026-05-25: `packages/ai` `generateText`/`streamText` `onStart` timeout
   exposure parity added `generate_text_event_aliases_share_upstream_json_shapes`
   and `stream_text_invokes_lifecycle_callbacks_with_streamed_steps`, proving

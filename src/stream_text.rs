@@ -12663,6 +12663,195 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_preserves_provider_metadata_when_replaying_the_next_step() {
+        let tool_search_provider_metadata = ProviderMetadata::from([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("tsc_123"))]),
+        )]);
+        let tool_search_provider_options = ProviderOptions::from_iter([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("tsc_123"))]),
+        )]);
+        let tool_search_result_provider_metadata = ProviderMetadata::from([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("tso_123"))]),
+        )]);
+        let tool_search_result_provider_options = ProviderOptions::from_iter([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("tso_123"))]),
+        )]);
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "tool-search-call-1",
+                        "toolSearch",
+                        r#"{"arguments":{"paths":["get_weather"]},"call_id":null}"#,
+                    )
+                    .with_provider_executed(true)
+                    .with_provider_metadata(tool_search_provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "tool-search-call-1",
+                        "toolSearch",
+                        NonNullJsonValue::new(json!({
+                            "tools": [{
+                                "type": "function",
+                                "name": "get_weather",
+                                "description": "Get the current weather at a specific location",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "location": { "type": "string" }
+                                    },
+                                    "required": ["location"]
+                                }
+                            }]
+                        }))
+                        .expect("provider tool result is non-null"),
+                    )
+                    .with_provider_metadata(tool_search_result_provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "get_weather",
+                    r#"{"location":"San Francisco, CA"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Sunny.")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let tool_search_input_schema = json!({
+            "type": "object",
+            "properties": {
+                "arguments": {
+                    "type": "object",
+                    "properties": {
+                        "paths": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["paths"]
+                },
+                "call_id": { "type": "null" }
+            },
+            "required": ["arguments", "call_id"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let tool_search_output_schema = json!({
+            "type": "object",
+            "properties": {
+                "tools": {
+                    "type": "array",
+                    "items": { "type": "object" }
+                }
+            },
+            "required": ["tools"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let get_weather_input_schema = json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" }
+            },
+            "required": ["location"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::provider_executed(
+                    "toolSearch",
+                    "test.toolSearch",
+                    json!({})
+                        .as_object()
+                        .expect("provider args are an object")
+                        .clone(),
+                    tool_search_input_schema,
+                    tool_search_output_schema,
+                ))
+                .with_tool(
+                    Tool::new("get_weather", get_weather_input_schema).with_execute(
+                        |input, _| async move {
+                            Ok(json!({
+                                "forecast": "sunny",
+                                "location": input["location"],
+                            }))
+                        },
+                    ),
+                )
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(
+            &calls[1].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if message.content.len() == 3
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "tool-search-call-1"
+                                && part.tool_name == "toolSearch"
+                                && part.input == json!({
+                                    "arguments": { "paths": ["get_weather"] },
+                                    "call_id": null
+                                })
+                                && part.provider_executed == Some(true)
+                                && part.provider_options == Some(tool_search_provider_options.clone())
+                    )
+                    && matches!(
+                        &message.content[1],
+                        LanguageModelAssistantContentPart::ToolResult(part)
+                            if part.tool_call_id == "tool-search-call-1"
+                                && part.tool_name == "toolSearch"
+                                && part.provider_options == Some(tool_search_result_provider_options.clone())
+                    )
+                    && matches!(
+                        &message.content[2],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "call-2"
+                                && part.tool_name == "get_weather"
+                                && part.input == json!({ "location": "San Francisco, CA" })
+                    )
+        ));
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.text, "Sunny.");
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_results.len(), 2);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(
+            result.tool_calls[0].provider_metadata,
+            Some(tool_search_provider_metadata)
+        );
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(
+            result.tool_results[0].provider_metadata,
+            Some(tool_search_result_provider_metadata)
+        );
+        assert_eq!(result.tool_calls[1].tool_name, "get_weather");
+        assert_eq!(result.tool_results[1].tool_name, "get_weather");
+    }
+
+    #[test]
     fn stream_text_invokes_lifecycle_callbacks_with_streamed_steps() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
