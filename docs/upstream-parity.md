@@ -2677,6 +2677,97 @@ focused tests for each portable behavior before changing rows to `verified`.
   deterministic event payloads for upstream `experimental_onStart` and
   `experimental_onStepStart` stream cases via `WorkflowAgentOnStartCallback`
   and `WorkflowAgentOnStepStartCallback`.
+- 2026-05-26: WorkflowAgent and workflow chat transport exact-name audit
+  added explicit ledger mappings for the remaining portable workflow test
+  names already covered in Rust but not yet named in the ledger. Upstream
+  `workflow-agent.test.ts` now maps `should call onFinish from constructor`
+  and `should call onFinish from stream method` to
+  `workflow_agent_compat_should_call_on_finish_from_constructor` and
+  `workflow_agent_compat_should_call_on_finish_from_stream_method`; the
+  matching `onStepFinish` callback cases map to
+  `workflow_agent_compat_should_call_on_step_finish_from_constructor`,
+  `workflow_agent_compat_should_call_on_step_finish_from_stream_method`, and
+  `workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback`.
+  Upstream `workflow-agent-e2e.integration.test.ts` now maps
+  `should accept a string prompt instead of messages`,
+  `should accept an array of messages as prompt`,
+  `should allow stream options to override constructor stop conditions`,
+  `should allow stream options to override constructor telemetry`,
+  `should call onAbort when abortSignal is already aborted`,
+  `should convert fatal error to tool error result`,
+  `should convert non-fatal error to tool error result`,
+  `should expose id when provided in constructor`,
+  `should have undefined id when not provided`,
+  `should handle provider-executed tool errors with isError flag`,
+  `should pass conversation messages to tool execute function`,
+  `should pass includeRawChunks to streamTextIterator`,
+  `should pass messages to multiple tools in parallel execution`,
+  `should pass onError callback to streamTextIterator`,
+  `should pass per-tool tools context entry as execute context`,
+  `should pass runtimeContext to onFinish`,
+  `should pass telemetry settings from constructor to streamTextIterator`,
+  `should pass through messages without approval responses unchanged`,
+  `should pass undefined context when no toolsContext entry exists`,
+  `should return empty result when provider-executed tool result is missing`,
+  `should skip local execution for provider-executed tools`,
+  `should stop the loop for client-side tools without execute`,
+  `should use constructor experimental_repairToolCall when not specified in stream`,
+  `should use constructor stop conditions when not specified in stream`,
+  and `should validate per-tool context against context schema` to the
+  existing Rust counterparts `workflow_agent_upstream_should_accept_a_string_prompt_in_stream`,
+  `workflow_agent_upstream_should_accept_an_array_of_messages_as_prompt`,
+  `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_stop_conditions`,
+  `workflow_agent_upstream_should_allow_stream_options_to_override_constructor_telemetry`,
+  `workflow_agent_upstream_should_call_on_abort_when_abort_signal_is_already_aborted`,
+  `workflow_agent_upstream_should_convert_fatal_error_to_tool_error_result`,
+  `workflow_agent_upstream_should_convert_non_fatal_error_to_tool_error_result`,
+  `workflow_agent_upstream_should_expose_id_when_provided_in_constructor`,
+  `workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag`,
+  `workflow_agent_upstream_should_have_undefined_id_when_not_provided`,
+  `workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function`,
+  `workflow_agent_upstream_should_pass_include_raw_chunks_to_stream_text_iterator`,
+  `workflow_agent_upstream_should_pass_messages_to_multiple_tools_in_parallel_execution`,
+  `workflow_agent_upstream_should_pass_on_error_callback_to_stream_text_iterator`,
+  `workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context`,
+  `workflow_agent_upstream_should_pass_runtime_context_to_on_finish`,
+  `workflow_agent_upstream_should_pass_telemetry_settings_from_constructor_to_stream_text_iterator`,
+  `workflow_agent_upstream_should_pass_through_messages_without_approval_responses_unchanged`,
+  `workflow_agent_upstream_should_pass_undefined_context_when_no_tools_context_entry_exists`,
+  `workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing`,
+  `workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools`,
+  `workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute`,
+  `workflow_agent_upstream_should_use_constructor_experimental_repair_tool_call_when_not_specified_in_stream`,
+  `workflow_agent_upstream_should_use_constructor_stop_conditions_when_not_specified_in_stream`,
+  `workflow_agent_upstream_should_validate_per_tool_context_against_context_schema`,
+  `workflow_chat_transport_accepts_and_stores_callback_functions`,
+  `workflow_chat_transport_accepts_custom_max_consecutive_errors`,
+  `workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header`,
+  `workflow_chat_transport_reconnect_formats_consecutive_errors`,
+  `workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header`,
+  `workflow_chat_transport_reconnect_uses_positive_initial_start_index_for_retries`,
+  `workflow_chat_transport_reconnects_after_interrupted_send_using_run_id_and_chunk_index`,
+  `workflow_chat_transport_reports_http_errors`,
+  `workflow_chat_transport_requires_workflow_run_id_for_interrupted_send`,
+  `workflow_chat_transport_sends_messages_and_reports_chat_end`,
+  `workflow_chat_transport_uses_custom_api_endpoint_and_builds_reconnect_request`,
+  `workflow_chat_transport_uses_custom_api_endpoint_and_builds_send_request`,
+  `workflow_chat_transport_uses_default_options_and_builds_send_request`, and
+  `workflow_smoke_should_compute_the_correct_result`. Upstream
+  `workflow-chat-transport.test.ts` now maps `accepts and stores callback
+  functions`, `accepts custom max consecutive errors`,
+  `reconnect falls back to zero for invalid negative tail header`,
+  `reconnect formats consecutive errors`,
+  `reconnect resolves negative start index from tail header`,
+  `reconnect uses positive initial start index for retries`,
+  `reconnects after interrupted send using run id and chunk index`,
+  `reports HTTP errors`, `requires workflow run id for interrupted send`,
+  `sends messages and reports chat end`,
+  `uses custom API endpoint and builds reconnect request`,
+  `uses custom API endpoint and builds send request`, and
+  `uses default options and builds send request` to the existing Rust
+  `workflow_chat_transport_*` tests. Upstream
+  `workflow-smoke.integration.test.ts` `should compute the correct result`
+  is represented by `workflow_smoke_should_compute_the_correct_result`.
 - 2026-05-22: OpenAI-compatible provider option key normalization added named
   Rust counterparts for all 17 portable upstream
   `packages/openai-compatible/src/utils/to-camel-case.test.ts` cases, covering
