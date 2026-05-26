@@ -2621,6 +2621,26 @@ focused tests for each portable behavior before changing rows to `verified`.
   constructor telemetry`, proving the stream facade normalizes string prompts
   into a single user message and forwards `includeRawChunks` and telemetry
   settings to the deterministic stream executor.
+- 2026-05-26: WorkflowAgent telemetry integration parity added named Rust
+  counterparts for upstream `workflow-agent-compat.test.ts` telemetry
+  listener cases: `should call per-call integration listeners for all
+  lifecycle events`, `should include only configured runtime and tools
+  context fields`, `should call globally registered integration listeners`,
+  `should call integration listeners alongside agent callbacks`, `should not
+  break streaming when an integration listener throws`, and `should emit
+  telemetry when an approved tool resumes`. The Rust workflow agent now
+  dispatches telemetry lifecycle events through the shared dispatcher, keeps
+  runtime/tools context filtering aligned with the upstream include lists, and
+  exposes a workflow-specific telemetry wrapper for async local tool
+  execution so approved tools can be observed while resuming the stream.
+- 2026-05-26: WorkflowAgent telemetry integration extension added the global
+  integration registry, callback-order, panic-containment, and async
+  approved-tool telemetry wrapper coverage that the upstream
+  `workflow-agent-compat.test.ts` cases depend on. The Rust workflow agent now
+  dispatches telemetry lifecycle events through the shared dispatcher, keeps
+  runtime/tools context filtering aligned with the upstream include lists, and
+  exposes a workflow-specific telemetry wrapper for async local tool
+  execution so approved tools can be observed while resuming the stream.
 - 2026-05-26: WorkflowAgent result-shape parity added the named Rust
   counterpart `workflow_agent_upstream_should_return_messages_and_steps_in_result`,
   proving the stream result exposes both the final conversation messages and

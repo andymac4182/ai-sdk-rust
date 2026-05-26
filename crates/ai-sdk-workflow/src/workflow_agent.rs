@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -17,7 +20,9 @@ use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions,
     ToolNeedsApprovalOptions, execute_tool,
 };
-use ai_sdk_rust::{Instructions, StopCondition, TelemetryOptions};
+use ai_sdk_rust::{
+    Instructions, StopCondition, TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -63,6 +68,9 @@ pub struct WorkflowAgentOptions {
     /// Default telemetry settings.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Default telemetry wrapper for local tool execution.
+    pub execute_tool_in_telemetry_context: Option<WorkflowExecuteToolInTelemetryContext<'static>>,
+
     /// Default prepare-step callback.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
@@ -100,6 +108,7 @@ impl WorkflowAgentOptions {
             experimental_repair_tool_call: None,
             on_error: None,
             telemetry: None,
+            execute_tool_in_telemetry_context: None,
             prepare_step: None,
             on_start: None,
             on_step_start: None,
@@ -183,6 +192,15 @@ impl WorkflowAgentOptions {
     /// Sets constructor-level telemetry settings.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets constructor-level telemetry wrapping for local tool execution.
+    pub fn with_execute_tool_in_telemetry_context(
+        mut self,
+        execute_tool_in_telemetry_context: WorkflowExecuteToolInTelemetryContext<'static>,
+    ) -> Self {
+        self.execute_tool_in_telemetry_context = Some(execute_tool_in_telemetry_context);
         self
     }
 
@@ -293,6 +311,7 @@ pub struct WorkflowAgent {
     experimental_repair_tool_call: Option<WorkflowToolCallRepairCallback>,
     on_error: Option<WorkflowStreamTextOnErrorCallback>,
     telemetry: Option<TelemetryOptions>,
+    execute_tool_in_telemetry_context: Option<WorkflowExecuteToolInTelemetryContext<'static>>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
     on_start: Option<WorkflowAgentOnStartCallback>,
     on_step_start: Option<WorkflowAgentOnStepStartCallback>,
@@ -317,6 +336,7 @@ impl WorkflowAgent {
             experimental_repair_tool_call: options.experimental_repair_tool_call,
             on_error: options.on_error,
             telemetry: options.telemetry,
+            execute_tool_in_telemetry_context: options.execute_tool_in_telemetry_context,
             prepare_step: options.prepare_step,
             on_start: options.on_start,
             on_step_start: options.on_step_start,
@@ -368,6 +388,10 @@ impl WorkflowAgent {
             .or_else(|| self.experimental_repair_tool_call.clone());
         let on_error = options.on_error.or_else(|| self.on_error.clone());
         let telemetry = options.telemetry.or_else(|| self.telemetry.clone());
+        let telemetry_dispatcher = create_telemetry_dispatcher(telemetry.clone());
+        let execute_tool_in_telemetry_context = options
+            .execute_tool_in_telemetry_context
+            .or_else(|| self.execute_tool_in_telemetry_context.clone());
         let include_raw_chunks = options.include_raw_chunks;
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
         let constructor_on_start = self.on_start.clone();
@@ -397,6 +421,8 @@ impl WorkflowAgent {
             &mut prompt,
             &self.tools,
             &initial_tools_context,
+            &telemetry_dispatcher,
+            execute_tool_in_telemetry_context.as_ref(),
             &constructor_on_tool_execution_start,
             &stream_on_tool_execution_start,
             &constructor_on_tool_execution_end,
@@ -451,6 +477,13 @@ impl WorkflowAgent {
                 tools_context: initial_tools_context.clone(),
             },
         );
+        telemetry_dispatcher.on_start(WorkflowAgentStartInfo {
+            model: self.model.clone(),
+            messages: initial_prompt.clone(),
+            generation_settings: generation_settings.clone(),
+            runtime_context: initial_runtime_context.clone(),
+            tools_context: initial_tools_context.clone(),
+        });
 
         let mut pending_tool_results = None;
         let mut steps = Vec::new();
@@ -494,6 +527,15 @@ impl WorkflowAgent {
                     tools_context: tools_context.clone(),
                 },
             );
+            telemetry_dispatcher.on_step_start(WorkflowAgentStepStartInfo {
+                model: self.model.clone(),
+                step_number: steps.len(),
+                steps: steps.clone(),
+                messages: messages.clone(),
+                generation_settings: generation_settings.clone(),
+                runtime_context: runtime_context.clone(),
+                tools_context: tools_context.clone(),
+            });
 
             let Some(yield_value) = iterator
                 .next(pending_tool_results.take())
@@ -515,12 +557,15 @@ impl WorkflowAgent {
                     &stream_on_step_finish,
                     &yield_value.step,
                 );
+                telemetry_dispatcher.on_step_finish(yield_value.step.clone());
                 break;
             }
 
             let execution = self
                 .execute_tool_calls(
                     &yield_value,
+                    &telemetry_dispatcher,
+                    execute_tool_in_telemetry_context.as_ref(),
                     &constructor_on_tool_execution_start,
                     &stream_on_tool_execution_start,
                     &constructor_on_tool_execution_end,
@@ -538,6 +583,7 @@ impl WorkflowAgent {
                 &stream_on_step_finish,
                 &yield_value.step,
             );
+            telemetry_dispatcher.on_step_finish(yield_value.step.clone());
 
             if execution.has_unresolved_client_tools {
                 break;
@@ -562,6 +608,7 @@ impl WorkflowAgent {
         if let Some(on_finish) = stream_on_finish {
             on_finish.call(WorkflowAgentFinishInfo::from(&result));
         }
+        telemetry_dispatcher.on_end(WorkflowAgentFinishInfo::from(&result));
 
         Ok(result)
     }
@@ -569,6 +616,8 @@ impl WorkflowAgent {
     async fn execute_tool_calls(
         &self,
         yield_value: &crate::StreamTextIteratorYieldValue,
+        telemetry_dispatcher: &TelemetryDispatcher,
+        execute_tool_in_telemetry_context: Option<&WorkflowExecuteToolInTelemetryContext<'static>>,
         constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
         stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
         constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
@@ -632,6 +681,8 @@ impl WorkflowAgent {
                 yield_value.messages.clone(),
                 context,
                 yield_value.step.step_number,
+                telemetry_dispatcher,
+                execute_tool_in_telemetry_context,
                 constructor_on_tool_execution_start,
                 stream_on_tool_execution_start,
                 constructor_on_tool_execution_end,
@@ -672,6 +723,9 @@ pub struct WorkflowAgentStreamOptions<E> {
 
     /// Stream-level telemetry settings that override constructor defaults.
     pub telemetry: Option<TelemetryOptions>,
+
+    /// Stream-level telemetry wrapper for local tool execution.
+    pub execute_tool_in_telemetry_context: Option<WorkflowExecuteToolInTelemetryContext<'static>>,
 
     /// Stream-level timeout in milliseconds.
     pub timeout: Option<u64>,
@@ -737,6 +791,7 @@ impl<E> WorkflowAgentStreamOptions<E> {
             executor,
             generation_settings: None,
             telemetry: None,
+            execute_tool_in_telemetry_context: None,
             timeout: None,
             include_raw_chunks: false,
             runtime_context: WorkflowRuntimeContext::new(),
@@ -770,6 +825,15 @@ impl<E> WorkflowAgentStreamOptions<E> {
     /// Sets stream-level telemetry settings.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets the stream-level telemetry wrapper for local tool execution.
+    pub fn with_execute_tool_in_telemetry_context(
+        mut self,
+        execute_tool_in_telemetry_context: WorkflowExecuteToolInTelemetryContext<'static>,
+    ) -> Self {
+        self.execute_tool_in_telemetry_context = Some(execute_tool_in_telemetry_context);
         self
     }
 
@@ -1439,11 +1503,104 @@ struct WorkflowAgentToolExecution {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct WorkflowAgentLocalToolResult {
+pub struct WorkflowAgentLocalToolResult {
     tool_result: LanguageModelToolResultPart,
     success: bool,
     output: Option<JsonValue>,
     error: Option<String>,
+}
+
+/// Future returned by a workflow-agent tool execution telemetry wrapper.
+pub type WorkflowExecuteToolInTelemetryContextFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<WorkflowAgentLocalToolResult, WorkflowAgentError>> + Send + 'a>,
+>;
+
+/// Closure that runs a local workflow tool executor.
+pub type WorkflowExecuteToolInTelemetryContextExecute<'a> =
+    dyn FnOnce() -> WorkflowExecuteToolInTelemetryContextFuture<'a> + Send + 'a;
+
+/// Options passed to a workflow-agent tool execution telemetry wrapper.
+pub struct WorkflowExecuteToolInTelemetryContextOptions<'a> {
+    /// Identifier for the high-level workflow call.
+    pub call_id: String,
+
+    /// Identifier for the tool call being executed.
+    pub tool_call_id: String,
+
+    execute: Box<WorkflowExecuteToolInTelemetryContextExecute<'a>>,
+}
+
+impl<'a> WorkflowExecuteToolInTelemetryContextOptions<'a> {
+    fn new(
+        call_id: String,
+        tool_call_id: String,
+        execute: impl FnOnce() -> WorkflowExecuteToolInTelemetryContextFuture<'a> + Send + 'a,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_call_id,
+            execute: Box::new(execute),
+        }
+    }
+
+    /// Runs the wrapped tool executor.
+    pub fn execute(self) -> WorkflowExecuteToolInTelemetryContextFuture<'a> {
+        (self.execute)()
+    }
+}
+
+impl fmt::Debug for WorkflowExecuteToolInTelemetryContextOptions<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowExecuteToolInTelemetryContextOptions")
+            .field("call_id", &self.call_id)
+            .field("tool_call_id", &self.tool_call_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Callback invoked to run a workflow-agent tool inside telemetry context.
+pub type WorkflowExecuteToolInTelemetryContextFunction<'a> =
+    dyn Fn(
+            WorkflowExecuteToolInTelemetryContextOptions<'a>,
+        ) -> WorkflowExecuteToolInTelemetryContextFuture<'a>
+        + 'a;
+
+/// Wrapper for workflow-agent tool execution telemetry.
+#[derive(Clone)]
+pub struct WorkflowExecuteToolInTelemetryContext<'a> {
+    execute_tool_in_telemetry_context: Rc<WorkflowExecuteToolInTelemetryContextFunction<'a>>,
+}
+
+impl<'a> WorkflowExecuteToolInTelemetryContext<'a> {
+    /// Creates a workflow-agent tool telemetry wrapper.
+    pub fn new<F, Fut>(execute_tool_in_telemetry_context: F) -> Self
+    where
+        F: Fn(WorkflowExecuteToolInTelemetryContextOptions<'a>) -> Fut + 'a,
+        Fut: Future<Output = Result<WorkflowAgentLocalToolResult, WorkflowAgentError>> + Send + 'a,
+    {
+        Self {
+            execute_tool_in_telemetry_context: Rc::new(move |options| {
+                Box::pin(execute_tool_in_telemetry_context(options))
+            }),
+        }
+    }
+
+    /// Runs the wrapper with a local tool execute closure.
+    pub fn execute(
+        &self,
+        options: WorkflowExecuteToolInTelemetryContextOptions<'a>,
+    ) -> WorkflowExecuteToolInTelemetryContextFuture<'a> {
+        (self.execute_tool_in_telemetry_context)(options)
+    }
+}
+
+impl fmt::Debug for WorkflowExecuteToolInTelemetryContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowExecuteToolInTelemetryContext")
+            .finish_non_exhaustive()
+    }
 }
 
 async fn execute_local_tool(
@@ -1502,6 +1659,8 @@ async fn execute_local_tool_with_callbacks(
     messages: WorkflowPrompt,
     context: Option<JsonValue>,
     step_number: usize,
+    telemetry_dispatcher: &TelemetryDispatcher,
+    execute_tool_in_telemetry_context: Option<&WorkflowExecuteToolInTelemetryContext<'static>>,
     constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
     stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
     constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
@@ -1518,10 +1677,36 @@ async fn execute_local_tool_with_callbacks(
         stream_on_tool_execution_start,
         &start_info,
     );
+    telemetry_dispatcher.on_tool_execution_start(start_info.clone());
 
     let started_at = Instant::now();
+    let tool_for_execute = tool.clone();
+    let tool_call_for_execute = tool_call.clone();
+    let messages_for_execute = messages.clone();
+    let context_for_execute = context.clone();
+    let execute = move || -> WorkflowExecuteToolInTelemetryContextFuture<'_> {
+        Box::pin(async move {
+            execute_local_tool(
+                &tool_for_execute,
+                &tool_call_for_execute,
+                messages_for_execute,
+                context_for_execute,
+            )
+            .await
+        })
+    };
     let tool_result =
-        execute_local_tool(tool, tool_call, messages.clone(), context.clone()).await?;
+        if let Some(execute_tool_in_telemetry_context) = execute_tool_in_telemetry_context {
+            execute_tool_in_telemetry_context
+                .execute(WorkflowExecuteToolInTelemetryContextOptions::new(
+                    tool_call.tool_call_id.clone(),
+                    tool_call.tool_call_id.clone(),
+                    execute,
+                ))
+                .await?
+        } else {
+            execute().await?
+        };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let end_info = WorkflowAgentToolExecutionEndInfo {
         tool_call: tool_call.clone(),
@@ -1538,6 +1723,7 @@ async fn execute_local_tool_with_callbacks(
         stream_on_tool_execution_end,
         &end_info,
     );
+    telemetry_dispatcher.on_tool_execution_end(end_info.clone());
 
     Ok(tool_result)
 }
@@ -1636,6 +1822,8 @@ async fn apply_tool_approvals_before_stream(
     prompt: &mut WorkflowPrompt,
     tools: &BTreeMap<String, Tool>,
     tools_context: &WorkflowToolsContext,
+    telemetry_dispatcher: &TelemetryDispatcher,
+    execute_tool_in_telemetry_context: Option<&WorkflowExecuteToolInTelemetryContext<'static>>,
     constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
     stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
     constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
@@ -1666,6 +1854,8 @@ async fn apply_tool_approvals_before_stream(
             prompt.clone(),
             context,
             0,
+            telemetry_dispatcher,
+            execute_tool_in_telemetry_context,
             constructor_on_tool_execution_start,
             stream_on_tool_execution_start,
             constructor_on_tool_execution_end,
@@ -1851,7 +2041,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
 
     use ai_sdk_provider::json::{JsonObject, JsonValue};
@@ -1864,6 +2054,10 @@ mod tests {
         LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
     };
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
+    use ai_sdk_rust::{
+        TelemetryEventKind, TelemetryIntegration, register_telemetry_integration,
+        reset_telemetry_state_for_tests,
+    };
     use serde_json::json;
 
     use crate::{
@@ -2029,6 +2223,13 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("future unexpectedly pending"),
         }
+    }
+
+    fn telemetry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static TELEMETRY_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        TELEMETRY_TEST_LOCK
+            .lock()
+            .expect("workflow telemetry test lock succeeds")
     }
 
     fn first_tool_result(
@@ -4507,6 +4708,429 @@ mod tests {
         assert_eq!(captured_telemetry.is_enabled, Some(false));
         assert_eq!(captured_telemetry.record_outputs, Some(true));
         assert_eq!(captured_telemetry.function_id.as_deref(), Some("stream-id"));
+    }
+
+    #[test]
+    fn workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events()
+     {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_on_start = Arc::clone(&events);
+        let events_for_on_step_start = Arc::clone(&events);
+        let events_for_on_tool_execution_start = Arc::clone(&events);
+        let events_for_on_tool_execution_end = Arc::clone(&events);
+        let events_for_on_step_finish = Arc::clone(&events);
+        let events_for_on_end = Arc::clone(&events);
+        let telemetry =
+            ai_sdk_rust::TelemetryOptions::new().with_integrations([TelemetryIntegration::new()
+                .with_callback(TelemetryEventKind::OnStart, move |_| {
+                    events_for_on_start
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("onStart".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnStepStart, move |_| {
+                    events_for_on_step_start
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("onStepStart".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnToolExecutionStart, move |_| {
+                    events_for_on_tool_execution_start
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("onToolExecutionStart".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnToolExecutionEnd, move |_| {
+                    events_for_on_tool_execution_end
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("onToolExecutionEnd".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                    events_for_on_step_finish
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("onStepFinish".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                    events_for_on_end
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("onEnd".to_string());
+                })]);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(executable_test_tool())
+                .with_telemetry(telemetry),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *events.lock().expect("events lock succeeds"),
+            vec![
+                "onStart".to_string(),
+                "onStepStart".to_string(),
+                "onToolExecutionStart".to_string(),
+                "onToolExecutionEnd".to_string(),
+                "onStepFinish".to_string(),
+                "onStepStart".to_string(),
+                "onStepFinish".to_string(),
+                "onEnd".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_telemetry_integrations_include_only_configured_runtime_and_tools_context_fields()
+     {
+        let start_event = Arc::new(Mutex::new(None::<WorkflowAgentStartInfo>));
+        let tool_start_event = Arc::new(Mutex::new(None::<WorkflowAgentToolExecutionStartInfo>));
+        let finish_event = Arc::new(Mutex::new(None::<JsonValue>));
+        let start_event_for_callback = Arc::clone(&start_event);
+        let tool_start_event_for_callback = Arc::clone(&tool_start_event);
+        let finish_event_for_callback = Arc::clone(&finish_event);
+        let telemetry = ai_sdk_rust::TelemetryOptions::new()
+            .with_runtime_context_key("requestId", true)
+            .with_tool_context_key("weather", "requestId", true)
+            .with_integrations([TelemetryIntegration::new()
+                .with_callback(TelemetryEventKind::OnStart, move |event| {
+                    *start_event_for_callback
+                        .lock()
+                        .expect("start event lock succeeds") =
+                        Some(serde_json::from_value(event.event).expect("start event shape"));
+                })
+                .with_callback(TelemetryEventKind::OnToolExecutionStart, move |event| {
+                    *tool_start_event_for_callback
+                        .lock()
+                        .expect("tool start lock succeeds") =
+                        Some(serde_json::from_value(event.event).expect("tool start event shape"));
+                })
+                .with_callback(TelemetryEventKind::OnEnd, move |event| {
+                    *finish_event_for_callback
+                        .lock()
+                        .expect("finish event lock succeeds") = Some(event.event);
+                })]);
+        let tool = Tool::new("weather", object_schema())
+            .with_context_schema(Schema::new(object_schema()))
+            .with_execute(|_, _| async { Ok(json!({ "result": "ok" })) });
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(tool)
+                .with_telemetry(telemetry),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new("call-1", "weather", "{}")),
+            stop_step(),
+        ]);
+        let mut runtime_context = WorkflowRuntimeContext::new();
+        runtime_context.insert("requestId".to_string(), json!("request-123"));
+        runtime_context.insert("secret".to_string(), json!("runtime-secret"));
+        let mut tools_context = WorkflowToolsContext::new();
+        let mut weather_tool_context = serde_json::Map::new();
+        weather_tool_context.insert("requestId".to_string(), json!("tool-request-123"));
+        weather_tool_context.insert("secret".to_string(), json!("tool-secret"));
+        tools_context.insert("weather".to_string(), Some(weather_tool_context));
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_runtime_context(runtime_context)
+                    .with_tools_context(tools_context),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let start_event = start_event
+            .lock()
+            .expect("start event lock succeeds")
+            .clone()
+            .expect("start event captured");
+        let tool_start_event = tool_start_event
+            .lock()
+            .expect("tool start lock succeeds")
+            .clone()
+            .expect("tool start event captured");
+        let finish_event = finish_event
+            .lock()
+            .expect("finish event lock succeeds")
+            .clone()
+            .expect("finish event captured");
+
+        assert_eq!(
+            start_event.runtime_context,
+            serde_json::from_value(json!({
+                "requestId": "request-123"
+            }))
+            .expect("runtime context is an object")
+        );
+        assert_eq!(start_event.tools_context, {
+            let mut tools_context = WorkflowToolsContext::new();
+            let mut weather_tool_context = serde_json::Map::new();
+            weather_tool_context.insert("requestId".to_string(), json!("tool-request-123"));
+            tools_context.insert("weather".to_string(), Some(weather_tool_context));
+            tools_context
+        });
+        assert_eq!(
+            tool_start_event.tool_context,
+            Some(json!({
+                "requestId": "tool-request-123"
+            }))
+        );
+        assert_eq!(
+            finish_event["runtimeContext"],
+            json!({
+                "requestId": "request-123"
+            })
+        );
+        let serialized_events = serde_json::to_string(&vec![
+            serde_json::to_value(start_event).expect("start event serializes"),
+            serde_json::to_value(tool_start_event).expect("tool start serializes"),
+            serde_json::to_value(finish_event).expect("finish event serializes"),
+        ])
+        .expect("events serialize");
+        assert!(!serialized_events.contains("runtime-secret"));
+        assert!(!serialized_events.contains("tool-secret"));
+    }
+
+    #[test]
+    fn workflow_agent_telemetry_integrations_call_globally_registered_integration_listeners() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_global_on_start = Arc::clone(&events);
+        let events_for_global_on_step_finish = Arc::clone(&events);
+        let events_for_global_on_end = Arc::clone(&events);
+        register_telemetry_integration(
+            TelemetryIntegration::new()
+                .with_callback(TelemetryEventKind::OnStart, move |_| {
+                    events_for_global_on_start
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("global-onStart".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                    events_for_global_on_step_finish
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("global-onStepFinish".to_string());
+                })
+                .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                    events_for_global_on_end
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("global-onEnd".to_string());
+                }),
+        );
+
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+        reset_telemetry_state_for_tests();
+
+        assert_eq!(
+            *events.lock().expect("events lock succeeds"),
+            vec![
+                "global-onStart".to_string(),
+                "global-onStepFinish".to_string(),
+                "global-onEnd".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_telemetry_integrations_call_integration_listeners_alongside_agent_callbacks()
+    {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_agent_on_start = Arc::clone(&events);
+        let events_for_agent_on_step_finish = Arc::clone(&events);
+        let events_for_agent_on_finish = Arc::clone(&events);
+        let events_for_integration_on_start = Arc::clone(&events);
+        let events_for_integration_on_step_finish = Arc::clone(&events);
+        let events_for_integration_on_end = Arc::clone(&events);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_on_start(WorkflowAgentOnStartCallback::new(move |_| {
+                    events_for_agent_on_start
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("agent-onStart".to_string());
+                }))
+                .with_on_step_finish(WorkflowAgentOnStepFinishCallback::new(move |_| {
+                    events_for_agent_on_step_finish
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("agent-onStepFinish".to_string());
+                }))
+                .with_on_finish(WorkflowAgentOnFinishCallback::new(move |_| {
+                    events_for_agent_on_finish
+                        .lock()
+                        .expect("events lock succeeds")
+                        .push("agent-onFinish".to_string());
+                }))
+                .with_telemetry(
+                    ai_sdk_rust::TelemetryOptions::new().with_integrations([
+                        TelemetryIntegration::new()
+                            .with_callback(TelemetryEventKind::OnStart, move |_| {
+                                events_for_integration_on_start
+                                    .lock()
+                                    .expect("events lock succeeds")
+                                    .push("integration-onStart".to_string());
+                            })
+                            .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                                events_for_integration_on_step_finish
+                                    .lock()
+                                    .expect("events lock succeeds")
+                                    .push("integration-onStepFinish".to_string());
+                            })
+                            .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                                events_for_integration_on_end
+                                    .lock()
+                                    .expect("events lock succeeds")
+                                    .push("integration-onEnd".to_string());
+                            }),
+                    ]),
+                ),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *events.lock().expect("events lock succeeds"),
+            vec![
+                "agent-onStart".to_string(),
+                "integration-onStart".to_string(),
+                "agent-onStepFinish".to_string(),
+                "integration-onStepFinish".to_string(),
+                "agent-onFinish".to_string(),
+                "integration-onEnd".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_telemetry_integrations_do_not_break_streaming_when_a_listener_throws() {
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_telemetry(
+                ai_sdk_rust::TelemetryOptions::new().with_integrations([
+                    TelemetryIntegration::new()
+                        .with_callback(TelemetryEventKind::OnStart, |_| {
+                            panic!("integration error");
+                        })
+                        .with_callback(TelemetryEventKind::OnStepFinish, |_| {
+                            panic!("integration error");
+                        })
+                        .with_callback(TelemetryEventKind::OnEnd, |_| {
+                            panic!("integration error");
+                        }),
+                ]),
+            ),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds even when telemetry listeners panic");
+    }
+
+    #[test]
+    fn workflow_agent_telemetry_integrations_emit_execute_tool_when_an_approved_tool_resumes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_execute = Arc::clone(&events);
+        let events_for_on_tool_execution_start = Arc::clone(&events);
+        let events_for_on_tool_execution_end = Arc::clone(&events);
+        let execute_wrapper = WorkflowExecuteToolInTelemetryContext::new(move |options| {
+            let events = Arc::clone(&events_for_execute);
+            async move {
+                events
+                    .lock()
+                    .expect("events lock succeeds")
+                    .push("executeTool".to_string());
+                options.execute().await
+            }
+        });
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!("approved-result")) })
+            .with_needs_approval(true);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(tool)
+                .with_execute_tool_in_telemetry_context(execute_wrapper)
+                .with_telemetry(
+                    ai_sdk_rust::TelemetryOptions::new().with_integrations([
+                        TelemetryIntegration::new()
+                            .with_callback(TelemetryEventKind::OnToolExecutionStart, move |_| {
+                                events_for_on_tool_execution_start
+                                    .lock()
+                                    .expect("events lock succeeds")
+                                    .push("onToolExecutionStart".to_string());
+                            })
+                            .with_callback(TelemetryEventKind::OnToolExecutionEnd, move |event| {
+                                let tool_event: WorkflowAgentToolExecutionEndInfo =
+                                    serde_json::from_value(event.event)
+                                        .expect("tool execution end event shape");
+                                events_for_on_tool_execution_end
+                                    .lock()
+                                    .expect("events lock succeeds")
+                                    .push(format!(
+                                        "onToolExecutionEnd:{}",
+                                        if tool_event.success {
+                                            "success"
+                                        } else {
+                                            "error"
+                                        }
+                                    ));
+                            }),
+                    ]),
+                ),
+        );
+        let prompt = vec![
+            user_text_message("test"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    ai_sdk_provider::LanguageModelToolCallPart::new(
+                        "call-1",
+                        "testTool",
+                        json!({ "value": "test" }),
+                    ),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    ai_sdk_provider::LanguageModelToolApprovalRequestPart::new(
+                        "approval-call-1",
+                        "call-1",
+                    ),
+                ),
+            ])),
+            LanguageModelMessage::Tool(ai_sdk_provider::LanguageModelToolMessage::new(vec![
+                ai_sdk_provider::LanguageModelToolContentPart::ToolApprovalResponse(
+                    ai_sdk_provider::LanguageModelToolApprovalResponsePart::new(
+                        "approval-call-1",
+                        true,
+                    ),
+                ),
+            ])),
+        ];
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(prompt, executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *events.lock().expect("events lock succeeds"),
+            vec![
+                "onToolExecutionStart".to_string(),
+                "executeTool".to_string(),
+                "onToolExecutionEnd:success".to_string(),
+            ]
+        );
     }
 
     #[test]

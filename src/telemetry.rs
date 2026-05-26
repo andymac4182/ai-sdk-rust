@@ -1338,8 +1338,8 @@ pub(crate) fn telemetry_test_guard_for_tests() -> std::sync::MutexGuard<'static,
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-#[cfg(test)]
-pub(crate) fn reset_telemetry_state_for_tests() {
+#[doc(hidden)]
+pub fn reset_telemetry_state_for_tests() {
     TELEMETRY_INTEGRATIONS
         .lock()
         .expect("telemetry registry mutex is not poisoned")
