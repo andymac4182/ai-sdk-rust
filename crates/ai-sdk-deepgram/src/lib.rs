@@ -896,6 +896,10 @@ fn apply_deepgram_speech_options(
                 )),
             });
             remove_query_param(query_params, "container");
+        } else if container == "ogg" {
+            set_query_param(query_params, "container", "ogg");
+            set_query_param(query_params, "encoding", "opus");
+            remove_query_param(query_params, "sample_rate");
         } else {
             set_query_param(query_params, "container", container);
             if get_query_param(query_params, "encoding").is_none() {
@@ -914,7 +918,10 @@ fn apply_deepgram_speech_options(
         set_query_param(query_params, "sample_rate", sample_rate.to_string());
     }
     if let Some(bit_rate) = options.bit_rate {
-        if let Some(value) = json_query_value(bit_rate) {
+        let encoding = get_query_param(query_params, "encoding").unwrap_or_default();
+        if matches!(encoding.as_str(), "linear16" | "mulaw" | "alaw" | "flac") {
+            remove_query_param(query_params, "bit_rate");
+        } else if let Some(value) = json_query_value(bit_rate) {
             set_query_param(query_params, "bit_rate", value);
         }
     }
@@ -1885,6 +1892,295 @@ mod tests {
                 .expect("captured requests mutex is not poisoned")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn deepgram_speech_model_includes_request_body_in_response() {
+        let (captured_requests, transport) =
+            capture_transport(vec![ProviderApiResponse::bytes(200, "OK", vec![9])]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .speech("aura-2-helena-en");
+
+        let result = poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello.")));
+
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            Some(&json!({
+                "text": "Hello."
+            }))
+        );
+        assert_eq!(result.response.model_id, "aura-2-helena-en");
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert!(
+            !captured_requests
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deepgram_speech_model_cleans_up_incompatible_parameters_when_encoding_changes_via_provider_options()
+     {
+        let (captured_requests, transport) =
+            capture_transport(vec![ProviderApiResponse::bytes(200, "OK", vec![9])]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .speech("aura-2-helena-en");
+
+        let _ = poll_ready(
+            model.do_generate(
+                SpeechModelCallOptions::new("Hello, welcome to Deepgram!")
+                    .with_output_format("linear16_16000")
+                    .with_provider_options(
+                        serde_json::from_value(json!({
+                            "deepgram": {
+                                "encoding": "mp3"
+                            }
+                        }))
+                        .expect("provider options deserialize"),
+                    ),
+            ),
+        );
+
+        let request = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .first()
+            .cloned()
+            .expect("request is captured");
+        assert!(request.url.contains("encoding=mp3"));
+        assert!(!request.url.contains("sample_rate="));
+
+        let (captured_requests, transport) =
+            capture_transport(vec![ProviderApiResponse::bytes(200, "OK", vec![9])]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .speech("aura-2-helena-en");
+
+        let _ = poll_ready(
+            model.do_generate(
+                SpeechModelCallOptions::new("Hello, welcome to Deepgram!")
+                    .with_output_format("mp3")
+                    .with_provider_options(
+                        serde_json::from_value(json!({
+                            "deepgram": {
+                                "encoding": "linear16",
+                                "bitRate": 48000
+                            }
+                        }))
+                        .expect("provider options deserialize"),
+                    ),
+            ),
+        );
+
+        let request = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .first()
+            .cloned()
+            .expect("request is captured");
+        assert!(request.url.contains("encoding=linear16"));
+        assert!(!request.url.contains("bit_rate="));
+    }
+
+    #[test]
+    fn deepgram_speech_model_cleans_up_incompatible_parameters_when_container_changes_encoding_implicitly()
+     {
+        let (captured_requests, transport) =
+            capture_transport(vec![ProviderApiResponse::bytes(200, "OK", vec![9])]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .speech("aura-2-helena-en");
+
+        let _ = poll_ready(
+            model.do_generate(
+                SpeechModelCallOptions::new("Hello, welcome to Deepgram!")
+                    .with_output_format("linear16_16000")
+                    .with_provider_options(
+                        serde_json::from_value(json!({
+                            "deepgram": {
+                                "container": "ogg"
+                            }
+                        }))
+                        .expect("provider options deserialize"),
+                    ),
+            ),
+        );
+
+        let request = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .first()
+            .cloned()
+            .expect("request is captured");
+        assert!(request.url.contains("encoding=opus"));
+        assert!(request.url.contains("container=ogg"));
+        assert!(!request.url.contains("sample_rate="));
+    }
+
+    #[test]
+    fn deepgram_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified() {
+        let (captured_requests, transport) = capture_transport(vec![ProviderApiResponse::text(
+            200,
+            "OK",
+            json!({
+                "metadata": {
+                    "duration": 1.0
+                },
+                "results": {
+                    "channels": [
+                        {
+                            "alternatives": [
+                                {
+                                    "transcript": "hello",
+                                    "words": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .transcription("nova-3");
+        let before = OffsetDateTime::now_utc();
+        let result = poll_ready(model.do_generate(TranscriptionModelCallOptions::new(
+            FileDataContent::Bytes(vec![1, 2, 3]),
+            "audio/wav",
+        )));
+        let after = OffsetDateTime::now_utc();
+
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_eq!(result.response.model_id, "nova-3");
+        assert_eq!(result.text, "hello");
+        assert!(
+            !captured_requests
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deepgram_transcription_model_returns_detected_language_from_inline_response() {
+        let (captured_requests, transport) = capture_transport(vec![ProviderApiResponse::text(
+            200,
+            "OK",
+            json!({
+                "metadata": {
+                    "duration": 1.0
+                },
+                "results": {
+                    "channels": [
+                        {
+                            "detected_language": "sv",
+                            "alternatives": [
+                                {
+                                    "transcript": "hej",
+                                    "words": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .transcription("nova-3");
+
+        let result = poll_ready(model.do_generate(TranscriptionModelCallOptions::new(
+            FileDataContent::Bytes(vec![1, 2, 3]),
+            "audio/wav",
+        )));
+
+        assert_eq!(result.language.as_deref(), Some("sv"));
+        assert_eq!(result.text, "hej");
+        assert!(
+            !captured_requests
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deepgram_transcription_model_returns_undefined_language_when_not_detected() {
+        let (captured_requests, transport) = capture_transport(vec![ProviderApiResponse::text(
+            200,
+            "OK",
+            json!({
+                "metadata": {
+                    "duration": 1.0
+                },
+                "results": {
+                    "channels": [
+                        {
+                            "alternatives": [
+                                {
+                                    "transcript": "hello",
+                                    "words": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )]);
+        let model = DeepgramProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .transcription("nova-3");
+
+        let result = poll_ready(model.do_generate(TranscriptionModelCallOptions::new(
+            FileDataContent::Bytes(vec![1, 2, 3]),
+            "audio/wav",
+        )));
+
+        assert_eq!(result.language, None);
+        assert_eq!(result.text, "hello");
+        assert!(
+            !captured_requests
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deepgram_error_parses_resource_exhausted_error() {
+        let parsed = super::deepgram_error_data(&json!({
+            "error": {
+                "message": "rate limit exceeded",
+                "code": 429
+            }
+        }))
+        .expect("error parses");
+
+        assert_eq!(parsed.error.message, "rate limit exceeded");
+        assert_eq!(parsed.error.code, 429);
     }
 
     #[test]
