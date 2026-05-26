@@ -1,14 +1,31 @@
 use std::env;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use ai_sdk_rust::file_data::FileDataContent;
+use ai_sdk_rust::json::{JsonObject, JsonValue};
+use ai_sdk_rust::openai::{OpenAIErrorData, OpenAITranscriptionResponse};
+use ai_sdk_rust::provider::{ProviderWithSpeechModel, ProviderWithTranscriptionModel};
+use ai_sdk_rust::provider_utils::{
+    FetchErrorInfo, FormData, FormDataValue, PostFormDataToApiOptions, PostJsonToApiOptions,
+    ProviderApiRequest, ProviderApiResponse, ProviderApiResponseHandlerError,
+    ResponseHandlerResult, convert_base64_to_bytes, create_binary_response_handler,
+    create_json_response_handler, media_type_to_extension, post_form_data_to_api, post_json_to_api,
+};
+use ai_sdk_rust::warning::Warning;
 use ai_sdk_rust::{
     Headers, NoSuchModelError, OpenAICompatibleChatLanguageModel,
     OpenAICompatibleCompletionLanguageModel, OpenAICompatibleEmbeddingModel,
     OpenAICompatibleImageModel, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
     OpenAICompatibleTransport, OpenResponsesLanguageModel, OpenResponsesProvider,
-    OpenResponsesProviderSettings, Provider, without_trailing_slash,
+    OpenResponsesProviderSettings, Provider, SpeechModel, SpeechModelCallOptions,
+    SpeechModelRequest, SpeechModelResponse, SpeechModelResult, TranscriptionModel,
+    TranscriptionModelCallOptions, TranscriptionModelResponse, TranscriptionModelResult,
+    TranscriptionModelSegment, without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 /// Default API version for upstream `@ai-sdk/azure`.
 pub const DEFAULT_AZURE_OPENAI_API_VERSION: &str = "v1";
@@ -95,6 +112,90 @@ impl AzureOpenAIProviderSettings {
 pub struct AzureOpenAIProvider {
     settings: AzureOpenAIProviderSettings,
     transport: Option<OpenAICompatibleTransport>,
+}
+
+/// Azure OpenAI speech model for `/audio/speech`.
+#[derive(Clone)]
+pub struct AzureOpenAISpeechModel {
+    provider: String,
+    model_id: String,
+    base_url: String,
+    api_version: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    current_date: Option<Arc<dyn Fn() -> OffsetDateTime + Send + Sync>>,
+}
+
+impl AzureOpenAISpeechModel {
+    fn new(
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        api_version: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            api_version: api_version.into(),
+            headers,
+            transport,
+            current_date: None,
+        }
+    }
+
+    /// Injects the response timestamp provider. This is primarily useful for deterministic tests.
+    pub fn with_current_date(
+        mut self,
+        current_date: impl Fn() -> OffsetDateTime + Send + Sync + 'static,
+    ) -> Self {
+        self.current_date = Some(Arc::new(current_date));
+        self
+    }
+}
+
+/// Azure OpenAI transcription model for `/audio/transcriptions`.
+#[derive(Clone)]
+pub struct AzureOpenAITranscriptionModel {
+    provider: String,
+    model_id: String,
+    base_url: String,
+    api_version: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    current_date: Option<Arc<dyn Fn() -> OffsetDateTime + Send + Sync>>,
+}
+
+impl AzureOpenAITranscriptionModel {
+    fn new(
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        api_version: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            api_version: api_version.into(),
+            headers,
+            transport,
+            current_date: None,
+        }
+    }
+
+    /// Injects the response timestamp provider. This is primarily useful for deterministic tests.
+    pub fn with_current_date(
+        mut self,
+        current_date: impl Fn() -> OffsetDateTime + Send + Sync + 'static,
+    ) -> Self {
+        self.current_date = Some(Arc::new(current_date));
+        self
+    }
 }
 
 impl AzureOpenAIProvider {
@@ -225,6 +326,53 @@ impl AzureOpenAIProvider {
         self.image(deployment_id)
     }
 
+    /// Creates an Azure OpenAI speech model.
+    pub fn speech(&self, deployment_id: impl Into<String>) -> AzureOpenAISpeechModel {
+        let deployment_id = deployment_id.into();
+        let base_url = self.model_base_url(&deployment_id);
+        AzureOpenAISpeechModel::new(
+            "azure.speech",
+            deployment_id,
+            base_url,
+            self.api_version(),
+            self.request_headers(),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_azure_openai_files_transport),
+        )
+    }
+
+    /// Creates an Azure OpenAI speech model.
+    pub fn speech_model(&self, deployment_id: impl Into<String>) -> AzureOpenAISpeechModel {
+        self.speech(deployment_id)
+    }
+
+    /// Creates an Azure OpenAI transcription model.
+    pub fn transcription(&self, deployment_id: impl Into<String>) -> AzureOpenAITranscriptionModel {
+        let deployment_id = deployment_id.into();
+        let base_url = self.model_base_url(&deployment_id);
+        AzureOpenAITranscriptionModel::new(
+            "azure.transcription",
+            deployment_id,
+            base_url,
+            self.api_version(),
+            self.request_headers(),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_azure_openai_files_transport),
+        )
+    }
+
+    /// Creates an Azure OpenAI transcription model.
+    pub fn transcription_model(
+        &self,
+        deployment_id: impl Into<String>,
+    ) -> AzureOpenAITranscriptionModel {
+        self.transcription(deployment_id)
+    }
+
     fn open_responses_provider(&self, deployment_id: &str) -> OpenResponsesProvider {
         let mut settings = OpenResponsesProviderSettings::new(
             "azure",
@@ -340,6 +488,166 @@ impl Provider for AzureOpenAIProvider {
     }
 }
 
+impl ProviderWithSpeechModel for AzureOpenAIProvider {
+    type SpeechModel = AzureOpenAISpeechModel;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        Ok(AzureOpenAIProvider::speech_model(self, model_id))
+    }
+}
+
+impl ProviderWithTranscriptionModel for AzureOpenAIProvider {
+    type TranscriptionModel = AzureOpenAITranscriptionModel;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        Ok(AzureOpenAIProvider::transcription_model(self, model_id))
+    }
+}
+
+impl SpeechModel for AzureOpenAISpeechModel {
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = SpeechModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn do_generate(&self, options: SpeechModelCallOptions) -> Self::GenerateFuture<'_> {
+        let provider = self.provider.clone();
+        let model_id = self.model_id.clone();
+        let base_url = self.base_url.clone();
+        let mut headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+        let current_date = self.current_date.as_ref().map(Arc::clone);
+
+        Box::pin(async move {
+            let timestamp = current_date
+                .as_ref()
+                .map(|current_date| current_date())
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let (request_body, warnings) = azure_speech_request_body(&model_id, &options);
+
+            if let Some(request_headers) = &options.headers {
+                for (name, value) in request_headers {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+
+            let response = post_json_to_api(
+                PostJsonToApiOptions::new(
+                    format!("{base_url}/audio/speech?api-version={}", self.api_version),
+                    JsonValue::Object(request_body.clone()),
+                )
+                .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value))))
+                .with_optional_abort_signal(options.abort_signal),
+                move |request| transport(request),
+                |request, response| {
+                    create_binary_response_handler(
+                        response.binary_response_handler_options(request),
+                    )
+                    .map_err(ProviderApiResponseHandlerError::from)
+                },
+                move |request, response| {
+                    Ok(azure_failed_response_handler(&provider, request, response))
+                },
+            )
+            .await
+            .expect("Azure speech generation failed");
+
+            let mut speech_response = SpeechModelResponse::new(timestamp, model_id.clone());
+            if let Some(response_headers) = response.response_headers {
+                speech_response.headers = Some(response_headers);
+            }
+
+            let mut result =
+                SpeechModelResult::new(FileDataContent::Bytes(response.value), speech_response)
+                    .with_request(
+                        SpeechModelRequest::new().with_body(JsonValue::Object(request_body)),
+                    );
+
+            for warning in warnings {
+                result = result.with_warning(warning);
+            }
+
+            result
+        })
+    }
+}
+
+impl TranscriptionModel for AzureOpenAITranscriptionModel {
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = TranscriptionModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn do_generate(&self, options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+        let provider = self.provider.clone();
+        let model_id = self.model_id.clone();
+        let base_url = self.base_url.clone();
+        let mut headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+        let current_date = self.current_date.as_ref().map(Arc::clone);
+
+        Box::pin(async move {
+            let timestamp = current_date
+                .as_ref()
+                .map(|current_date| current_date())
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let (form_data, warnings) = azure_transcription_form_data(&model_id, &options);
+
+            if let Some(request_headers) = &options.headers {
+                for (name, value) in request_headers {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+
+            let response = post_form_data_to_api(
+                PostFormDataToApiOptions::new(
+                    format!(
+                        "{base_url}/audio/transcriptions?api-version={}",
+                        self.api_version
+                    ),
+                    form_data,
+                )
+                .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value))))
+                .with_optional_abort_signal(options.abort_signal),
+                move |request| transport(request),
+                |request, response| {
+                    create_json_response_handler::<OpenAITranscriptionResponse, _, _>(
+                        response.json_response_handler_options(request),
+                        |value| serde_json::from_value(value.clone()),
+                    )
+                    .map_err(ProviderApiResponseHandlerError::from)
+                },
+                move |request, response| {
+                    Ok(azure_failed_response_handler(&provider, request, response))
+                },
+            )
+            .await
+            .expect("Azure transcription failed");
+
+            azure_transcription_result(model_id, timestamp, response, warnings)
+        })
+    }
+}
+
 /// Creates an Azure OpenAI provider with explicit settings.
 pub fn create_azure(settings: AzureOpenAIProviderSettings) -> AzureOpenAIProvider {
     AzureOpenAIProvider::from_settings(settings)
@@ -356,6 +664,562 @@ fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn default_azure_openai_files_transport() -> OpenAICompatibleTransport {
+    Arc::new(|_| {
+        Box::pin(std::future::ready(Err(FetchErrorInfo::new(
+            "multipart form data requires an injected Azure transport",
+        ))))
+    })
+}
+
+fn azure_file_upload_data_bytes(data: &FileDataContent) -> Vec<u8> {
+    match data {
+        FileDataContent::Bytes(bytes) => bytes.clone(),
+        FileDataContent::Base64(base64) => {
+            convert_base64_to_bytes(base64).unwrap_or_else(|_| base64.as_bytes().to_vec())
+        }
+    }
+}
+
+fn azure_speech_request_body(
+    model_id: &str,
+    options: &SpeechModelCallOptions,
+) -> (JsonObject, Vec<Warning>) {
+    let mut request_body = JsonObject::new();
+    let mut warnings = Vec::new();
+
+    request_body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
+    request_body.insert("input".to_string(), JsonValue::String(options.text.clone()));
+    request_body.insert(
+        "voice".to_string(),
+        JsonValue::String(options.voice.clone().unwrap_or_else(|| "alloy".to_string())),
+    );
+
+    let mut response_format = "mp3".to_string();
+    if let Some(output_format) = &options.output_format {
+        if azure_speech_output_format_is_supported(output_format) {
+            response_format = output_format.clone();
+        } else {
+            warnings.push(Warning::Unsupported {
+                feature: "outputFormat".to_string(),
+                details: Some(format!(
+                    "Unsupported output format: {output_format}. Using mp3 instead."
+                )),
+            });
+        }
+    }
+    request_body.insert(
+        "response_format".to_string(),
+        JsonValue::String(response_format),
+    );
+
+    if let Some(speed) = options.speed {
+        request_body.insert("speed".to_string(), JsonValue::from(speed));
+    }
+    if let Some(instructions) = &options.instructions {
+        request_body.insert(
+            "instructions".to_string(),
+            JsonValue::String(instructions.clone()),
+        );
+    }
+    if let Some(openai_options) = options
+        .provider_options
+        .as_ref()
+        .and_then(|provider_options| provider_options.get("openai"))
+    {
+        if let Some(JsonValue::String(instructions)) = openai_options.get("instructions") {
+            request_body.insert(
+                "instructions".to_string(),
+                JsonValue::String(instructions.clone()),
+            );
+        }
+        if let Some(speed) = openai_options.get("speed").and_then(JsonValue::as_f64) {
+            request_body.insert("speed".to_string(), JsonValue::from(speed));
+        }
+    }
+    if let Some(language) = &options.language {
+        warnings.push(Warning::Unsupported {
+            feature: "language".to_string(),
+            details: Some(format!(
+                "OpenAI speech models do not support language selection. Language parameter \"{language}\" was ignored."
+            )),
+        });
+    }
+
+    (request_body, warnings)
+}
+
+fn azure_speech_output_format_is_supported(output_format: &str) -> bool {
+    matches!(
+        output_format,
+        "mp3" | "opus" | "aac" | "flac" | "wav" | "pcm"
+    )
+}
+
+fn azure_transcription_form_data(
+    model_id: &str,
+    options: &TranscriptionModelCallOptions,
+) -> (FormData, Vec<Warning>) {
+    let mut form_data = FormData::new();
+    form_data.append("model", FormDataValue::text(model_id));
+    form_data.append(
+        "file",
+        FormDataValue::bytes(azure_file_upload_data_bytes(&options.audio)),
+    );
+
+    if let Some(openai_options) = options
+        .provider_options
+        .as_ref()
+        .and_then(|provider_options| provider_options.get("openai"))
+    {
+        if let Some(JsonValue::Array(include)) = openai_options.get("include") {
+            for value in include.iter().filter_map(JsonValue::as_str) {
+                form_data.append("include[]", FormDataValue::text(value));
+            }
+        }
+        if let Some(language) = openai_options.get("language").and_then(JsonValue::as_str) {
+            form_data.append("language", FormDataValue::text(language));
+        }
+        if let Some(prompt) = openai_options.get("prompt").and_then(JsonValue::as_str) {
+            form_data.append("prompt", FormDataValue::text(prompt));
+        }
+
+        form_data.append(
+            "response_format",
+            FormDataValue::text(azure_transcription_response_format(model_id)),
+        );
+
+        let temperature = openai_options
+            .get("temperature")
+            .map(azure_form_data_value)
+            .unwrap_or_else(|| "0".to_string());
+        form_data.append("temperature", FormDataValue::text(temperature));
+
+        if let Some(JsonValue::Array(granularities)) = openai_options.get("timestampGranularities")
+        {
+            for value in granularities.iter().filter_map(JsonValue::as_str) {
+                form_data.append("timestamp_granularities[]", FormDataValue::text(value));
+            }
+        }
+    }
+
+    let _filename = format!("audio.{}", media_type_to_extension(&options.media_type));
+
+    (form_data, Vec::new())
+}
+
+fn azure_transcription_response_format(model_id: &str) -> &'static str {
+    if matches!(model_id, "gpt-4o-transcribe" | "gpt-4o-mini-transcribe") {
+        "json"
+    } else {
+        "verbose_json"
+    }
+}
+
+fn azure_form_data_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn azure_transcription_result(
+    model_id: String,
+    timestamp: OffsetDateTime,
+    response: ResponseHandlerResult<OpenAITranscriptionResponse>,
+    warnings: Vec<Warning>,
+) -> TranscriptionModelResult {
+    let response_headers = response.response_headers.clone();
+    let raw_value = response.raw_value.clone();
+    let OpenAITranscriptionResponse {
+        text,
+        language,
+        duration,
+        segments,
+        words,
+    } = response.value;
+
+    let segments = segments
+        .map(|segments| {
+            segments
+                .into_iter()
+                .map(|segment| {
+                    TranscriptionModelSegment::new(segment.text, segment.start, segment.end)
+                })
+                .collect()
+        })
+        .or_else(|| {
+            words.map(|words| {
+                words
+                    .into_iter()
+                    .map(|word| TranscriptionModelSegment::new(word.word, word.start, word.end))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    let mut transcription_response = TranscriptionModelResponse::new(timestamp, model_id);
+    if let Some(response_headers) = response_headers {
+        transcription_response.headers = Some(response_headers);
+    }
+    if let Some(raw_value) = raw_value {
+        transcription_response.body = Some(raw_value);
+    }
+
+    let mut result = TranscriptionModelResult::new(text, segments, transcription_response);
+    if let Some(language) = language.and_then(|language| azure_transcription_language(&language)) {
+        result = result.with_language(language);
+    }
+    if let Some(duration) = duration {
+        result = result.with_duration_in_seconds(duration);
+    }
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
+fn azure_transcription_language(language: &str) -> Option<String> {
+    let code = match language {
+        "afrikaans" => "af",
+        "arabic" => "ar",
+        "armenian" => "hy",
+        "azerbaijani" => "az",
+        "belarusian" => "be",
+        "bosnian" => "bs",
+        "bulgarian" => "bg",
+        "catalan" => "ca",
+        "chinese" => "zh",
+        "croatian" => "hr",
+        "czech" => "cs",
+        "danish" => "da",
+        "dutch" => "nl",
+        "english" => "en",
+        "estonian" => "et",
+        "finnish" => "fi",
+        "french" => "fr",
+        "galician" => "gl",
+        "german" => "de",
+        "greek" => "el",
+        "hebrew" => "he",
+        "hindi" => "hi",
+        "hungarian" => "hu",
+        "icelandic" => "is",
+        "indonesian" => "id",
+        "italian" => "it",
+        "japanese" => "ja",
+        "kannada" => "kn",
+        "kazakh" => "kk",
+        "korean" => "ko",
+        "latvian" => "lv",
+        "lithuanian" => "lt",
+        "macedonian" => "mk",
+        "malay" => "ms",
+        "marathi" => "mr",
+        "maori" => "mi",
+        "nepali" => "ne",
+        "norwegian" => "no",
+        "persian" => "fa",
+        "polish" => "pl",
+        "portuguese" => "pt",
+        "romanian" => "ro",
+        "russian" => "ru",
+        "serbian" => "sr",
+        "slovak" => "sk",
+        "slovenian" => "sl",
+        "spanish" => "es",
+        "swahili" => "sw",
+        "swedish" => "sv",
+        "tagalog" => "tl",
+        "tamil" => "ta",
+        "thai" => "th",
+        "turkish" => "tr",
+        "ukrainian" => "uk",
+        "urdu" => "ur",
+        "vietnamese" => "vi",
+        "welsh" => "cy",
+        code if code.len() == 2 => code,
+        _ => return None,
+    };
+
+    Some(code.to_string())
+}
+
+fn azure_failed_response_handler(
+    provider: &str,
+    request: &ProviderApiRequest,
+    response: &ProviderApiResponse,
+) -> ResponseHandlerResult<ai_sdk_rust::provider::ApiCallError> {
+    let message = response
+        .text_body()
+        .and_then(|body| {
+            create_json_response_handler::<OpenAIErrorData, _, _>(
+                response.json_response_handler_options(request),
+                |value| serde_json::from_value(value.clone()),
+            )
+            .ok()
+            .map(|parsed| parsed.value.error.message)
+            .or_else(|| Some(body.to_string()))
+        })
+        .unwrap_or_else(|| response.status_text.clone());
+    let error = ai_sdk_rust::provider::ApiCallError::new(
+        message,
+        request.url.clone(),
+        request.request_body_values.clone(),
+    )
+    .with_status_code(response.status_code)
+    .with_response_headers(response.headers.clone())
+    .with_data(JsonValue::Object(JsonObject::from_iter([(
+        provider.to_string(),
+        JsonValue::String(response.status_text.clone()),
+    )])));
+
+    ResponseHandlerResult::new(error).with_response_headers(response.headers.clone())
+}
+
+#[cfg(test)]
+mod azure_speech_transcription_tests {
+    use super::{AzureOpenAIProviderSettings, create_azure};
+    use ai_sdk_rust::{
+        FileDataContent, Headers, OpenAICompatibleTransport, OpenAICompatibleTransportFuture,
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        SpeechModel, SpeechModelCallOptions, TranscriptionModel, TranscriptionModelCallOptions,
+    };
+    use serde_json::json;
+    use std::future::Future;
+    use std::future::ready;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn test_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
+
+    fn poll_ready<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("test futures use ready transports"),
+        }
+    }
+
+    #[test]
+    fn azure_provider_speech_uses_correct_url_format() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport = Arc::new(
+            move |request: ProviderApiRequest| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::bytes(
+                    200,
+                    "OK",
+                    vec![1_u8, 2, 3],
+                )
+                .with_headers(Headers::from([(
+                    "content-type".to_string(),
+                    "audio/mp3".to_string(),
+                )])))))
+            },
+        );
+        let provider = create_azure(
+            AzureOpenAIProviderSettings::new()
+                .with_resource_name("test-resource")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider
+                .speech("tts-1")
+                .do_generate(SpeechModelCallOptions::new("Hello, world!")),
+        );
+
+        assert_eq!(result.audio, FileDataContent::Bytes(vec![1_u8, 2, 3]));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://test-resource.openai.azure.com/openai/v1/audio/speech?api-version=v1"
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .expect("speech request body is text");
+        let request_json: serde_json::Value =
+            serde_json::from_str(request_body).expect("speech request body is valid JSON");
+        assert_eq!(request_json["model"], "tts-1");
+        assert_eq!(request_json["input"], "Hello, world!");
+    }
+
+    #[test]
+    fn azure_provider_speech_uses_deployment_based_url_when_enabled() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport = Arc::new(
+            move |request: ProviderApiRequest| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::bytes(
+                    200,
+                    "OK",
+                    vec![1_u8, 2, 3],
+                ))))
+            },
+        );
+        let provider = create_azure(
+            AzureOpenAIProviderSettings::new()
+                .with_resource_name("test-resource")
+                .with_api_key("test-api-key")
+                .with_use_deployment_based_urls(true),
+        )
+        .with_transport(transport);
+
+        let _ = poll_ready(
+            provider
+                .speech("tts-1")
+                .do_generate(SpeechModelCallOptions::new("Hello, world!")),
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request.url,
+            "https://test-resource.openai.azure.com/openai/deployments/tts-1/audio/speech?api-version=v1"
+        );
+    }
+
+    #[test]
+    fn azure_provider_transcription_uses_correct_url_format() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport = Arc::new(
+            move |request: ProviderApiRequest| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "text": "Hello, world!",
+                        "segments": [],
+                        "language": "en",
+                        "duration": 5.0,
+                    })
+                    .to_string(),
+                ))))
+            },
+        );
+        let provider = create_azure(
+            AzureOpenAIProviderSettings::new()
+                .with_resource_name("test-resource")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(provider.transcription("whisper-1").do_generate(
+            TranscriptionModelCallOptions::new(FileDataContent::Bytes(Vec::new()), "audio/wav"),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://test-resource.openai.azure.com/openai/v1/audio/transcriptions?api-version=v1"
+        );
+        assert!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_form_data)
+                .is_some(),
+            "transcription request body should be form data"
+        );
+    }
+
+    #[test]
+    fn azure_provider_transcription_uses_deployment_based_url_when_enabled() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport = Arc::new(
+            move |request: ProviderApiRequest| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "text": "Hello, world!",
+                        "segments": [],
+                        "language": "en",
+                        "duration": 5.0,
+                    })
+                    .to_string(),
+                ))))
+            },
+        );
+        let provider = create_azure(
+            AzureOpenAIProviderSettings::new()
+                .with_resource_name("test-resource")
+                .with_api_key("test-api-key")
+                .with_use_deployment_based_urls(true),
+        )
+        .with_transport(transport);
+
+        let _ = poll_ready(provider.transcription("whisper-1").do_generate(
+            TranscriptionModelCallOptions::new(FileDataContent::Bytes(Vec::new()), "audio/wav"),
+        ));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request.url,
+            "https://test-resource.openai.azure.com/openai/deployments/whisper-1/audio/transcriptions?api-version=v1"
+        );
+    }
 }
 
 #[cfg(test)]

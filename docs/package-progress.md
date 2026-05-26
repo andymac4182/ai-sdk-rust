@@ -4,7 +4,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 - Displayed package rows: 52
 - Average estimated completion: 53.8%
-- Portable package average: 42.7%
+- Portable package average: 42.9%
 - Closed package rows: 21 / 52
 - Strict portable verified rows: 11 / 42
 - In-progress rows: 16
@@ -40,7 +40,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
+| `@ai-sdk/azure` | 50% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/bytedance` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
