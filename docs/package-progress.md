@@ -3,8 +3,8 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 52.6%
-- Portable package average: 41.3%
+- Average estimated completion: 52.7%
+- Portable package average: 41.4%
 - Closed package rows: 20 / 52
 - Strict portable verified rows: 10 / 42
 - In-progress rows: 17
@@ -47,7 +47,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/deepgram` | 40% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/deepinfra` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/huggingface` | 40% | In progress | provider package | Initial provider wrapper exists; SSE/tool parity and broader package behavior remain. |
-| `@ai-sdk/hume` | 40% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
+| `@ai-sdk/hume` | 45% | In progress | provider package | Initial provider crate exists; deterministic upstream speech/error parity is mapped, with live-provider validation... |
 | `@ai-sdk/lmnt` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/luma` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/mistral` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |

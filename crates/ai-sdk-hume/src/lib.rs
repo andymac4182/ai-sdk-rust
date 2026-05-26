@@ -624,12 +624,12 @@ fn hume_api_key(explicit_api_key: Option<&String>) -> Result<String, LoadApiKeyE
     load_api_key(options)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct HumeErrorData {
     error: HumeErrorBody,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct HumeErrorBody {
     message: String,
     code: i64,
@@ -822,8 +822,9 @@ fn hume_provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_HUME_BASE_URL, DEFAULT_HUME_VOICE_ID, HumeProvider, HumeProviderSettings,
-        HumeTransport, HumeTransportFuture, create_hume, hume,
+        DEFAULT_HUME_BASE_URL, DEFAULT_HUME_VOICE_ID, HumeErrorBody, HumeErrorData, HumeProvider,
+        HumeProviderSettings, HumeTransport, HumeTransportFuture, create_hume, hume,
+        hume_error_data,
     };
     use ai_sdk_rust::{
         FileDataContent, ModelType, Provider, ProviderApiRequest, ProviderApiRequestBody,
@@ -879,6 +880,14 @@ mod tests {
 
     fn fixed_timestamp() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
+    }
+
+    fn hume_audio_response(format: &str, audio: Vec<u8>) -> ProviderApiResponse {
+        ProviderApiResponse::bytes(200, "OK", audio).with_headers(
+            [("content-type".to_string(), format!("audio/{format}"))]
+                .into_iter()
+                .collect(),
+        )
     }
 
     #[test]
@@ -1075,6 +1084,61 @@ mod tests {
     }
 
     #[test]
+    fn hume_speech_model_uses_real_date_when_no_custom_date_provider_is_specified() {
+        let before = OffsetDateTime::now_utc();
+        let (_, transport) = capture_transport(hume_audio_response("mp3", vec![9]));
+        let model = HumeProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .speech();
+
+        let result =
+            poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")));
+        let after = OffsetDateTime::now_utc();
+
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_eq!(result.response.model_id, "");
+    }
+
+    #[test]
+    fn hume_speech_model_handles_different_audio_formats() {
+        let formats = ["mp3", "pcm", "wav"];
+
+        for (index, format) in formats.into_iter().enumerate() {
+            let audio = vec![index as u8 + 1, index as u8 + 2, index as u8 + 3];
+            let (_, transport) = capture_transport(hume_audio_response(format, audio.clone()));
+            let model = HumeProvider::new()
+                .with_api_key("test-api-key")
+                .with_transport(transport)
+                .with_current_date(fixed_timestamp)
+                .speech();
+
+            let result = poll_ready(model.do_generate(
+                SpeechModelCallOptions::new("Hello from the AI SDK!").with_output_format(format),
+            ));
+
+            assert_eq!(result.audio, FileDataContent::Bytes(audio));
+        }
+    }
+
+    #[test]
+    fn hume_speech_model_includes_warnings_if_any_are_generated() {
+        let (_, transport) = capture_transport(hume_audio_response("mp3", vec![9]));
+        let model = HumeProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .speech();
+
+        let result = poll_ready(model.do_generate(
+            SpeechModelCallOptions::new("Hello from the AI SDK!").with_output_format("mp3"),
+        ));
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
     fn hume_speech_model_maps_generation_context_and_api_errors_to_metadata() {
         let (captured_request, transport) = capture_transport(
             ProviderApiResponse::text(
@@ -1156,6 +1220,29 @@ mod tests {
         assert_eq!(
             request_body["context"],
             json!({ "generation_id": "gen_123" })
+        );
+    }
+
+    #[test]
+    fn hume_error_data_schema_parses_hume_resource_exhausted_error() {
+        let error = json!({
+            "error": {
+                "message": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+                "code": 429
+            }
+        });
+
+        let result = hume_error_data(&error).expect("error data parses");
+
+        assert_eq!(
+            result,
+            HumeErrorData {
+                error: HumeErrorBody {
+                    message: "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"
+                        .to_string(),
+                    code: 429,
+                }
+            }
         );
     }
 
