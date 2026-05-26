@@ -3,8 +3,8 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 54.4%
-- Portable package average: 43.6%
+- Average estimated completion: 54.7%
+- Portable package average: 43.9%
 - Closed package rows: 21 / 52
 - Strict portable verified rows: 11 / 42
 - In-progress rows: 16
@@ -44,7 +44,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
 | `@ai-sdk/bytedance` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
-| `@ai-sdk/cerebras` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
+| `@ai-sdk/cerebras` | 60% | In progress | provider package | Initial provider wrapper exists; deterministic upstream provider inventory is mapped, with live-provider validation... |
 | `@ai-sdk/deepgram` | 50% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/deepinfra` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/huggingface` | 40% | In progress | provider package | Initial provider wrapper exists; SSE/tool parity and broader package behavior remain. |

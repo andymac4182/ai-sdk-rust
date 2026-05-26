@@ -6,7 +6,7 @@ azure	50	Initial provider crate exists; full upstream test and live-provider par
 baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
 black-forest-labs	65	Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still credential-gated.
 bytedance	45	Initial provider crate exists; full upstream test and live-provider parity remain.
-cerebras	45	Initial provider wrapper exists; broader package behavior and live proof remain.
+cerebras	60	Initial provider wrapper exists; deterministic upstream provider inventory is mapped, with live-provider validation still credential-gated.
 deepgram	50	Initial provider crate exists; full upstream test and live-provider parity remain.
 deepinfra	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 huggingface	40	Initial provider wrapper exists; SSE/tool parity and broader package behavior remain.

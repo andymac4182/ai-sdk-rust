@@ -443,6 +443,221 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cerebras_provider_creates_a_provider_instance_with_default_options() {
+        let provider = CerebrasProvider::new();
+
+        assert_eq!(
+            super::cerebras_base_url(&CerebrasProviderSettings::new()),
+            DEFAULT_CEREBRAS_BASE_URL
+        );
+        assert_eq!(provider.specification_version().as_str(), "v4");
+    }
+
+    #[test]
+    fn cerebras_provider_creates_a_provider_instance_with_custom_options() {
+        let settings = CerebrasProviderSettings::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.cerebras.test/v1/")
+            .with_header("custom-header", "value");
+        let provider = create_cerebras(settings.clone());
+
+        assert_eq!(
+            super::cerebras_base_url(&settings),
+            "https://api.cerebras.test/v1"
+        );
+        assert_eq!(provider.chat("llama3.1-8b").provider(), "cerebras.chat");
+    }
+
+    #[test]
+    fn cerebras_provider_passes_header() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-cerebras",
+                        "created": 1711115037,
+                        "model": "llama3.1-8b",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello from Cerebras"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 3,
+                            "total_tokens": 7
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_cerebras(
+            CerebrasProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.cerebras.test/v1/")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+
+        let model = provider.chat("llama3.1-8b");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(16),
+        ));
+
+        assert_eq!(result.text, "Hello from Cerebras");
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn cerebras_provider_returns_a_chat_model_when_called_as_a_function() {
+        let model = cerebras("llama3.1-8b");
+
+        assert_eq!(model.provider(), "cerebras.chat");
+        assert_eq!(model.model_id(), "llama3.1-8b");
+        assert!(model.supports_structured_outputs());
+    }
+
+    #[test]
+    fn cerebras_provider_constructs_a_language_model_with_correct_configuration() {
+        let provider = CerebrasProvider::new();
+        let model =
+            Provider::language_model(&provider, "llama3.1-8b").expect("language model exists");
+
+        assert_eq!(model.provider(), "cerebras.chat");
+        assert_eq!(model.model_id(), "llama3.1-8b");
+        assert!(model.supports_structured_outputs());
+    }
+
+    #[test]
+    fn cerebras_provider_throws_nosuchmodelerror_when_attempting_to_create_embedding_model() {
+        let provider = CerebrasProvider::new();
+
+        let embedding = match provider.embedding_model("embedding-model") {
+            Ok(_) => panic!("embedding models are unsupported"),
+            Err(error) => error,
+        };
+
+        assert_eq!(embedding.model_type(), ModelType::EmbeddingModel);
+        assert_eq!(
+            embedding.message(),
+            "No such embeddingModel: embedding-model"
+        );
+    }
+
+    #[test]
+    fn cerebras_provider_constructs_a_chat_model_with_correct_configuration() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-cerebras",
+                        "created": 1711115037,
+                        "model": "llama3.1-8b",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello from Cerebras"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 3,
+                            "total_tokens": 7
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_cerebras(
+            CerebrasProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.cerebras.test/v1/")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.chat("llama3.1-8b");
+        let mut schema = JsonObject::new();
+        schema.insert("type".to_string(), JsonValue::String("object".to_string()));
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(16)
+                .with_temperature(0.0)
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_schema(schema)
+                        .with_name("answer"),
+                ),
+        ));
+
+        assert_eq!(result.text, "Hello from Cerebras");
+        assert!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("cerebras"))
+                .is_some_and(|metadata| metadata.is_empty())
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.cerebras.test/v1/chat/completions");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/cerebras/0.1.0"))
+        );
+    }
+
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
