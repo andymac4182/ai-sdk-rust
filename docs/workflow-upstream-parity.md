@@ -66,6 +66,23 @@ leave no portable upstream row without a Rust counterpart. A bucket that
 implements behavior without mapping the upstream test rows is incomplete even
 if its Rust-only tests pass.
 
+## Required Workflow Bucket Verification
+
+Every Workflow SDK bucket must refresh and verify the standalone upstream
+inventory before claiming progress:
+
+```sh
+npx opensrc fetch https://github.com/vercel/workflow
+node scripts/workflow-test-inventory.mjs --check
+node scripts/workflow-parity-check.mjs
+scripts/check-naming-conventions.sh
+git diff --check
+```
+
+Run `cargo fmt --all --check` whenever Rust files are touched. Buckets that
+change the parity gate itself must also run
+`node scripts/workflow-parity-check.mjs --self-test`.
+
 ## Package Inventory
 
 | Upstream package | Version | Class | Status | Rust owner | Major source and test files | Notes |
