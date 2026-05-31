@@ -1,0 +1,1 @@
+crates/workflow-swc-plugin/tests/errors/misplaced-module-directive/output-*.stderr whitespace=-blank-at-eol
