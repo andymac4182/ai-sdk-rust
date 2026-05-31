@@ -36,6 +36,24 @@ pub use steps::*;
 pub use ulid::*;
 pub use waits::*;
 
+/// Worlds that can clear their backing state for deterministic local tests.
+pub trait ClearableWorld {
+    /// Error type returned by this world implementation.
+    type Error;
+
+    /// Remove persisted workflow data owned by this world.
+    fn clear(&self) -> Result<(), Self::Error>;
+}
+
+/// Worlds that can recover active runs after a restart.
+pub trait RecoverableWorld {
+    /// Error type returned by this world implementation.
+    type Error;
+
+    /// Re-enqueue persisted pending/running runs.
+    fn recover_active_runs(&self) -> Result<usize, Self::Error>;
+}
+
 /// Upstream repository used for this crate boundary.
 pub const UPSTREAM_REPOSITORY: &str = "github.com/vercel/workflow";
 
@@ -63,5 +81,30 @@ mod tests {
         assert_eq!(UPSTREAM_PACKAGE, "@workflow/world");
         assert_eq!(UPSTREAM_VERSION, "5.0.0-beta.5");
         assert_eq!(UPSTREAM_HEAD.len(), 40);
+    }
+
+    #[test]
+    fn exposes_world_local_lifecycle_extension_traits() {
+        struct FakeWorld;
+
+        impl ClearableWorld for FakeWorld {
+            type Error = core::convert::Infallible;
+
+            fn clear(&self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        impl RecoverableWorld for FakeWorld {
+            type Error = core::convert::Infallible;
+
+            fn recover_active_runs(&self) -> Result<usize, Self::Error> {
+                Ok(0)
+            }
+        }
+
+        let world = FakeWorld;
+        assert_eq!(world.recover_active_runs(), Ok(0));
+        assert_eq!(world.clear(), Ok(()));
     }
 }

@@ -19,4 +19,13 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+base64 = "0.22"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10"
+thiserror = "1.0"
+time = { version = "0.3.45", features = ["formatting", "macros", "parsing", "serde", "serde-well-known"] }
 workflow-world = { path = "../workflow-world" }
+
+[dev-dependencies]
+tempfile = "3.23"

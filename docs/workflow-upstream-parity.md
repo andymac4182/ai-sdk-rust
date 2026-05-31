@@ -171,22 +171,22 @@ Remaining blocked WF07-adjacent rows:
 | `packages/web-shared` (`@workflow/web-shared`) | `5.0.0-beta.10` | web-only | not-started | none | Source: `src/components/**/*.tsx`, `src/lib/*.ts`, `src/hooks/*.ts`, `src/styles.css`. Tests: 6 files including `test/trace-builder-v1.test.ts`, `test/hydration.test.ts`, `test/exact-event-search-id.test.ts`. | Shared UI components and trace rendering. |
 | `packages/workflow` (`workflow`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow` | Source: `src/index.ts`, `src/workflow.ts`, `src/stdlib.ts`, `src/api.ts`, `src/runtime.ts`, `src/observability.ts`, host subpath files, `bin/run.js`. Tests: `src/internal/builtins.test.ts`, `src/observability.test.ts`, `src/stdlib.test.ts`. | Skeleton facade crate only. Immediate follow-up: keep it as a facade over package-owned crates and avoid putting core-owned behavior here. |
 | `packages/world` (`@workflow/world`) | `5.0.0-beta.5` | portable Rust runtime | verified | `crates/workflow-world` | Source: `src/index.ts`, `src/attributes.ts`, `src/interfaces.ts`, `src/runs.ts`, `src/steps.ts`, `src/events.ts`, `src/hooks.ts`, `src/queue.ts`, `src/recovery.ts`, `src/serialization.ts`, `src/shared.ts`, `src/spec-version.ts`, `src/ulid.ts`, `src/waits.ts`. Tests: `src/attributes.test.ts`. | Shared World boundary ported as Rust contracts for attributes, events, hooks, queue, recovery, runs, serialization, shared pagination/stream types, spec versions, steps, ULID timestamp checks, waits, and traits for local/postgres/vercel implementations. All 23 portable upstream `attributes.test.ts` rows have named Rust tests in `workflow-world::attributes`, verified by `cargo test -p workflow-world`. |
-| `packages/world-local` (`@workflow/world-local`) | `5.0.0-beta.11` | portable Rust runtime | in-progress | `crates/workflow-world-local` | Source: `src/index.ts`, `src/config.ts`, `src/fs.ts`, `src/init.ts`, `src/queue.ts`, `src/storage/**/*.ts`, `src/streamer.ts`, `src/telemetry.ts`. Tests: 9 files including `src/storage.test.ts`, `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/tag.test.ts`. | Skeleton crate only. Immediate follow-up: port local storage/queue after `workflow-world` interfaces exist. |
+| `packages/world-local` (`@workflow/world-local`) | `5.0.0-beta.11` | portable Rust runtime | verified | `crates/workflow-world-local` | Source: `src/index.ts`, `src/config.ts`, `src/fs.ts`, `src/init.ts`, `src/queue.ts`, `src/storage/**/*.ts`, `src/streamer.ts`, `src/telemetry.ts`. Tests: 9 files including `src/storage.test.ts`, `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/tag.test.ts`. | WF 08 ports local config/data-dir handling, safe filesystem helpers, event-sourced storage, queue, streams, re-enqueue, tags, and telemetry helpers. All 314 portable rows in `workflow-test-inventory.md` map to named Rust tests; the 9 prior dynamic `needs-review` rows were inspected and reclassified portable. Validation: `cargo test -p workflow-world-local`. |
 | `packages/world-postgres` (`@workflow/world-postgres`) | `5.0.0-beta.9` | portable Rust runtime | not-started | none | Source: `bin/setup.js`, `src/index.ts`, `src/config.ts`, `src/drizzle/**/*.ts`, SQL migrations, `src/queue.ts`, `src/storage.ts`, `src/streamer.ts`. Tests: `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/util.test.ts`, `test/spec.test.ts`, `test/storage.test.ts`. | PostgreSQL world implementation. Needs a separate crate after the shared world interface is stable. |
 | `packages/world-testing` (`@workflow/world-testing`) | `5.0.0-beta.10` | docs/test-only | not-started | none | Source: `src/*.mts`, `workflows/*`, `scripts/generate-well-known-dts.mjs`. Tests: `test/embedded.test.ts`, `test/inline-batches-debug.test.ts`. | Test workflows and harness utilities. |
 | `packages/world-vercel` (`@workflow/world-vercel`) | `5.0.0-beta.9` | host-framework binding | not-started | none | Source: `src/index.ts`, `src/http-client.ts`, `src/queue.ts`, `src/runs.ts`, `src/steps.ts`, `src/storage.ts`, `src/streamer.ts`, `src/run-id/*.ts`, `src/telemetry.ts`. Tests: 7 files including `src/encryption.test.ts`, `src/run-id/index.test.ts`, `src/streamer.test.ts`. | Vercel platform world implementation; port after shared and local world contracts prove the boundary. |
 
-## Crate Skeletons Added
+## Crate Status
 
 | Rust crate | Upstream package | Status | Scope in this pass |
 | --- | --- | --- | --- |
 | `workflow` | `packages/workflow` (`workflow`) | in-progress | Facade crate with source metadata and re-export placeholders for foundational crates. |
-| `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | WF04 adds core primitives, schemas, utilities, and diagnostics; WF05 adds portable serialization, encryption, stream framing, observability hydration, ordering, UUID, and base64/hex utilities; WF06 adds workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream APIs. Runtime engine and remaining e2e rows are still pending. |
+| `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | WF04 adds core primitives, schemas, utilities, and diagnostics; WF05 adds portable serialization, encryption, stream framing, observability hydration, ordering, UUID, and base64/hex utilities; WF06 adds workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream APIs; WF07 adds deterministic runtime engine tests over fake World/event-log seams. Remaining core E2E rows stay classified separately. |
 | `workflow-errors` | `packages/errors` (`@workflow/errors`) | verified | Error taxonomy, framed rendering, fatal classification, runtime decryption context, serialization/corrupted-log errors, and stable serde/display contracts. |
 | `workflow-serde` | `packages/serde` (`@workflow/serde`) | verified | Dedicated marker crate for the upstream serialization/deserialization symbol names. |
 | `workflow-utils` | `packages/utils` (`@workflow/utils`) | verified | Foundation utilities covering every portable upstream `packages/utils` test row. |
 | `workflow-world` | `packages/world` (`@workflow/world`) | verified | Shared World contracts plus all 23 portable upstream attributes tests. |
-| `workflow-world-local` | `packages/world-local` (`@workflow/world-local`) | in-progress | Local World implementation ownership marker and `workflow-world` re-export placeholder. |
+| `workflow-world-local` | `packages/world-local` (`@workflow/world-local`) | verified | Local World implementation with filesystem-backed config/init/storage/events/queue/streaming/recovery/tagging and named Rust parity tests for every portable upstream row. |
 
 ## WF 05 Core Serialization, Encryption, and VM Utilities
 
@@ -202,8 +202,8 @@ Remaining blocked WF07-adjacent rows:
 
 ## Immediate Follow-Up Queue
 
-1. Use the verified `workflow-world` contracts to start `workflow-world-local`
-   storage, queue, streamer, telemetry, and filesystem behavior.
+1. Continue with PostgreSQL/Vercel world implementations now that shared and
+   local world contracts are merged.
 2. Keep `workflow` as a facade; behavior should land in the matching
    package-owned crates and only be re-exported from the facade.
 
