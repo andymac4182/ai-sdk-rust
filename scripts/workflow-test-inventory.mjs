@@ -35,6 +35,54 @@ const rustOwners = new Map([
   ['world-local', 'workflow-world-local'],
 ]);
 
+const rowOverrides = new Map(
+  [
+    [
+      'packages/workflow/src/internal/builtins.test.ts:54',
+      'workflow_builtins_set_attributes_rethrows_before_third_attempt',
+    ],
+    [
+      'packages/workflow/src/internal/builtins.test.ts:74',
+      'workflow_builtins_set_attributes_logs_after_third_failed_attempt',
+    ],
+    [
+      'packages/workflow/src/observability.test.ts:12',
+      'workflow_observability_reexports_parse_step_name_and_it_works',
+    ],
+    [
+      'packages/workflow/src/observability.test.ts:17',
+      'workflow_observability_reexports_parse_workflow_name_and_it_works',
+    ],
+    [
+      'packages/workflow/src/observability.test.ts:24',
+      'workflow_observability_reexports_parse_class_name_and_it_works',
+    ],
+    [
+      'packages/workflow/src/observability.test.ts:29',
+      'workflow_observability_reexports_observability_revivers',
+    ],
+    [
+      'packages/workflow/src/observability.test.ts:36',
+      'workflow_observability_reexports_hydrate_resource_io_and_handles_plain_values',
+    ],
+    [
+      'packages/workflow/src/observability.test.ts:43',
+      'workflow_observability_reexports_hydrate_data_and_passes_through_plain_values',
+    ],
+    [
+      'packages/workflow/src/stdlib.test.ts:5',
+      'workflow_stdlib_fetch_has_the_correct_name',
+    ],
+  ].map(([key, rustTestName]) => [
+    key,
+    {
+      rustTestName,
+      status: 'verified',
+      note: 'Ported in crates/workflow/src/lib.rs and validated by cargo test -p workflow.',
+    },
+  ])
+);
+
 const hostFrameworkPackages = new Set([
   'astro',
   'nest',
@@ -389,6 +437,10 @@ function packageName(relativePath) {
   return parts[0] === 'packages' ? parts[1] : 'unknown';
 }
 
+function rowKey(row) {
+  return `${row.file}:${row.line}`;
+}
+
 function classify(row, source) {
   const file = row.file;
   if (typeSystemPackages.has(row.packageName) || source.includes('expectTypeOf')) {
@@ -522,7 +574,8 @@ function parseFile(filePath) {
         eachNote: call.eachNote,
         dynamicName: call.dynamicName,
       };
-      rows.push({ ...row, ...classify(row, source) });
+      const classified = { ...row, ...classify(row, source) };
+      rows.push({ ...classified, ...rowOverrides.get(rowKey(classified)) });
     }
   }
 
@@ -585,7 +638,7 @@ function renderInventory(rows, testFiles) {
     row.declaration,
     row.portability,
     rustOwners.get(row.packageName) ?? 'unassigned',
-    '',
+    row.rustTestName ?? '',
     row.status,
     row.note,
   ]);

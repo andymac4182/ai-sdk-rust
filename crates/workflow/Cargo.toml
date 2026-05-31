@@ -22,3 +22,6 @@ all = "warn"
 workflow-core = { path = "../workflow-core" }
 workflow-errors = { path = "../workflow-errors" }
 workflow-utils = { path = "../workflow-utils" }
+
+[dev-dependencies]
+serde_json = "1.0.149"
