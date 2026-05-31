@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod git;
+pub mod git_finish;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -26,6 +29,16 @@ pub const OWNER_BUCKET: u8 = 3;
 
 /// Optional base snapshot id for Vercel-backed sandboxes.
 pub const VERCEL_SANDBOX_BASE_SNAPSHOT_ID_ENV: &str = "VERCEL_SANDBOX_BASE_SNAPSHOT_ID";
+
+pub use git::{
+    CommitOutcome, DiffFileStat, DiffSummary, FileChange, FileChangeStatus, GitCredentials,
+    GitError, GitOutput, GitRedactor, GitRemoteActionMode, GitSandbox, GitStatus,
+    PullRequestCommandOutcome, PushOptions, PushOutcome, is_safe_branch_name,
+};
+pub use git_finish::{
+    GitFinishOptions, GitFinishReport, GitFinishStatus, PullRequestOptions, PullRequestOutcome,
+    run_git_finish,
+};
 
 const DETACHED_QUICK_FAILURE_WINDOW_MS: u64 = 2_000;
 const SHELL_BINARY: &str = "/bin/bash";
