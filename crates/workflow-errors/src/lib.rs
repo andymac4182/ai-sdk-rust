@@ -63,12 +63,32 @@ pub enum WorkflowErrorFamily {
     Fatal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowErrorKind {
+    Fatal,
+    Workflow,
+    WorkflowRuntime,
+    StepNotRegistered,
+    WorkflowNotRegistered,
+    CorruptedEventLog,
+    RuntimeDecryption,
+    Serialization,
+    WorkflowWorld,
+    HookConflict,
+    Native,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowError {
     name: String,
     message: String,
     cause: Option<String>,
     family: WorkflowErrorFamily,
+    kind: WorkflowErrorKind,
+    code: Option<String>,
+    status: Option<u16>,
+    cause_name: Option<String>,
+    stack: Option<String>,
     fatal: bool,
 }
 
@@ -93,13 +113,161 @@ impl WorkflowError {
         fatal: bool,
     ) -> Self {
         let message = append_framed_details(message.into(), build_framed_details(None, slug));
+        let name = name.into();
+        let kind = workflow_error_kind_for_name(&name, family);
         Self {
-            name: name.into(),
+            name,
             message,
             cause,
             family,
+            kind,
+            code: None,
+            status: None,
+            cause_name: None,
+            stack: None,
             fatal,
         }
+    }
+
+    pub fn fatal(message: impl Into<String>) -> Self {
+        Self::with_options(
+            "FatalError",
+            message,
+            WorkflowErrorFamily::Fatal,
+            None,
+            None,
+            true,
+        )
+    }
+
+    pub fn workflow_runtime(message: impl Into<String>) -> Self {
+        Self::with_options(
+            "WorkflowRuntimeError",
+            message,
+            WorkflowErrorFamily::Runtime,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn step_not_registered(step_name: impl AsRef<str>) -> Self {
+        Self::with_options(
+            "StepNotRegisteredError",
+            format!("Step not registered: {}", step_name.as_ref()),
+            WorkflowErrorFamily::Runtime,
+            Some(ErrorSlug::StepNotRegistered),
+            None,
+            false,
+        )
+    }
+
+    pub fn workflow_not_registered(workflow_name: impl AsRef<str>) -> Self {
+        Self::with_options(
+            "WorkflowNotRegisteredError",
+            format!("Workflow not registered: {}", workflow_name.as_ref()),
+            WorkflowErrorFamily::Runtime,
+            Some(ErrorSlug::WorkflowNotRegistered),
+            None,
+            false,
+        )
+    }
+
+    pub fn corrupted_event_log(message: impl Into<String>) -> Self {
+        Self::with_options(
+            "CorruptedEventLogError",
+            message,
+            WorkflowErrorFamily::Runtime,
+            Some(ErrorSlug::CorruptedEventLog),
+            None,
+            false,
+        )
+    }
+
+    pub fn runtime_decryption(message: impl Into<String>) -> Self {
+        Self::with_options(
+            "RuntimeDecryptionError",
+            message,
+            WorkflowErrorFamily::Runtime,
+            Some(ErrorSlug::RuntimeDecryptionFailed),
+            None,
+            false,
+        )
+    }
+
+    pub fn serialization(message: impl Into<String>) -> Self {
+        Self::with_options(
+            "SerializationError",
+            message,
+            WorkflowErrorFamily::Serialization,
+            Some(ErrorSlug::SerializationFailed),
+            None,
+            true,
+        )
+    }
+
+    pub fn hook_conflict(token: impl AsRef<str>) -> Self {
+        Self::with_options(
+            "HookConflictError",
+            format!("Hook token already exists: {}", token.as_ref()),
+            WorkflowErrorFamily::Runtime,
+            Some(ErrorSlug::HookConflict),
+            None,
+            false,
+        )
+    }
+
+    pub fn workflow_world(message: impl Into<String>) -> Self {
+        let mut error = Self::with_options(
+            "WorkflowWorldError",
+            message,
+            WorkflowErrorFamily::Runtime,
+            None,
+            None,
+            false,
+        );
+        error.kind = WorkflowErrorKind::WorkflowWorld;
+        error
+    }
+
+    pub fn native(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            message: message.into(),
+            cause: None,
+            family: WorkflowErrorFamily::Workflow,
+            kind: WorkflowErrorKind::Native,
+            code: None,
+            status: None,
+            cause_name: None,
+            stack: None,
+            fatal: false,
+        }
+    }
+
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    pub fn with_cause_name(mut self, cause_name: impl Into<String>) -> Self {
+        self.cause_name = Some(cause_name.into());
+        self
+    }
+
+    pub fn with_stack(mut self, stack: impl Into<String>) -> Self {
+        self.stack = Some(stack.into());
+        self
+    }
+
+    pub fn with_fatal(mut self, fatal: bool) -> Self {
+        self.fatal = fatal;
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -118,12 +286,61 @@ impl WorkflowError {
         self.family
     }
 
+    pub fn kind(&self) -> WorkflowErrorKind {
+        self.kind
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    pub fn status(&self) -> Option<u16> {
+        self.status
+    }
+
+    pub fn cause_name(&self) -> Option<&str> {
+        self.cause_name.as_deref()
+    }
+
+    pub fn stack(&self) -> Option<&str> {
+        self.stack.as_deref()
+    }
+
     pub fn is_fatal(&self) -> bool {
         self.fatal
     }
 
+    pub fn is_runtime_error_family(&self) -> bool {
+        matches!(
+            self.kind,
+            WorkflowErrorKind::WorkflowRuntime
+                | WorkflowErrorKind::StepNotRegistered
+                | WorkflowErrorKind::WorkflowNotRegistered
+                | WorkflowErrorKind::RuntimeDecryption
+        )
+    }
+
     pub fn is(value: &Self) -> bool {
         value.name == "WorkflowError"
+    }
+}
+
+fn workflow_error_kind_for_name(name: &str, family: WorkflowErrorFamily) -> WorkflowErrorKind {
+    match name {
+        "FatalError" => WorkflowErrorKind::Fatal,
+        "WorkflowRuntimeError" => WorkflowErrorKind::WorkflowRuntime,
+        "StepNotRegisteredError" => WorkflowErrorKind::StepNotRegistered,
+        "WorkflowNotRegisteredError" => WorkflowErrorKind::WorkflowNotRegistered,
+        "CorruptedEventLogError" => WorkflowErrorKind::CorruptedEventLog,
+        "RuntimeDecryptionError" => WorkflowErrorKind::RuntimeDecryption,
+        "SerializationError" => WorkflowErrorKind::Serialization,
+        "WorkflowWorldError" => WorkflowErrorKind::WorkflowWorld,
+        "HookConflictError" => WorkflowErrorKind::HookConflict,
+        "Error" | "TypeError" | "SyntaxError" | "ReferenceError" => WorkflowErrorKind::Native,
+        _ if family == WorkflowErrorFamily::Runtime => WorkflowErrorKind::WorkflowRuntime,
+        _ if family == WorkflowErrorFamily::Fatal => WorkflowErrorKind::Fatal,
+        _ if family == WorkflowErrorFamily::Serialization => WorkflowErrorKind::Serialization,
+        _ => WorkflowErrorKind::Workflow,
     }
 }
 
@@ -350,6 +567,7 @@ impl RuntimeDecryptionError {
         )
         .inner;
         inner.name = "RuntimeDecryptionError".to_owned();
+        inner.kind = WorkflowErrorKind::RuntimeDecryption;
         Self {
             inner,
             context: options.context,
@@ -409,6 +627,7 @@ impl CorruptedEventLogError {
         )
         .inner;
         inner.name = "CorruptedEventLogError".to_owned();
+        inner.kind = WorkflowErrorKind::CorruptedEventLog;
         Self { inner }
     }
 

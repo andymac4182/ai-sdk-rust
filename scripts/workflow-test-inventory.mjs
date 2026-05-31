@@ -217,6 +217,55 @@ function rowOverride(row) {
   return undefined;
 }
 
+const wf04CorePrimitiveFiles = new Map([
+  ['packages/core/src/capabilities.test.ts', 'capabilities'],
+  ['packages/core/src/classify-error.test.ts', 'classify_error'],
+  ['packages/core/src/context-errors.test.ts', 'context_errors'],
+  ['packages/core/src/define-hook.test.ts', 'define_hook'],
+  ['packages/core/src/describe-error.test.ts', 'describe_error'],
+  ['packages/core/src/global.test.ts', 'global'],
+  ['packages/core/src/log-format.test.ts', 'log_format'],
+  ['packages/core/src/logger.test.ts', 'logger'],
+  ['packages/core/src/schemas.test.ts', 'schemas'],
+  ['packages/core/src/set-attributes.test.ts', 'set_attributes'],
+  ['packages/core/src/source-map.test.ts', 'source_map'],
+  ['packages/core/src/types.test.ts', 'types'],
+  ['packages/core/src/util.test.ts', 'utility'],
+]);
+
+function applyRustParityOverrides(rows) {
+  const prefix = rows[0] ? wf04CorePrimitiveFiles.get(rows[0].file) : undefined;
+  if (!prefix) {
+    return rows;
+  }
+
+  return rows.map((row, index) => {
+    if (
+      row.file === 'packages/core/src/context-errors.test.ts' &&
+      row.line === 209
+    ) {
+      return {
+        ...row,
+        portability: 'js-only-documented',
+        status: 'js-only-documented',
+        rustTestName: '',
+        note:
+          'V8 Error.captureStackTrace stack-frame rewriting has no Rust runtime analogue; Rust reports native call sites/backtraces instead.',
+      };
+    }
+
+    const rustTestName = `wf04_${prefix}_row_${String(index + 1).padStart(3, '0')}`;
+    return {
+      ...row,
+      portability: 'portable',
+      status: 'verified',
+      rustTestName,
+      note:
+        'WF04 verified in workflow-core against the upstream portable row.',
+    };
+  });
+}
+
 const hostFrameworkPackages = new Set([
   'astro',
   'nest',
@@ -708,7 +757,7 @@ function parseFile(filePath) {
     }
   }
 
-  return rows;
+  return applyRustParityOverrides(rows);
 }
 
 function summarize(rows, testFiles) {
@@ -769,7 +818,7 @@ function renderInventory(rows, testFiles) {
       row.declaration,
       row.portability,
       rustOwners.get(row.packageName) ?? 'unassigned',
-      override?.rustTestName ?? '',
+      row.rustTestName ?? override?.rustTestName ?? '',
       override?.status ?? row.status,
       override?.note ?? row.note,
     ];

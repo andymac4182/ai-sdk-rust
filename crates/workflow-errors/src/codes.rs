@@ -22,6 +22,18 @@ impl RunErrorCode {
             Self::WorldContractError => "WORLD_CONTRACT_ERROR",
         }
     }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "USER_ERROR" => Some(Self::UserError),
+            "RUNTIME_ERROR" => Some(Self::RuntimeError),
+            "CORRUPTED_EVENT_LOG" => Some(Self::CorruptedEventLog),
+            "MAX_DELIVERIES_EXCEEDED" => Some(Self::MaxDeliveriesExceeded),
+            "REPLAY_TIMEOUT" => Some(Self::ReplayTimeout),
+            "WORLD_CONTRACT_ERROR" => Some(Self::WorldContractError),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
