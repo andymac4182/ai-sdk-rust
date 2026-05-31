@@ -18,25 +18,27 @@ Commands:
   --dry-run        Alias for --plan.
   --check-config   Run service config validation with local fixture secrets.
   --fixture        Run the deterministic open-agents-service fixture.
+  --emulator       Run the Slack emulator-backed local E2E proof.
   --test           Run cargo test -p open-agents-service.
-  --all-local      Run --check-config, --fixture, and --test.
+  --all-local      Run --check-config, --fixture, --emulator, and --test.
 USAGE
 }
 
 print_matrix() {
   cat <<'MATRIX'
-| Flow | Local coverage today | Gap before full local E2E |
+| Flow | Local coverage today | Gap before durable runtime E2E |
 | --- | --- | --- |
-| URL verification | Fixture and Slack ingress unit tests | Service binary route at /slack/events still TODO |
-| App mention and DM | App mention fixture; app mention and DM router tests | Emulator event dispatch to running service still TODO |
-| Thread routing | Parser/router tests and fixture interaction tests | Emulator-backed thread replay still TODO |
-| Durable run completion | Fixture fake run completes and clears active state | Real durable runtime through service route still TODO |
-| Waiting, answer, cancel | Synthetic block action fixture payloads | Emulator cannot simulate interactions today |
-| Outbound Slack message/update | Fixture captures outbound; Slack outbound body tests cover post/update shapes | Emulator Web API state assertions still TODO |
-| Persistence | In-memory fixture run and active-run keys | Postgres-backed persistence still TODO |
-| Sandbox command | Fixture records fake sandbox.exec pwd proof | Real local sandbox command through runtime still TODO |
+| URL verification | Signed service route and Slack ingress unit tests | Live Slack app proof still TODO |
+| App mention | Emulator-backed signed service path and service route tests | Live model runtime proof still TODO |
+| DM | Slack router tests | Emulator-backed DM scenario still TODO |
+| Thread routing | Emulator-backed app mention thread replay; parser/router tests | Broader DM/thread matrix still TODO |
+| Durable run completion | Service route scripted runtime completes and clears active state | Live model runtime proof still TODO |
+| Waiting, answer, cancel | Emulator-backed question prompt plus direct signed block action payload; service cancel test | Emulator cannot simulate interactions today |
+| Outbound Slack message/update | Emulator Web API state assertions for postMessage; Slack outbound body tests cover post/update shapes | Emulator-backed chat.update scenario still TODO |
+| Persistence | In-memory service route run and active-run keys | Postgres-backed persistence still TODO |
+| Sandbox command | Service route records sandbox.exec pwd proof | Broader sandbox and git automation proof still TODO |
 | Git automation summary | Slack renderer unit coverage only | End-to-end auto-commit/PR summary still TODO |
-| Health/readiness | Service health/readiness tests and manual probes | Include probes in emulator E2E once service route lands |
+| Health/readiness | Service health/readiness tests, manual probes, and emulator readiness polling | Live deployment probes still TODO |
 MATRIX
 }
 
@@ -45,12 +47,13 @@ print_plan() {
 scripts/open-agents-local-e2e.sh --matrix
 scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
+scripts/open-agents-local-e2e.sh --emulator
 cargo test -p open-agents-service
 
-Future emulator-backed lane after service-route and emulator-harness buckets:
-npx emulate --service slack --seed docs/open-agents/emulate-slack.seed.yaml
-# start open-agents-service with the emulator Slack API base URL
-# drive app mention, DM, thread reply, and outbound update assertions
+The emulator lane starts emulate@0.6.0 programmatically, starts
+open-agents-service, posts an app mention through the emulator Web API, sends a
+signed Events API payload to the service route, and verifies the service replies
+through conversations.replies.
 PLAN
 }
 
@@ -80,6 +83,16 @@ run_tests() {
   )
 }
 
+run_emulator() {
+  (
+    cd "$repo_root"
+    if [[ ! -d scripts/open-agents-local-e2e/node_modules ]]; then
+      npm install --prefix scripts/open-agents-local-e2e
+    fi
+    npm test --prefix scripts/open-agents-local-e2e
+  )
+}
+
 command="${1:---help}"
 case "$command" in
   --help | -h)
@@ -97,12 +110,16 @@ case "$command" in
   --fixture)
     run_fixture
     ;;
+  --emulator)
+    run_emulator
+    ;;
   --test)
     run_tests
     ;;
   --all-local)
     run_check_config
     run_fixture
+    run_emulator
     run_tests
     ;;
   *)

@@ -63,6 +63,7 @@ pub struct OpenAgentsServiceConfig {
     slack_bot_token: String,
     slack_signing_secret: String,
     slack_app_token: Option<String>,
+    slack_api_url: Option<String>,
     sandbox: SandboxMode,
     model_api_key: Option<String>,
 }
@@ -80,6 +81,7 @@ impl fmt::Debug for OpenAgentsServiceConfig {
                 "slack_app_token",
                 &self.slack_app_token.as_ref().map(|_| "<redacted>"),
             )
+            .field("slack_api_url", &self.slack_api_url)
             .field("sandbox", &self.sandbox)
             .field(
                 "model_api_key",
@@ -119,6 +121,8 @@ impl OpenAgentsServiceConfig {
         let slack_signing_secret =
             required(&mut read_var, open_agents_slack::SLACK_SIGNING_SECRET_ENV)?;
         let slack_app_token = present(read_var(open_agents_slack::SLACK_APP_TOKEN_ENV));
+        let slack_api_url = present(read_var("OPEN_AGENTS_SLACK_API_URL"))
+            .or_else(|| present(read_var("SLACK_API_URL")));
 
         let slack_ingress =
             parse_slack_ingress(present(read_var("OPEN_AGENTS_SLACK_INGRESS")).as_deref())?;
@@ -147,6 +151,7 @@ impl OpenAgentsServiceConfig {
             slack_bot_token,
             slack_signing_secret,
             slack_app_token,
+            slack_api_url,
             sandbox,
             model_api_key,
         })
@@ -163,6 +168,7 @@ impl OpenAgentsServiceConfig {
             slack_bot_token: "xoxb-fixture".to_string(),
             slack_signing_secret: "fixture-signing-secret".to_string(),
             slack_app_token: None,
+            slack_api_url: None,
             sandbox: SandboxMode::Local {
                 root: PathBuf::from("."),
             },
@@ -200,6 +206,11 @@ impl OpenAgentsServiceConfig {
         self.slack_app_token.as_deref()
     }
 
+    /// Optional Slack Web API base URL override.
+    pub fn slack_api_url(&self) -> Option<&str> {
+        self.slack_api_url.as_deref()
+    }
+
     /// Selected sandbox backend.
     pub fn sandbox(&self) -> &SandboxMode {
         &self.sandbox
@@ -213,7 +224,7 @@ impl OpenAgentsServiceConfig {
     /// Redacted summary safe to print in operator logs.
     pub fn operator_summary(&self) -> String {
         format!(
-            "bind_addr={} state={} slack_ingress={} sandbox={} slack_bot_token={} signing_secret={} socket_mode_token={} model_credential={}",
+            "bind_addr={} state={} slack_ingress={} sandbox={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={}",
             self.bind_addr,
             self.state_store.label(),
             slack_ingress_label(self.slack_ingress),
@@ -221,6 +232,7 @@ impl OpenAgentsServiceConfig {
             present_label(Some(&self.slack_bot_token)),
             present_label(Some(&self.slack_signing_secret)),
             present_label(self.slack_app_token.as_ref()),
+            present_label(self.slack_api_url.as_ref()),
             present_label(self.model_api_key.as_ref()),
         )
     }
@@ -372,7 +384,32 @@ mod tests {
         assert_eq!(config.bind_addr().to_string(), "127.0.0.1:8080");
         assert_eq!(config.state_store().label(), "memory");
         assert_eq!(config.slack_ingress(), SlackIngressMode::Webhook);
+        assert_eq!(config.slack_api_url(), None);
         assert_eq!(config.sandbox().label(), "local");
+    }
+
+    #[test]
+    fn from_reader_accepts_open_agents_slack_api_url() {
+        let config = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("OPEN_AGENTS_SLACK_API_URL", "http://127.0.0.1:4003/api"),
+        ])
+        .unwrap();
+
+        assert_eq!(config.slack_api_url(), Some("http://127.0.0.1:4003/api"));
+    }
+
+    #[test]
+    fn from_reader_accepts_slack_api_url_alias() {
+        let config = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("SLACK_API_URL", "http://127.0.0.1:4003/api"),
+        ])
+        .unwrap();
+
+        assert_eq!(config.slack_api_url(), Some("http://127.0.0.1:4003/api"));
     }
 
     #[test]

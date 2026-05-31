@@ -434,10 +434,14 @@ pub async fn run_live_slack_smoke_from_env() -> Result<Option<String>, FixtureEr
         }
     };
 
-    let adapter = SlackAdapter::new(SlackAdapterOptions::new(
+    let mut options = SlackAdapterOptions::new(
         config.slack_bot_token().to_string(),
         config.slack_signing_secret().to_string(),
-    ));
+    );
+    if let Some(api_base) = config.slack_api_url() {
+        options = options.with_api_base(api_base.to_string());
+    }
+    let adapter = SlackAdapter::new(options);
     let thread_id = SlackThreadAddress::new(channel_id.trim(), "").chat_thread_id();
     let message_id = adapter
         .post_message(
