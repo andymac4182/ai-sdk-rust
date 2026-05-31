@@ -127,7 +127,8 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
         Ok(stream_text(options).await)
     }
 
-    fn prepare_call(
+    /// Validates and prepares a tool-loop call without invoking the model.
+    pub fn prepare_call(
         &self,
         options: ToolLoopAgentCallOptions<'a, M>,
     ) -> Result<ToolLoopAgentPreparedCall<'a, M>, InvalidPromptError> {

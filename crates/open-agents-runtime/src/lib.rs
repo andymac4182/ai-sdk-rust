@@ -6,7 +6,15 @@
 
 #![forbid(unsafe_code)]
 
-use open_agents_core::{AgentModelSelection, RemoteAgentIdentity};
+mod open_agent;
+
+pub use open_agent::{
+    DEFAULT_OPEN_AGENT_MODEL_LABEL, OpenAgent, OpenAgentCallOptions, OpenAgentError,
+    OpenAgentPreparedCall, OpenAgentSettings, OpenAgentSkillMetadata, OpenAgentSkillOptions,
+    OpenAgentSystemPromptOptions, OpenAgentUsageEvent, OpenAgentUsageHook,
+    build_open_agent_system_prompt, get_open_agent_provider_options_for_model,
+};
+pub use open_agents_core::{AgentModelSelection, RemoteAgentIdentity};
 use open_agents_sandbox::SandboxContext;
 use serde::{Deserialize, Serialize};
 
