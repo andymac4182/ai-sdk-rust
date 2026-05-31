@@ -1,0 +1,45 @@
+[
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Approval required: Bash*\nRun cargo test --all-features"
+    }
+  },
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": "*Details:* Command touches the workspace test runner."
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Approve",
+          "emoji": true
+        },
+        "action_id": "oa:v1:approve:run-1:assistant-message-1:approval-1",
+        "value": "approval-1",
+        "style": "primary"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Deny",
+          "emoji": true
+        },
+        "action_id": "oa:v1:deny:run-1:assistant-message-1:approval-1",
+        "value": "approval-1",
+        "style": "danger"
+      }
+    ]
+  }
+]

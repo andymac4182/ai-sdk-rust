@@ -1,0 +1,148 @@
+[
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Questions for you*"
+    }
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Deploy*\nWhere should I deploy this?"
+    }
+  },
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": "*Preview:* Deploy to a preview environment."
+      },
+      {
+        "type": "mrkdwn",
+        "text": "*Production:* Ship directly to production."
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Preview",
+          "emoji": true
+        },
+        "action_id": "oa:v1:question_answer:run-1:assistant-message-1:ask-user-call-1%2Fq0%2Foption0",
+        "value": "ask-user-call-1/q0/option0"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Production",
+          "emoji": true
+        },
+        "action_id": "oa:v1:question_answer:run-1:assistant-message-1:ask-user-call-1%2Fq0%2Foption1",
+        "value": "ask-user-call-1/q0/option1"
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Other...",
+          "emoji": true
+        },
+        "action_id": "oa:v1:question_other:run-1:assistant-message-1:ask-user-call-1%2Fq0%2Fother",
+        "value": "ask-user-call-1/q0/other"
+      }
+    ]
+  },
+  {
+    "type": "section",
+    "text": {
+      "type": "mrkdwn",
+      "text": "*Checks*\nWhich checks should I run?"
+    }
+  },
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": "*Unit tests:* Run the fast Rust tests."
+      },
+      {
+        "type": "mrkdwn",
+        "text": "*Lint:* Run clippy and formatting checks."
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "checkboxes",
+        "action_id": "oa:v1:question_select:run-1:assistant-message-1:ask-user-call-1%2Fq1",
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Unit tests",
+              "emoji": true
+            },
+            "description": {
+              "type": "plain_text",
+              "text": "Run the fast Rust tests.",
+              "emoji": true
+            },
+            "value": "ask-user-call-1/q1/option0"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Lint",
+              "emoji": true
+            },
+            "description": {
+              "type": "plain_text",
+              "text": "Run clippy and formatting checks.",
+              "emoji": true
+            },
+            "value": "ask-user-call-1/q1/option1"
+          }
+        ]
+      },
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Submit",
+          "emoji": true
+        },
+        "action_id": "oa:v1:question_submit:run-1:assistant-message-1:ask-user-call-1%2Fq1",
+        "value": "ask-user-call-1/q1",
+        "style": "primary"
+      }
+    ]
+  },
+  {
+    "type": "actions",
+    "elements": [
+      {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Decline",
+          "emoji": true
+        },
+        "action_id": "oa:v1:question_decline:run-1:assistant-message-1:ask-user-call-1",
+        "value": "ask-user-call-1",
+        "style": "danger"
+      }
+    ]
+  }
+]
