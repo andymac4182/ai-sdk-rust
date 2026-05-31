@@ -15,6 +15,7 @@ pub mod crypto;
 pub mod format;
 pub mod markdown;
 pub mod modals;
+pub mod session_lifecycle;
 pub mod webhook;
 
 use async_trait::async_trait;
@@ -984,9 +985,9 @@ mod tests {
     //!    is held as an opaque `reqwest::Client`. Per-call
     //!    referential equality is moot under `Clone`-shared-pool
     //!    semantics. The deprecated `client` alias was never shipped
-    //!    in Rust. Multi-workspace property-throw + ALS-based
+    //!    in Rust. Multi-workspace property-throw plus ALS-based
     //!    per-request token resolution are surfaced via typed errors
-    //!    + function-parameter plumbing at the per-workspace call
+    //!    and function-parameter plumbing at the per-workspace call
     //!    sites (webhook handler), not via a property getter.
     //!
     //! ## Constructor default-Logger (slice 447)
@@ -1097,9 +1098,9 @@ mod tests {
     //! - `index.test.ts > describe("deleteMessage via response_url")` (1)
     //! - `index.test.ts > describe("isMessageFromSelf")` (3)
     //! - `index.test.ts > describe("reverse user lookup")` (19) —
-    //!   reverse-index storage in lookupUser + resolveOutgoingMentions
-    //!   + resolveMessageMentions + thread participant tracking +
-    //!   user_change event + rehydrateAttachment
+    //!   reverse-index storage in lookupUser, resolveOutgoingMentions,
+    //!   resolveMessageMentions, thread participant tracking,
+    //!   user_change event, and rehydrateAttachment
     //! - `index.test.ts > describe("stream with empty threadTs")` (1)
     //! - `index.test.ts > describe("scheduleMessage with empty threadTs")` (1)
     //! - `index.test.ts > describe("getUser")` (7) — `users.info`

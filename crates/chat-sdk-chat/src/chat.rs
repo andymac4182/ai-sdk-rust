@@ -159,9 +159,10 @@ pub const MODAL_CONTEXT_KEY_PREFIX: &str = "modal-context:";
 ///   [`crate::channel::derive_channel_id`].
 /// - `Resolver(fn)`: per-message async callback returning Thread or
 ///   Channel.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum LockScope {
     /// 1:1 with upstream `"thread"` literal.
+    #[default]
     Thread,
     /// 1:1 with upstream `"channel"` literal.
     Channel,
@@ -176,12 +177,6 @@ pub enum LockScope {
 
 /// Boxed async future returned by a [`LockScope::Resolver`] callback.
 pub type LockScopeFuture = std::pin::Pin<Box<dyn std::future::Future<Output = LockScope> + Send>>;
-
-impl Default for LockScope {
-    fn default() -> Self {
-        Self::Thread
-    }
-}
 
 impl std::fmt::Debug for LockScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -229,12 +224,16 @@ pub enum LockConflictResolution {
 pub type LockConflictFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = LockConflictResolution> + Send>>;
 
+pub type LockConflictCallback =
+    Arc<dyn Fn(&str, &crate::message::Message) -> LockConflictFuture + Send + Sync + 'static>;
+
 /// 1:1 with upstream `ChatConfig.onLockConflict`. Determines how the
 /// dispatcher handles per-thread lock conflicts.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum OnLockConflict {
     /// Default — drop the message and return
     /// [`crate::errors::ChatError::Lock`].
+    #[default]
     Drop,
     /// Force-release the held lock + re-acquire + dispatch. Use
     /// when a stuck handler instance is acceptable to evict.
@@ -242,15 +241,7 @@ pub enum OnLockConflict {
     /// Per-message callback returning the resolution. The closure
     /// is async to match upstream's `Promise<"drop" | "force">`
     /// return type.
-    Callback(
-        Arc<dyn Fn(&str, &crate::message::Message) -> LockConflictFuture + Send + Sync + 'static>,
-    ),
-}
-
-impl Default for OnLockConflict {
-    fn default() -> Self {
-        Self::Drop
-    }
+    Callback(LockConflictCallback),
 }
 
 impl std::fmt::Debug for OnLockConflict {
@@ -646,20 +637,20 @@ pub struct SlashCommandEvent {
 
 impl SlashCommandEvent {
     /// 1:1 with upstream `SlashCommandEvent.openModal(modal)`.
-    /// Mirrors [`Chat::open_modal`] using the event-bound adapter
-    /// + trigger_id + state: generates a fresh UUID context_id,
-    /// persists a `modal-context:<context_id>` envelope with the
-    /// slash event's channel_id (as the originating thread context)
-    /// + adapter name + callback_id, then calls
-    /// `adapter.open_modal(trigger_id, modal, context_id)`.
-    /// Returns `Ok(None)` when `trigger_id` is missing or when the
-    /// adapter returns `Unsupported` for `open_modal`. Logger
-    /// warnings ("Cannot open modal: no triggerId available" /
-    /// "Cannot open modal: <name> does not support modals") are
-    /// elided from the Rust port for the same reason
-    /// `Chat::open_modal` elides them — the [`crate::logger`]
-    /// surface is not threaded through the event yet; the
-    /// observable result (`Ok(None)`) matches.
+    /// Mirrors [`Chat::open_modal`] using the event-bound adapter +
+    /// trigger_id + state: generates a fresh UUID context_id, persists
+    /// a `modal-context:<context_id>` envelope with the slash event's
+    /// channel_id (as the originating thread context) + adapter name +
+    /// callback_id, then calls `adapter.open_modal(trigger_id, modal,
+    /// context_id)`.
+    ///
+    /// Returns `Ok(None)` when `trigger_id` is missing or when the adapter
+    /// returns `Unsupported` for `open_modal`. Logger warnings ("Cannot open
+    /// modal: no triggerId available" / "Cannot open modal: <name> does not
+    /// support modals") are elided from the Rust port for the same reason
+    /// `Chat::open_modal` elides them — the [`crate::logger`] surface is not
+    /// threaded through the event yet; the observable result (`Ok(None)`)
+    /// matches.
     pub async fn open_modal(
         &self,
         modal: &crate::modals::ModalElement,
@@ -2014,27 +2005,17 @@ impl Chat {
                 .await;
             return Ok(false);
         }
-        let lock = match lock_acquired {
-            Some(lock) => Some(lock),
-            None => {
-                // Only consult the policy when the state backend
-                // actually attempted a lock (signaled by the default
-                // returning None for "no lock primitive"). To
-                // distinguish, we re-check the conflict policy: if
-                // it's Drop and the backend default would return
-                // None anyway, we'd block all dispatch. So: only
-                // surface the LockError / force-release when the
-                // policy is non-default OR the conflict is real.
-                //
-                // For Phase A here, treat any None as "no lock
-                // primitive" → proceed without a lock. Real
-                // conflict-handling kicks in via the explicit
-                // policy paths in tests with a real lock-tracking
-                // state mock (see LockTrackingState in the chat
-                // tests module).
-                None
-            }
-        };
+        // Only consult the policy when the state backend actually attempted a
+        // lock (signaled by the default returning None for "no lock primitive").
+        // To distinguish, we re-check the conflict policy: if it's Drop and
+        // the backend default would return None anyway, we'd block all
+        // dispatch. So: only surface the LockError / force-release when the
+        // policy is non-default OR the conflict is real. For Phase A here,
+        // treat any None as "no lock primitive" -> proceed without a lock.
+        // Real conflict-handling kicks in via the explicit policy paths in
+        // tests with a real lock-tracking state mock (see LockTrackingState in
+        // the chat tests module).
+        let lock = lock_acquired;
         // The above degenerates to None for backends without a
         // lock primitive. For backends that DO implement
         // acquire_lock, we need to surface conflicts. The test
@@ -2618,7 +2599,6 @@ mod tests {
         })
     }
 
-    #[test]
     // ---------- user-id pattern predicates ----------
     // 1:1 with upstream's private regexes used by `adapterFor(userId)`
     // routing. No standalone upstream tests; the predicates are

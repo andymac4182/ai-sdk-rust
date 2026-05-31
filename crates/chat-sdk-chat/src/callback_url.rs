@@ -258,10 +258,8 @@ fn has_callback_buttons(children: &[crate::cards::CardChild]) -> bool {
                     }
                 }
             }
-            crate::cards::CardChild::Section(s) => {
-                if has_callback_buttons(&s.children) {
-                    return true;
-                }
+            crate::cards::CardChild::Section(s) if has_callback_buttons(&s.children) => {
+                return true;
             }
             _ => {}
         }

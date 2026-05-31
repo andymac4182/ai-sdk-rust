@@ -441,7 +441,7 @@ impl EmojiResolver {
         as_slice(&formats.slack)
             .iter()
             .any(|s| s.to_lowercase() == cleaned_raw)
-            || as_slice(&formats.gchat).iter().any(|g| *g == raw_emoji)
+            || as_slice(&formats.gchat).contains(&raw_emoji)
     }
 
     /// Add or override emoji mappings. 1:1 port of upstream `extend`.

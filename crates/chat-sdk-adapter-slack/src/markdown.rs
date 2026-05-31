@@ -51,9 +51,7 @@ fn rewrite_bare_mentions(text: &str) -> String {
             }
         }
         // Push this char and advance by its utf-8 length.
-        let ch_len = if bytes[i] < 0x80 {
-            1
-        } else if bytes[i] < 0xc0 {
+        let ch_len = if bytes[i] < 0xc0 {
             1
         } else if bytes[i] < 0xe0 {
             2
