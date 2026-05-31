@@ -44,6 +44,7 @@ members = [
     "crates/open-agents-sandbox",
     "crates/open-agents-service",
     "crates/open-agents-slack",
+    "crates/repo-naming-check",
 ]
 resolver = "3"
 

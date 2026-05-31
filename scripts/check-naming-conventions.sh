@@ -18,194 +18,29 @@ set -euo pipefail
 #   packages/adapter-shared submodule filenames (adapter-utils.ts,
 #   buffer-utils.ts, card-utils.ts).
 
-failures=()
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
 
-add_failure() {
-  failures+=("$1")
-}
-
-is_banned_token() {
-  case "$1" in
-    helper | helpers | util | utils | common | misc | stuff | shared)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-allowed_path() {
-  case "$1" in
-    src/provider_utils.rs | src/util.rs)
-      return 0
-      ;;
-    crates/chat-sdk-adapter-gchat/src/thread_utils.rs)
-      # Mirrors upstream packages/adapter-gchat/src/thread-utils.ts.
-      return 0
-      ;;
-    crates/chat-sdk-adapter-linear/src/utils.rs)
-      # Mirrors upstream packages/adapter-linear/src/utils.ts.
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-allowed_identifier_token() {
-  local name="$1"
-  local token="$2"
-  local origin="${3:-}"
-
-  # The Linear adapter's `utils` module mirrors upstream
-  # packages/adapter-linear/src/utils.ts. Allow the bare `utils`
-  # identifier only at its declaring lib.rs site.
-  if [[ "$token" == "utils" && "$name" == "utils" &&
-        "$origin" == *chat-sdk-adapter-linear/src/lib.rs* ]]; then
-    return 0
-  fi
-
-  if [[ "$token" == "utils" && ( "$name" == *provider_utils* || "$name" == *provider-utils* ) ]]; then
-    return 0
-  fi
-
-  if [[ "$token" == "utils" && (
-        "$name" == *adapter_utils* || "$name" == *adapter-utils* ||
-        "$name" == *buffer_utils*  || "$name" == *buffer-utils*  ||
-        "$name" == *card_utils*    || "$name" == *card-utils*  ||
-        "$name" == *thread_utils*  || "$name" == *thread-utils*
-      ) ]]; then
-    return 0
-  fi
-
-  # `mdast_util_to_markdown` mirrors the upstream `mdast-util-to-markdown`
-  # npm package name referenced in chat-sdk markdown porting notes.
-  if [[ "$token" == "util" && "$name" == *mdast_util_to_markdown* ]]; then
-    return 0
-  fi
-
-  if [[ "$token" == "util" && "$name" == "util" ]]; then
-    return 0
-  fi
-
-  if [[ "$token" == "shared" && "$name" == SharedV4ProviderReference ]]; then
-    return 0
-  fi
-
-  if [[ "$token" == "shared" && ( "$name" == *adapter_shared* || "$name" == *adapter-shared* ) ]]; then
-    return 0
-  fi
-
-  if [[ "$token" == "helper" && ( "$name" == EmojiHelper || "$name" == BaseEmojiHelper || "$name" == ExtendedEmojiHelper ) ]]; then
-    return 0
-  fi
-
-  return 1
-}
-
-identifier_tokens() {
-  local name="$1"
-
-  perl -CS -e '
-    my $name = shift;
-    $name =~ s/([a-z0-9])([A-Z])/$1_$2/g;
-    $name = lc $name;
-    $name =~ s/[^a-z0-9]+/\n/g;
-    print "$_\n" for grep { length } split /\n/, $name;
-  ' "$name"
-}
-
-check_identifier() {
-  local origin="$1"
-  local name="$2"
-
-  while IFS= read -r token; do
-    if is_banned_token "$token" && ! allowed_identifier_token "$name" "$token" "$origin"; then
-      add_failure "$origin: '$name' uses vague token '$token'"
-    fi
-  done < <(identifier_tokens "$name")
-}
-
-check_path() {
-  local path="$1"
-
-  allowed_path "$path" && return 0
-
-  local component
-  IFS='/' read -ra components <<< "$path"
-  for component in "${components[@]}"; do
-    local stem="${component%.*}"
-    check_identifier "$path path component" "$stem"
-  done
-}
-
-while IFS= read -r path; do
-  check_path "$path"
-done < <(git ls-files)
-
-while IFS= read -r cargo_manifest; do
-  while IFS= read -r line; do
-    value="${line#*=}"
-    value="${value%\"}"
-    value="${value#*\"}"
-    check_identifier "$cargo_manifest crate name" "$value"
-  done < <(grep -E '^[[:space:]]*name[[:space:]]*=' "$cargo_manifest")
-done < <(git ls-files 'Cargo.toml' '*/Cargo.toml')
-
-while IFS= read -r path; do
-  case "$path" in
-    scripts/codex-goal/* | scripts/codex-goal-chat/* | scripts/run-gnhf-port.sh)
-      continue
-      ;;
-  esac
-
-  while IFS=: read -r line_number name; do
-    [[ -z "${name:-}" ]] && continue
-    check_identifier "$path:$line_number" "$name"
-  done < <(
-    perl -ne '
-      if (/^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\b/) {
-        print "$.:$1\n";
-      }
-      if (/^\s*pub(?:\([^)]*\))?\s+(?:async\s+)?(?:fn|struct|enum|trait|type|const|static|mod)\s+([A-Za-z_][A-Za-z0-9_]*)\b/) {
-        print "$.:$1\n";
-      }
-      if (/^\s*pub\s+use\s+([A-Za-z_][A-Za-z0-9_]*)::/) {
-        print "$.:$1\n";
-      }
-    ' "$path"
-  )
-done < <(git ls-files '*.rs')
-
-while IFS= read -r path; do
-  case "$path" in
-    scripts/codex-goal/* | scripts/codex-goal-chat/* | scripts/run-gnhf-port.sh)
-      continue
-      ;;
-  esac
-
-  while IFS=: read -r line_number name; do
-    [[ -z "${name:-}" ]] && continue
-    check_identifier "$path:$line_number documented identifier" "$name"
-  done < <(
-    perl -ne '
-      while (/`([^`]+)`/g) {
-        my $identifier = $1;
-        next if $identifier =~ /@ai-sdk\/provider-utils/;
-        next if $identifier =~ /provider[_-]utils/;
-        next unless $identifier =~ /^[A-Za-z_][A-Za-z0-9_-]*$/;
-        print "$.:$identifier\n";
-      }
-    ' "$path"
-  )
-done < <(git ls-files '*.md' '*.rs')
-
-if (( ${#failures[@]} > 0 )); then
-  printf 'Naming convention check failed:\n' >&2
-  printf '  - %s\n' "${failures[@]}" >&2
-  exit 1
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$repo_root/$target_dir"
 fi
 
-printf 'Naming convention check passed.\n'
+checker="$target_dir/debug/repo-naming-check"
+checker_manifest="$repo_root/crates/repo-naming-check/Cargo.toml"
+root_manifest="$repo_root/Cargo.toml"
+
+needs_build=false
+if [[ "${CHECK_NAMING_FORCE_BUILD:-}" == "1" || ! -x "$checker" ]]; then
+  needs_build=true
+elif [[ "$checker_manifest" -nt "$checker" || "$root_manifest" -nt "$checker" ]]; then
+  needs_build=true
+elif [[ -n "$(find "$repo_root/crates/repo-naming-check/src" -type f -name '*.rs' -newer "$checker" -print -quit)" ]]; then
+  needs_build=true
+fi
+
+if [[ "$needs_build" == "true" ]]; then
+  cargo build --quiet -p repo-naming-check
+fi
+
+exec "$checker"
