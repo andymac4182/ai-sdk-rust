@@ -1,0 +1,8 @@
+  x Functions marked with "use workflow" must be async functions
+   ,-[input.js:2:1]
+ 1 |     // Error: sync arrow function with use workflow (workflow functions must be async)
+ 2 | ,-> export const syncWorkflow = () => {
+ 3 | |     'use workflow';
+ 4 | |     return 'test';
+ 5 | `-> };
+   `----

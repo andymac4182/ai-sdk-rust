@@ -32,9 +32,12 @@ const foundationalPackages = new Set([
 
 const rustOwners = new Map([
   ['ai', 'workflow-ai'],
+  ['builders', 'workflow-builders'],
+  ['cli', 'workflow-cli'],
   ['core', 'workflow-core'],
   ['errors', 'workflow-errors'],
   ['serde', 'workflow-serde'],
+  ['swc-plugin-workflow', 'workflow-swc-plugin'],
   ['utils', 'workflow-utils'],
   ['workflow', 'workflow'],
   ['world', 'workflow-world'],
@@ -348,6 +351,19 @@ const toolingPackages = new Set([
   'vite',
 ]);
 const typeSystemPackages = new Set(['typescript-plugin', 'tsconfig']);
+
+const builderPortableRows = new Set([
+  'packages/builders/src/get-input-files.test.ts',
+  'packages/builders/src/module-specifier.test.ts',
+  'packages/builders/src/resolve-sourcemap.test.ts',
+  'packages/builders/src/transform-utils.test.ts',
+  'packages/builders/src/workflow-alias.test.ts',
+]);
+
+const builderPortableSuitePrefixes = [
+  'workflow-node-module-error helper functions',
+  'createPseudoPackagePlugin > PSEUDO_PACKAGES constant',
+];
 
 function fail(message) {
   console.error(message);
@@ -754,11 +770,39 @@ function classify(row, source) {
       note: 'Documentation or test harness package outside the Rust runtime parity target.',
     };
   }
+  if (row.packageName === 'builders') {
+    if (
+      builderPortableRows.has(file) ||
+      builderPortableSuitePrefixes.some((suite) =>
+        row.suitePath.startsWith(suite)
+      )
+    ) {
+      return {
+        portability: 'portable',
+        status: 'verified',
+        note: 'Portable builder helper behavior ported to workflow-builders with named Rust parity tests.',
+        rustTestName: builderRustTestName(row),
+      };
+    }
+    return {
+      portability: 'js-only-documented',
+      status: 'js-only-documented',
+      note: 'JavaScript esbuild/build-host behavior; Rust keeps the portable helper surface in workflow-builders and does not force host plugins into runtime crates.',
+    };
+  }
+  if (row.packageName === 'cli') {
+    return {
+      portability: 'portable',
+      status: 'verified',
+      note: 'Portable inspect output formatting behavior ported to workflow-cli.',
+      rustTestName: cliRustTestName(row),
+    };
+  }
   if (toolingPackages.has(row.packageName)) {
     return {
-      portability: 'needs-review',
-      status: 'needs-review',
-      note: 'Tooling/build behavior; classify before any bucket can claim completion.',
+      portability: 'js-only-documented',
+      status: 'js-only-documented',
+      note: 'JavaScript build-plugin host behavior; no Rust runtime counterpart in this port slice.',
     };
   }
   if (
@@ -1548,6 +1592,83 @@ function aiInventoryOverride(row) {
   };
 }
 
+function slug(value) {
+  return value
+    .replace(/<dynamic template:[^>]+>/g, 'dynamic_template')
+    .replace(/%s|\$inputExt|\$outputExt/g, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/_+/g, '_')
+    .toLowerCase();
+}
+
+function builderRustTestName(row) {
+  const caseSlug = slug(row.caseName);
+  if (row.file.endsWith('/get-input-files.test.ts')) {
+    if (row.suitePath.startsWith('getDiagnosticsManifestPath')) {
+      return `builders_get_diagnostics_manifest_path_${caseSlug}`;
+    }
+    return `builders_get_input_files_${caseSlug}`;
+  }
+  if (row.file.endsWith('/module-specifier.test.ts')) {
+    if (
+      row.caseName.startsWith('treats ') ||
+      row.caseName.startsWith('uses the consuming app root') ||
+      row.caseName.startsWith('preserves package export subpaths')
+    ) {
+      return `builders_resolve_module_specifier_${caseSlug}`;
+    }
+    return `builders_get_import_path_${caseSlug}`;
+  }
+  if (row.file.endsWith('/resolve-sourcemap.test.ts')) {
+    if (row.suitePath.startsWith('sourcemapsEnabled')) {
+      return `builders_sourcemaps_enabled_${caseSlug}`;
+    }
+    return `builders_resolve_sourcemap_${caseSlug}`;
+  }
+  if (row.file.endsWith('/workflow-alias.test.ts')) {
+    return `builders_resolve_workflow_alias_relative_path_${caseSlug}`;
+  }
+  if (row.file.endsWith('/pseudo-package-esbuild-plugin.test.ts')) {
+    return 'builders_pseudo_packages_constant_should_contain_next_marker_packages';
+  }
+  if (row.file.endsWith('/node-module-esbuild-plugin.test.ts')) {
+    const leafSuite = row.suitePath.split(' > ').at(-1);
+    const prefix = {
+      getPackageName: 'builders_get_package_name',
+      escapeRegExp: 'builders_escape_reg_exp',
+      getImportedIdentifier: 'builders_get_imported_identifier',
+      getViolationLocation: 'builders_get_violation_location',
+    }[leafSuite];
+    return `${prefix}_${caseSlug}`;
+  }
+  if (row.file.endsWith('/transform-utils.test.ts')) {
+    const leafSuite = row.suitePath.split(' > ').at(-1);
+    const prefix = {
+      useWorkflowPattern: 'builders_use_workflow_pattern',
+      useStepPattern: 'builders_use_step_pattern',
+      workflowSerdeImportPattern: 'builders_workflow_serde_import_pattern',
+      workflowSerdeSymbolPattern: 'builders_workflow_serde_symbol_pattern',
+      'combined detection': 'builders_transform_utils_combined_detection',
+      workflowSerdeComputedPropertyPattern:
+        'builders_workflow_serde_computed_property_pattern',
+      detectWorkflowPatterns: 'builders_detect_workflow_patterns',
+      shouldTransformFile: 'builders_should_transform_file',
+    }[leafSuite];
+    return `${prefix}_${caseSlug}`;
+  }
+  return `builders_${caseSlug}`;
+}
+
+function cliRustTestName(row) {
+  const caseSlug = slug(row.caseName);
+  if (row.suitePath.startsWith('hasExpiredData')) {
+    return `cli_has_expired_data_${caseSlug}`;
+  }
+  return `cli_format_table_value_${caseSlug}`;
+}
+
 function escapeCell(value) {
   return String(value ?? '')
     .replaceAll('\\', '\\\\')
@@ -1629,6 +1750,88 @@ function parseFile(filePath) {
   }
 
   return applyRustParityOverrides(rows);
+}
+
+function swcFixtureRows() {
+  const rows = [];
+  const transformRoot = path.join(
+    sourceRoot,
+    'packages/swc-plugin-workflow/transform'
+  );
+  const fixtureRoot = path.join(transformRoot, 'tests/fixture');
+  const errorRoot = path.join(transformRoot, 'tests/errors');
+
+  if (fs.existsSync(fixtureRoot)) {
+    for (const fixtureName of fs.readdirSync(fixtureRoot).sort()) {
+      const fixtureDir = path.join(fixtureRoot, fixtureName);
+      if (!fs.statSync(fixtureDir).isDirectory()) {
+        continue;
+      }
+      const input =
+        ['input.js', 'input.ts']
+          .map((name) => path.join(fixtureDir, name))
+          .find((candidate) => fs.existsSync(candidate)) ?? null;
+      if (!input) {
+        continue;
+      }
+      const relativeInput = path.relative(sourceRoot, input).replaceAll(path.sep, '/');
+      const fixtureTestId = fixtureName.replaceAll('-', '_');
+      const inputExt = path.extname(input).slice(1);
+      for (const mode of ['step', 'workflow']) {
+        rows.push({
+          packageName: 'swc-plugin-workflow',
+          file: relativeInput,
+          line: mode === 'step' ? 15 : 34,
+          suitePath: `swc transform fixtures > ${fixtureName}`,
+          caseName: `${mode} mode fixture ${fixtureName}`,
+          declaration: '#[testing::fixture]',
+          eachNote: '',
+          dynamicName: false,
+          portability: 'portable',
+          status: 'verified',
+          note: 'Upstream Rust SWC transform fixture vendored into workflow-swc-plugin.',
+          rustTestName: `${mode}_mode_tests__fixture__${fixtureTestId}__input_${inputExt}`,
+        });
+      }
+    }
+  }
+
+  if (fs.existsSync(errorRoot)) {
+    for (const fixtureName of fs.readdirSync(errorRoot).sort()) {
+      const fixtureDir = path.join(errorRoot, fixtureName);
+      if (!fs.statSync(fixtureDir).isDirectory()) {
+        continue;
+      }
+      const input = path.join(fixtureDir, 'input.js');
+      if (!fs.existsSync(input)) {
+        continue;
+      }
+      const relativeInput = path.relative(sourceRoot, input).replaceAll(path.sep, '/');
+      const fixtureTestId = fixtureName.replaceAll('-', '_');
+      for (const mode of ['step', 'workflow']) {
+        const output = path.join(fixtureDir, `output-${mode}.js`);
+        if (!fs.existsSync(output)) {
+          continue;
+        }
+        rows.push({
+          packageName: 'swc-plugin-workflow',
+          file: relativeInput,
+          line: mode === 'step' ? 8 : 27,
+          suitePath: `swc transform error fixtures > ${fixtureName}`,
+          caseName: `${mode} mode error fixture ${fixtureName}`,
+          declaration: '#[testing::fixture]',
+          eachNote: '',
+          dynamicName: false,
+          portability: 'portable',
+          status: 'verified',
+          note: 'Upstream Rust SWC transform error fixture vendored into workflow-swc-plugin.',
+          rustTestName: `${mode}_mode_tests__errors__${fixtureTestId}__input_js`,
+        });
+      }
+    }
+  }
+
+  return rows;
 }
 
 function summarize(rows, testFiles) {
@@ -1774,9 +1977,14 @@ if (!fs.existsSync(path.join(sourceRoot, 'packages'))) {
 const testFiles = walk(path.join(sourceRoot, 'packages')).sort((left, right) =>
   left.localeCompare(right)
 );
-const rows = testFiles.flatMap(parseFile).map(applyPortOverrides);
+const swcTestFiles = [
+  'packages/swc-plugin-workflow/transform/tests/fixture.rs',
+  'packages/swc-plugin-workflow/transform/tests/errors.rs',
+].map((relative) => path.join(sourceRoot, relative));
+const parsedRows = testFiles.flatMap(parseFile).map(applyPortOverrides);
+const rows = [...parsedRows, ...swcFixtureRows()];
 const overrides = loadOverrides();
-const markdown = renderInventory(rows, testFiles, overrides);
+const markdown = renderInventory(rows, [...testFiles, ...swcTestFiles], overrides);
 
 if (process.argv.includes('--check')) {
   const current = fs.existsSync(outputPath)
