@@ -21,7 +21,10 @@ use ai_sdk_provider_utils::{
     ToolNeedsApprovalOptions, execute_tool,
 };
 use ai_sdk_rust::{
-    Instructions, StopCondition, TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher,
+    AgentSkillInstruction, AgentSkillMetadata, Instructions, StopCondition, TelemetryDispatcher,
+    TelemetryOptions, allowed_tools_for_loaded_agent_skills, attach_agent_skills_to_context,
+    build_agent_skill_prompt_sections, create_telemetry_dispatcher, merge_agent_skills,
+    merge_loaded_agent_skills,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +47,12 @@ pub struct WorkflowAgentOptions {
 
     /// Runtime tools available to the agent.
     pub tools: BTreeMap<String, Tool>,
+
+    /// Skills available for model invocation.
+    pub skills: Vec<AgentSkillMetadata>,
+
+    /// Skill instructions already loaded for every stream call.
+    pub loaded_skills: Vec<AgentSkillInstruction>,
 
     /// Default system instructions for every stream call on this agent.
     pub instructions: Option<Instructions>,
@@ -101,6 +110,8 @@ impl WorkflowAgentOptions {
             id: None,
             model,
             tools: BTreeMap::new(),
+            skills: Vec::new(),
+            loaded_skills: Vec::new(),
             instructions: None,
             generation_settings: WorkflowGenerationSettings::default(),
             active_tools: None,
@@ -136,6 +147,33 @@ impl WorkflowAgentOptions {
     pub fn with_tools(mut self, tools: impl IntoIterator<Item = Tool>) -> Self {
         self.tools
             .extend(tools.into_iter().map(|tool| (tool.name.clone(), tool)));
+        self
+    }
+
+    /// Adds one skill to every stream call's model-visible skill registry.
+    pub fn with_skill(mut self, skill: AgentSkillMetadata) -> Self {
+        self.skills.push(skill);
+        self
+    }
+
+    /// Adds skills to every stream call's model-visible skill registry.
+    pub fn with_skills(mut self, skills: impl IntoIterator<Item = AgentSkillMetadata>) -> Self {
+        self.skills.extend(skills);
+        self
+    }
+
+    /// Adds one already-loaded skill instruction to every stream call.
+    pub fn with_loaded_skill(mut self, skill: AgentSkillInstruction) -> Self {
+        self.loaded_skills.push(skill);
+        self
+    }
+
+    /// Adds already-loaded skill instructions to every stream call.
+    pub fn with_loaded_skills(
+        mut self,
+        skills: impl IntoIterator<Item = AgentSkillInstruction>,
+    ) -> Self {
+        self.loaded_skills.extend(skills);
         self
     }
 
@@ -304,6 +342,8 @@ pub struct WorkflowAgent {
     id: Option<String>,
     model: WorkflowModelInfo,
     tools: BTreeMap<String, Tool>,
+    skills: Vec<AgentSkillMetadata>,
+    loaded_skills: Vec<AgentSkillInstruction>,
     instructions: Option<Instructions>,
     generation_settings: WorkflowGenerationSettings,
     active_tools: Option<Vec<String>>,
@@ -329,6 +369,8 @@ impl WorkflowAgent {
             id: options.id,
             model: options.model,
             tools: options.tools,
+            skills: options.skills,
+            loaded_skills: options.loaded_skills,
             instructions: options.instructions,
             generation_settings: options.generation_settings,
             active_tools: options.active_tools,
@@ -374,9 +416,12 @@ impl WorkflowAgent {
         let generation_settings = options
             .generation_settings
             .unwrap_or_else(|| self.generation_settings.clone());
+        let skills = merge_agent_skills(&self.skills, options.skills);
+        let loaded_skills = merge_loaded_agent_skills(&self.loaded_skills, options.loaded_skills);
         let active_tools = options
             .active_tools
             .or_else(|| self.active_tools.clone())
+            .or_else(|| allowed_tools_for_loaded_agent_skills(&loaded_skills))
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
         let stop_conditions = if options.stop_conditions.is_empty() {
@@ -410,10 +455,13 @@ impl WorkflowAgent {
         let abort_signal = options.abort_signal.clone();
         let on_abort = options.on_abort;
 
-        let initial_runtime_context = options.runtime_context.clone();
+        let mut runtime_context = options.runtime_context;
+        attach_agent_skills_to_context(&mut runtime_context, &skills, &loaded_skills);
+        let initial_runtime_context = runtime_context.clone();
         let initial_tools_context = options.tools_context.clone();
         let mut prompt = options.prompt;
 
+        prepend_agent_skill_prompt(&mut prompt, &skills, &loaded_skills);
         if let Some(instructions) = self.instructions.as_ref() {
             prepend_instructions(&mut prompt, instructions.clone());
         }
@@ -441,7 +489,7 @@ impl WorkflowAgent {
         )
         .with_model(self.model.clone())
         .with_generation_settings(generation_settings.clone())
-        .with_runtime_context(options.runtime_context)
+        .with_runtime_context(runtime_context)
         .with_tools_context(options.tools_context)
         .with_include_raw_chunks(include_raw_chunks);
 
@@ -751,6 +799,21 @@ fn prepend_instructions(prompt: &mut WorkflowPrompt, instructions: Instructions)
     }
 }
 
+fn prepend_agent_skill_prompt(
+    prompt: &mut WorkflowPrompt,
+    skills: &[AgentSkillMetadata],
+    loaded_skills: &[AgentSkillInstruction],
+) {
+    let Some(skill_prompt) = build_agent_skill_prompt_sections(skills, loaded_skills) else {
+        return;
+    };
+
+    prompt.insert(
+        0,
+        LanguageModelMessage::System(LanguageModelSystemMessage::new(skill_prompt)),
+    );
+}
+
 /// Per-call options for [`WorkflowAgent::stream`].
 #[derive(Clone, Debug)]
 pub struct WorkflowAgentStreamOptions<E> {
@@ -780,6 +843,12 @@ pub struct WorkflowAgentStreamOptions<E> {
 
     /// Stream-level per-tool context.
     pub tools_context: WorkflowToolsContext,
+
+    /// Stream-level skills available for model invocation.
+    pub skills: Vec<AgentSkillMetadata>,
+
+    /// Stream-level skill instructions already loaded for this call.
+    pub loaded_skills: Vec<AgentSkillInstruction>,
 
     /// Stream-level active tools that override constructor defaults.
     pub active_tools: Option<Vec<String>>,
@@ -838,6 +907,8 @@ impl<E> WorkflowAgentStreamOptions<E> {
             include_raw_chunks: false,
             runtime_context: WorkflowRuntimeContext::new(),
             tools_context: WorkflowToolsContext::new(),
+            skills: Vec::new(),
+            loaded_skills: Vec::new(),
             active_tools: None,
             tool_choice: None,
             stop_conditions: Vec::new(),
@@ -900,6 +971,33 @@ impl<E> WorkflowAgentStreamOptions<E> {
     /// Sets per-tool context.
     pub fn with_tools_context(mut self, tools_context: WorkflowToolsContext) -> Self {
         self.tools_context = tools_context;
+        self
+    }
+
+    /// Adds one stream-level skill to the model-visible skill registry.
+    pub fn with_skill(mut self, skill: AgentSkillMetadata) -> Self {
+        self.skills.push(skill);
+        self
+    }
+
+    /// Adds stream-level skills to the model-visible skill registry.
+    pub fn with_skills(mut self, skills: impl IntoIterator<Item = AgentSkillMetadata>) -> Self {
+        self.skills.extend(skills);
+        self
+    }
+
+    /// Adds one already-loaded skill instruction to this stream call.
+    pub fn with_loaded_skill(mut self, skill: AgentSkillInstruction) -> Self {
+        self.loaded_skills.push(skill);
+        self
+    }
+
+    /// Adds already-loaded skill instructions to this stream call.
+    pub fn with_loaded_skills(
+        mut self,
+        skills: impl IntoIterator<Item = AgentSkillInstruction>,
+    ) -> Self {
+        self.loaded_skills.extend(skills);
         self
     }
 
@@ -2178,6 +2276,30 @@ mod tests {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(ai_sdk_provider::LanguageModelTextPart::new(text)),
         ]))
+    }
+
+    fn test_agent_skill(name: &str, description: &str) -> AgentSkillMetadata {
+        AgentSkillMetadata {
+            name: name.to_string(),
+            description: description.to_string(),
+            path: format!("/skills/{name}"),
+            filename: "SKILL.md".to_string(),
+            options: ai_sdk_rust::AgentSkillOptions::default(),
+        }
+    }
+
+    fn test_loaded_agent_skill(
+        name: &str,
+        content: &str,
+        allowed_tools: Vec<String>,
+    ) -> AgentSkillInstruction {
+        let mut metadata = test_agent_skill(name, "Loaded skill");
+        metadata.options.allowed_tools = allowed_tools;
+        AgentSkillInstruction {
+            metadata,
+            content: content.to_string(),
+            arguments: None,
+        }
     }
 
     fn usage() -> LanguageModelUsage {
@@ -4568,6 +4690,57 @@ mod tests {
                 ])),
             ]
         );
+    }
+
+    #[test]
+    fn workflow_agent_attaches_skills_to_prompt_context_and_active_tools() {
+        let loaded_skill = test_loaded_agent_skill(
+            "review",
+            "Skill directory: /skills/review\n\nReview the diff.",
+            vec!["Read".to_string()],
+        );
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_instructions("Base workflow instructions.")
+                .with_tool(Tool::new("Read", object_schema()))
+                .with_tool(Tool::new("Write", object_schema()))
+                .with_skill(test_agent_skill("review", "Review code changes"))
+                .with_loaded_skill(loaded_skill),
+        );
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+
+        let _result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        let call = calls.first().expect("one model call");
+        assert!(matches!(
+            &call.prompt[0],
+            LanguageModelMessage::System(message)
+                if message.content == "Base workflow instructions."
+        ));
+        assert!(matches!(
+            &call.prompt[1],
+            LanguageModelMessage::System(message)
+                if message.content.contains("## Skills")
+                    && message.content.contains("- review: Review code changes")
+                    && message.content.contains("## Loaded Skills")
+                    && message.content.contains("<review>")
+        ));
+        assert_eq!(
+            call.options.runtime_context["skills"]["available"][0]["name"],
+            json!("review")
+        );
+        assert_eq!(
+            call.options.runtime_context["skills"]["loaded"][0]["metadata"]["name"],
+            json!("review")
+        );
+        assert!(call.tools.contains_key("Read"));
+        assert!(!call.tools.contains_key("Write"));
     }
 
     #[test]
