@@ -14,13 +14,19 @@ use ai_sdk_workflow::{
     InMemoryDurableRunStore, chat_message_bridge::open_agent_message_from_stream_chunks,
 };
 use async_trait::async_trait;
-use chat_sdk_adapter_slack::message_bridge::render_open_agent_message_for_slack_with_context;
-use chat_sdk_adapter_slack::outbound::{
-    SlackOutboundActionKind, SlackOutboundMessage, SlackQuestion, SlackQuestionOption,
-    SlackQuestionPrompt, SlackRunContext, SlackRunTerminalStatus, decode_slack_action_id,
-    render_progress_update, render_question_prompt, render_run_started, render_run_terminal,
+use chat_sdk_adapter_slack::{
+    SlackAdapter, SlackAdapterOptions,
+    message_bridge::render_open_agent_message_for_slack_with_context,
+    outbound::{
+        SlackOutboundActionKind, SlackOutboundMessage, SlackQuestion, SlackQuestionOption,
+        SlackQuestionPrompt, SlackRunContext, SlackRunTerminalStatus, decode_slack_action_id,
+        render_progress_update, render_question_prompt, render_run_started, render_run_terminal,
+    },
 };
-use chat_sdk_chat::open_agent_message::{OpenAgentMessagePart, OpenAgentMessageRole};
+use chat_sdk_chat::{
+    open_agent_message::{OpenAgentMessagePart, OpenAgentMessageRole},
+    types::Adapter,
+};
 use chat_sdk_state_memory::create_memory_state;
 use open_agents_core::{AgentModelSelection, RemoteAgentIdentity};
 use open_agents_persistence::{
@@ -46,6 +52,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{OpenAgentsServiceConfig, SandboxMode};
 use crate::health::HealthCheck;
@@ -64,6 +71,8 @@ pub struct OpenAgentsService {
     health: HealthCheck,
     slack_ingress: Arc<SlackIngress>,
     runtime: Arc<LocalRuntimeRouter>,
+    slack_outbound: Option<SlackAdapter>,
+    posted_outbounds: Arc<AsyncMutex<usize>>,
 }
 
 impl OpenAgentsService {
@@ -80,11 +89,22 @@ impl OpenAgentsService {
             state,
             router,
         ));
+        let slack_outbound = config.slack_api_url().map(|api_base| {
+            SlackAdapter::new(
+                SlackAdapterOptions::new(
+                    config.slack_bot_token().to_string(),
+                    config.slack_signing_secret().to_string(),
+                )
+                .with_api_base(api_base.to_string()),
+            )
+        });
 
         Ok(Self {
             health,
             slack_ingress,
             runtime,
+            slack_outbound,
+            posted_outbounds: Arc::new(AsyncMutex::new(0)),
         })
     }
 
@@ -129,7 +149,29 @@ impl OpenAgentsService {
             headers: request.headers,
         };
         let response = self.slack_ingress.handle(route, slack_request).await;
+        if (200..300).contains(&response.status) {
+            if let Err(error) = self.flush_slack_outbounds().await {
+                return HttpResponse::text(500, format!("{error}\n"));
+            }
+        }
         HttpResponse::from_slack(response)
+    }
+
+    async fn flush_slack_outbounds(&self) -> Result<(), ServiceError> {
+        let Some(adapter) = &self.slack_outbound else {
+            return Ok(());
+        };
+
+        let outbounds = self.runtime.outbound_messages();
+        let mut posted = self.posted_outbounds.lock().await;
+        for (index, outbound) in outbounds.iter().enumerate().skip(*posted) {
+            adapter
+                .post_message(&outbound.thread_id, &outbound.text)
+                .await
+                .map_err(|error| ServiceError::SlackOutbound(error.to_string()))?;
+            *posted = index + 1;
+        }
+        Ok(())
     }
 }
 
@@ -1087,6 +1129,7 @@ pub enum ServiceError {
     Conflict(String),
     MissingSlackTarget,
     NotFound(String),
+    SlackOutbound(String),
     Unsupported(String),
     BadRequest(String),
 }
@@ -1110,6 +1153,9 @@ impl fmt::Display for ServiceError {
                 formatter.write_str("Slack interaction is missing a target")
             }
             Self::NotFound(error) => write!(formatter, "service record not found: {error}"),
+            Self::SlackOutbound(error) => {
+                write!(formatter, "service Slack outbound error: {error}")
+            }
             Self::Unsupported(error) => write!(formatter, "unsupported service request: {error}"),
             Self::BadRequest(error) => write!(formatter, "bad service request: {error}"),
         }
@@ -1455,6 +1501,10 @@ mod tests {
     impl TestServer {
         async fn start() -> Self {
             let config = OpenAgentsServiceConfig::fixture();
+            Self::start_with_config(config).await
+        }
+
+        async fn start_with_config(config: OpenAgentsServiceConfig) -> Self {
             let service = OpenAgentsService::from_config(config.clone()).unwrap();
             let listener = bind_service_listener(config.bind_addr()).await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -1588,6 +1638,48 @@ mod tests {
         out
     }
 
+    fn config_with_slack_api_base(api_addr: SocketAddr) -> OpenAgentsServiceConfig {
+        OpenAgentsServiceConfig::from_reader(|name| match name {
+            "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
+            "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
+            "OPEN_AGENTS_BIND_ADDR" => Some("127.0.0.1:0".to_string()),
+            "OPEN_AGENTS_SLACK_API_URL" => Some(format!("http://{api_addr}/api")),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    async fn start_fake_slack_api(
+        expected_requests: usize,
+    ) -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..expected_requests {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buffer[..read]).to_string());
+                let body = json!({
+                    "ok": true,
+                    "channel": "C123",
+                    "ts": format!("1710000000.00020{index}")
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            requests
+        });
+        (addr, task)
+    }
+
     #[tokio::test]
     async fn slack_events_url_verification_traverses_service_http_route() {
         let server = TestServer::start().await;
@@ -1640,6 +1732,36 @@ mod tests {
             outbounds
                 .iter()
                 .any(|message| message.kind == LocalOutboundKind::Final)
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn app_mention_with_slack_api_url_posts_outbounds_to_slack_api() {
+        let (api_addr, api_task) = start_fake_slack_api(3).await;
+        let server = TestServer::start_with_config(config_with_slack_api_base(api_addr)).await;
+        let thread_ts = "1710000000.000150";
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body("inspect the repo", "EvE2EApiBase", thread_ts),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let requests = api_task.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.contains("/api/chat.postMessage"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("Fixture agent finished"))
         );
         server.stop().await;
     }

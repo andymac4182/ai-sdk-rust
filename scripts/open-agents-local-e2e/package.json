@@ -1,0 +1,11 @@
+{
+  "name": "open-agents-local-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node slack-emulator-e2e.mjs"
+  },
+  "dependencies": {
+    "emulate": "0.6.0"
+  }
+}

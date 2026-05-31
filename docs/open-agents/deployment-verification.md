@@ -3,16 +3,17 @@
 This guide captures the local verification shape for the Rust Open Agents Slack
 remote-agent path. The repository currently has deterministic fixture coverage,
 Slack ingress/router unit coverage, service health checks, and an ignored live
-Slack smoke. It does not yet have a full emulator-backed local E2E suite.
+Slack smoke, plus a no-credentials Slack emulator E2E lane for the fixture
+runtime path.
 
 The current Rust slice extends the existing `open-agents-service` process with
 configuration validation, health checks, graceful shutdown, state and sandbox
-selection, local Slack event fixtures, a testable Slack HTTP route, and an
-ignored live Slack smoke test.
+selection, local Slack event fixtures, a testable signed Slack HTTP route,
+optional Slack Web API base URL override, and an ignored live Slack smoke test.
 
-Keep this document honest as the emulator-harness bucket lands: replace the
-remaining TODOs below with exact commands only after that branch wires the
-service config to the Slack emulator API base URL.
+Keep this document honest as later durable-runtime buckets land: replace
+remaining TODOs with exact commands only after those branches wire production
+model behavior, persistence, and sandbox behavior.
 
 ## Source Rechecked
 
@@ -56,12 +57,14 @@ scripts/open-agents-local-e2e.sh --help
 scripts/open-agents-local-e2e.sh --matrix
 scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
+scripts/open-agents-local-e2e.sh --emulator
 cargo test -p open-agents-service
 ```
 
 `--check-config` supplies local fixture secrets if the shell has no Slack env.
-`--fixture` drives the deterministic local Slack event harness. `--matrix`
-prints the coverage table from this guide for CI logs and local handoffs.
+`--fixture` drives the deterministic local Slack event harness. `--emulator`
+starts the local Slack emulator and service together. `--matrix` prints the
+coverage table from this guide for CI logs and local handoffs.
 
 ## Fixture Path
 
@@ -92,89 +95,78 @@ validation, and the ignored live Slack probe gate.
 
 ## Emulator-Backed Path
 
-Use the Slack emulator for the local E2E suite once the service route and
-emulator harness branches land. The emulator should be started with a Slack seed
-file and the Rust service should point its Slack Web API client at the emulator.
+The emulator path does not require real Slack credentials. It starts
+`emulate@0.6.0` programmatically, seeds a deterministic local Slack workspace,
+starts `open-agents-service`, posts an app mention through the emulated Slack
+Web API, sends the corresponding signed Slack `event_callback` payload to the
+local service route, and verifies the fixture run output through
+`conversations.replies`.
+
+Install the pinned local Node dependency once:
 
 ```sh
-npx emulate --service slack --seed docs/open-agents/emulate-slack.seed.yaml
-
-# TODO(service-route): expose /slack/events from open-agents-service.
-# TODO(emulator-harness): wire the service config env for Slack API base URL.
-export SLACK_BOT_TOKEN=xoxb-local-test
-export SLACK_SIGNING_SECRET=open-agents-local-signing-secret
-export OPEN_AGENTS_STATE=memory
-export OPEN_AGENTS_SANDBOX=local
-export OPEN_AGENTS_SANDBOX_ROOT="$PWD"
-export OPEN_AGENTS_BIND_ADDR=127.0.0.1:8080
-# TODO(emulator-harness): confirm final env name, for example:
-# export OPEN_AGENTS_SLACK_API_BASE=http://127.0.0.1:4003/api
-
-cargo run -p open-agents-service
+npm install --prefix scripts/open-agents-local-e2e
 ```
 
-Seed configuration reference: <https://emulate.dev/docs/configuration>. Seed
-data should include at least:
+Run the local E2E proof:
 
-```yaml
-slack:
-  team:
-    name: Open Agents Local
-    domain: open-agents-local
-  users:
-    - name: developer
-      real_name: Developer
-      email: dev@example.com
-      is_admin: true
-  channels:
-    - name: open-agents-e2e
-      topic: Local Open Agents E2E
-    - name: engineering
-      topic: Thread routing checks
-      is_private: true
-  bots:
-    - name: open-agents
-  tokens:
-    - token: xoxb-local-test
-      user: developer
-      scopes:
-        - app_mentions:read
-        - chat:write
-        - channels:history
-        - channels:read
-        - groups:history
-        - groups:read
-        - im:history
-        - im:read
-        - users:read
-  incoming_webhooks:
-    - channel: open-agents-e2e
-      label: Open Agents E2E
-  signing_secret: open-agents-local-signing-secret
+```sh
+npm test --prefix scripts/open-agents-local-e2e
 ```
 
-TODO(emulator-harness): add the exact event subscription or programmatic
-registration shape for dispatching emulator `event_callback` payloads to
-`http://127.0.0.1:8080/slack/events`. The emulator docs describe dispatch to
-configured webhook URLs, but the final seed key should come from the harness
-implementation rather than this guide guessing it.
+The wrapper exposes the same proof:
+
+```sh
+scripts/open-agents-local-e2e.sh --emulator
+```
+
+Expected output includes:
+
+```text
+ok: Slack emulator listening at http://localhost:...
+ok: open-agents-service local E2E listening at http://127.0.0.1:...
+ok: app mention completed in Slack thread ...
+ok: question prompt posted in Slack thread ...
+ok: direct interaction payload resumed the run ...
+```
+
+The harness seeds:
+
+- team `T123`
+- user `U000000001`
+- channel `C000000001`
+- app `AOPENAGENT`
+- bot user `UOPENAGENT`
+- bot token `xoxb-open-agents-local`
+- signing secret `open-agents-local-signing-secret`
+
+The service targets the emulator through:
+
+```sh
+OPEN_AGENTS_SLACK_API_URL=http://127.0.0.1:4003/api
+```
+
+`SLACK_API_URL` is accepted as a compatibility alias. The emulator stores
+stateful Slack messages and threads, so the verification reads the same thread
+history a developer can inspect in the emulator UI.
 
 Expected emulator assertions:
 
 - URL verification returns the Slack challenge with HTTP 200
-- `app_mention` starts or resumes a run for the channel/thread
-- `message.im` starts or resumes a DM run and ignores bot echo events
-- threaded replies route to the parent `thread_ts`
+- `app_mention` reaches the local service and starts a fixture run
 - outbound Slack `chat.postMessage` creates a thread reply in emulator state
-- outbound Slack `chat.update` updates rich message fields in emulator state
-- run completion persists state and clears active run state
+- the completed run text appears in `conversations.replies`
+- a waiting/question run posts a prompt into the same thread
+- a direct `block_actions` payload to `/slack/interactions` resumes the run
+- run completion persists fixture state and clears active run state
 - health probes stay green during event processing
 
 Known emulator limits:
 
 - Slash command and interaction callbacks are not simulated by the emulator
-  today. Continue to cover slash command and block action payload parsing with
-  synthetic signed form bodies in Rust unit tests.
+  today. The local E2E lane posts app mentions through Slack Web API state, then
+  sends the matching `event_callback` to the service directly. The question
+  continuation posts a direct `block_actions` payload to `/slack/interactions`.
 - Socket Mode is not implemented by the emulator. Keep local E2E on Events API
   webhooks and leave Socket Mode for live smoke or unit-level config checks.
 - Chat streaming is not implemented by the emulator. Assert Slack message/update
@@ -236,6 +228,8 @@ Optional production or live settings:
 - `OPEN_AGENTS_SANDBOX=vercel`
 - `VERCEL_SANDBOX_BASE_SNAPSHOT_ID`, optional Vercel sandbox base snapshot
 - `AI_GATEWAY_API_KEY` or `AI_SDK_RUST_AI_GATEWAY_API_KEY`, model credential
+- `OPEN_AGENTS_SLACK_API_URL` or `SLACK_API_URL`, optional Slack Web API base
+  URL override for local emulators
 - `OPEN_AGENTS_SLACK_INGRESS=socket-mode`
 - `SLACK_APP_TOKEN`, required for Socket Mode
 
@@ -295,18 +289,19 @@ path through a real Slack app once live outbound assertions are available.
 
 ## Verification Matrix
 
-| Flow | Local coverage today | Command or evidence | Gap before full local E2E |
+| Flow | Local coverage today | Command or evidence | Gap before durable runtime E2E |
 | --- | --- | --- | --- |
-| URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Emulator webhook dispatch still TODO |
-| App mention and DM | App mention is covered through the service route; `open-agents-slack` covers DM routing | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator event dispatch to running service still TODO |
-| Thread routing | Covered at parser/router level and service interaction level | `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Emulator-backed thread replay still TODO |
-| Durable run completion | Covered locally through the service route with a scripted durable runtime | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live model runtime proof still TODO |
-| Waiting, answer, cancel | Covered by signed synthetic block action payloads through `/slack/interactions` | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
-| Outbound Slack message/update | Service route captures rendered outbound messages; Slack outbound tests cover API body shapes | `cargo test -p open-agents-service`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator Web API state assertions still TODO |
+| URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Live Slack app proof still TODO |
+| App mention | Covered through the signed service route and emulator-backed local service path | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live model runtime proof still TODO |
+| DM | `open-agents-slack` covers DM routing | `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator-backed DM scenario still TODO |
+| Thread routing | Emulator-backed app mention thread replay plus parser/router tests | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Broader DM/thread matrix still TODO |
+| Durable run completion | Covered locally through the service route with a scripted durable runtime | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live model runtime proof still TODO |
+| Waiting, answer, cancel | Emulator-backed question prompt plus direct signed block action payload; service cancel test | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
+| Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
 | Sandbox command | Local service route executes `sandbox.exec pwd` through the runtime seam | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Broader sandbox command and git automation proof still TODO |
 | Git automation summary | Unit renderer coverage only | `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | End-to-end auto-commit/PR summary from a run still TODO |
-| Health/readiness | Covered by service tests and manual probes | `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Include probes in emulator E2E once service route lands |
+| Health/readiness | Covered by service tests, manual probes, and emulator readiness polling | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Live deployment probes still TODO |
 
 ## CI Shape
 
@@ -316,13 +311,12 @@ Minimal local/CI lane that requires no real Slack credentials:
 scripts/open-agents-local-e2e.sh --matrix
 scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
+scripts/open-agents-local-e2e.sh --emulator
 cargo test -p open-agents-service
 ```
 
-Expanded lane once the emulator harness lands:
+Expanded local lane:
 
 ```sh
-npx emulate --service slack --seed docs/open-agents/emulate-slack.seed.yaml
-# TODO: start open-agents-service with the emulator Slack API base URL.
-# TODO: drive app mention, DM, thread reply, and outbound update assertions.
+scripts/open-agents-local-e2e.sh --all-local
 ```
