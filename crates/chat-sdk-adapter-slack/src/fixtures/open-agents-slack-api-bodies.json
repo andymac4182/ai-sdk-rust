@@ -1,0 +1,66 @@
+{
+  "post": {
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "*Run started: Build the Slack bridge*"
+        }
+      }
+    ],
+    "channel": "C123",
+    "text": "Run started: Build the Slack bridge",
+    "thread_ts": "1700000000.000200",
+    "unfurl_links": false,
+    "unfurl_media": false
+  },
+  "update": {
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "*Run started: Build the Slack bridge*"
+        }
+      }
+    ],
+    "channel": "C123",
+    "text": "Run started: Build the Slack bridge",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "ts": "1700000000.000300"
+  },
+  "ephemeral": {
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "*Run started: Build the Slack bridge*"
+        }
+      }
+    ],
+    "channel": "C123",
+    "text": "Run started: Build the Slack bridge",
+    "thread_ts": "1700000000.000200",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "user": "U123"
+  },
+  "delete": {
+    "channel": "C123",
+    "ts": "1700000000.000300"
+  },
+  "reaction": {
+    "channel": "C123",
+    "timestamp": "1700000000.000300",
+    "name": "hourglass_flowing_sand"
+  },
+  "typing": {
+    "channel_id": "C123",
+    "thread_ts": "1700000000.000200",
+    "status": "Working",
+    "loading_messages": ["Working"]
+  }
+}

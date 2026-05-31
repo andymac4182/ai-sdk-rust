@@ -15,6 +15,7 @@ pub mod crypto;
 pub mod format;
 pub mod markdown;
 pub mod modals;
+pub mod outbound;
 pub mod session_lifecycle;
 pub mod webhook;
 
