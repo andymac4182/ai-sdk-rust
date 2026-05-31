@@ -1,0 +1,17 @@
+{
+  "token": "verification-token",
+  "team_id": "T123",
+  "api_app_id": "A123",
+  "type": "event_callback",
+  "event_id": "Ev123",
+  "event_time": 1717113600,
+  "event": {
+    "type": "app_mention",
+    "user": "U123",
+    "text": "<@U999BOT> run cargo test",
+    "team": "T123",
+    "channel": "C123",
+    "event_ts": "1717113600.000100",
+    "ts": "1717113600.000100"
+  }
+}

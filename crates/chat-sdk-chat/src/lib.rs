@@ -22,6 +22,7 @@ pub mod logger;
 pub mod markdown;
 pub mod message;
 pub mod modals;
+pub mod open_agent_message;
 pub mod plan;
 pub mod postable_object;
 pub mod reviver;
