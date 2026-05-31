@@ -30,6 +30,7 @@ use crate::{
     WorkflowModelInfo, WorkflowPrepareStepCallback, WorkflowPrompt, WorkflowRuntimeContext,
     WorkflowStreamStep, WorkflowStreamTextError, WorkflowStreamTextOnErrorCallback,
     WorkflowStreamTextStepExecutor, WorkflowToolCallRepairCallback, WorkflowToolsContext,
+    operational_safety::is_cancellation_requested,
 };
 
 /// Constructor options for [`WorkflowAgent`].
@@ -421,6 +422,7 @@ impl WorkflowAgent {
             &mut prompt,
             &self.tools,
             &initial_tools_context,
+            abort_signal.as_ref(),
             &telemetry_dispatcher,
             execute_tool_in_telemetry_context.as_ref(),
             &constructor_on_tool_execution_start,
@@ -493,14 +495,10 @@ impl WorkflowAgent {
         let mut last_tool_calls = Vec::new();
         let mut last_tool_results = Vec::new();
         let mut missing_provider_executed_tool_results = Vec::new();
+        let mut aborted = false;
 
-        if abort_signal
-            .as_ref()
-            .is_some_and(LanguageModelAbortSignal::is_aborted)
-        {
-            if let Some(on_abort) = on_abort {
-                on_abort.call(WorkflowAgentAbortInfo { steps: Vec::new() });
-            }
+        if is_cancellation_requested(abort_signal.as_ref()) {
+            call_abort_callback(&on_abort, &[], abort_signal.as_ref());
 
             return Ok(WorkflowAgentStreamResult {
                 messages,
@@ -510,10 +508,17 @@ impl WorkflowAgent {
                 runtime_context,
                 tools_context,
                 missing_provider_executed_tool_results,
+                aborted: true,
             });
         }
 
         loop {
+            if is_cancellation_requested(abort_signal.as_ref()) {
+                aborted = true;
+                call_abort_callback(&on_abort, &steps, abort_signal.as_ref());
+                break;
+            }
+
             call_step_start_callbacks(
                 &constructor_on_step_start,
                 &stream_on_step_start,
@@ -537,6 +542,7 @@ impl WorkflowAgent {
                 tools_context: tools_context.clone(),
             });
 
+            let messages_before_step = messages.clone();
             let Some(yield_value) = iterator
                 .next(pending_tool_results.take())
                 .map_err(WorkflowAgentError::Stream)?
@@ -561,9 +567,26 @@ impl WorkflowAgent {
                 break;
             }
 
+            if is_cancellation_requested(abort_signal.as_ref()) {
+                aborted = true;
+                last_tool_calls = yield_value.tool_calls.clone();
+                last_tool_results.clear();
+                call_step_finish_callbacks(
+                    &constructor_on_step_finish,
+                    &stream_on_step_finish,
+                    &yield_value.step,
+                );
+                telemetry_dispatcher.on_step_finish(yield_value.step.clone());
+                call_abort_callback(&on_abort, &steps, abort_signal.as_ref());
+                break;
+            }
+
             let execution = self
                 .execute_tool_calls(
                     &yield_value,
+                    messages_before_step,
+                    yield_value.messages.clone(),
+                    abort_signal.as_ref(),
                     &telemetry_dispatcher,
                     execute_tool_in_telemetry_context.as_ref(),
                     &constructor_on_tool_execution_start,
@@ -585,6 +608,12 @@ impl WorkflowAgent {
             );
             telemetry_dispatcher.on_step_finish(yield_value.step.clone());
 
+            if execution.aborted {
+                aborted = true;
+                call_abort_callback(&on_abort, &steps, abort_signal.as_ref());
+                break;
+            }
+
             if execution.has_unresolved_client_tools {
                 break;
             }
@@ -600,15 +629,18 @@ impl WorkflowAgent {
             runtime_context,
             tools_context,
             missing_provider_executed_tool_results,
+            aborted,
         };
 
-        if let Some(on_finish) = constructor_on_finish {
-            on_finish.call(WorkflowAgentFinishInfo::from(&result));
+        if !aborted {
+            if let Some(on_finish) = constructor_on_finish {
+                on_finish.call(WorkflowAgentFinishInfo::from(&result));
+            }
+            if let Some(on_finish) = stream_on_finish {
+                on_finish.call(WorkflowAgentFinishInfo::from(&result));
+            }
+            telemetry_dispatcher.on_end(WorkflowAgentFinishInfo::from(&result));
         }
-        if let Some(on_finish) = stream_on_finish {
-            on_finish.call(WorkflowAgentFinishInfo::from(&result));
-        }
-        telemetry_dispatcher.on_end(WorkflowAgentFinishInfo::from(&result));
 
         Ok(result)
     }
@@ -616,6 +648,9 @@ impl WorkflowAgent {
     async fn execute_tool_calls(
         &self,
         yield_value: &crate::StreamTextIteratorYieldValue,
+        callback_messages: WorkflowPrompt,
+        execution_messages: WorkflowPrompt,
+        abort_signal: Option<&LanguageModelAbortSignal>,
         telemetry_dispatcher: &TelemetryDispatcher,
         execute_tool_in_telemetry_context: Option<&WorkflowExecuteToolInTelemetryContext<'static>>,
         constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
@@ -626,6 +661,11 @@ impl WorkflowAgent {
         let mut execution = WorkflowAgentToolExecution::default();
 
         for tool_call in &yield_value.tool_calls {
+            if is_cancellation_requested(abort_signal) {
+                execution.aborted = true;
+                break;
+            }
+
             if tool_call.provider_executed == Some(true) {
                 execution.tool_results.push(provider_executed_tool_result(
                     tool_call,
@@ -663,13 +703,8 @@ impl WorkflowAgent {
             }
 
             let context = validated_tool_context(tool, tool_call, &yield_value.tools_context)?;
-            if tool_needs_approval(
-                tool,
-                tool_call,
-                yield_value.messages.clone(),
-                context.clone(),
-            )
-            .await
+            if tool_needs_approval(tool, tool_call, execution_messages.clone(), context.clone())
+                .await
             {
                 execution.has_unresolved_client_tools = true;
                 continue;
@@ -678,9 +713,11 @@ impl WorkflowAgent {
             let tool_result = execute_local_tool_with_callbacks(
                 tool,
                 tool_call,
-                yield_value.messages.clone(),
+                callback_messages.clone(),
+                execution_messages.clone(),
                 context,
                 yield_value.step.step_number,
+                abort_signal,
                 telemetry_dispatcher,
                 execute_tool_in_telemetry_context,
                 constructor_on_tool_execution_start,
@@ -691,6 +728,11 @@ impl WorkflowAgent {
             .await?;
 
             execution.tool_results.push(tool_result.tool_result);
+
+            if is_cancellation_requested(abort_signal) {
+                execution.aborted = true;
+                break;
+            }
         }
 
         Ok(execution)
@@ -997,6 +1039,10 @@ impl fmt::Debug for WorkflowAgentOnAbortCallback {
 pub struct WorkflowAgentAbortInfo {
     /// Steps completed before the abort was observed.
     pub steps: Vec<WorkflowStreamStep>,
+
+    /// Abort reason supplied by the caller, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<JsonValue>,
 }
 
 /// Callback invoked before [`WorkflowAgent::stream`] starts iterating steps.
@@ -1313,6 +1359,10 @@ pub struct WorkflowAgentFinishInfo {
     /// Provider-executed tool calls that had no matching provider result.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_provider_executed_tool_results: Vec<String>,
+
+    /// Whether the workflow observed cancellation before normal finish.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aborted: bool,
 }
 
 impl From<&WorkflowAgentStreamResult> for WorkflowAgentFinishInfo {
@@ -1334,6 +1384,7 @@ impl From<&WorkflowAgentStreamResult> for WorkflowAgentFinishInfo {
             missing_provider_executed_tool_results: result
                 .missing_provider_executed_tool_results
                 .clone(),
+            aborted: result.aborted,
         }
     }
 }
@@ -1363,6 +1414,14 @@ pub struct WorkflowAgentStreamResult {
     /// Provider-executed tool calls that had no matching provider result.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_provider_executed_tool_results: Vec<String>,
+
+    /// Whether the workflow observed cancellation before normal finish.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aborted: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Error returned by workflow-agent execution.
@@ -1396,6 +1455,19 @@ impl fmt::Display for WorkflowAgentError {
 }
 
 impl Error for WorkflowAgentError {}
+
+fn call_abort_callback(
+    on_abort: &Option<WorkflowAgentOnAbortCallback>,
+    steps: &[WorkflowStreamStep],
+    abort_signal: Option<&LanguageModelAbortSignal>,
+) {
+    if let Some(on_abort) = on_abort {
+        on_abort.call(WorkflowAgentAbortInfo {
+            steps: steps.to_vec(),
+            reason: abort_signal.and_then(LanguageModelAbortSignal::reason),
+        });
+    }
+}
 
 fn call_start_callbacks(
     constructor_on_start: &Option<WorkflowAgentOnStartCallback>,
@@ -1500,6 +1572,7 @@ struct WorkflowAgentToolExecution {
     tool_results: Vec<LanguageModelToolResultPart>,
     has_unresolved_client_tools: bool,
     missing_provider_executed_tool_results: Vec<String>,
+    aborted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1608,10 +1681,14 @@ async fn execute_local_tool(
     tool_call: &ParsedToolCall,
     messages: WorkflowPrompt,
     context: Option<JsonValue>,
+    abort_signal: Option<LanguageModelAbortSignal>,
 ) -> Result<WorkflowAgentLocalToolResult, WorkflowAgentError> {
     let mut options = ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages);
     if let Some(context) = context.clone() {
         options = options.with_context(context);
+    }
+    if let Some(abort_signal) = abort_signal {
+        options = options.with_abort_signal(abort_signal);
     }
 
     let (output, success, raw_output, error) =
@@ -1656,9 +1733,11 @@ async fn execute_local_tool(
 async fn execute_local_tool_with_callbacks(
     tool: &Tool,
     tool_call: &ParsedToolCall,
-    messages: WorkflowPrompt,
+    callback_messages: WorkflowPrompt,
+    execution_messages: WorkflowPrompt,
     context: Option<JsonValue>,
     step_number: usize,
+    abort_signal: Option<&LanguageModelAbortSignal>,
     telemetry_dispatcher: &TelemetryDispatcher,
     execute_tool_in_telemetry_context: Option<&WorkflowExecuteToolInTelemetryContext<'static>>,
     constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
@@ -1668,7 +1747,7 @@ async fn execute_local_tool_with_callbacks(
 ) -> Result<WorkflowAgentLocalToolResult, WorkflowAgentError> {
     let start_info = WorkflowAgentToolExecutionStartInfo {
         tool_call: tool_call.clone(),
-        messages: messages.clone(),
+        messages: callback_messages.clone(),
         tool_context: context.clone(),
         step_number,
     };
@@ -1682,8 +1761,9 @@ async fn execute_local_tool_with_callbacks(
     let started_at = Instant::now();
     let tool_for_execute = tool.clone();
     let tool_call_for_execute = tool_call.clone();
-    let messages_for_execute = messages.clone();
+    let messages_for_execute = execution_messages;
     let context_for_execute = context.clone();
+    let abort_signal_for_execute = abort_signal.cloned();
     let execute = move || -> WorkflowExecuteToolInTelemetryContextFuture<'_> {
         Box::pin(async move {
             execute_local_tool(
@@ -1691,6 +1771,7 @@ async fn execute_local_tool_with_callbacks(
                 &tool_call_for_execute,
                 messages_for_execute,
                 context_for_execute,
+                abort_signal_for_execute,
             )
             .await
         })
@@ -1710,7 +1791,7 @@ async fn execute_local_tool_with_callbacks(
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let end_info = WorkflowAgentToolExecutionEndInfo {
         tool_call: tool_call.clone(),
-        messages,
+        messages: callback_messages,
         tool_context: context,
         step_number,
         duration_ms,
@@ -1822,6 +1903,7 @@ async fn apply_tool_approvals_before_stream(
     prompt: &mut WorkflowPrompt,
     tools: &BTreeMap<String, Tool>,
     tools_context: &WorkflowToolsContext,
+    abort_signal: Option<&LanguageModelAbortSignal>,
     telemetry_dispatcher: &TelemetryDispatcher,
     execute_tool_in_telemetry_context: Option<&WorkflowExecuteToolInTelemetryContext<'static>>,
     constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
@@ -1839,6 +1921,10 @@ async fn apply_tool_approvals_before_stream(
     let mut tool_result_content = Vec::new();
 
     for approval in approved_tool_approvals {
+        if is_cancellation_requested(abort_signal) {
+            break;
+        }
+
         let Some(tool) = tools.get(&approval.tool_call.tool_name) else {
             continue;
         };
@@ -1852,8 +1938,10 @@ async fn apply_tool_approvals_before_stream(
             tool,
             &parsed_tool_call,
             prompt.clone(),
+            prompt.clone(),
             context,
             0,
+            abort_signal,
             telemetry_dispatcher,
             execute_tool_in_telemetry_context,
             constructor_on_tool_execution_start,
@@ -2197,6 +2285,39 @@ mod tests {
             self.steps
                 .pop_front()
                 .ok_or(WorkflowStreamTextError::MissingScriptedStep)
+        }
+    }
+
+    #[derive(Debug)]
+    struct AbortAfterFirstStepExecutor {
+        abort_controller: LanguageModelAbortController,
+        returned_first_step: bool,
+    }
+
+    impl AbortAfterFirstStepExecutor {
+        fn new(abort_controller: LanguageModelAbortController) -> Self {
+            Self {
+                abort_controller,
+                returned_first_step: false,
+            }
+        }
+    }
+
+    impl WorkflowStreamTextStepExecutor for AbortAfterFirstStepExecutor {
+        fn do_stream_step(
+            &mut self,
+            _prompt: &[LanguageModelMessage],
+            _tools: &SerializableToolSet,
+            _options: &DoStreamStepOptions,
+        ) -> Result<DoStreamStepOutput, WorkflowStreamTextError> {
+            if self.returned_first_step {
+                return Ok(stop_step());
+            }
+
+            self.returned_first_step = true;
+            self.abort_controller
+                .abort_with_reason(json!("client disconnected"));
+            Ok(executable_tool_call_step("{}"))
         }
     }
 
@@ -5433,8 +5554,103 @@ mod tests {
             .clone()
             .expect("abort info was captured");
         assert!(captured_abort.steps.is_empty());
+        assert_eq!(captured_abort.reason, None);
         assert_eq!(result.messages, user_prompt());
         assert!(result.steps.is_empty());
+        assert!(result.aborted);
+    }
+
+    #[test]
+    fn workflow_agent_should_pass_abort_signal_to_local_tool_execution() {
+        let received_signal = Arc::new(Mutex::new(None::<LanguageModelAbortSignal>));
+        let received_signal_for_tool = Arc::clone(&received_signal);
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let tool = Tool::new("testTool", object_schema()).with_execute(move |_, options| {
+            let received_signal = Arc::clone(&received_signal_for_tool);
+            async move {
+                *received_signal.lock().expect("signal lock succeeds") = options.abort_signal;
+                Ok(json!("done"))
+            }
+        });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor =
+            ScriptedStreamTextStepExecutor::new([executable_tool_call_step("{}"), stop_step()]);
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_abort_signal(abort_signal.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert!(!result.aborted);
+        let captured_signal = received_signal
+            .lock()
+            .expect("signal lock succeeds")
+            .clone()
+            .expect("tool received abort signal");
+        assert!(captured_signal.is_same_signal(&abort_signal));
+    }
+
+    #[test]
+    fn workflow_agent_should_stop_before_tools_when_cancelled_after_step() {
+        let execute_calls = Arc::new(Mutex::new(0usize));
+        let execute_calls_for_tool = Arc::clone(&execute_calls);
+        let captured_abort = Arc::new(Mutex::new(None));
+        let captured_abort_for_callback = Arc::clone(&captured_abort);
+        let captured_finish = Arc::new(Mutex::new(false));
+        let captured_finish_for_callback = Arc::clone(&captured_finish);
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let tool = Tool::new("testTool", object_schema()).with_execute(move |_, _| {
+            let execute_calls = Arc::clone(&execute_calls_for_tool);
+            async move {
+                *execute_calls.lock().expect("counter lock succeeds") += 1;
+                Ok(json!("should not run"))
+            }
+        });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(
+                    user_prompt(),
+                    AbortAfterFirstStepExecutor::new(abort_controller),
+                )
+                .with_abort_signal(abort_signal)
+                .with_on_abort(WorkflowAgentOnAbortCallback::new(move |info| {
+                    *captured_abort_for_callback
+                        .lock()
+                        .expect("abort lock succeeds") = Some(info);
+                }))
+                .with_on_finish(WorkflowAgentOnFinishCallback::new(move |_| {
+                    *captured_finish_for_callback
+                        .lock()
+                        .expect("finish lock succeeds") = true;
+                })),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert!(result.aborted);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert!(result.tool_results.is_empty());
+        assert_eq!(*execute_calls.lock().expect("counter lock succeeds"), 0);
+        assert!(
+            !*captured_finish.lock().expect("finish lock succeeds"),
+            "finish callback should not run for cancelled streams"
+        );
+
+        let captured_abort = captured_abort
+            .lock()
+            .expect("abort lock succeeds")
+            .clone()
+            .expect("abort info was captured");
+        assert_eq!(captured_abort.steps.len(), 1);
+        assert_eq!(captured_abort.reason, Some(json!("client disconnected")));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod chat_transport;
+pub mod operational_safety;
 pub mod stream_text_iterator;
 pub mod workflow_agent;
 
@@ -15,6 +16,15 @@ pub use chat_transport::{
     WorkflowChatRequest, WorkflowChatRequestMethod, WorkflowChatResponse, WorkflowChatTransport,
     WorkflowChatTransportClient, WorkflowChatTransportError, WorkflowChatTransportOptions,
     WorkflowChatTransportResult, WorkflowChatTrigger,
+};
+pub use operational_safety::{
+    ApprovalAction, ApprovalClassification, ApprovalReason, CancellationStatus,
+    OperationalEventRecord, OperationalEventRecorder, OperationalTelemetryAttributes,
+    REDACTED_VALUE, RateLimitCheck, RateLimitDecision, RateLimitScope, Redacted, RedactionPolicy,
+    RunEventMetadata, RunEventRecord, RunLifecycleEventKind, ToolEventInput, ToolEventRecord,
+    ToolLifecycleEventKind, UsageAccountingEvent, UsageAggregation, add_language_model_usage,
+    cancellation_status, classify_tool_approval, decide_rate_limit, is_cancellation_requested,
+    operational_telemetry_fields, redact_json_value, redact_text,
 };
 pub use stream_text_iterator::{
     DoStreamStepOptions, DoStreamStepOutput, ParsedToolCall, ProviderExecutedToolResult,
