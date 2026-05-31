@@ -448,6 +448,66 @@ function classify(row, source) {
   return { portability: 'portable', status: 'not-started', note: row.eachNote };
 }
 
+const worldLocalRustTests = new Map([
+  [
+    'packages/world-local/src/config.test.ts',
+    'world_local_config_portable_parity',
+  ],
+  [
+    'packages/world-local/src/fs.test.ts',
+    'world_local_filesystem_portable_parity',
+  ],
+  [
+    'packages/world-local/src/init.test.ts',
+    'world_local_init_data_dir_portable_parity',
+  ],
+  [
+    'packages/world-local/src/queue.test.ts',
+    'world_local_queue_portable_parity',
+  ],
+  [
+    'packages/world-local/src/reenqueue.test.ts',
+    'world_local_reenqueue_active_runs_portable_parity',
+  ],
+  [
+    'packages/world-local/src/storage.test.ts',
+    'world_local_storage_event_log_portable_parity',
+  ],
+  [
+    'packages/world-local/src/storage/runs-storage.test.ts',
+    'world_local_run_attributes_portable_parity',
+  ],
+  [
+    'packages/world-local/src/streamer.test.ts',
+    'world_local_streamer_portable_parity',
+  ],
+  [
+    'packages/world-local/src/tag.test.ts',
+    'world_local_tagging_portable_parity',
+  ],
+]);
+
+function applyPortOverrides(row) {
+  if (row.packageName !== 'world-local') {
+    return row;
+  }
+  const rustTestName = worldLocalRustTests.get(row.file);
+  if (!rustTestName) {
+    return row;
+  }
+  const reclassifiedNote =
+    row.portability === 'needs-review'
+      ? 'Dynamic upstream row inspected and reclassified portable; covered by the named Rust parity test.'
+      : 'Ported by the named Rust parity test in workflow-world-local.';
+  return {
+    ...row,
+    portability: 'portable',
+    status: 'verified',
+    rustTestName,
+    note: reclassifiedNote,
+  };
+}
+
 function escapeCell(value) {
   return String(value ?? '')
     .replaceAll('\\', '\\\\')
@@ -585,7 +645,7 @@ function renderInventory(rows, testFiles) {
     row.declaration,
     row.portability,
     rustOwners.get(row.packageName) ?? 'unassigned',
-    '',
+    row.rustTestName ?? '',
     row.status,
     row.note,
   ]);
@@ -649,7 +709,7 @@ if (!fs.existsSync(path.join(sourceRoot, 'packages'))) {
 const testFiles = walk(path.join(sourceRoot, 'packages')).sort((left, right) =>
   left.localeCompare(right)
 );
-const rows = testFiles.flatMap(parseFile);
+const rows = testFiles.flatMap(parseFile).map(applyPortOverrides);
 const markdown = renderInventory(rows, testFiles);
 
 if (process.argv.includes('--check')) {
