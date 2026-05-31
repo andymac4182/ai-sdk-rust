@@ -9,6 +9,7 @@
 pub mod config;
 pub mod health;
 pub mod local_fixture;
+pub mod service;
 
 pub use open_agents_core as core;
 pub use open_agents_runtime as runtime;
@@ -22,6 +23,10 @@ pub use health::{
 pub use local_fixture::{
     FixtureError, FixtureHarness, FixtureOutbound, FixtureOutboundKind, FixtureReply, FixtureRun,
     FixtureRunStatus, SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL,
+};
+pub use service::{
+    LocalOutbound, LocalOutboundKind, LocalRuntimeRouter, OpenAgentsService, ServiceError,
+    bind_service_listener, serve_open_agents_service,
 };
 
 /// Binary name for the Slack remote-agent service.

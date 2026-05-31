@@ -23,13 +23,22 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+ai-sdk-rust = { path = "../.." }
+ai-sdk-workflow = { path = "../ai-sdk-workflow" }
+async-trait = "0.1.89"
 chat-sdk-adapter-slack = { path = "../chat-sdk-adapter-slack" }
 chat-sdk-chat = { path = "../chat-sdk-chat" }
 chat-sdk-state-memory = { path = "../chat-sdk-state-memory" }
 open-agents-core = { path = "../open-agents-core" }
+open-agents-persistence = { path = "../open-agents-persistence" }
 open-agents-runtime = { path = "../open-agents-runtime" }
 open-agents-sandbox = { path = "../open-agents-sandbox" }
 open-agents-slack = { path = "../open-agents-slack" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+time = { version = "0.3.45", features = ["serde", "serde-well-known"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+hmac = "0.12"
+sha2 = "0.10"

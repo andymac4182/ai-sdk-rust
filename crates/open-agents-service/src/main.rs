@@ -3,7 +3,8 @@
 use std::error::Error;
 
 use open_agents_service::{
-    FixtureHarness, HealthCheck, OpenAgentsServiceConfig, bind_health_listener, serve_health_checks,
+    FixtureHarness, OpenAgentsService, OpenAgentsServiceConfig, bind_service_listener,
+    serve_open_agents_service,
 };
 use serde_json::json;
 
@@ -34,15 +35,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
 async fn run_server() -> Result<(), Box<dyn Error>> {
     let config = OpenAgentsServiceConfig::from_env()?;
-    let health = HealthCheck::from_config(&config);
-    let listener = bind_health_listener(config.bind_addr()).await?;
+    let service = OpenAgentsService::from_config(config.clone())?;
+    let listener = bind_service_listener(config.bind_addr()).await?;
     let local_addr = listener.local_addr()?;
-    health.set_ready(true);
+    service.health().set_ready(true);
     eprintln!(
         "open-agents-slack listening on http://{local_addr} ({})",
         config.operator_summary()
     );
-    serve_health_checks(listener, health, async {
+    serve_open_agents_service(listener, service, async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await?;
@@ -80,5 +81,5 @@ fn run_fixture() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!("Usage: open-agents-slack [--check-config|--fixture]");
-    println!("No arguments starts the health server and waits for Ctrl-C.");
+    println!("No arguments starts the HTTP service with health and Slack routes.");
 }

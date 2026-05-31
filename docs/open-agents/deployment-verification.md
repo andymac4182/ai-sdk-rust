@@ -5,9 +5,14 @@ remote-agent path. The repository currently has deterministic fixture coverage,
 Slack ingress/router unit coverage, service health checks, and an ignored live
 Slack smoke. It does not yet have a full emulator-backed local E2E suite.
 
-Keep this document honest as the service-route and emulator-harness buckets
-land: replace the TODOs below with exact commands only after those branches wire
-the deployable service to the Slack event route and emulator API base URL.
+The current Rust slice extends the existing `open-agents-service` process with
+configuration validation, health checks, graceful shutdown, state and sandbox
+selection, local Slack event fixtures, a testable Slack HTTP route, and an
+ignored live Slack smoke test.
+
+Keep this document honest as the emulator-harness bucket lands: replace the
+remaining TODOs below with exact commands only after that branch wires the
+service config to the Slack emulator API base URL.
 
 ## Source Rechecked
 
@@ -199,10 +204,16 @@ curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/status
 ```
 
-TODO(service-route): wire the HTTPS Slack callback route reserved for the
-runtime router at `/slack/events`. Until then, the deployable binary serves
-health/readiness only and the fixture harness exercises the Slack parser
-directly in tests.
+The local HTTP service now routes signed Slack callbacks through the same
+ingress/router boundary used by the binary:
+
+- Events API request URL: `http://127.0.0.1:8080/slack/events`
+- Interactivity request URL: `http://127.0.0.1:8080/slack/interactions`
+- Slash commands, when enabled: `http://127.0.0.1:8080/slack/commands`
+
+The deterministic service tests POST signed Slack payloads through an ephemeral
+listener and assert URL verification, persisted runs, durable waiting/resume
+state, cancellation, and captured Slack outbound messages.
 
 ## Environment Variables
 
@@ -255,7 +266,7 @@ Event subscriptions:
 
 Interactivity:
 
-- Request URL: `https://YOUR_DOMAIN/slack/events`
+- Request URL: `https://YOUR_DOMAIN/slack/interactions`
 - Enable block actions for answer/resume and cancel actions.
 - The fixture action ids are `open_agents_answer` and `open_agents_cancel`.
 
@@ -278,22 +289,22 @@ export SLACK_TEST_CHANNEL_ID=C...
 cargo test -p open-agents-service live_slack_smoke -- --ignored --nocapture
 ```
 
-When the durable runtime is wired through the service route, extend this smoke
-to trigger a small agent task through the Slack app, observe progress in the
-thread, and verify the persisted run record.
+The deterministic local route tests already trigger a small scripted agent task
+through the service boundary. Extend the ignored live smoke to drive the same
+path through a real Slack app once live outbound assertions are available.
 
 ## Verification Matrix
 
 | Flow | Local coverage today | Command or evidence | Gap before full local E2E |
 | --- | --- | --- | --- |
-| URL verification | Covered by fixture and Slack ingress unit tests | `cargo test -p open-agents-service url_verification_returns_challenge`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Service binary route at `/slack/events` still TODO |
-| App mention and DM | Partial. Fixture covers app mention; `open-agents-slack` covers app mention and DM routing | `cargo test -p open-agents-service app_mention_creates_session_uses_sandbox_and_finishes`; `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator event dispatch to running service still TODO |
-| Thread routing | Covered at parser/router level and fixture interaction level | `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_in_same_thread` | Emulator-backed thread replay still TODO |
-| Durable run completion | Partial. Fixture completes a fake run and clears active state | `cargo test -p open-agents-service app_mention_creates_session_uses_sandbox_and_finishes` | Real durable runtime through service route still TODO |
-| Waiting, answer, cancel | Covered by synthetic block action fixture payloads | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_in_same_thread`; `cargo test -p open-agents-service block_action_cancel_clears_active_state` | Emulator cannot simulate interactions today |
-| Outbound Slack message/update | Partial. Fixture captures outbound messages; Slack outbound tests cover API body shapes | `cargo test -p open-agents-service`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator Web API state assertions still TODO |
-| Persistence | Partial. In-memory fixture run and active-run keys are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_in_same_thread` | Postgres-backed persistence still TODO |
-| Sandbox command | Partial. Fixture records fake `sandbox.exec pwd` proof | `cargo test -p open-agents-service app_mention_creates_session_uses_sandbox_and_finishes` | Real local sandbox command through runtime still TODO |
+| URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Emulator webhook dispatch still TODO |
+| App mention and DM | App mention is covered through the service route; `open-agents-slack` covers DM routing | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator event dispatch to running service still TODO |
+| Thread routing | Covered at parser/router level and service interaction level | `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Emulator-backed thread replay still TODO |
+| Durable run completion | Covered locally through the service route with a scripted durable runtime | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live model runtime proof still TODO |
+| Waiting, answer, cancel | Covered by signed synthetic block action payloads through `/slack/interactions` | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
+| Outbound Slack message/update | Service route captures rendered outbound messages; Slack outbound tests cover API body shapes | `cargo test -p open-agents-service`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator Web API state assertions still TODO |
+| Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
+| Sandbox command | Local service route executes `sandbox.exec pwd` through the runtime seam | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Broader sandbox command and git automation proof still TODO |
 | Git automation summary | Unit renderer coverage only | `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | End-to-end auto-commit/PR summary from a run still TODO |
 | Health/readiness | Covered by service tests and manual probes | `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Include probes in emulator E2E once service route lands |
 
