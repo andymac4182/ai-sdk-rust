@@ -2,8 +2,9 @@
 //!
 //! This crate maps to upstream `packages/core`. The Rust surface models the
 //! portable public workflow, step, hook, sleep, abort, context-storage, request /
-//! response, writable-stream, serialization, and deterministic runtime contracts
-//! without embedding the JavaScript VM or live persistence runtime.
+//! response, writable-stream, serialization, deterministic runtime contracts,
+//! and facade re-export helpers without embedding the JavaScript VM or live
+//! persistence runtime.
 
 #![forbid(unsafe_code)]
 
@@ -23,7 +24,7 @@ pub mod log_format;
 pub mod logger;
 pub mod observability;
 pub mod ordering;
-mod runtime;
+pub mod runtime;
 pub mod schemas;
 pub mod set_attributes;
 pub mod source_map;
@@ -49,6 +50,138 @@ pub use runtime::*;
 pub use workflow_errors as errors;
 pub use workflow_serde as serde;
 pub use workflow_world as world;
+
+/// Browser-safe serialization-format helpers used by observability.
+pub mod serialization_format {
+    use serde_json::{Map, Value};
+
+    /// Length of the upstream serialization format prefix.
+    pub const FORMAT_PREFIX_LENGTH: usize = 4;
+
+    /// Upstream devalue serialization prefix.
+    pub const DEVALUE_V1_FORMAT: &str = "devl";
+
+    /// Upstream encrypted payload prefix.
+    pub const ENCRYPTED_FORMAT: &str = "encr";
+
+    /// Placeholder displayed for encrypted data when no decryption key is
+    /// supplied.
+    pub const ENCRYPTED_PLACEHOLDER: &str = "\u{1F512} Encrypted";
+
+    /// Display-friendly observability reviver registry.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct ObservabilityRevivers;
+
+    impl ObservabilityRevivers {
+        /// Returns true when the upstream observability registry exposes a
+        /// reviver for the given serialized type.
+        pub fn contains(&self, name: &str) -> bool {
+            OBSERVABILITY_REVIVER_NAMES.contains(&name)
+        }
+
+        /// Names exposed by upstream `observabilityRevivers`.
+        pub fn names(&self) -> &'static [&'static str] {
+            OBSERVABILITY_REVIVER_NAMES
+        }
+    }
+
+    /// Shared reviver type for the Rust observability facade.
+    pub type Revivers = ObservabilityRevivers;
+
+    /// Upstream observability reviver names.
+    pub const OBSERVABILITY_REVIVER_NAMES: &[&str] = &[
+        "ReadableStream",
+        "WritableStream",
+        "TransformStream",
+        "AbortController",
+        "AbortSignal",
+        "DOMException",
+        "StepFunction",
+        "WorkflowFunction",
+        "Instance",
+        "Class",
+    ];
+
+    /// Upstream `observabilityRevivers` registry.
+    pub const OBSERVABILITY_REVIVERS: ObservabilityRevivers = ObservabilityRevivers;
+
+    /// Returns the observability reviver registry.
+    pub fn observability_revivers() -> ObservabilityRevivers {
+        OBSERVABILITY_REVIVERS
+    }
+
+    /// Hydrates serialized data for observability.
+    ///
+    /// The initial Rust surface faithfully preserves already-plain values. Full
+    /// devalue and encrypted payload handling belongs to the broader
+    /// `workflow-core` serialization bucket.
+    pub fn hydrate_data(value: Value, _revivers: Revivers) -> Value {
+        value
+    }
+
+    /// Hydrates the input/output-style fields of a workflow resource.
+    pub fn hydrate_resource_io(resource: Value, revivers: Revivers) -> Value {
+        let Value::Object(mut object) = resource else {
+            return resource;
+        };
+
+        if object.contains_key("stepId") {
+            hydrate_fields(&mut object, &["input", "output", "error"], revivers);
+        } else if object.contains_key("hookId") {
+            hydrate_fields(&mut object, &["metadata"], revivers);
+        } else if object.contains_key("eventId") {
+            hydrate_event_data(&mut object, revivers);
+        } else {
+            hydrate_fields(&mut object, &["input", "output", "error"], revivers);
+        }
+
+        strip_execution_context(&mut object);
+
+        Value::Object(object)
+    }
+
+    fn hydrate_fields(object: &mut Map<String, Value>, fields: &[&str], revivers: Revivers) {
+        for field in fields {
+            let Some(value) = object.get(*field) else {
+                continue;
+            };
+            if value.is_null() {
+                continue;
+            }
+            object.insert((*field).to_string(), hydrate_data(value.clone(), revivers));
+        }
+    }
+
+    fn hydrate_event_data(object: &mut Map<String, Value>, revivers: Revivers) {
+        let Some(Value::Object(mut event_data)) = object.get("eventData").cloned() else {
+            return;
+        };
+
+        hydrate_fields(
+            &mut event_data,
+            &["result", "input", "output", "metadata", "payload", "error"],
+            revivers,
+        );
+        object.insert("eventData".to_string(), Value::Object(event_data));
+    }
+
+    fn strip_execution_context(object: &mut Map<String, Value>) {
+        let Some(execution_context) = object.remove("executionContext") else {
+            return;
+        };
+
+        let Some(workflow_core_version) = execution_context
+            .as_object()
+            .and_then(|context| context.get("workflowCoreVersion"))
+            .filter(|value| !value.is_null())
+            .cloned()
+        else {
+            return;
+        };
+
+        object.insert("workflowCoreVersion".to_string(), workflow_core_version);
+    }
+}
 
 /// Upstream repository used for this crate boundary.
 pub const UPSTREAM_REPOSITORY: &str = "github.com/vercel/workflow";

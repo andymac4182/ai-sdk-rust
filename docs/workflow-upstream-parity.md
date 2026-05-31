@@ -169,7 +169,7 @@ Remaining blocked WF07-adjacent rows:
 | `packages/vitest` (`@workflow/vitest`) | `5.0.0-beta.10` | docs/test-only | not-started | none | Source: `src/index.ts`, `src/options.ts`, `src/global-setup.ts`, `src/setup-file.ts`, `src/vitest-context.d.ts`. Tests: `src/index.test.ts`. | Test harness integration. Defer until runtime testing surface exists. |
 | `packages/web` (`@workflow/web`) | `5.0.0-beta.10` | web-only | not-started | none | Source: `app/root.tsx`, `app/routes/*.tsx`, `app/components/**/*.tsx`, `app/lib/client/*.ts`, `server/app.ts`, `server.js`. Tests: 9 files including `app/root.test.tsx`, `app/lib/client/workflow-actions.test.ts`, `app/lib/client/hooks/use-trace-viewer.test.ts`. | Observability UI. Not portable runtime, but its client contracts may inform later API serialization tests. |
 | `packages/web-shared` (`@workflow/web-shared`) | `5.0.0-beta.10` | web-only | not-started | none | Source: `src/components/**/*.tsx`, `src/lib/*.ts`, `src/hooks/*.ts`, `src/styles.css`. Tests: 6 files including `test/trace-builder-v1.test.ts`, `test/hydration.test.ts`, `test/exact-event-search-id.test.ts`. | Shared UI components and trace rendering. |
-| `packages/workflow` (`workflow`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow` | Source: `src/index.ts`, `src/workflow.ts`, `src/stdlib.ts`, `src/api.ts`, `src/runtime.ts`, `src/observability.ts`, host subpath files, `bin/run.js`. Tests: `src/internal/builtins.test.ts`, `src/observability.test.ts`, `src/stdlib.test.ts`. | Skeleton facade crate only. Immediate follow-up: keep it as a facade over package-owned crates and avoid putting core-owned behavior here. |
+| `packages/workflow` (`workflow`) | `5.0.0-beta.10` | portable Rust runtime | verified | `crates/workflow` | Source: `src/index.ts`, `src/workflow.ts`, `src/stdlib.ts`, `src/api.ts`, `src/runtime.ts`, `src/observability.ts`, `src/api-workflow.ts`, `src/internal/builtins.ts`, host subpath files, `bin/run.js`. Tests: `src/internal/builtins.test.ts`, `src/observability.test.ts`, `src/stdlib.test.ts`. | Facade re-exports core/runtime, observability, utils parser, stdlib, API shim, builtin, and host-subpath classification surfaces. All 9 portable upstream rows are verified by `cargo test -p workflow`. |
 | `packages/world` (`@workflow/world`) | `5.0.0-beta.5` | portable Rust runtime | verified | `crates/workflow-world` | Source: `src/index.ts`, `src/attributes.ts`, `src/interfaces.ts`, `src/runs.ts`, `src/steps.ts`, `src/events.ts`, `src/hooks.ts`, `src/queue.ts`, `src/recovery.ts`, `src/serialization.ts`, `src/shared.ts`, `src/spec-version.ts`, `src/ulid.ts`, `src/waits.ts`. Tests: `src/attributes.test.ts`. | Shared World boundary ported as Rust contracts for attributes, events, hooks, queue, recovery, runs, serialization, shared pagination/stream types, spec versions, steps, ULID timestamp checks, waits, and traits for local/postgres/vercel implementations. All 23 portable upstream `attributes.test.ts` rows have named Rust tests in `workflow-world::attributes`, verified by `cargo test -p workflow-world`. |
 | `packages/world-local` (`@workflow/world-local`) | `5.0.0-beta.11` | portable Rust runtime | verified | `crates/workflow-world-local` | Source: `src/index.ts`, `src/config.ts`, `src/fs.ts`, `src/init.ts`, `src/queue.ts`, `src/storage/**/*.ts`, `src/streamer.ts`, `src/telemetry.ts`. Tests: 9 files including `src/storage.test.ts`, `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/tag.test.ts`. | WF 08 ports local config/data-dir handling, safe filesystem helpers, event-sourced storage, queue, streams, re-enqueue, tags, and telemetry helpers. All 314 portable rows in `workflow-test-inventory.md` map to named Rust tests; the 9 prior dynamic `needs-review` rows were inspected and reclassified portable. Validation: `cargo test -p workflow-world-local`. |
 | `packages/world-postgres` (`@workflow/world-postgres`) | `5.0.0-beta.9` | portable Rust runtime | verified | `crates/workflow-world-postgres` | Source: `bin/setup.js`, `src/index.ts`, `src/config.ts`, `src/drizzle/**/*.ts`, SQL migrations, `src/queue.ts`, `src/storage.ts`, `src/streamer.ts`. Tests: `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/util.test.ts`, `test/spec.test.ts`, `test/storage.test.ts`. | Ported deterministic Postgres config, Graphile queue planning, SQL migration metadata, in-memory event-sourced storage, and stream pagination. Inventory maps all 103 portable rows to named Rust tests; 2 TypeScript helper/generic rows are classified `type-system-impossible`. Live Docker/Postgres coverage remains credential/container gated outside normal tests. |
@@ -180,7 +180,7 @@ Remaining blocked WF07-adjacent rows:
 
 | Rust crate | Upstream package | Status | Scope in this pass |
 | --- | --- | --- | --- |
-| `workflow` | `packages/workflow` (`workflow`) | in-progress | Facade crate with source metadata and re-export placeholders for foundational crates. |
+| `workflow` | `packages/workflow` (`workflow`) | verified | Facade crate with stdlib `fetch`, workflow API/runtime shims, observability re-exports, internal builtin contracts, host subpath classifications, and 9 named upstream parity tests. |
 | `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | WF04 adds core primitives, schemas, utilities, and diagnostics; WF05 adds portable serialization, encryption, stream framing, observability hydration, ordering, UUID, and base64/hex utilities; WF06 adds workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream APIs; WF07 adds deterministic runtime engine tests over fake World/event-log seams. Remaining core E2E rows stay classified separately. |
 | `workflow-errors` | `packages/errors` (`@workflow/errors`) | verified | Error taxonomy, framed rendering, fatal classification, runtime decryption context, serialization/corrupted-log errors, and stable serde/display contracts. |
 | `workflow-serde` | `packages/serde` (`@workflow/serde`) | verified | Dedicated marker crate for the upstream serialization/deserialization symbol names. |
@@ -201,6 +201,33 @@ Remaining blocked WF07-adjacent rows:
 | Async deserialization ordering | `packages/core/src/async-deserialization-ordering.test.ts` | ported in `workflow-core` | Rust helper verifies concurrent hydration work is published in event-log order. |
 | VM UUID/base64 utilities | `packages/core/src/vm/uuid.test.ts`, `packages/core/src/vm/uint8array-base64.test.ts`, portable `btoa`/`atob` rows in `packages/core/src/vm/index.test.ts` | ported in `workflow-core` | Covers deterministic UUID v4 formatting and TC39-style base64/hex byte conversions. |
 | JavaScript-only serialization/runtime identity | JS function proxies, class constructors/static symbols, cross-VM constructor identity, AbortController/AbortSignal event objects, Request/Response/ReadableStream/WritableStream object transfer, and Node `vm.Context` global patching | documented as `js-only-documented` in the inventory | Rust keeps typed reference/data payloads where portable and does not claim callable JS identity or Node VM behavior. |
+
+## Workflow Facade Notes
+
+The `workflow` package facade is verified for its 9 portable upstream rows in
+[Workflow SDK Test Inventory](workflow-test-inventory.md). Behavior remains in
+the owning crate where possible:
+
+- `workflow-utils` owns `parseStepName`, `parseWorkflowName`, and
+  `parseClassName` equivalents, re-exported by `workflow::observability`.
+- `workflow-core` owns runtime-facing start/run option types and
+  serialization-format observability helpers, re-exported by `workflow`.
+- `workflow` owns package-local stdlib `fetch` metadata, `api-workflow.ts`
+  runtime-usage stubs, and `internal/builtins.ts` set-attributes behavior.
+
+Host subpath files reviewed in this bucket are intentionally not implemented as
+portable Rust runtime behavior:
+
+| Upstream file | Classification | Rust note |
+| --- | --- | --- |
+| `packages/workflow/src/astro.ts` | host binding | Re-export of `@workflow/astro`; defer to a future host adapter. |
+| `packages/workflow/src/nest.ts` | host binding | Re-export of `@workflow/nest`; defer to a future host adapter. |
+| `packages/workflow/src/next.cts` | host binding | CommonJS Next.js plugin bridge; no Rust runtime facade behavior. |
+| `packages/workflow/src/nitro.ts` | host binding | Nitro plugin/default export bridge; no Rust runtime facade behavior. |
+| `packages/workflow/src/nuxt.ts` | host binding | Nuxt module/default export bridge; no Rust runtime facade behavior. |
+| `packages/workflow/src/sveltekit.ts` | host binding | Re-export of `@workflow/sveltekit`; defer to a future host adapter. |
+| `packages/workflow/src/vite.ts` | host binding | Vite plugin bridge through `@workflow/nitro/vite`; no Rust runtime facade behavior. |
+| `packages/workflow/src/typescript-plugin.cts` | js-only | CommonJS TypeScript server plugin loader; no Rust runtime counterpart. |
 
 ## Immediate Follow-Up Queue
 

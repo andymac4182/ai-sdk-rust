@@ -64,4 +64,20 @@ mod tests {
         let class = parse_class_name("class//./src/models/point//Point").unwrap();
         assert_eq!(class.short_name, "Point");
     }
+
+    #[test]
+    fn parse_step_name_extracts_short_name() {
+        let parsed = parse_step_name("step//./src/workflows/pulse//queryKBStep").unwrap();
+
+        assert_eq!(parsed.short_name, "queryKBStep");
+        assert_eq!(parsed.module_specifier, "./src/workflows/pulse");
+        assert_eq!(parsed.function_name, "queryKBStep");
+    }
+
+    #[test]
+    fn parse_default_export_uses_module_short_name() {
+        let parsed = parse_workflow_name("workflow//point@0.0.1//default").unwrap();
+
+        assert_eq!(parsed.short_name, "point");
+    }
 }

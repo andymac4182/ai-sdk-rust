@@ -1204,8 +1204,48 @@ pub enum DeploymentId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartOptions {
+    pub world: Option<String>,
     pub deployment_id: Option<DeploymentId>,
     pub spec_version: Option<u32>,
+}
+
+impl StartOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_world(mut self, world: impl Into<String>) -> Self {
+        self.world = Some(world.into());
+        self
+    }
+
+    pub fn with_spec_version(mut self, spec_version: u32) -> Self {
+        self.spec_version = Some(spec_version);
+        self
+    }
+
+    pub fn with_latest_deployment(mut self) -> Self {
+        self.deployment_id = Some(DeploymentId::Latest);
+        self
+    }
+
+    pub fn with_deployment_id(mut self, deployment_id: impl Into<String>) -> Self {
+        self.deployment_id = Some(DeploymentId::Id(deployment_id.into()));
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowMetadata {
+    pub workflow_id: String,
+}
+
+impl WorkflowMetadata {
+    pub fn new(workflow_id: impl Into<String>) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1322,6 +1362,46 @@ impl RunHandle {
             ))),
         }
     }
+}
+
+pub type Run = RunHandle;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheckResult {
+    pub ok: bool,
+    pub runtime: String,
+    pub spec_version: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRuntimeUsageError {
+    item: String,
+}
+
+impl WorkflowRuntimeUsageError {
+    pub fn new(item: impl Into<String>) -> Self {
+        Self { item: item.into() }
+    }
+
+    pub fn item(&self) -> &str {
+        &self.item
+    }
+}
+
+impl fmt::Display for WorkflowRuntimeUsageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "The workflow environment doesn't allow this runtime usage of {}. Move this call to a step function (\"use step\") or call it outside the workflow context.",
+            self.item
+        )
+    }
+}
+
+impl Error for WorkflowRuntimeUsageError {}
+
+pub fn workflow_context_stub<T>(item: impl Into<String>) -> Result<T, WorkflowRuntimeUsageError> {
+    Err(WorkflowRuntimeUsageError::new(item))
 }
 
 pub fn start<W: RuntimeWorld>(

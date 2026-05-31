@@ -23,3 +23,6 @@ workflow-core = { path = "../workflow-core" }
 workflow-errors = { path = "../workflow-errors" }
 workflow-serde = { path = "../workflow-serde" }
 workflow-utils = { path = "../workflow-utils" }
+
+[dev-dependencies]
+serde_json = "1.0.149"
