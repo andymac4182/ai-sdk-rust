@@ -403,6 +403,10 @@ fn allowed_identifier_token(name: &str, token: &str, origin: &str) -> bool {
         return true;
     }
 
+    if token == "utils" && (name.contains("workflow_utils") || name.contains("workflow-utils")) {
+        return true;
+    }
+
     if token == "utils"
         && [
             "adapter_utils",
@@ -481,6 +485,7 @@ mod tests {
         let mut failures = Vec::new();
         for (origin, name) in [
             ("src/provider_utils.rs path component", "provider_utils"),
+            ("crates/workflow-utils path component", "workflow-utils"),
             ("src/lib.rs:1", "util"),
             ("src/lib.rs:2", "SharedV4ProviderReference"),
             ("src/lib.rs:3", "EmojiHelper"),
@@ -504,6 +509,7 @@ mod tests {
             vec!["src/common.rs path component: 'common' uses vague token 'common'"]
         );
         assert!(check_path("src/provider_utils.rs").is_empty());
+        assert!(check_path("crates/workflow-utils/src/lib.rs").is_empty());
     }
 
     #[test]

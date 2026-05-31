@@ -1,0 +1,23 @@
+[package]
+name = "workflow-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust crate skeleton for the standalone Vercel Workflow core package."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "workflow_core"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+workflow-errors = { path = "../workflow-errors" }
+workflow-world = { path = "../workflow-world" }

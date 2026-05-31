@@ -1,0 +1,19 @@
+[package]
+name = "workflow-errors"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust crate skeleton for the standalone Vercel Workflow errors package."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "workflow_errors"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

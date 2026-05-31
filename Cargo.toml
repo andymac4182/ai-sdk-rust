@@ -45,6 +45,12 @@ members = [
     "crates/open-agents-service",
     "crates/open-agents-slack",
     "crates/repo-naming-check",
+    "crates/workflow",
+    "crates/workflow-core",
+    "crates/workflow-errors",
+    "crates/workflow-utils",
+    "crates/workflow-world",
+    "crates/workflow-world-local",
 ]
 resolver = "3"
 

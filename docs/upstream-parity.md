@@ -4,6 +4,11 @@ This ledger is maintained by long-running Codex `/goal` sessions. It is the
 source of truth for deciding what remains before this repository can claim full
 portable parity with upstream [`vercel/ai`](https://github.com/vercel/ai).
 
+The standalone Vercel Workflow SDK is tracked separately because its source of
+truth is [`vercel/workflow`](https://github.com/vercel/workflow), not
+`vercel/ai/packages/workflow`: see
+[Workflow SDK Upstream Parity](workflow-upstream-parity.md).
+
 Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
 must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
 more tests for stronger typing, extra edge cases, live-provider proof, and
