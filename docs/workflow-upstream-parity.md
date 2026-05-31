@@ -16,17 +16,55 @@ This ledger tracks the standalone Vercel Workflow SDK from
 | Upstream commit date | `2026-05-31T08:48:21Z` |
 | Inventory date | `2026-06-01` |
 | Upstream package count | 28 packages under `packages/*/package.json` |
-| Upstream test files | 154 `*.test.ts`, `*.test.tsx`, `*.spec.ts`, and e2e/test files under `packages/*` |
+| Upstream test files | 144 `*.test.ts`, `*.test.tsx`, `*.spec.ts`, `*.spec.tsx`, `*.test.mts`, and `*.spec.mts` files under `packages/*` |
+| Upstream test cases | 2,531 executable `it`/`test` rows in [Workflow SDK Test Inventory](workflow-test-inventory.md), including expanded simple `*.each` tables |
+| Foundational runtime test inventory | 79 files and 1,692 executable rows across `packages/errors`, `packages/utils`, `packages/world`, `packages/workflow`, `packages/core`, and `packages/world-local` |
 
 ## Status Rules
 
 Use one of these statuses for every row: `not-started`, `in-progress`,
-`ported`, `verified`, or `js-only-documented`.
+`ported`, `verified`, `js-only-documented`, `type-system-impossible`, or
+`needs-review`.
 
 A portable package can only become `verified` after its matching Rust crate owns
 the public API, implementation, docs, and every portable upstream test/case.
 The skeleton crates in this pass are intentionally `in-progress`: they record
 ownership, source metadata, and crate boundaries only.
+
+## Hard Test Parity Gate
+
+Workflow SDK parity follows the same rule as the AI SDK and Chat SDK ledgers:
+every portable upstream TypeScript test/case from `vercel/workflow` must have a
+named Rust counterpart in the owning Rust crate before the package can be
+marked `ported` or `verified`.
+
+Extra Rust tests are additive only. They do not compensate for any missing
+upstream TypeScript test/case, table row, fixture-backed scenario, e2e case,
+serialization snapshot equivalent, or error-path assertion.
+
+Every upstream row in [Workflow SDK Test Inventory](workflow-test-inventory.md)
+must end in exactly one of these states before its package can complete:
+
+- `verified`: the owning Rust crate has a named Rust test counterpart and the
+  package validation command is recorded.
+- `ported`: the named Rust counterpart exists but the package still awaits
+  broader verification.
+- `js-only-documented`: the row is explicitly JavaScript, browser, Node,
+  framework, or Vercel-host-runtime specific, with the Rust-facing alternative
+  documented.
+- `type-system-impossible`: the row only proves TypeScript language-service or
+  TypeScript type-system behavior that cannot be represented as Rust runtime
+  behavior; use Rust compile tests where a meaningful Rust analogue exists.
+
+Rows marked `needs-review` are blocking inventory debt, not exclusions. A
+future bucket must reclassify each one as portable, `js-only-documented`, or
+`type-system-impossible` before claiming package completion.
+
+Future implementation buckets must start from the case inventory, port all
+portable rows owned by their package, fill in the `Rust test name` column, and
+leave no portable upstream row without a Rust counterpart. A bucket that
+implements behavior without mapping the upstream test rows is incomplete even
+if its Rust-only tests pass.
 
 ## Package Inventory
 
