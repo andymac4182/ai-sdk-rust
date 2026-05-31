@@ -1,0 +1,27 @@
+[package]
+name = "open-agents-runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Durable runtime contracts for the Rust Open Agents Slack remote agent."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "open_agents_runtime"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+ai-sdk-rust = { path = "../.." }
+ai-sdk-workflow = { path = "../ai-sdk-workflow" }
+open-agents-core = { path = "../open-agents-core" }
+open-agents-sandbox = { path = "../open-agents-sandbox" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"

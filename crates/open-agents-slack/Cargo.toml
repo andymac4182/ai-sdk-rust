@@ -1,0 +1,24 @@
+[package]
+name = "open-agents-slack"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Slack surface contracts for the Rust Open Agents remote agent."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "open_agents_slack"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+chat-sdk-adapter-slack = { path = "../chat-sdk-adapter-slack" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
