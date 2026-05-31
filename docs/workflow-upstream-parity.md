@@ -74,7 +74,7 @@ if its Rust-only tests pass.
 | `packages/astro` (`@workflow/astro`) | `5.0.0-beta.10` | host-framework binding | not-started | none | Source: `src/builder.ts`, `src/index.ts`, `src/plugin.ts`. Tests: none. | Astro integration; defer until portable runtime and builder contracts exist. |
 | `packages/builders` (`@workflow/builders`) | `5.0.0-beta.10` | Rust tooling | not-started | none | Source: `src/base-builder.ts`, `src/build-queue.ts`, `src/workflows-extractor.ts`, `src/swc-esbuild-plugin.ts`, `src/standalone.ts`. Tests: 11 files including `src/discover-entries-esbuild-plugin.test.ts`, `src/get-input-files.test.ts`, `src/workflow-alias.test.ts`. | Build pipeline and transform infrastructure. Needs a separate tooling crate decision before porting behavior. |
 | `packages/cli` (`@workflow/cli`) | `5.0.0-beta.10` | Rust tooling | not-started | none | Source: `bin/run.js`, `src/base.ts`, `src/commands/*.ts`, `src/lib/inspect/*.ts`. Tests: `src/lib/inspect/output.test.ts`. | Command surface for build/dev/start/inspect flows. |
-| `packages/core` (`@workflow/core`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow-core` | Source: `runtime.js`, `runtime.d.ts`, `src/workflow.ts`, `src/step.ts`, `src/runtime/*.ts`, `src/serialization/*.ts`, `src/vm/*.ts`, `e2e/*.ts`. Tests: 52 files including `src/workflow.test.ts`, `src/step.test.ts`, `src/runtime/start.test.ts`, `src/serialization/serialization.test.ts`, `src/vm/index.test.ts`, and e2e tests. | Skeleton crate only. Immediate follow-up: port public workflow/step/runtime contracts and enumerate all 52 upstream test files case-by-case. |
+| `packages/core` (`@workflow/core`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow-core` | Source: `runtime.js`, `runtime.d.ts`, `src/workflow.ts`, `src/step.ts`, `src/runtime/*.ts`, `src/serialization/*.ts`, `src/vm/*.ts`, e2e files, and WF04 primitives/diagnostics files listed below. Tests: 52 files including `src/workflow.test.ts`, `src/step.test.ts`, `src/runtime/start.test.ts`, `src/serialization/serialization.test.ts`, `src/vm/index.test.ts`, and e2e tests. | WF04 verified 161 portable primitive/diagnostic rows in `workflow-core`; package remains in-progress because runtime execution, serialization codecs, workflow/step APIs, VM/e2e, and remaining needs-review rows are still unported. |
 | `packages/docs-typecheck` (`@workflow/docs-typecheck`) | `0.0.1-beta.12` | docs/test-only | not-started | none | Source: `scripts/find-incomplete.ts`, `src/extractor.ts`, `src/type-checker.ts`. Tests: `src/__tests__/docs.test.ts`, `src/__tests__/sitemap-guard.test.ts`. | Documentation validation tooling; not part of runtime parity. |
 | `packages/errors` (`@workflow/errors`) | `5.0.0-beta.6` | portable Rust runtime | in-progress | `crates/workflow-errors` | Source: `src/index.ts`, `src/ansi.ts`, `src/error-codes.ts`, `src/internal-chalk.ts`. Tests: 6 files including `src/fatal-error.test.ts`, `src/serialization-error.test.ts`, `src/runtime-decryption-error.test.ts`. | Skeleton crate only. Immediate follow-up: port error taxonomy and framed-message behavior before core error handling lands. |
 | `packages/nest` (`@workflow/nest`) | `5.0.0-beta.10` | host-framework binding | not-started | none | Source: `src/index.ts`, `src/builder.ts`, `src/cli.ts`, `src/workflow.controller.ts`, `src/workflow.module.ts`. Tests: `src/cjs-rewrite.test.ts`, `src/parse-module-type.test.ts`. | NestJS integration; defer until runtime and builder crates exist. |
@@ -104,7 +104,7 @@ if its Rust-only tests pass.
 | Rust crate | Upstream package | Status | Scope in this pass |
 | --- | --- | --- | --- |
 | `workflow` | `packages/workflow` (`workflow`) | in-progress | Facade crate with source metadata and re-export placeholders for foundational crates. |
-| `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | Core runtime ownership marker with source metadata only. |
+| `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | WF04 adds core primitives, schemas, utilities, diagnostics, and 161 verified upstream row counterparts; runtime execution, serialization codecs, workflow/step APIs, VM/e2e, and remaining needs-review rows are still pending. |
 | `workflow-errors` | `packages/errors` (`@workflow/errors`) | in-progress | Error package ownership marker with source metadata only. |
 | `workflow-utils` | `packages/utils` (`@workflow/utils`) | in-progress | Utility package ownership marker with source metadata only. |
 | `workflow-world` | `packages/world` (`@workflow/world`) | in-progress | World interface ownership marker with source metadata only. |
@@ -122,3 +122,40 @@ if its Rust-only tests pass.
    contracts to start `workflow-world-local`.
 5. Keep `workflow` as a facade; behavior should land in the matching
    package-owned crates and only be re-exported from the facade.
+
+## WF04 Core Primitives, Schemas, Utilities, And Diagnostics
+
+Bucket branch `codex/workflow-sdk-04-core-primitives` owns the portable upstream
+rows for these `packages/core/src` files:
+
+| Upstream test file | Rows | Verified portable rows | JS-only rows | Rust test name pattern |
+| --- | --- | --- | --- | --- |
+| `capabilities.test.ts` | 14 | 14 | 0 | `wf04_capabilities_row_NNN` |
+| `classify-error.test.ts` | 14 | 14 | 0 | `wf04_classify_error_row_NNN` |
+| `context-errors.test.ts` | 16 | 15 | 1 | `wf04_context_errors_row_NNN` |
+| `define-hook.test.ts` | 3 | 3 | 0 | `wf04_define_hook_row_NNN` |
+| `describe-error.test.ts` | 30 | 30 | 0 | `wf04_describe_error_row_NNN` |
+| `global.test.ts` | 23 | 23 | 0 | `wf04_global_row_NNN` |
+| `log-format.test.ts` | 8 | 8 | 0 | `wf04_log_format_row_NNN` |
+| `logger.test.ts` | 12 | 12 | 0 | `wf04_logger_row_NNN` |
+| `schemas.test.ts` | 2 | 2 | 0 | `wf04_schemas_row_NNN` |
+| `set-attributes.test.ts` | 5 | 5 | 0 | `wf04_set_attributes_row_NNN` |
+| `source-map.test.ts` | 1 | 1 | 0 | `wf04_source_map_row_NNN` |
+| `types.test.ts` | 11 | 11 | 0 | `wf04_types_row_NNN` |
+| `util.test.ts` | 23 | 23 | 0 | `wf04_utility_row_NNN` |
+| **Total** | **162** | **161** | **1** |  |
+
+The single JS-only row is
+`packages/core/src/context-errors.test.ts:209`, which asserts V8
+`Error.captureStackTrace` stack-frame rewriting. Rust has no equivalent V8
+stack-frame redirection behavior; Rust reporting uses native call sites and
+backtraces instead.
+
+Implementation scope landed in `crates/workflow-core` for capabilities,
+classification, context errors, hook schema validation/resume wiring,
+run-error descriptions, workflow suspension primitives, log formatting,
+structured logger metadata merging, invoke payload schemas, host-side
+attribute normalization/posting seams, inline source-map extraction failure
+behavior, abort-error helpers, and queue/stream ID utilities. A minimal
+`workflow-errors` taxonomy was added only to support the core diagnostic
+surfaces above.

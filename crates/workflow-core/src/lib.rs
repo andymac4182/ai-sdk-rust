@@ -6,6 +6,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capabilities;
+pub mod classify_error;
+pub mod context_errors;
+pub mod define_hook;
+pub mod describe_error;
+pub mod global;
+pub mod log_format;
+pub mod logger;
+pub mod schemas;
+pub mod set_attributes;
+pub mod source_map;
+pub mod types;
+pub mod util;
+
 pub use workflow_errors as errors;
 pub use workflow_world as world;
 
