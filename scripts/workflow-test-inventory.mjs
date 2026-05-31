@@ -53,6 +53,192 @@ const toolingPackages = new Set([
   'vite',
 ]);
 const typeSystemPackages = new Set(['typescript-plugin', 'tsconfig']);
+const webSharedPortableContracts = new Map(
+  [
+    [
+      'packages/web-shared/test/event-list-duration.test.ts',
+      'uses the first step_started, not the last, for steps with retries',
+      'web_shared_event_duration_uses_first_step_started_not_last_for_retries',
+    ],
+    [
+      'packages/web-shared/test/event-list-duration.test.ts',
+      'handles events in descending order (newest first)',
+      'web_shared_event_duration_handles_descending_order',
+    ],
+    [
+      'packages/web-shared/test/event-list-duration.test.ts',
+      'still works for a step with a single start (no retry)',
+      'web_shared_event_duration_handles_single_start_without_retry',
+    ],
+    [
+      'packages/web-shared/test/event-list-duration.test.ts',
+      'falls back to the started time when no created event is seen',
+      'web_shared_event_duration_falls_back_to_started_time_without_created_event',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'accepts full step IDs',
+      'web_shared_exact_id_accepts_full_step_ids',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'accepts full wait IDs',
+      'web_shared_exact_id_accepts_full_wait_ids',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'accepts full hook IDs',
+      'web_shared_exact_id_accepts_full_hook_ids',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'accepts full event IDs',
+      'web_shared_exact_id_accepts_full_event_ids',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'normalizes lowercase ULID bodies to uppercase',
+      'web_shared_exact_id_normalizes_lowercase_ulid_bodies',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'trims leading and trailing whitespace',
+      'web_shared_exact_id_trims_leading_and_trailing_whitespace',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'rejects partial IDs and run IDs',
+      'web_shared_exact_id_rejects_partial_ids_and_run_ids',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'rejects IDs with illegal Crockford characters or wrong length',
+      'web_shared_exact_id_rejects_illegal_crockford_characters_or_wrong_length',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'matches known workflow ID prefixes',
+      'web_shared_exact_id_looks_like_workflow_id_matches_known_prefixes',
+    ],
+    [
+      'packages/web-shared/test/exact-event-search-id.test.ts',
+      'does not match free-text search input',
+      'web_shared_exact_id_looks_like_workflow_id_rejects_free_text',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'groups step events with no run-level events for v1',
+      'web_shared_trace_v1_groups_step_events_without_run_level_events',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'builds a valid trace for a completed v1 run with step events',
+      'web_shared_trace_v1_builds_completed_run_with_step_events',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'builds a valid trace for a failed v1 run',
+      'web_shared_trace_v1_builds_failed_run',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'builds a valid trace for a v1 run with no events at all',
+      'web_shared_trace_v1_builds_run_with_no_events',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'builds step spans from v1 events (no step_created)',
+      'web_shared_trace_v1_builds_step_spans_without_step_created',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'derives step status from v1 events without step_created',
+      'web_shared_trace_v1_derives_step_status_without_step_created',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'uses correlationId for step span when stepName is unavailable',
+      'web_shared_trace_v1_uses_correlation_id_when_step_name_is_unavailable',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'uses resumeAt for pending sleep span duration',
+      'web_shared_trace_v1_uses_resume_at_for_pending_sleep_duration',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'caps pending sleep spans at the latest known event before resumeAt',
+      'web_shared_trace_v1_caps_pending_sleep_spans_at_latest_known_event_before_resume_at',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'shows "succeeded" segment for a completed v1 run (no run_completed event)',
+      'web_shared_trace_v1_run_segments_show_succeeded_for_completed_v1_run',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'shows "failed" segment for a failed v1 run (no run_failed event)',
+      'web_shared_trace_v1_run_segments_show_failed_for_failed_v1_run',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'shows "running" segment for an in-progress v1 run',
+      'web_shared_trace_v1_run_segments_show_running_for_in_progress_v1_run',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'shows queued + succeeded for a v1 run with startedAt',
+      'web_shared_trace_v1_run_segments_show_queued_and_succeeded_with_started_at',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'v2 baseline: shows "succeeded" from run_completed event',
+      'web_shared_trace_v1_run_segments_v2_baseline_succeeds_from_run_completed_event',
+    ],
+    [
+      'packages/web-shared/test/trace-builder-v1.test.ts',
+      'v2 mid-pagination: shows "running" when run_completed has not loaded yet',
+      'web_shared_trace_v1_run_segments_v2_mid_pagination_runs_until_completion_event_loaded',
+    ],
+  ].map(([file, caseName, rustTestName]) => [
+    `${file}\u0000${caseName}`,
+    rustTestName,
+  ])
+);
+
+const hostFrameworkNotes = new Map([
+  [
+    'nest',
+    'NestJS adapter build output and tsconfig parsing; no Rust runtime counterpart unless a Nest host adapter is introduced.',
+  ],
+  [
+    'next',
+    'Next.js builder/env/webpack integration; no Rust runtime counterpart unless a Next host adapter is introduced.',
+  ],
+  [
+    'nitro',
+    'Nitro virtual handler, functionRule, and externals integration; no Rust runtime counterpart unless a Nitro host adapter is introduced.',
+  ],
+  [
+    'sveltekit',
+    'SvelteKit/Vercel config integration; no Rust runtime counterpart unless a SvelteKit host adapter is introduced.',
+  ],
+]);
+
+const docsOnlyNotes = new Map([
+  [
+    'docs-typecheck',
+    'Documentation markdown, code-sample, and sitemap validation tooling; outside Rust runtime parity.',
+  ],
+  [
+    'vitest',
+    'Vitest harness setup/options behavior for JavaScript tests; outside Rust runtime parity.',
+  ],
+  [
+    'world-testing',
+    'JavaScript world test harness and generated fixture package; outside Rust runtime parity.',
+  ],
+]);
 
 function fail(message) {
   console.error(message);
@@ -398,25 +584,44 @@ function classify(row, source) {
       note: 'TypeScript type-system assertion; needs a Rust compile-test analogue or explicit impossible note.',
     };
   }
+  const portableWebSharedContract = webSharedPortableContracts.get(
+    `${row.file}\u0000${row.caseName}`
+  );
+  if (portableWebSharedContract) {
+    return {
+      portability: 'portable',
+      status: 'ported',
+      rustOwner: 'workflow-world',
+      rustTestName: portableWebSharedContract,
+      note: 'Portable workflow event/trace data contract ported in workflow-world.',
+    };
+  }
   if (hostFrameworkPackages.has(row.packageName)) {
     return {
       portability: 'js-only-documented',
       status: 'js-only-documented',
-      note: 'JavaScript framework binding; no Rust runtime counterpart unless a future host adapter is defined.',
+      note:
+        hostFrameworkNotes.get(row.packageName) ??
+        'JavaScript framework adapter behavior; no Rust runtime counterpart unless a host adapter is introduced.',
     };
   }
   if (webOnlyPackages.has(row.packageName)) {
     return {
       portability: 'js-only-documented',
       status: 'js-only-documented',
-      note: 'Browser/UI behavior; no Rust runtime counterpart unless a future UI crate is defined.',
+      note:
+        row.packageName === 'web-shared'
+          ? 'React/UI display, browser hydration, or typed-array inspector behavior; portable trace/event data rows are mapped separately to workflow-world.'
+          : 'React dashboard, browser fetch, and client hook behavior; API data-shape parity belongs to the owning runtime/world crates.',
     };
   }
   if (docsOnlyPackages.has(row.packageName)) {
     return {
       portability: 'js-only-documented',
       status: 'js-only-documented',
-      note: 'Documentation or test harness package outside the Rust runtime parity target.',
+      note:
+        docsOnlyNotes.get(row.packageName) ??
+        'Documentation or JavaScript test harness package outside Rust runtime parity.',
     };
   }
   if (toolingPackages.has(row.packageName)) {
@@ -584,8 +789,8 @@ function renderInventory(rows, testFiles) {
     row.caseName,
     row.declaration,
     row.portability,
-    rustOwners.get(row.packageName) ?? 'unassigned',
-    '',
+    row.rustOwner ?? rustOwners.get(row.packageName) ?? 'unassigned',
+    row.rustTestName ?? '',
     row.status,
     row.note,
   ]);
