@@ -51,6 +51,8 @@ members = [
     "crates/workflow-utils",
     "crates/workflow-world",
     "crates/workflow-world-local",
+    "crates/workflow-world-postgres",
+    "crates/workflow-world-vercel",
 ]
 resolver = "3"
 

@@ -1,0 +1,25 @@
+[package]
+name = "workflow-world-postgres"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust port of the standalone Vercel Workflow world-postgres package."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "workflow_world_postgres"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+base64 = "0.22"
+serde_json = "1.0.149"
+workflow-world = { path = "../workflow-world" }
+
