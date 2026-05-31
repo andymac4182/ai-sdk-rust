@@ -3,7 +3,7 @@ name = "open-agents-sandbox"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85.0"
-description = "Sandbox boundary contracts for the Rust Open Agents Slack remote agent."
+description = "Rust sandbox boundary for Open Agents remote-agent execution."
 license = "Apache-2.0"
 repository = "https://github.com/andymac4182/ai-sdk-rust"
 readme = "../../README.md"
@@ -11,6 +11,10 @@ readme = "../../README.md"
 [lib]
 name = "open_agents_sandbox"
 path = "src/lib.rs"
+
+[features]
+default = []
+vercel-sandbox = []
 
 [lints.rust]
 unsafe_code = "forbid"
