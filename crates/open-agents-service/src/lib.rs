@@ -6,10 +6,23 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
+pub mod health;
+pub mod local_fixture;
+
 pub use open_agents_core as core;
 pub use open_agents_runtime as runtime;
 pub use open_agents_sandbox as sandbox;
 pub use open_agents_slack as slack;
+
+pub use config::{ConfigError, OpenAgentsServiceConfig, SandboxMode, StateStore};
+pub use health::{
+    HealthCheck, HealthError, HealthSnapshot, bind_health_listener, serve_health_checks,
+};
+pub use local_fixture::{
+    FixtureError, FixtureHarness, FixtureOutbound, FixtureOutboundKind, FixtureReply, FixtureRun,
+    FixtureRunStatus, SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL,
+};
 
 /// Binary name for the Slack remote-agent service.
 pub const SERVICE_NAME: &str = "open-agents-slack";
