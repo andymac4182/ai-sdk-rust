@@ -4,6 +4,7 @@
 
 pub mod chat_message_bridge;
 pub mod chat_transport;
+pub mod durable_run;
 pub mod operational_safety;
 pub mod stream_text_iterator;
 pub mod workflow_agent;
@@ -23,6 +24,12 @@ pub use chat_transport::{
     WorkflowChatRequest, WorkflowChatRequestMethod, WorkflowChatResponse, WorkflowChatTransport,
     WorkflowChatTransportClient, WorkflowChatTransportError, WorkflowChatTransportOptions,
     WorkflowChatTransportResult, WorkflowChatTrigger,
+};
+pub use durable_run::{
+    DurableRunAgent, DurableRunAgentContext, DurableRunAgentError, DurableRunAgentOutput,
+    DurableRunEngine, DurableRunError, DurableRunEvent, DurableRunEventPayload,
+    DurableRunExecution, DurableRunPause, DurableRunRecord, DurableRunResume,
+    DurableRunStartOptions, DurableRunState, DurableRunStore, InMemoryDurableRunStore,
 };
 pub use operational_safety::{
     ApprovalAction, ApprovalClassification, ApprovalReason, CancellationStatus,

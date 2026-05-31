@@ -693,6 +693,7 @@ impl WorkflowAgent {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_calls(
         &self,
         yield_value: &crate::StreamTextIteratorYieldValue,
@@ -1828,6 +1829,7 @@ async fn execute_local_tool(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_local_tool_with_callbacks(
     tool: &Tool,
     tool_call: &ParsedToolCall,
@@ -1997,6 +1999,7 @@ fn collect_workflow_tool_approvals(
     (approved, denied)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_tool_approvals_before_stream(
     prompt: &mut WorkflowPrompt,
     tools: &BTreeMap<String, Tool>,
