@@ -11,6 +11,10 @@ const defaultSourceRoot =
   '/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/workflow/main';
 const sourceRoot = process.env.WORKFLOW_UPSTREAM_PATH ?? defaultSourceRoot;
 const outputPath = path.join(repositoryRoot, 'docs/workflow-test-inventory.md');
+const overridesPath = path.join(
+  repositoryRoot,
+  'docs/workflow-test-overrides.json'
+);
 const sourceHead = '1ee63b870afbf9754eb1022b1bb5f02d0ab042f9';
 const inventoryDate = '2026-06-01';
 
@@ -57,6 +61,46 @@ const typeSystemPackages = new Set(['typescript-plugin', 'tsconfig']);
 function fail(message) {
   console.error(message);
   process.exit(1);
+}
+
+function rowKey(row) {
+  return [
+    row.packageName,
+    row.file,
+    row.line,
+    row.suitePath || '(root)',
+    row.caseName,
+    row.declaration,
+  ].join('\u001f');
+}
+
+function loadOverrides() {
+  if (!fs.existsSync(overridesPath)) {
+    return new Map();
+  }
+  const raw = JSON.parse(fs.readFileSync(overridesPath, 'utf8'));
+  if (!Array.isArray(raw)) {
+    fail(`${path.relative(repositoryRoot, overridesPath)} must contain an array`);
+  }
+  const overrides = new Map();
+  for (const override of raw) {
+    const required = ['packageName', 'file', 'line', 'suite', 'caseName', 'declaration'];
+    for (const field of required) {
+      if (!(field in override)) {
+        fail(`Override is missing required field ${field}`);
+      }
+    }
+    const key = [
+      override.packageName,
+      override.file,
+      override.line,
+      override.suite,
+      override.caseName,
+      override.declaration,
+    ].join('\u001f');
+    overrides.set(key, override);
+  }
+  return overrides;
 }
 
 function walk(directory, files = []) {
@@ -565,7 +609,7 @@ function summarize(rows, testFiles) {
   );
 }
 
-function renderInventory(rows, testFiles) {
+function renderInventory(rows, testFiles, overrides) {
   const summaryRows = summarize(rows, testFiles).map((summary) => [
     summary.packageId,
     summary.files,
@@ -576,19 +620,37 @@ function renderInventory(rows, testFiles) {
     summary.typeSystem,
   ]);
 
-  const caseRows = rows.map((row) => [
-    row.packageName,
-    row.file,
-    row.line,
-    row.suitePath || '(root)',
-    row.caseName,
-    row.declaration,
-    row.portability,
-    rustOwners.get(row.packageName) ?? 'unassigned',
-    '',
-    row.status,
-    row.note,
-  ]);
+  const seenOverrideKeys = new Set();
+  const caseRows = rows.map((row) => {
+    const override = overrides.get(rowKey(row));
+    if (override) {
+      seenOverrideKeys.add(rowKey(row));
+    }
+    return [
+      row.packageName,
+      row.file,
+      row.line,
+      row.suitePath || '(root)',
+      row.caseName,
+      row.declaration,
+      override?.portability ?? row.portability,
+      override?.rustOwner ?? rustOwners.get(row.packageName) ?? 'unassigned',
+      override?.rustTestName ?? '',
+      override?.status ?? row.status,
+      override?.notes ?? row.note,
+    ];
+  });
+
+  for (const overrideKey of overrides.keys()) {
+    if (!seenOverrideKeys.has(overrideKey)) {
+      fail(
+        `${path.relative(
+          repositoryRoot,
+          overridesPath
+        )} contains an override that does not match the current upstream inventory`
+      );
+    }
+  }
 
   return `# Workflow SDK Test Inventory
 
@@ -650,7 +712,8 @@ const testFiles = walk(path.join(sourceRoot, 'packages')).sort((left, right) =>
   left.localeCompare(right)
 );
 const rows = testFiles.flatMap(parseFile);
-const markdown = renderInventory(rows, testFiles);
+const overrides = loadOverrides();
+const markdown = renderInventory(rows, testFiles, overrides);
 
 if (process.argv.includes('--check')) {
   const current = fs.existsSync(outputPath)
