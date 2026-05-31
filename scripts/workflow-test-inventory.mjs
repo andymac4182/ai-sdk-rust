@@ -448,6 +448,414 @@ function classify(row, source) {
   return { portability: 'portable', status: 'not-started', note: row.eachNote };
 }
 
+function ported(rustTestName, note = '') {
+  return {
+    portability: 'portable',
+    status: 'ported',
+    rustTestName,
+    note,
+  };
+}
+
+function jsOnly(note) {
+  return {
+    portability: 'js-only-documented',
+    status: 'js-only-documented',
+    rustTestName: '',
+    note,
+  };
+}
+
+function bucket05Override(row) {
+  if (row.packageName !== 'core') return undefined;
+
+  const file = row.file;
+  const suite = row.suitePath;
+  const testCase = row.caseName;
+
+  if (file === 'packages/core/src/async-deserialization-ordering.test.ts') {
+    if (testCase.includes('sequential step promises')) {
+      return ported(
+        'async_deserialization_ordering_test_resolves_sequential_step_promises_in_order'
+      );
+    }
+    if (testCase.includes('hook payloads')) {
+      return ported(
+        'async_deserialization_ordering_test_resolves_hook_payloads_in_event_log_order'
+      );
+    }
+    if (testCase.includes('mixed step_completed and step_failed')) {
+      return ported(
+        'async_deserialization_ordering_test_resolves_mixed_step_completed_and_failed_in_order'
+      );
+    }
+    if (testCase.includes('many concurrent steps')) {
+      return ported(
+        'async_deserialization_ordering_test_handles_many_concurrent_steps_in_correct_order'
+      );
+    }
+    if (testCase.includes('sleep and step promises')) {
+      return ported(
+        'async_deserialization_ordering_test_resolves_sleep_and_step_promises_in_event_log_order'
+      );
+    }
+    if (testCase.includes('interleaved')) {
+      return ported(
+        'async_deserialization_ordering_test_resolves_interleaved_step_functions_in_event_log_order'
+      );
+    }
+    return ported(
+      'async_deserialization_ordering_test_resolves_step_promises_in_event_log_order'
+    );
+  }
+
+  if (file === 'packages/core/src/encryption.test.ts') {
+    if (suite.includes('round-trip')) {
+      return ported('encryption_test_encrypt_decrypt_returns_original_plaintext');
+    }
+    if (suite.includes('importKey')) {
+      return ported(
+        'encryption_test_import_key_rejects_keys_that_are_not_exactly_32_bytes'
+      );
+    }
+    if (testCase.includes('wrong key')) {
+      return ported(
+        'encryption_test_decrypt_failure_cases_wrong_key_is_runtime_decryption_error'
+      );
+    }
+    if (suite.includes('encrypt failure cases')) {
+      return ported(
+        'encryption_test_encrypt_failure_cases_wrap_underlying_crypto_call'
+      );
+    }
+    return ported(
+      'encryption_test_decrypt_failure_cases_use_runtime_decryption_error'
+    );
+  }
+
+  if (file === 'packages/core/src/serialization-format.test.ts') {
+    if (suite.startsWith('encodeWithFormatPrefix')) {
+      return testCase.includes('non-Uint8Array')
+        ? ported('serialization_serialization_test_encode_with_format_prefix_passes_legacy_values')
+        : ported('serialization_serialization_test_encode_with_format_prefix_prepends_prefix');
+    }
+    if (suite.startsWith('decodeFormatPrefix')) {
+      if (testCase.includes('shorter')) {
+        return ported('serialization_serialization_test_decode_format_prefix_rejects_short_or_invalid_bytes');
+      }
+      return testCase.includes('unknown')
+        ? ported('serialization_format_test_decode_known_format_prefix_rejects_unknown_format')
+        : ported('serialization_serialization_test_decode_format_prefix_decodes_bytes_and_legacy_values');
+    }
+    if (suite.startsWith('hydrateData')) {
+      if (testCase.includes('unsupported')) {
+        return ported('serialization_format_test_hydrate_data_passes_plain_values_and_rejects_unknown_prefix');
+      }
+      if (testCase.includes('encrypted')) {
+        return ported('serialization_format_test_encrypted_data_handling_passes_through_or_decrypts');
+      }
+      return ported('serialization_format_test_hydrate_data_parses_prefixed_and_legacy_values');
+    }
+    if (suite.startsWith('hydrateResourceIO')) {
+      if (testCase.includes('null/undefined') || testCase.includes('parse errors')) {
+        return ported('serialization_format_test_hydrate_resource_io_handles_null_and_parse_errors_gracefully');
+      }
+      if (testCase.includes('encrypted')) {
+        return ported('serialization_format_test_encrypted_data_handling_passes_through_or_decrypts');
+      }
+      if (testCase.includes('executionContext')) {
+        return ported('serialization_format_test_hydrate_resource_io_hydrates_step_run_event_and_hook_fields');
+      }
+      return ported('serialization_format_test_hydrate_resource_io_hydrates_step_run_event_and_hook_fields');
+    }
+    if (suite.startsWith('observabilityRevivers')) {
+      return ported(
+        'serialization_format_test_observability_revivers_convert_stream_step_class_and_workflow_refs',
+        'Rust port covers the serialized display/ref payload, not JS constructor identity.'
+      );
+    }
+    if (suite.startsWith('isStreamRef') || suite.startsWith('isStreamId')) {
+      return ported('serialization_format_test_stream_ref_stream_id_extract_and_truncate_helpers');
+    }
+    if (suite.startsWith('extractStreamIds') || suite.startsWith('truncateId')) {
+      return ported('serialization_format_test_stream_ref_stream_id_extract_and_truncate_helpers');
+    }
+    if (suite.includes('encrypted data handling')) {
+      if (suite.includes('isEncryptedData')) {
+        return ported('serialization_format_test_is_encrypted_data_detects_only_encr_prefixed_bytes');
+      }
+      if (suite.includes('isExpiredStub')) {
+        return ported('serialization_format_test_is_expired_stub_matches_exact_server_shapes');
+      }
+      return ported('serialization_format_test_encrypted_data_handling_passes_through_or_decrypts');
+    }
+    if (suite.includes('custom class instances')) {
+      return ported(
+        'serialization_format_test_observability_revivers_convert_stream_step_class_and_workflow_refs',
+        'Rust port preserves class-instance reference data, not JS class identity.'
+      );
+    }
+  }
+
+  if (file === 'packages/core/src/serialization/serialization.test.ts') {
+    if (suite.startsWith('isFormatPrefix')) {
+      return testCase.includes('accept') || testCase.includes('boundary')
+        ? ported('serialization_serialization_test_is_format_prefix_accepts_valid_prefixes')
+        : ported('serialization_serialization_test_is_format_prefix_rejects_invalid_prefixes');
+    }
+    if (suite.startsWith('SerializationFormat constants')) {
+      return ported('serialization_serialization_test_serialization_format_constants_are_valid');
+    }
+    if (suite.startsWith('encodeWithFormatPrefix')) {
+      if (testCase.includes('non-Uint8Array')) {
+        return ported('serialization_serialization_test_encode_with_format_prefix_passes_legacy_values');
+      }
+      if (testCase.includes('empty') || testCase.includes('large')) {
+        return ported('serialization_serialization_test_encode_with_format_prefix_handles_empty_and_large_payloads');
+      }
+      return ported('serialization_serialization_test_encode_with_format_prefix_prepends_prefix');
+    }
+    if (suite.startsWith('decodeFormatPrefix')) {
+      if (testCase.includes('too short') || testCase.includes('invalid')) {
+        return ported('serialization_serialization_test_decode_format_prefix_rejects_short_or_invalid_bytes');
+      }
+      return ported('serialization_serialization_test_decode_format_prefix_decodes_bytes_and_legacy_values');
+    }
+    if (suite.startsWith('peekFormatPrefix') || suite.startsWith('isEncrypted')) {
+      return ported('serialization_serialization_test_peek_format_prefix_and_is_encrypted_match_upstream');
+    }
+    if (suite.startsWith('encrypt')) {
+      return ported('serialization_serialization_test_encrypt_decrypt_layer_matches_encr_contract');
+    }
+    if (suite.startsWith('decrypt')) {
+      return testCase.includes('auth-tag')
+        ? ported('serialization_serialization_test_decrypt_layer_requires_key_and_attaches_encr_prefix')
+        : ported('serialization_serialization_test_encrypt_decrypt_layer_matches_encr_contract');
+    }
+    if (suite.startsWith('common reducers')) {
+      if (testCase.includes('ArrayBuffer')) {
+        return ported('serialization_serialization_test_common_reducers_reduce_arraybuffer_and_zero_length');
+      }
+      if (testCase.includes('typed arrays')) {
+        return ported('serialization_serialization_test_common_reducers_reduce_typed_arrays');
+      }
+      if (testCase.includes('BigInt') || testCase.includes('Date') || testCase.includes('non-bigint')) {
+        return ported('serialization_serialization_test_common_reducers_reduce_scalar_special_values');
+      }
+      if (testCase.includes('Error')) {
+        return ported('serialization_serialization_test_common_revivers_round_trip_error_payloads');
+      }
+      return ported('serialization_serialization_test_common_reducers_reduce_maps_sets_headers_urls_and_regex');
+    }
+    if (suite.startsWith('common revivers')) {
+      if (testCase.includes('Error')) {
+        return ported('serialization_serialization_test_common_revivers_round_trip_error_payloads');
+      }
+      return ported('serialization_serialization_test_common_revivers_round_trip_portable_special_values');
+    }
+    if (suite.startsWith('class reducers') || suite.startsWith('class revivers')) {
+      return jsOnly(
+        'JavaScript constructor registry and static symbol methods; Rust port covers class reference payloads only.'
+      );
+    }
+    if (suite.startsWith('step function reducer') || suite.startsWith('step function reviver')) {
+      return jsOnly(
+        'JavaScript function/proxy identity and bind semantics; Rust port covers typed step-function reference payloads only.'
+      );
+    }
+    if (suite.startsWith('devalue codec')) {
+      if (testCase.includes('StepFunction')) {
+        return ported(
+          'serialization_serialization_test_devalue_codec_step_function_mode_boundaries',
+          'Rust counterpart verifies typed reference payload boundaries, not callable JS functions.'
+        );
+      }
+      if (testCase.includes('primitives')) {
+        return ported('serialization_serialization_test_devalue_codec_round_trips_primitives_in_all_modes');
+      }
+      if (testCase.includes('Date') || testCase.includes('Map') || testCase.includes('Set') || testCase.includes('nested')) {
+        return ported('serialization_serialization_test_devalue_codec_round_trips_common_special_values');
+      }
+      return ported('serialization_serialization_test_devalue_codec_supports_legacy_and_bytes_output');
+    }
+    if (suite.startsWith('workflow.serialize')) {
+      if (testCase.includes('non-serializable')) {
+        return jsOnly('Raw JavaScript function values do not have a Rust runtime value analogue.');
+      }
+      if (testCase.includes('legacy')) {
+        return ported('serialization_serialization_test_workflow_deserialize_legacy_non_binary_data');
+      }
+      if (testCase.includes('unsupported format')) {
+        return ported('serialization_serialization_test_workflow_deserialize_rejects_unsupported_format_prefix');
+      }
+      return ported('serialization_serialization_test_workflow_serialize_deserialize_round_trips_values');
+    }
+    if (suite.startsWith('step.serialize') || suite.startsWith('client.serialize')) {
+      if (testCase.includes('encrypted data without key')) {
+        return ported('serialization_serialization_test_step_and_client_modes_reject_encrypted_data_without_key');
+      }
+      if (testCase.includes('encryption')) {
+        return ported('serialization_serialization_test_step_and_client_modes_round_trip_with_encryption');
+      }
+      if (testCase.includes('legacy')) {
+        return ported('serialization_serialization_test_workflow_deserialize_legacy_non_binary_data');
+      }
+      return ported('serialization_serialization_test_workflow_serialize_deserialize_round_trips_values');
+    }
+    if (suite.startsWith('cross-mode serialization')) {
+      return ported('serialization_serialization_test_cross_mode_serialization_is_compatible');
+    }
+    if (suite.startsWith('edge cases')) {
+      if (testCase.includes('circular references')) {
+        return jsOnly('JavaScript object identity/cycles are devalue runtime semantics, not portable Rust value identity.');
+      }
+      return ported('serialization_serialization_test_edge_cases_cover_undefined_deep_mixed_empty_and_bigint_values');
+    }
+  }
+
+  if (file === 'packages/core/src/serialization.test.ts') {
+    if (suite.startsWith('getStreamType')) {
+      return jsOnly('WHATWG ReadableStream controller type inspection is JavaScript runtime-specific.');
+    }
+    if (suite.startsWith('workflow arguments')) {
+      if (/(WritableStream|ReadableStream|Response|Request)/.test(testCase)) {
+        return jsOnly('WHATWG stream/fetch object identity and body transfer semantics are JavaScript runtime-specific.');
+      }
+      if (testCase.includes('unsupported type')) {
+        return jsOnly('Unsupported JavaScript values such as raw functions have no Rust runtime value analogue.');
+      }
+      return ported('serialization_serialization_test_workflow_serialize_deserialize_round_trips_values');
+    }
+    if (suite.startsWith('workflow return value') || suite.startsWith('step arguments') || suite.startsWith('step return value')) {
+      return jsOnly('Unsupported raw JavaScript function/symbol values have no Rust runtime value analogue.');
+    }
+    if (suite.startsWith('cross-VM Error serialization')) {
+      return jsOnly('Cross-realm Error identity depends on Node VM globals; Rust port preserves portable error payloads.');
+    }
+    if (suite.startsWith('step function serialization') || suite.startsWith('WorkflowFunction serialization')) {
+      return jsOnly('Callable JavaScript function/proxy identity is not portable; Rust port covers reference payload data only.');
+    }
+    if (suite.startsWith('custom class serialization') || suite.startsWith('custom Error subclass serialization')) {
+      return jsOnly('JavaScript class constructors and WORKFLOW_SERIALIZE/WORKFLOW_DESERIALIZE static methods are not portable Rust runtime semantics.');
+    }
+    if (suite.startsWith('built-in Error subclass serialization') || suite.startsWith('DOMException serialization') || suite.startsWith('Workflow error serialization')) {
+      if (testCase.includes('VM')) {
+        return jsOnly('Cross-VM constructor identity depends on Node VM globals; Rust port preserves portable error payload data.');
+      }
+      return ported('serialization_serialization_test_common_revivers_round_trip_error_payloads');
+    }
+    if (suite.startsWith('dehydrate/hydrateStepError') || suite.startsWith('dehydrate/hydrateRunError')) {
+      return ported('serialization_test_format_prefix_system_handles_all_dehydrate_hydrate_pairs');
+    }
+    if (suite.startsWith('encryption-failure propagation')) {
+      return ported('serialization_serialization_test_decrypt_layer_requires_key_and_attaches_encr_prefix');
+    }
+    if (suite.startsWith('format prefix system')) {
+      if (testCase.includes('unknown') || testCase.includes('too short')) {
+        return ported('serialization_serialization_test_decode_format_prefix_rejects_short_or_invalid_bytes');
+      }
+      return ported('serialization_test_format_prefix_system_handles_all_dehydrate_hydrate_pairs');
+    }
+    if (suite.startsWith('decodeFormatPrefix legacy compatibility')) {
+      return ported('serialization_test_decode_format_prefix_legacy_compatibility_handles_plain_values');
+    }
+    if (suite.startsWith('getSerializeStream')) {
+      if (testCase.includes('length framing')) {
+        return ported('serialization_test_get_serialize_stream_frames_each_chunk_with_format_prefix_and_length');
+      }
+      if (testCase.includes('concatenated')) {
+        return ported('serialization_test_get_serialize_stream_frames_parse_and_coalesce');
+      }
+      if (testCase.includes('split')) {
+        return ported('serialization_test_get_deserialize_stream_handles_arbitrary_frame_splits');
+      }
+      return ported('serialization_test_get_serialize_stream_frames_parse_and_coalesce');
+    }
+    if (suite.startsWith('getDeserializeStream legacy fallback')) {
+      return ported('serialization_test_get_deserialize_stream_legacy_fallback_parses_newline_json');
+    }
+    if (suite.startsWith('stream encryption round-trip')) {
+      if (testCase.includes('without a key') || testCase.includes('tampered')) {
+        return ported('serialization_test_stream_encryption_errors_without_key_or_when_tampered');
+      }
+      if (testCase.includes('not encrypt')) {
+        return ported('serialization_test_stream_encryption_does_not_encrypt_without_key');
+      }
+      if (testCase.includes('concatenated') || testCase.includes('split') || testCase.includes('large')) {
+        return ported('serialization_test_stream_encryption_handles_concatenated_split_and_large_payloads');
+      }
+      return ported('serialization_test_stream_encryption_round_trip_frames_with_encr_prefix');
+    }
+    if (suite.startsWith('encryption integration')) {
+      if (testCase.includes('wrong key') || testCase.includes('without a key')) {
+        return ported('serialization_serialization_test_step_and_client_modes_reject_encrypted_data_without_key');
+      }
+      if (testCase.includes('not encrypt')) {
+        return ported('serialization_test_stream_encryption_does_not_encrypt_without_key');
+      }
+      return ported('serialization_serialization_test_step_and_client_modes_round_trip_with_encryption');
+    }
+    if (suite.startsWith('encrypt/decrypt primitives')) {
+      if (testCase.includes('reject keys')) {
+        return ported('encryption_test_import_key_rejects_keys_that_are_not_exactly_32_bytes');
+      }
+      if (testCase.includes('truncated') || testCase.includes('wrong key') || testCase.includes('tampered')) {
+        return ported('encryption_test_decrypt_failure_cases_use_runtime_decryption_error');
+      }
+      return ported('encryption_test_encrypt_decrypt_returns_original_plaintext');
+    }
+    if (suite.startsWith('maybeEncrypt') || suite.startsWith('isEncrypted')) {
+      return testCase.includes('no key')
+        ? ported('serialization_serialization_test_decrypt_layer_requires_key_and_attaches_encr_prefix')
+        : ported('serialization_serialization_test_encrypt_decrypt_layer_matches_encr_contract');
+    }
+    if (suite.startsWith('AbortController serialization')) {
+      return jsOnly('AbortController, AbortSignal, hook streams, and abort event listeners are JavaScript runtime objects outside this portable utility bucket.');
+    }
+  }
+
+  if (file === 'packages/core/src/vm/uint8array-base64.test.ts') {
+    if (suite.includes('toBase64')) return ported('vm_uint8array_base64_test_to_base64_rows_match_upstream');
+    if (suite.includes('toHex')) return ported('vm_uint8array_base64_test_to_hex_rows_match_upstream');
+    if (suite.includes('fromBase64') && suite.includes('strict')) {
+      return ported('vm_uint8array_base64_test_from_base64_strict_and_stop_before_partial_rows_match_upstream');
+    }
+    if (suite.includes('fromBase64') && suite.includes('stop-before-partial')) {
+      return ported('vm_uint8array_base64_test_from_base64_strict_and_stop_before_partial_rows_match_upstream');
+    }
+    if (suite.includes('fromBase64')) return ported('vm_uint8array_base64_test_from_base64_rows_match_upstream');
+    if (suite.includes('fromHex')) return ported('vm_uint8array_base64_test_from_hex_rows_match_upstream');
+    if (suite.includes('setFromBase64')) return ported('vm_uint8array_base64_test_set_from_base64_rows_match_upstream');
+    if (suite.includes('setFromHex')) return ported('vm_uint8array_base64_test_set_from_hex_rows_match_upstream');
+    return ported('vm_uint8array_base64_test_roundtrip_encoding_decoding_rows_match_upstream');
+  }
+
+  if (file === 'packages/core/src/vm/uuid.test.ts') {
+    if (suite.includes('basic functionality') || suite.includes('UUID v4 specifications')) {
+      return ported('vm_uuid_test_basic_functionality_and_v4_spec_rows_match_upstream');
+    }
+    if (suite.includes('deterministic behavior')) {
+      return ported('vm_uuid_test_deterministic_behavior_rows_match_upstream');
+    }
+    return ported('vm_uuid_test_edge_cases_and_distribution_rows_match_upstream');
+  }
+
+  if (file === 'packages/core/src/vm/index.test.ts') {
+    if (testCase.includes('btoa') || testCase.includes('atob') || testCase.includes('basic auth')) {
+      return ported('vm_index_test_btoa_atob_basic_auth_portable_rows_match_upstream');
+    }
+    if (testCase.includes('crypto.randomUUID')) {
+      return ported(
+        'vm_uuid_test_basic_functionality_and_v4_spec_rows_match_upstream',
+        'Rust port covers deterministic UUID utility; Node VM global installation is JS-only.'
+      );
+    }
+    return jsOnly('Node vm.Context global patching/execution behavior has no portable Rust runtime counterpart in this utility bucket.');
+  }
+
+  return undefined;
+}
+
 function escapeCell(value) {
   return String(value ?? '')
     .replaceAll('\\', '\\\\')
@@ -522,7 +930,8 @@ function parseFile(filePath) {
         eachNote: call.eachNote,
         dynamicName: call.dynamicName,
       };
-      rows.push({ ...row, ...classify(row, source) });
+      const classified = { ...row, ...classify(row, source) };
+      rows.push({ ...classified, ...bucket05Override(classified) });
     }
   }
 
@@ -585,7 +994,7 @@ function renderInventory(rows, testFiles) {
     row.declaration,
     row.portability,
     rustOwners.get(row.packageName) ?? 'unassigned',
-    '',
+    row.rustTestName ?? '',
     row.status,
     row.note,
   ]);

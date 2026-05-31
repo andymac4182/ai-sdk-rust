@@ -1,10 +1,22 @@
 //! Core runtime crate for the standalone Vercel Workflow SDK Rust port.
 //!
-//! This crate maps to upstream `packages/core`. The current surface only
-//! records source ownership; workflow, step, runtime, serialization, and VM
-//! behavior still need source-verified Rust ports.
+//! This crate maps to upstream `packages/core`. It now owns the portable
+//! serialization, encryption, and VM utility contracts used by the standalone
+//! workflow runtime. JavaScript-only runtime identity semantics such as
+//! function/class constructors and Node `vm.Context` globals are documented in
+//! the parity inventory instead of being over-claimed here.
 
 #![forbid(unsafe_code)]
+
+pub mod codec;
+pub mod encryption;
+pub mod error;
+pub mod format;
+pub mod observability;
+pub mod ordering;
+pub mod stream;
+pub mod value;
+pub mod vm;
 
 pub use workflow_errors as errors;
 pub use workflow_world as world;
