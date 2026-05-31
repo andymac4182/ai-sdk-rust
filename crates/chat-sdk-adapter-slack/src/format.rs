@@ -402,7 +402,7 @@ fn replace_id_link(
             rest = after_id;
             continue;
         }
-        if after_id.starts_with('>') {
+        if let Some(after_close) = after_id.strip_prefix('>') {
             if !no_label_only {
                 // Skip - we only want with-label tokens in this pass.
                 out.push_str(prefix);
@@ -411,7 +411,7 @@ fn replace_id_link(
                 continue;
             }
             out.push_str(&render(id, None));
-            rest = &after_id[1..];
+            rest = after_close;
             continue;
         }
         // Bad shape; passthrough.
@@ -442,9 +442,7 @@ fn replace_url_link(
             continue;
         }
         // URL body: stop at `|` (only when with-label) / `<` / `>`.
-        let url_end = after
-            .find(|c: char| c == '|' || c == '<' || c == '>')
-            .unwrap_or(after.len());
+        let url_end = after.find(['|', '<', '>']).unwrap_or(after.len());
         let url = &after[..url_end];
         let rest_after_url = &after[url_end..];
         if let Some(after_pipe) = rest_after_url.strip_prefix('|') {
@@ -466,14 +464,14 @@ fn replace_url_link(
             rest = after;
             continue;
         }
-        if rest_after_url.starts_with('>') {
+        if let Some(after_close) = rest_after_url.strip_prefix('>') {
             if !no_label_only {
                 out.push('<');
                 rest = after;
                 continue;
             }
             out.push_str(&render(url, None));
-            rest = &rest_after_url[1..];
+            rest = after_close;
             continue;
         }
         out.push('<');

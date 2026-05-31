@@ -74,7 +74,7 @@ pub const CHANNEL_STATE_KEY_PREFIX: &str = "channel-state:";
 
 /// 1:1 with upstream `export const CHANNEL_STATE_TTL_MS = 30 * 24
 /// * 60 * 60 * 1000` (30 days in milliseconds). Channel state and
-/// thread state share the same TTL upstream.
+///   thread state share the same TTL upstream.
 pub const CHANNEL_STATE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// 1:1 port of upstream `deriveChannelId(adapter, threadId): string`.
