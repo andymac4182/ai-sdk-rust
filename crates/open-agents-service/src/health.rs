@@ -60,7 +60,7 @@ impl HealthCheck {
             .ready = ready;
     }
 
-    fn response_for_path(&self, path: &str) -> (u16, &'static str, String) {
+    pub(crate) fn response_for_path(&self, path: &str) -> (u16, &'static str, String) {
         let snapshot = self.snapshot();
         match path {
             "/healthz" => {
