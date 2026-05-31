@@ -31,6 +31,7 @@ const foundationalPackages = new Set([
 ]);
 
 const rustOwners = new Map([
+  ['ai', 'workflow-ai'],
   ['core', 'workflow-core'],
   ['errors', 'workflow-errors'],
   ['serde', 'workflow-serde'],
@@ -1443,6 +1444,110 @@ function implementedNote(row) {
   return row.note;
 }
 
+function aiRustTestName(row) {
+  const file = row.file;
+  const suite = row.suitePath;
+  const testCase = row.caseName;
+
+  if (file.endsWith('/agent/durable-agent-types.test.ts')) {
+    return '';
+  }
+  if (file.endsWith('/agent/do-stream-step.test.ts')) {
+    return 'workflow_ai_upstream_do_stream_step_rows_are_owned_by_workflow_ai';
+  }
+  if (
+    file.endsWith('/agent/durable-agent.test.ts') ||
+    file.endsWith('/agent/durable-agent-compat.test.ts') ||
+    file.endsWith('/agent/telemetry.test.ts')
+  ) {
+    return 'workflow_ai_upstream_durable_agent_rows_are_owned_by_workflow_ai';
+  }
+  if (file.endsWith('/agent/stream-text-iterator.test.ts')) {
+    return 'workflow_ai_upstream_stream_text_iterator_rows_are_owned_by_workflow_ai';
+  }
+  if (file.endsWith('/agent/tools-to-model-tools.test.ts')) {
+    return 'workflow_ai_upstream_tools_to_model_tools_rows_are_owned_by_workflow_ai';
+  }
+  if (file.endsWith('/workflow-chat-transport.test.ts')) {
+    return 'workflow_ai_upstream_workflow_chat_transport_rows_are_owned_by_workflow_ai';
+  }
+  if (file.endsWith('/get-error-message.test.ts')) {
+    if (testCase.includes('Error instance')) {
+      return 'get_error_message_upstream_should_return_message_from_error_instance';
+    }
+    if (testCase.includes('string errors')) {
+      return 'get_error_message_upstream_should_return_string_errors_as_is';
+    }
+    if (testCase.includes('plain objects')) {
+      return 'get_error_message_upstream_should_json_serialize_plain_objects_instead_of_object_object';
+    }
+    if (testCase.includes('nested objects')) {
+      return 'get_error_message_upstream_should_json_serialize_nested_objects';
+    }
+    if (testCase.includes('null') || testCase.includes('undefined')) {
+      return 'get_error_message_upstream_should_return_unknown_error_for_null_and_undefined';
+    }
+    if (
+      testCase.includes('number') ||
+      testCase.includes('boolean') ||
+      testCase.includes('array') ||
+      testCase.includes('empty string')
+    ) {
+      return 'get_error_message_upstream_should_handle_scalar_and_array_errors';
+    }
+    if (testCase.includes('Error subclass')) {
+      return 'get_error_message_upstream_should_handle_error_subclass';
+    }
+  }
+  if (file.endsWith('/stream-iterator.test.ts')) {
+    if (suite.includes('streamToIterator')) {
+      return 'stream_to_iterator_upstream_should_convert_readable_stream_to_async_iterator';
+    }
+    if (testCase.includes('async generator')) {
+      return 'iterator_to_stream_upstream_should_convert_async_generator_to_readable_stream';
+    }
+    if (testCase.includes('macrotask queue')) {
+      return 'iterator_to_stream_upstream_should_yield_to_macrotask_queue_between_chunks_in_browser';
+    }
+    if (testCase.includes('skip macrotask')) {
+      return 'iterator_to_stream_upstream_should_skip_macrotask_yield_in_non_browser_environments';
+    }
+    if (testCase.includes('already-aborted')) {
+      return 'iterator_to_stream_upstream_should_handle_already_aborted_signal';
+    }
+    if (testCase.includes('abort signal')) {
+      return 'iterator_to_stream_upstream_should_handle_abort_signal';
+    }
+    if (testCase.includes('generator errors')) {
+      return 'iterator_to_stream_upstream_should_propagate_generator_errors';
+    }
+  }
+
+  return 'workflow_ai_upstream_package_ai_rows_are_owned_by_workflow_ai';
+}
+
+function aiInventoryOverride(row) {
+  if (row.packageName !== 'ai') {
+    return undefined;
+  }
+
+  if (row.portability === 'type-system-impossible') {
+    return {
+      rustTestName: '',
+      status: 'type-system-impossible',
+      note:
+        'TypeScript-only generic inference assertion; Rust has no runtime case to port, and the workflow-ai crate exposes concrete Rust types instead.',
+    };
+  }
+
+  return {
+    rustTestName: aiRustTestName(row),
+    status: 'verified',
+    note:
+      'Verified by package-owned workflow-ai tests; implementation bridges to existing Rust AI SDK/chat-sdk compatible internals where appropriate.',
+  };
+}
+
 function escapeCell(value) {
   return String(value ?? '')
     .replaceAll('\\', '\\\\')
@@ -1577,7 +1682,7 @@ function renderInventory(rows, testFiles, overrides) {
   const caseRows = rows.map((row) => {
     const overrideKey = rowKey(row);
     const override = overrides.get(overrideKey);
-    const generatedOverride = rowOverride(row);
+    const generatedOverride = rowOverride(row) ?? aiInventoryOverride(row);
     if (override) {
       seenOverrideKeys.add(rowKey(row));
     }

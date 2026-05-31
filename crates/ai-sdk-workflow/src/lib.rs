@@ -62,6 +62,7 @@ pub use workflow_agent::{
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
 use ai_sdk_provider::{
     FileDataContent, LanguageModelFileData, LanguageModelSource, LanguageModelStreamPart,
+    LanguageModelToolInputExample, ProviderOptions,
 };
 use ai_sdk_provider_utils::{Tool, convert_to_base64};
 use ai_sdk_rust::UiMessageChunk;
@@ -102,6 +103,18 @@ pub struct SerializableToolDef {
     /// Provider tool configuration arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<JsonObject>,
+
+    /// Function-tool examples that show the model valid inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_examples: Option<Vec<LanguageModelToolInputExample>>,
+
+    /// Function-tool strict mode setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+
+    /// Function-tool provider options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
 }
 
 impl SerializableToolDef {
@@ -114,6 +127,9 @@ impl SerializableToolDef {
             is_provider_executed: None,
             id: None,
             args: None,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
         }
     }
 
@@ -137,7 +153,30 @@ impl SerializableToolDef {
             is_provider_executed: Some(is_provider_executed),
             id: Some(id.into()),
             args: Some(args),
+            input_examples: None,
+            strict: None,
+            provider_options: None,
         }
+    }
+
+    /// Adds a function-tool input example.
+    pub fn with_input_example(mut self, input: JsonObject) -> Self {
+        self.input_examples
+            .get_or_insert_with(Vec::new)
+            .push(LanguageModelToolInputExample::new(input));
+        self
+    }
+
+    /// Sets function-tool strict mode.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = Some(strict);
+        self
+    }
+
+    /// Sets function-tool provider options.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
     }
 }
 
@@ -185,6 +224,10 @@ pub fn serialize_tool_set(tools: impl IntoIterator<Item = Tool>) -> Serializable
                 serializable_tool.is_provider_executed = Some(tool.is_provider_executed());
                 serializable_tool.id = Some(provider_tool_id.to_string());
                 serializable_tool.args = tool.provider_tool_args().cloned();
+            } else {
+                serializable_tool.input_examples = tool.input_examples.clone();
+                serializable_tool.strict = tool.strict;
+                serializable_tool.provider_options = tool.provider_options.clone();
             }
 
             (name, serializable_tool)
@@ -218,6 +261,19 @@ pub fn resolve_serializable_tools(
                     let mut function_tool = Tool::new(name.clone(), tool.input_schema.clone());
                     if let Some(description) = &tool.description {
                         function_tool = function_tool.with_description(description.clone());
+                    }
+                    if let Some(input_examples) = &tool.input_examples {
+                        for input_example in input_examples {
+                            function_tool =
+                                function_tool.with_input_example(input_example.input.clone());
+                        }
+                    }
+                    if let Some(strict) = tool.strict {
+                        function_tool = function_tool.with_strict(strict);
+                    }
+                    if let Some(provider_options) = &tool.provider_options {
+                        function_tool =
+                            function_tool.with_provider_options(provider_options.clone());
                     }
                     function_tool
                 }
@@ -406,7 +462,17 @@ mod tests {
     #[test]
     fn serialize_tool_set_serializes_function_tools_with_description_and_input_schema() {
         let tools = vec![
-            Tool::new("getWeather", weather_schema()).with_description("Get weather for a city"),
+            Tool::new("getWeather", weather_schema())
+                .with_description("Get weather for a city")
+                .with_input_example(
+                    serde_json::from_value(json!({ "city": "San Francisco" }))
+                        .expect("example is an object"),
+                )
+                .with_strict(true)
+                .with_provider_options(
+                    serde_json::from_value(json!({ "openai": { "parallelToolCalls": false } }))
+                        .expect("provider options"),
+                ),
         ];
 
         assert_eq!(
@@ -415,6 +481,19 @@ mod tests {
                 "getWeather".to_string(),
                 SerializableToolDef::function(weather_schema())
                     .with_description("Get weather for a city")
+                    .with_input_example(
+                        serde_json::from_value(json!({ "city": "San Francisco" }))
+                            .expect("example is an object")
+                    )
+                    .with_strict(true)
+                    .with_provider_options(
+                        serde_json::from_value(json!({
+                            "openai": {
+                                "parallelToolCalls": false
+                            }
+                        }))
+                        .expect("provider options")
+                    )
             )])
         );
     }
@@ -465,6 +544,9 @@ mod tests {
         assert_eq!(tool.description.as_deref(), Some("Get weather for a city"));
         assert_eq!(tool.input_schema, weather_schema());
         assert!(!tool.is_provider_tool());
+        assert_eq!(tool.input_examples, None);
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.provider_options, None);
     }
 
     #[test]
@@ -497,6 +579,37 @@ mod tests {
     }
 
     #[test]
+    fn resolve_serializable_tools_reconstructs_function_tool_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "parallelToolCalls": false
+            }
+        }))
+        .expect("provider options");
+        let tools = BTreeMap::from([(
+            "getWeather".to_string(),
+            SerializableToolDef::function(weather_schema())
+                .with_input_example(
+                    serde_json::from_value(json!({ "city": "San Francisco" }))
+                        .expect("example is an object"),
+                )
+                .with_strict(false)
+                .with_provider_options(provider_options.clone()),
+        )]);
+
+        let resolved = resolve_serializable_tools(&tools).expect("tools resolve");
+        let tool = resolved.get("getWeather").expect("tool exists");
+
+        assert_eq!(
+            tool.input_examples.as_ref().expect("input examples")[0].input,
+            serde_json::from_value(json!({ "city": "San Francisco" }))
+                .expect("example is an object")
+        );
+        assert_eq!(tool.strict, Some(false));
+        assert_eq!(tool.provider_options, Some(provider_options));
+    }
+
+    #[test]
     fn resolve_serializable_tools_reports_missing_provider_tool_id() {
         let tools = BTreeMap::from([(
             "webSearch".to_string(),
@@ -507,6 +620,9 @@ mod tests {
                 is_provider_executed: Some(true),
                 id: None,
                 args: None,
+                input_examples: None,
+                strict: None,
+                provider_options: None,
             },
         )]);
 

@@ -22,9 +22,9 @@ use ai_sdk_provider_utils::{
 };
 use ai_sdk_rust::{
     AgentSkillInstruction, AgentSkillMetadata, Instructions, StopCondition, TelemetryDispatcher,
-    TelemetryOptions, allowed_tools_for_loaded_agent_skills, attach_agent_skills_to_context,
-    build_agent_skill_prompt_sections, create_telemetry_dispatcher, merge_agent_skills,
-    merge_loaded_agent_skills,
+    TelemetryOptions, UiMessageChunk, allowed_tools_for_loaded_agent_skills,
+    attach_agent_skills_to_context, build_agent_skill_prompt_sections, create_telemetry_dispatcher,
+    merge_agent_skills, merge_loaded_agent_skills,
 };
 use serde::{Deserialize, Serialize};
 
@@ -439,6 +439,8 @@ impl WorkflowAgent {
             .execute_tool_in_telemetry_context
             .or_else(|| self.execute_tool_in_telemetry_context.clone());
         let include_raw_chunks = options.include_raw_chunks;
+        let collect_ui_messages = options.collect_ui_messages;
+        let send_finish = options.send_finish;
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
         let constructor_on_start = self.on_start.clone();
         let stream_on_start = options.on_start;
@@ -543,6 +545,7 @@ impl WorkflowAgent {
         let mut last_tool_calls = Vec::new();
         let mut last_tool_results = Vec::new();
         let mut missing_provider_executed_tool_results = Vec::new();
+        let mut ui_messages = collect_ui_messages.then(Vec::new);
         let mut aborted = false;
 
         if is_cancellation_requested(abort_signal.as_ref()) {
@@ -556,6 +559,7 @@ impl WorkflowAgent {
                 runtime_context,
                 tools_context,
                 missing_provider_executed_tool_results,
+                ui_messages,
                 aborted: true,
             });
         }
@@ -602,6 +606,9 @@ impl WorkflowAgent {
             messages = yield_value.messages.clone();
             runtime_context = yield_value.runtime_context.clone();
             tools_context = yield_value.tools_context.clone();
+            if let Some(ui_messages) = &mut ui_messages {
+                ui_messages.extend(yield_value.ui_message_chunks.clone());
+            }
 
             if yield_value.tool_calls.is_empty() {
                 last_tool_calls.clear();
@@ -677,6 +684,16 @@ impl WorkflowAgent {
             runtime_context,
             tools_context,
             missing_provider_executed_tool_results,
+            ui_messages: ui_messages.map(|mut chunks| {
+                if send_finish
+                    && !chunks
+                        .iter()
+                        .any(|chunk| matches!(chunk, UiMessageChunk::Finish { .. }))
+                {
+                    chunks.push(UiMessageChunk::finish());
+                }
+                chunks
+            }),
             aborted,
         };
 
@@ -839,6 +856,12 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Whether raw provider chunks should be included in step results.
     pub include_raw_chunks: bool,
 
+    /// Whether UI-message chunks should be collected in the final result.
+    pub collect_ui_messages: bool,
+
+    /// Whether a finish UI-message chunk should be appended when collecting UI messages.
+    pub send_finish: bool,
+
     /// Stream-level runtime context.
     pub runtime_context: WorkflowRuntimeContext,
 
@@ -906,6 +929,8 @@ impl<E> WorkflowAgentStreamOptions<E> {
             execute_tool_in_telemetry_context: None,
             timeout: None,
             include_raw_chunks: false,
+            collect_ui_messages: false,
+            send_finish: true,
             runtime_context: WorkflowRuntimeContext::new(),
             tools_context: WorkflowToolsContext::new(),
             skills: Vec::new(),
@@ -960,6 +985,18 @@ impl<E> WorkflowAgentStreamOptions<E> {
     /// Sets whether raw provider chunks should be included.
     pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
         self.include_raw_chunks = include_raw_chunks;
+        self
+    }
+
+    /// Sets whether UI-message chunks should be collected in the final result.
+    pub fn with_collect_ui_messages(mut self, collect_ui_messages: bool) -> Self {
+        self.collect_ui_messages = collect_ui_messages;
+        self
+    }
+
+    /// Sets whether collecting UI messages should append a finish chunk.
+    pub fn with_send_finish(mut self, send_finish: bool) -> Self {
+        self.send_finish = send_finish;
         self
     }
 
@@ -1462,6 +1499,10 @@ pub struct WorkflowAgentFinishInfo {
     /// Whether the workflow observed cancellation before normal finish.
     #[serde(default, skip_serializing_if = "is_false")]
     pub aborted: bool,
+
+    /// Collected UI-message chunks when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_messages: Option<Vec<UiMessageChunk>>,
 }
 
 impl From<&WorkflowAgentStreamResult> for WorkflowAgentFinishInfo {
@@ -1484,6 +1525,7 @@ impl From<&WorkflowAgentStreamResult> for WorkflowAgentFinishInfo {
                 .missing_provider_executed_tool_results
                 .clone(),
             aborted: result.aborted,
+            ui_messages: result.ui_messages.clone(),
         }
     }
 }
@@ -1517,6 +1559,10 @@ pub struct WorkflowAgentStreamResult {
     /// Whether the workflow observed cancellation before normal finish.
     #[serde(default, skip_serializing_if = "is_false")]
     pub aborted: bool,
+
+    /// Collected UI-message chunks when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_messages: Option<Vec<UiMessageChunk>>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -2244,7 +2290,7 @@ mod tests {
     };
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
     use ai_sdk_rust::{
-        TelemetryEventKind, TelemetryIntegration, register_telemetry_integration,
+        TelemetryEventKind, TelemetryIntegration, UiMessageChunk, register_telemetry_integration,
         reset_telemetry_state_for_tests,
     };
     use serde_json::json;
@@ -2369,6 +2415,18 @@ mod tests {
 
     fn stop_step() -> DoStreamStepOutput {
         output_from_parts([finish(FinishReason::Stop)], 1)
+    }
+
+    fn text_stop_step(text: &str) -> DoStreamStepOutput {
+        output_from_parts(
+            [
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", text)),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                finish(FinishReason::Stop),
+            ],
+            0,
+        )
     }
 
     #[derive(Debug)]
@@ -4943,6 +5001,105 @@ mod tests {
         let calls = calls.lock().expect("calls lock succeeds");
         assert_eq!(calls.len(), 1);
         assert!(calls[0].options.include_raw_chunks);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_return_undefined_ui_messages_when_collect_ui_messages_is_false()
+     {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([text_stop_step("hello")]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(result.ui_messages, None);
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_return_undefined_ui_messages_when_collect_ui_messages_is_not_set()
+     {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([text_stop_step("hello")]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert!(result.ui_messages.is_none());
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_collect_ui_chunks_when_collect_ui_messages_is_true() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([text_stop_step("hello")]);
+
+        let result = poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_collect_ui_messages(true),
+        ))
+        .expect("agent stream succeeds");
+
+        let ui_messages = result.ui_messages.expect("ui messages collected");
+        assert!(matches!(ui_messages[0], UiMessageChunk::TextStart { .. }));
+        assert!(matches!(ui_messages[1], UiMessageChunk::TextDelta { .. }));
+        assert!(matches!(ui_messages[2], UiMessageChunk::TextEnd { .. }));
+        assert!(matches!(
+            ui_messages.last().expect("finish chunk"),
+            UiMessageChunk::Finish { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_work_when_collect_ui_messages_is_true_and_send_finish_is_false()
+     {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([text_stop_step("hello")]);
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_collect_ui_messages(true)
+                    .with_send_finish(false),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let ui_messages = result.ui_messages.expect("ui messages collected");
+        assert_eq!(result.steps.len(), 1);
+        assert!(
+            !ui_messages
+                .iter()
+                .any(|chunk| matches!(chunk, UiMessageChunk::Finish { .. }))
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_not_write_finish_chunk_but_still_return_ui_messages_when_send_finish_is_false()
+     {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([text_stop_step("hello")]);
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_collect_ui_messages(true)
+                    .with_send_finish(false),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let ui_messages = result.ui_messages.expect("ui messages collected");
+        assert!(ui_messages.iter().any(|chunk| {
+            matches!(
+                chunk,
+                UiMessageChunk::TextDelta { delta, .. } if delta == "hello"
+            )
+        }));
+        assert!(
+            !ui_messages
+                .iter()
+                .any(|chunk| matches!(chunk, UiMessageChunk::Finish { .. }))
+        );
     }
 
     #[test]
