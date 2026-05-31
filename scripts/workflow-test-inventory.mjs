@@ -137,6 +137,86 @@ const verifiedRustFileTests = new Map([
   ],
 ]);
 
+const verifiedWorldAttributeTests = new Map([
+  [13, 'validate_attribute_key_accepts_a_normal_key'],
+  [17, 'validate_attribute_key_rejects_empty_keys'],
+  [21, 'validate_attribute_key_rejects_keys_over_the_length_cap'],
+  [27, 'validate_attribute_key_accepts_keys_exactly_at_the_length_cap'],
+  [
+    33,
+    'validate_attribute_key_rejects_keys_starting_with_reserved_prefix_by_default',
+  ],
+  [
+    39,
+    'validate_attribute_key_accepts_reserved_prefix_keys_when_allow_reserved_attributes_is_set',
+  ],
+  [
+    45,
+    'validate_attribute_key_still_rejects_reserved_prefix_keys_when_allow_reserved_attributes_is_explicitly_false',
+  ],
+  [53, 'validate_attribute_value_accepts_null_unset'],
+  [57, 'validate_attribute_value_accepts_a_normal_string'],
+  [61, 'validate_attribute_value_rejects_values_over_the_byte_cap'],
+  [67, 'validate_attribute_value_counts_utf8_bytes_not_characters'],
+  [79, 'validate_attribute_changes_accepts_a_small_batch_of_valid_changes'],
+  [
+    88,
+    'validate_attribute_changes_rejects_duplicate_keys_within_a_single_batch',
+  ],
+  [
+    97,
+    'validate_attribute_changes_rejects_when_post_merge_count_exceeds_the_per_run_cap',
+  ],
+  [
+    107,
+    'validate_attribute_changes_does_not_count_upserts_on_already_present_keys_against_the_cap',
+  ],
+  [
+    121,
+    'validate_attribute_changes_rejects_reserved_prefix_keys_in_a_batch_by_default',
+  ],
+  [
+    130,
+    'validate_attribute_changes_accepts_reserved_prefix_keys_when_allow_reserved_attributes_is_set',
+  ],
+  [144, 'apply_attribute_changes_upserts_new_keys'],
+  [150, 'apply_attribute_changes_overwrites_existing_keys'],
+  [156, 'apply_attribute_changes_removes_keys_when_value_is_null'],
+  [162, 'apply_attribute_changes_applies_set_and_unset_in_a_single_batch'],
+  [171, 'apply_attribute_changes_returns_a_new_object_does_not_mutate_input'],
+  [178, 'apply_attribute_changes_treats_undefined_existing_as_the_empty_record'],
+]);
+
+const verifiedWorldAttributeNote =
+  'Ported in crates/workflow-world/src/attributes.rs; verified by cargo test -p workflow-world.';
+
+function rowOverride(row) {
+  const verifiedRustFileTest = verifiedRustFileTests.get(
+    `${row.packageName}|${row.file}`
+  );
+  if (verifiedRustFileTest) {
+    return {
+      rustTestName: verifiedRustFileTest.testName,
+      status: 'verified',
+      note: verifiedRustFileTest.note,
+    };
+  }
+  if (
+    row.packageName === 'world' &&
+    row.file === 'packages/world/src/attributes.test.ts'
+  ) {
+    const rustTestName = verifiedWorldAttributeTests.get(row.line);
+    if (rustTestName) {
+      return {
+        rustTestName,
+        status: 'verified',
+        note: verifiedWorldAttributeNote,
+      };
+    }
+  }
+  return undefined;
+}
+
 const hostFrameworkPackages = new Set([
   'astro',
   'nest',
@@ -679,9 +759,7 @@ function renderInventory(rows, testFiles) {
   ]);
 
   const caseRows = rows.map((row) => {
-    const verifiedRustFileTest = verifiedRustFileTests.get(
-      `${row.packageName}|${row.file}`
-    );
+    const override = rowOverride(row);
     return [
       row.packageName,
       row.file,
@@ -691,9 +769,9 @@ function renderInventory(rows, testFiles) {
       row.declaration,
       row.portability,
       rustOwners.get(row.packageName) ?? 'unassigned',
-      verifiedRustFileTest?.testName ?? '',
-      verifiedRustFileTest ? 'verified' : row.status,
-      verifiedRustFileTest?.note ?? row.note,
+      override?.rustTestName ?? '',
+      override?.status ?? row.status,
+      override?.note ?? row.note,
     ];
   });
 

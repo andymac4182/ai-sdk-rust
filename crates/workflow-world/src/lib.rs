@@ -1,9 +1,40 @@
 //! World interface crate for the standalone Vercel Workflow SDK Rust port.
 //!
-//! This crate maps to upstream `packages/world`. It is a skeleton boundary for
-//! run, step, event, queue, hook, wait, and serialization contracts.
+//! This crate maps to upstream `packages/world`. It owns cross-world run, step,
+//! event, queue, hook, wait, stream, serialization, and World trait contracts.
+//! Local, Postgres, and Vercel worlds implement these traits in their own crates.
 
 #![forbid(unsafe_code)]
+
+pub mod attributes;
+pub mod data;
+pub mod error;
+pub mod events;
+pub mod hooks;
+pub mod interfaces;
+pub mod queue;
+pub mod recovery;
+pub mod runs;
+pub mod serialization;
+pub mod spec_version;
+pub mod steps;
+pub mod ulid;
+pub mod waits;
+
+pub use attributes::*;
+pub use data::*;
+pub use error::*;
+pub use events::*;
+pub use hooks::*;
+pub use interfaces::*;
+pub use queue::*;
+pub use recovery::*;
+pub use runs::*;
+pub use serialization::*;
+pub use spec_version::*;
+pub use steps::*;
+pub use ulid::*;
+pub use waits::*;
 
 /// Upstream repository used for this crate boundary.
 pub const UPSTREAM_REPOSITORY: &str = "github.com/vercel/workflow";
