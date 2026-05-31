@@ -74,7 +74,7 @@ if its Rust-only tests pass.
 | `packages/astro` (`@workflow/astro`) | `5.0.0-beta.10` | host-framework binding | not-started | none | Source: `src/builder.ts`, `src/index.ts`, `src/plugin.ts`. Tests: none. | Astro integration; defer until portable runtime and builder contracts exist. |
 | `packages/builders` (`@workflow/builders`) | `5.0.0-beta.10` | Rust tooling | not-started | none | Source: `src/base-builder.ts`, `src/build-queue.ts`, `src/workflows-extractor.ts`, `src/swc-esbuild-plugin.ts`, `src/standalone.ts`. Tests: 11 files including `src/discover-entries-esbuild-plugin.test.ts`, `src/get-input-files.test.ts`, `src/workflow-alias.test.ts`. | Build pipeline and transform infrastructure. Needs a separate tooling crate decision before porting behavior. |
 | `packages/cli` (`@workflow/cli`) | `5.0.0-beta.10` | Rust tooling | not-started | none | Source: `bin/run.js`, `src/base.ts`, `src/commands/*.ts`, `src/lib/inspect/*.ts`. Tests: `src/lib/inspect/output.test.ts`. | Command surface for build/dev/start/inspect flows. |
-| `packages/core` (`@workflow/core`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow-core` | Source: `runtime.js`, `runtime.d.ts`, `src/workflow.ts`, `src/step.ts`, `src/runtime/*.ts`, `src/serialization/*.ts`, `src/vm/*.ts`, e2e files, and WF04 primitives/diagnostics files listed below. Tests: 52 files including `src/workflow.test.ts`, `src/step.test.ts`, `src/runtime/start.test.ts`, `src/serialization/serialization.test.ts`, `src/vm/index.test.ts`, and e2e tests. | WF04 verifies primitive/diagnostic rows; WF05 verifies portable serialization, encryption, stream framing, observability hydration, async-deserialization ordering, UUID, and base64/hex utility rows. Package remains in-progress until runtime execution, workflow/step APIs, VM/e2e classification, and remaining needs-review rows are finished. |
+| `packages/core` (`@workflow/core`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow-core` | Source: `runtime.js`, `runtime.d.ts`, `src/workflow.ts`, `src/step.ts`, `src/runtime/*.ts`, `src/serialization/*.ts`, `src/vm/*.ts`, e2e files, and WF04 primitives/diagnostics files listed below. Tests: 52 files including `src/workflow.test.ts`, `src/step.test.ts`, `src/runtime/start.test.ts`, `src/serialization/serialization.test.ts`, `src/vm/index.test.ts`, and e2e tests. | WF04 verifies primitive/diagnostic rows; WF05 verifies portable serialization, encryption, stream framing, observability hydration, async-deserialization ordering, UUID, and base64/hex utility rows; WF06 verifies workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream API rows. Runtime engine, persistence-backed worlds, and remaining core e2e rows remain follow-up work. |
 | `packages/docs-typecheck` (`@workflow/docs-typecheck`) | `0.0.1-beta.12` | docs/test-only | not-started | none | Source: `scripts/find-incomplete.ts`, `src/extractor.ts`, `src/type-checker.ts`. Tests: `src/__tests__/docs.test.ts`, `src/__tests__/sitemap-guard.test.ts`. | Documentation validation tooling; not part of runtime parity. |
 | `packages/errors` (`@workflow/errors`) | `5.0.0-beta.6` | portable Rust runtime | verified | `crates/workflow-errors` | Source: `src/index.ts`, `src/ansi.ts`, `src/error-codes.ts`, `src/internal-chalk.ts`. Tests: 6 files including `src/fatal-error.test.ts`, `src/serialization-error.test.ts`, `src/runtime-decryption-error.test.ts`. | Ports run error codes, framed ANSI/plain rendering, fatal/build/serialization/runtime-decryption/corrupted-event-log errors, and serde-backed stable error contracts. All 36 portable upstream rows are mapped in the test inventory and validated by `cargo test -p workflow-errors`. |
 | `packages/nest` (`@workflow/nest`) | `5.0.0-beta.10` | host-framework binding | not-started | none | Source: `src/index.ts`, `src/builder.ts`, `src/cli.ts`, `src/workflow.controller.ts`, `src/workflow.module.ts`. Tests: `src/cjs-rewrite.test.ts`, `src/parse-module-type.test.ts`. | NestJS integration; defer until runtime and builder crates exist. |
@@ -104,7 +104,7 @@ if its Rust-only tests pass.
 | Rust crate | Upstream package | Status | Scope in this pass |
 | --- | --- | --- | --- |
 | `workflow` | `packages/workflow` (`workflow`) | in-progress | Facade crate with source metadata and re-export placeholders for foundational crates. |
-| `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | WF04 adds core primitives, schemas, utilities, and diagnostics; WF05 adds portable serialization, encryption, stream framing, observability hydration, ordering, UUID, and base64/hex utilities. Runtime execution, workflow/step APIs, and remaining e2e rows are still pending. |
+| `workflow-core` | `packages/core` (`@workflow/core`) | in-progress | WF04 adds core primitives, schemas, utilities, and diagnostics; WF05 adds portable serialization, encryption, stream framing, observability hydration, ordering, UUID, and base64/hex utilities; WF06 adds workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream APIs. Runtime engine and remaining e2e rows are still pending. |
 | `workflow-errors` | `packages/errors` (`@workflow/errors`) | verified | Error taxonomy, framed rendering, fatal classification, runtime decryption context, serialization/corrupted-log errors, and stable serde/display contracts. |
 | `workflow-serde` | `packages/serde` (`@workflow/serde`) | verified | Dedicated marker crate for the upstream serialization/deserialization symbol names. |
 | `workflow-utils` | `packages/utils` (`@workflow/utils`) | verified | Foundation utilities covering every portable upstream `packages/utils` test row. |
@@ -166,3 +166,25 @@ attribute normalization/posting seams, inline source-map extraction failure
 behavior, abort-error helpers, and queue/stream ID utilities. A minimal
 `workflow-errors` taxonomy was added only to support the core diagnostic
 surfaces above.
+
+## Verified Core WF06 Rows
+
+WF06 ports the portable upstream rows owned by the core workflow, step, hook,
+sleep, abort, context-storage, request/response, and writable stream API slice.
+The generated case inventory records the exact Rust test name for each row via
+`docs/workflow-test-overrides.json`.
+
+| Upstream file | Verified rows | Rust test module |
+| --- | ---: | --- |
+| `packages/core/src/abort-controller-step.test.ts` | 18 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/abort-controller.test.ts` | 22 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/define-hook.test.ts` | 3 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/step.test.ts` | 30 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/step/context-storage.test.ts` | 3 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/step/writable-stream.test.ts` | 5 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/types.test.ts` | 3 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/workflow.test.ts` | 75 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/workflow/hook.test.ts` | 30 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/workflow/sleep.test.ts` | 12 | `crates/workflow-core/tests/upstream_parity.rs` |
+| `packages/core/src/writable-stream.test.ts` | 18 | `crates/workflow-core/tests/upstream_parity.rs` |
+| **Total** | **219** |  |
