@@ -1,0 +1,131 @@
+[
+  {
+    "id": "slack-app-mention-1",
+    "role": "user",
+    "metadata": {
+      "source": "slack",
+      "slack": {
+        "channel": "C123",
+        "threadTs": "1717113600.000100",
+        "isMention": true
+      }
+    },
+    "parts": [
+      {
+        "type": "text",
+        "text": "<@U999BOT> run cargo test"
+      },
+      {
+        "type": "data-snippet",
+        "id": "snippet-1",
+        "data": {
+          "filename": "src/main.rs",
+          "content": "fn main() {}"
+        }
+      }
+    ]
+  },
+  {
+    "id": "assistant-tool-1",
+    "role": "assistant",
+    "parts": [
+      {
+        "type": "tool-bash",
+        "toolCallId": "call-bash-1",
+        "state": "output-available",
+        "input": {
+          "command": "cargo test"
+        },
+        "output": {
+          "success": true,
+          "exitCode": 0,
+          "stdout": "ok"
+        }
+      },
+      {
+        "type": "tool-ask_user_question",
+        "toolCallId": "call-question-1",
+        "state": "input-available",
+        "input": {
+          "questions": [
+            {
+              "question": "Which branch should I use?",
+              "header": "Branch",
+              "options": [
+                {
+                  "label": "Current",
+                  "description": "Use the current branch."
+                },
+                {
+                  "label": "New",
+                  "description": "Create a new branch."
+                }
+              ],
+              "multiSelect": false
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "assistant-approval-1",
+    "role": "assistant",
+    "parts": [
+      {
+        "type": "tool-bash",
+        "toolCallId": "call-danger-1",
+        "state": "approval-requested",
+        "input": {
+          "command": "rm -rf target"
+        },
+        "approval": {
+          "id": "approval-1",
+          "isAutomatic": false
+        }
+      }
+    ]
+  },
+  {
+    "id": "assistant-final-1",
+    "role": "assistant",
+    "parts": [
+      {
+        "type": "text",
+        "text": "Done. Tests passed.",
+        "state": "done"
+      },
+      {
+        "type": "data-commit",
+        "id": "commit-1",
+        "data": {
+          "status": "success",
+          "committed": true,
+          "pushed": true,
+          "commitMessage": "Port chat message bridge",
+          "commitSha": "abc123",
+          "url": "https://github.com/example/repo/commit/abc123"
+        }
+      },
+      {
+        "type": "data-pr",
+        "id": "pr-1",
+        "data": {
+          "status": "success",
+          "created": true,
+          "syncedExisting": false,
+          "prNumber": 42,
+          "url": "https://github.com/example/repo/pull/42"
+        }
+      },
+      {
+        "type": "data-workspace-status",
+        "id": "workspace-1",
+        "data": {
+          "status": "setting-up",
+          "message": "Preparing workspace"
+        }
+      }
+    ]
+  }
+]

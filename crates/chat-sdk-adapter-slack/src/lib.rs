@@ -14,6 +14,7 @@ pub mod cards;
 pub mod crypto;
 pub mod format;
 pub mod markdown;
+pub mod message_bridge;
 pub mod modals;
 pub mod outbound;
 pub mod session_lifecycle;

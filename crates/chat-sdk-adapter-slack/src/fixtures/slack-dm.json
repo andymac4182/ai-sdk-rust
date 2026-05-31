@@ -1,0 +1,18 @@
+{
+  "token": "verification-token",
+  "team_id": "T123",
+  "api_app_id": "A123",
+  "type": "event_callback",
+  "event_id": "Ev124",
+  "event_time": 1717113660,
+  "event": {
+    "type": "message",
+    "channel_type": "im",
+    "user": "U123",
+    "text": "please summarize the branch",
+    "team": "T123",
+    "channel": "D123",
+    "event_ts": "1717113660.000200",
+    "ts": "1717113660.000200"
+  }
+}

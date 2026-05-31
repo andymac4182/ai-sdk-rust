@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat_message_bridge;
 pub mod chat_transport;
 pub mod operational_safety;
 pub mod stream_text_iterator;
@@ -11,6 +12,12 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+pub use chat_message_bridge::{
+    ai_ui_message_to_open_agent_ui_message, chat_message_to_open_agent_ui_message,
+    open_agent_data_part_to_model_part, open_agent_message_from_stream_chunks,
+    open_agent_ui_message_to_ai_ui_message, open_agent_ui_messages_to_model_messages,
+    open_agent_ui_messages_to_model_messages_with_options,
+};
 pub use chat_transport::{
     DEFAULT_WORKFLOW_CHAT_API, ReconnectToStreamOptions, SendMessagesOptions, WorkflowChatEnd,
     WorkflowChatRequest, WorkflowChatRequestMethod, WorkflowChatResponse, WorkflowChatTransport,
