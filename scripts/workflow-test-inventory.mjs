@@ -941,7 +941,7 @@ function classify(row, source) {
   if (portableWebSharedContract) {
     return {
       portability: 'portable',
-      status: 'ported',
+      status: 'verified',
       rustOwner: 'workflow-world',
       rustTestName: portableWebSharedContract,
       note: 'Portable workflow event/trace data contract ported in workflow-world.',
@@ -2102,7 +2102,10 @@ function renderInventory(rows, testFiles, overrides) {
       row.caseName,
       row.declaration,
       override?.portability ?? row.portability,
-      override?.rustOwner ?? rustOwners.get(row.packageName) ?? 'unassigned',
+      override?.rustOwner ??
+        row.rustOwner ??
+        rustOwners.get(row.packageName) ??
+        'unassigned',
       override?.rustTestName ??
         row.rustTestName ??
         generatedOverride?.rustTestName ??
@@ -2187,9 +2190,17 @@ const swcTestFiles = [
   'packages/swc-plugin-workflow/transform/tests/errors.rs',
 ].map((relative) => path.join(sourceRoot, relative));
 const parsedRows = testFiles.flatMap(parseFile).map(applyPortOverrides);
-const rows = [...parsedRows, ...swcFixtureRows()];
+const swcRows = swcFixtureRows();
+const swcInventoryFiles = [
+  ...new Set(swcRows.map((row) => path.join(sourceRoot, row.file))),
+];
+const rows = [...parsedRows, ...swcRows];
 const overrides = loadOverrides();
-const markdown = renderInventory(rows, [...testFiles, ...swcTestFiles], overrides);
+const markdown = renderInventory(
+  rows,
+  [...testFiles, ...swcTestFiles, ...swcInventoryFiles],
+  overrides
+);
 
 if (process.argv.includes('--check')) {
   const current = fs.existsSync(outputPath)

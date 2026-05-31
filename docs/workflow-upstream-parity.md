@@ -143,6 +143,23 @@ Remaining blocked WF07-adjacent rows:
   explicitly `type-system-impossible` because they assert TypeScript overload
   behavior, not runtime semantics.
 
+## Required Workflow Bucket Verification
+
+Every Workflow SDK bucket must refresh and verify the standalone upstream
+inventory before claiming progress:
+
+```sh
+npx opensrc fetch https://github.com/vercel/workflow
+node scripts/workflow-test-inventory.mjs --check
+node scripts/workflow-parity-check.mjs
+scripts/check-naming-conventions.sh
+git diff --check
+```
+
+Run `cargo fmt --all --check` whenever Rust files are touched. Buckets that
+change the parity gate itself must also run
+`node scripts/workflow-parity-check.mjs --self-test`.
+
 ## Package Inventory
 
 | Upstream package | Version | Class | Status | Rust owner | Major source and test files | Notes |
@@ -170,7 +187,7 @@ Remaining blocked WF07-adjacent rows:
 | `packages/web` (`@workflow/web`) | `5.0.0-beta.10` | web-only | js-only-documented | none | Source: `app/root.tsx`, `app/routes/*.tsx`, `app/components/**/*.tsx`, `app/lib/client/*.ts`, `server/app.ts`, `server.js`. Tests: 9 files including `app/root.test.tsx`, `app/lib/client/workflow-actions.test.ts`, `app/lib/client/hooks/use-trace-viewer.test.ts`. | Seventy-three rows cover the React dashboard, browser fetch/RPC helpers, hooks, stream client helpers, and route error UI. API data-shape parity belongs to owning runtime/world crates; no browser UI port is claimed. |
 | `packages/web-shared` (`@workflow/web-shared`) | `5.0.0-beta.10` | web-only with portable data contracts | verified | `crates/workflow-world` for portable rows | Source: `src/components/**/*.tsx`, `src/lib/*.ts`, `src/hooks/*.ts`, `src/styles.css`. Tests: 6 files including `test/trace-builder-v1.test.ts`, `test/hydration.test.ts`, `test/exact-event-search-id.test.ts`. | Twenty-nine portable trace/event data rows are ported as named `workflow-world` tests. The remaining twenty rows cover React/UI display, browser hydration/devalue revivers, typed-array inspector rendering, and search UI behavior and are documented as JS-only. No browser UI port is claimed. |
 | `packages/workflow` (`workflow`) | `5.0.0-beta.10` | portable Rust runtime | verified | `crates/workflow` | Source: `src/index.ts`, `src/workflow.ts`, `src/stdlib.ts`, `src/api.ts`, `src/runtime.ts`, `src/observability.ts`, `src/api-workflow.ts`, `src/internal/builtins.ts`, host subpath files, `bin/run.js`. Tests: `src/internal/builtins.test.ts`, `src/observability.test.ts`, `src/stdlib.test.ts`. | Facade re-exports core/runtime, observability, utils parser, stdlib, API shim, builtin, and host-subpath classification surfaces. All 9 portable upstream rows are verified by `cargo test -p workflow`. |
-| `packages/world` (`@workflow/world`) | `5.0.0-beta.5` | portable Rust runtime | verified | `crates/workflow-world` | Source: `src/index.ts`, `src/attributes.ts`, `src/interfaces.ts`, `src/runs.ts`, `src/steps.ts`, `src/events.ts`, `src/hooks.ts`, `src/queue.ts`, `src/recovery.ts`, `src/serialization.ts`, `src/shared.ts`, `src/spec-version.ts`, `src/ulid.ts`, `src/waits.ts`. Tests: `src/attributes.test.ts`. | Shared World boundary ported as Rust contracts for attributes, events, hooks, queue, recovery, runs, serialization, shared pagination/stream types, spec versions, steps, ULID timestamp checks, waits, and traits for local/postgres/vercel implementations. Also owns portable `web-shared` event ID, event duration, and v1/v2 trace data-contract tests. |
+| `packages/world` (`@workflow/world`) | `5.0.0-beta.5` | portable Rust runtime | verified | `crates/workflow-world` | Source: `src/index.ts`, `src/attributes.ts`, `src/interfaces.ts`, `src/runs.ts`, `src/steps.ts`, `src/events.ts`, `src/hooks.ts`, `src/queue.ts`, `src/recovery.ts`, `src/serialization.ts`, `src/shared.ts`, `src/spec-version.ts`, `src/ulid.ts`, `src/waits.ts`. Tests: `src/attributes.test.ts`. | Shared World boundary ported as Rust contracts for attributes, events, hooks, queue, recovery, runs, serialization, shared pagination/stream types, spec versions, steps, ULID timestamp checks, waits, and traits for local/postgres/vercel implementations. Also owns portable `packages/web-shared` event ID, event duration, and v1/v2 trace data-contract tests. |
 | `packages/world-local` (`@workflow/world-local`) | `5.0.0-beta.11` | portable Rust runtime | verified | `crates/workflow-world-local` | Source: `src/index.ts`, `src/config.ts`, `src/fs.ts`, `src/init.ts`, `src/queue.ts`, `src/storage/**/*.ts`, `src/streamer.ts`, `src/telemetry.ts`. Tests: 9 files including `src/storage.test.ts`, `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/tag.test.ts`. | WF 08 ports local config/data-dir handling, safe filesystem helpers, event-sourced storage, queue, streams, re-enqueue, tags, and telemetry helpers. All 314 portable rows in `workflow-test-inventory.md` map to named Rust tests; the 9 prior dynamic `needs-review` rows were inspected and reclassified portable. Validation: `cargo test -p workflow-world-local`. |
 | `packages/world-postgres` (`@workflow/world-postgres`) | `5.0.0-beta.9` | portable Rust runtime | verified | `crates/workflow-world-postgres` | Source: `bin/setup.js`, `src/index.ts`, `src/config.ts`, `src/drizzle/**/*.ts`, SQL migrations, `src/queue.ts`, `src/storage.ts`, `src/streamer.ts`. Tests: `src/queue.test.ts`, `src/reenqueue.test.ts`, `src/util.test.ts`, `test/spec.test.ts`, `test/storage.test.ts`. | Ported deterministic Postgres config, Graphile queue planning, SQL migration metadata, in-memory event-sourced storage, and stream pagination. Inventory maps all 103 portable rows to named Rust tests; 2 TypeScript helper/generic rows are classified `type-system-impossible`. Live Docker/Postgres coverage remains credential/container gated outside normal tests. |
 | `packages/world-testing` (`@workflow/world-testing`) | `5.0.0-beta.10` | docs/test-only | js-only-documented | none | Source: `src/*.mts`, `workflows/*`, `scripts/generate-well-known-dts.mjs`. Tests: `test/embedded.test.ts`, `test/inline-batches-debug.test.ts`. | JavaScript test harness package. Its test files invoke helper suites rather than declaring direct inventory rows, so it remains outside Rust runtime parity. |

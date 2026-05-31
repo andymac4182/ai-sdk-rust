@@ -80,8 +80,8 @@ pub const UPSTREAM_VERSION: &str = "5.0.0-beta.5";
 /// Rust crate version compiled into the library.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Portable data contracts shared with upstream `packages/web-shared`.
-pub mod web_shared_contracts {
+/// Portable event and trace contracts from upstream `packages/web-shared`.
+pub mod web_trace_contracts {
     use std::collections::HashMap;
 
     /// Workflow run status values shared by the World API and observability data.
@@ -848,7 +848,7 @@ pub mod web_shared_contracts {
 
 #[cfg(test)]
 mod tests {
-    use super::web_shared_contracts::*;
+    use super::web_trace_contracts::*;
     use super::{
         ClearableWorld, RecoverableWorld, UPSTREAM_HEAD, UPSTREAM_PACKAGE, UPSTREAM_VERSION,
     };
