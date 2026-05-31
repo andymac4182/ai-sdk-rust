@@ -25,11 +25,16 @@ use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     LanguageModel, LanguageModelAbortSignal, LanguageModelCallOptions,
     LanguageModelReasoningEffort, LanguageModelResponseFormat, LanguageModelStreamPart,
-    LanguageModelToolChoice,
+    LanguageModelSystemMessage, LanguageModelToolChoice,
 };
 use crate::prompt::{Instructions, Prompt, PromptInput, TimeoutConfiguration};
 use crate::provider::{InvalidPromptError, ProviderOptions, TypeValidationContext};
 use crate::provider_utils::{ExperimentalSandbox, FlexibleSchema, validate_types};
+use crate::skills::{
+    AgentSkillInstruction, AgentSkillMetadata, allowed_tools_for_loaded_agent_skills,
+    attach_agent_skills_to_context, build_agent_skill_prompt_sections, merge_agent_skills,
+    merge_loaded_agent_skills,
+};
 use crate::stream_text::{
     StreamTextOptions, StreamTextResult, StreamTextTransform, StreamTextUiMessageStreamOptions,
     stream_text,
@@ -130,6 +135,19 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
             options.call_options,
             self.settings.call_options_schema.as_ref(),
         )?;
+        let skills = merge_agent_skills(&self.settings.skills, options.skills);
+        let loaded_skills =
+            merge_loaded_agent_skills(&self.settings.loaded_skills, options.loaded_skills);
+        let mut runtime_context = merge_json_objects(
+            self.settings.runtime_context.clone(),
+            options.runtime_context,
+        );
+        attach_agent_skills_to_context(&mut runtime_context, &skills, &loaded_skills);
+        let active_tools = options
+            .active_tools
+            .or_else(|| self.settings.active_tools.clone())
+            .or_else(|| allowed_tools_for_loaded_agent_skills(&loaded_skills));
+
         let mut prepared = ToolLoopAgentPreparedCall {
             model: options.model.unwrap_or(self.settings.model),
             prompt: options.prompt,
@@ -143,10 +161,9 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
                 .clone()
                 .merge(options.model_settings),
             tools: merged_tools(&self.settings.tools, options.tools),
-            runtime_context: merge_json_objects(
-                self.settings.runtime_context.clone(),
-                options.runtime_context,
-            ),
+            skills,
+            loaded_skills,
+            runtime_context,
             tools_context: merge_json_objects(
                 self.settings.tools_context.clone(),
                 options.tools_context,
@@ -154,9 +171,7 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
             experimental_sandbox: options
                 .experimental_sandbox
                 .or_else(|| self.settings.experimental_sandbox.clone()),
-            active_tools: options
-                .active_tools
-                .or_else(|| self.settings.active_tools.clone()),
+            active_tools,
             tool_approval: options
                 .tool_approval
                 .or_else(|| self.settings.tool_approval.clone()),
@@ -335,6 +350,12 @@ pub struct ToolLoopAgentSettings<'a, M: LanguageModel + ?Sized> {
     /// Tools made available to each call.
     pub tools: Vec<GenerateTextTool>,
 
+    /// Skills available for model invocation.
+    pub skills: Vec<AgentSkillMetadata>,
+
+    /// Skill instructions already loaded for each call.
+    pub loaded_skills: Vec<AgentSkillInstruction>,
+
     /// Runtime context attached to generated steps.
     pub runtime_context: JsonObject,
 
@@ -405,6 +426,8 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
             instructions: None,
             model_settings: ToolLoopAgentModelSettings::default(),
             tools: Vec::new(),
+            skills: Vec::new(),
+            loaded_skills: Vec::new(),
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
             call_options_schema: None,
@@ -443,6 +466,33 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
     /// Adds a tool to every call.
     pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
         self.tools.push(tool.into());
+        self
+    }
+
+    /// Adds one skill to every call's model-visible skill registry.
+    pub fn with_skill(mut self, skill: AgentSkillMetadata) -> Self {
+        self.skills.push(skill);
+        self
+    }
+
+    /// Adds skills to every call's model-visible skill registry.
+    pub fn with_skills(mut self, skills: impl IntoIterator<Item = AgentSkillMetadata>) -> Self {
+        self.skills.extend(skills);
+        self
+    }
+
+    /// Adds one already-loaded skill instruction to every call.
+    pub fn with_loaded_skill(mut self, skill: AgentSkillInstruction) -> Self {
+        self.loaded_skills.push(skill);
+        self
+    }
+
+    /// Adds already-loaded skill instructions to every call.
+    pub fn with_loaded_skills(
+        mut self,
+        skills: impl IntoIterator<Item = AgentSkillInstruction>,
+    ) -> Self {
+        self.loaded_skills.extend(skills);
         self
     }
 
@@ -825,6 +875,8 @@ pub struct ToolLoopAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub instructions: Option<Instructions>,
     pub model_settings: ToolLoopAgentModelSettings,
     pub tools: Vec<GenerateTextTool>,
+    pub skills: Vec<AgentSkillMetadata>,
+    pub loaded_skills: Vec<AgentSkillInstruction>,
     pub runtime_context: JsonObject,
     pub tools_context: JsonObject,
     pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
@@ -858,6 +910,8 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
             instructions: None,
             model_settings: ToolLoopAgentModelSettings::default(),
             tools: Vec::new(),
+            skills: Vec::new(),
+            loaded_skills: Vec::new(),
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
             experimental_sandbox: None,
@@ -919,6 +973,33 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
     /// Adds a per-call tool.
     pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
         self.tools.push(tool.into());
+        self
+    }
+
+    /// Adds one skill to the per-call model-visible skill registry.
+    pub fn with_skill(mut self, skill: AgentSkillMetadata) -> Self {
+        self.skills.push(skill);
+        self
+    }
+
+    /// Adds skills to the per-call model-visible skill registry.
+    pub fn with_skills(mut self, skills: impl IntoIterator<Item = AgentSkillMetadata>) -> Self {
+        self.skills.extend(skills);
+        self
+    }
+
+    /// Adds one already-loaded skill instruction to this call.
+    pub fn with_loaded_skill(mut self, skill: AgentSkillInstruction) -> Self {
+        self.loaded_skills.push(skill);
+        self
+    }
+
+    /// Adds already-loaded skill instructions to this call.
+    pub fn with_loaded_skills(
+        mut self,
+        skills: impl IntoIterator<Item = AgentSkillInstruction>,
+    ) -> Self {
+        self.loaded_skills.extend(skills);
         self
     }
 
@@ -1139,6 +1220,8 @@ pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub instructions: Option<Instructions>,
     pub model_settings: ToolLoopAgentModelSettings,
     pub tools: Vec<GenerateTextTool>,
+    pub skills: Vec<AgentSkillMetadata>,
+    pub loaded_skills: Vec<AgentSkillInstruction>,
     pub runtime_context: JsonObject,
     pub tools_context: JsonObject,
     pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
@@ -1233,7 +1316,12 @@ fn generate_options_from_prepared<'a, M: LanguageModel + ?Sized>(
 ) -> Result<GenerateTextOptions<'a, M>, InvalidPromptError> {
     let mut options = GenerateTextOptions::from_prompt(
         prepared.model,
-        prompt_with_instructions(prepared.prompt.clone(), prepared.instructions.clone()),
+        prompt_with_agent_context(
+            prepared.prompt.clone(),
+            prepared.instructions.clone(),
+            &prepared.skills,
+            &prepared.loaded_skills,
+        ),
     )?;
     prepared
         .model_settings
@@ -1246,7 +1334,12 @@ fn stream_options_from_prepared<'a, M: LanguageModel + ?Sized>(
 ) -> Result<StreamTextOptions<'a, M>, InvalidPromptError> {
     let mut options = StreamTextOptions::from_prompt(
         prepared.model,
-        prompt_with_instructions(prepared.prompt.clone(), prepared.instructions.clone()),
+        prompt_with_agent_context(
+            prepared.prompt.clone(),
+            prepared.instructions.clone(),
+            &prepared.skills,
+            &prepared.loaded_skills,
+        ),
     )?;
     prepared
         .model_settings
@@ -1342,11 +1435,54 @@ fn validate_agent_call_options(
     .map_err(|error| InvalidPromptError::new(JsonValue::Null, error.message()))
 }
 
-fn prompt_with_instructions(mut prompt: Prompt, instructions: Option<Instructions>) -> Prompt {
+fn prompt_with_agent_context(
+    mut prompt: Prompt,
+    instructions: Option<Instructions>,
+    skills: &[AgentSkillMetadata],
+    loaded_skills: &[AgentSkillInstruction],
+) -> Prompt {
+    let skill_prompt = build_agent_skill_prompt_sections(skills, loaded_skills);
+
     if prompt.instructions.is_none() && prompt.system.is_none() {
-        prompt.instructions = instructions;
+        prompt.instructions = merge_optional_instructions(instructions, skill_prompt);
+    } else if let Some(skill_prompt) = skill_prompt {
+        if let Some(existing_instructions) = prompt.instructions.take() {
+            prompt.instructions = Some(append_text_to_instructions(
+                existing_instructions,
+                skill_prompt,
+            ));
+        } else if let Some(existing_system) = prompt.system.take() {
+            prompt.system = Some(append_text_to_instructions(existing_system, skill_prompt));
+        }
     }
+
     prompt
+}
+
+fn merge_optional_instructions(
+    instructions: Option<Instructions>,
+    text: Option<String>,
+) -> Option<Instructions> {
+    match (instructions, text) {
+        (Some(instructions), Some(text)) => Some(append_text_to_instructions(instructions, text)),
+        (Some(instructions), None) => Some(instructions),
+        (None, Some(text)) => Some(Instructions::Text(text)),
+        (None, None) => None,
+    }
+}
+
+fn append_text_to_instructions(instructions: Instructions, text: String) -> Instructions {
+    let mut messages = instructions_to_system_messages(instructions);
+    messages.push(LanguageModelSystemMessage::new(text));
+    Instructions::Messages(messages)
+}
+
+fn instructions_to_system_messages(instructions: Instructions) -> Vec<LanguageModelSystemMessage> {
+    match instructions {
+        Instructions::Text(text) => vec![LanguageModelSystemMessage::new(text)],
+        Instructions::Message(message) => vec![message],
+        Instructions::Messages(messages) => messages,
+    }
 }
 
 fn merged_tools(
@@ -1781,6 +1917,30 @@ mod tests {
         crate::language_model::LanguageModelMessage::System(LanguageModelSystemMessage::new(text))
     }
 
+    fn test_agent_skill(name: &str, description: &str) -> AgentSkillMetadata {
+        AgentSkillMetadata {
+            name: name.to_string(),
+            description: description.to_string(),
+            path: format!("/skills/{name}"),
+            filename: "SKILL.md".to_string(),
+            options: crate::skills::AgentSkillOptions::default(),
+        }
+    }
+
+    fn test_loaded_agent_skill(
+        name: &str,
+        content: &str,
+        allowed_tools: Vec<String>,
+    ) -> AgentSkillInstruction {
+        let mut metadata = test_agent_skill(name, "Loaded skill");
+        metadata.options.allowed_tools = allowed_tools;
+        AgentSkillInstruction {
+            metadata,
+            content: content.to_string(),
+            arguments: None,
+        }
+    }
+
     fn system_message_with_provider_options(
         text: &str,
         provider_options: ProviderOptions,
@@ -1926,6 +2086,65 @@ mod tests {
             crate::language_model::LanguageModelMessage::System(message)
                 if message.content == "Use concise answers."
         ));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_attaches_skills_to_prompt_context_and_active_tools() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let prepared_context = Rc::new(RefCell::new(None::<JsonObject>));
+        let prepared_active_tools = Rc::new(RefCell::new(None::<ActiveTools>));
+        let prepared_context_for_callback = Rc::clone(&prepared_context);
+        let prepared_active_tools_for_callback = Rc::clone(&prepared_active_tools);
+        let loaded_skill = test_loaded_agent_skill(
+            "review",
+            "Skill directory: /skills/review\n\nReview the diff.",
+            vec!["Read".to_string()],
+        );
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_instructions("Base instructions.")
+                .with_skill(test_agent_skill("review", "Review code changes"))
+                .with_loaded_skill(loaded_skill)
+                .with_prepare_call(move |prepared| {
+                    *prepared_context_for_callback.borrow_mut() =
+                        Some(prepared.runtime_context.clone());
+                    *prepared_active_tools_for_callback.borrow_mut() =
+                        Some(prepared.active_tools.clone());
+                    prepared
+                }),
+        );
+
+        let result = poll_ready(agent.generate("Hello")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let prompt = &model.generate_calls()[0].prompt;
+        assert_eq!(prompt.len(), 3);
+        assert!(matches!(
+            &prompt[0],
+            crate::language_model::LanguageModelMessage::System(message)
+                if message.content == "Base instructions."
+        ));
+        assert!(matches!(
+            &prompt[1],
+            crate::language_model::LanguageModelMessage::System(message)
+                if message.content.contains("## Skills")
+                    && message.content.contains("- review: Review code changes")
+                    && message.content.contains("## Loaded Skills")
+                    && message.content.contains("<review>")
+        ));
+        assert_eq!(
+            prepared_active_tools.borrow().as_ref(),
+            Some(&Some(vec!["Read".to_string()]))
+        );
+        let context = prepared_context
+            .borrow()
+            .clone()
+            .expect("skills context captured");
+        assert_eq!(context["skills"]["available"][0]["name"], json!("review"));
+        assert_eq!(
+            context["skills"]["loaded"][0]["metadata"]["name"],
+            json!("review")
+        );
     }
 
     #[test]
