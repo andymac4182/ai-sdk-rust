@@ -8,13 +8,15 @@ use std::sync::Arc;
 use ai_sdk_provider::json::{JsonObject, JsonValue};
 use ai_sdk_provider::{
     FinishReason, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
-    LanguageModelFinishReason, LanguageModelMessage, LanguageModelResponseMetadata,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelSystemMessage,
-    LanguageModelTextPart, LanguageModelToolCall, LanguageModelToolCallPart,
-    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultPart,
-    LanguageModelUsage, ProviderMetadata, ProviderOptions, Warning,
+    LanguageModelFinishReason, LanguageModelMessage, LanguageModelReasoningPart,
+    LanguageModelResponseMetadata, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolCall,
+    LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
+    LanguageModelToolResultPart, LanguageModelUsage, ProviderMetadata, ProviderOptions, Warning,
 };
-use ai_sdk_rust::{StopCondition, TelemetryOptions, ToolCallRepairFunction, ToolCallRepairOptions};
+use ai_sdk_rust::{
+    StopCondition, TelemetryOptions, ToolCallRepairFunction, ToolCallRepairOptions, UiMessageChunk,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{SerializableToolSet, serialize_tool_set};
@@ -114,17 +116,8 @@ pub struct ParsedToolCall {
 impl ParsedToolCall {
     /// Converts a provider stream tool-call part into a workflow parsed tool call.
     pub fn from_language_model_tool_call(tool_call: &LanguageModelToolCall) -> Self {
-        let (input, invalid, error) = match serde_json::from_str::<JsonValue>(&tool_call.input) {
-            Ok(input) => (input, None, None),
-            Err(error) => (
-                JsonValue::String(tool_call.input.clone()),
-                Some(true),
-                Some(format!(
-                    "Tool call '{}' did not contain valid JSON input: {error}",
-                    tool_call.tool_name
-                )),
-            ),
-        };
+        let (input, invalid, error) =
+            parse_tool_call_input_with_status(Some(tool_call.input.as_str()), &tool_call.tool_name);
 
         Self {
             kind: "tool-call".to_string(),
@@ -401,6 +394,9 @@ pub struct StreamTextIteratorYieldValue {
 
     /// Provider-executed results emitted by the model stream.
     pub provider_executed_tool_results: BTreeMap<String, ProviderExecutedToolResult>,
+
+    /// UI-message chunks collected from the model stream for this yield.
+    pub ui_message_chunks: Vec<UiMessageChunk>,
 }
 
 /// Callback invoked before each workflow stream-text step.
@@ -902,14 +898,7 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
         match finish_reason {
             FinishReason::ToolCalls => {
                 self.prompt.push(LanguageModelMessage::Assistant(
-                    LanguageModelAssistantMessage::new(
-                        output
-                            .tool_calls
-                            .iter()
-                            .map(tool_call_prompt_part)
-                            .map(LanguageModelAssistantContentPart::ToolCall)
-                            .collect(),
-                    ),
+                    LanguageModelAssistantMessage::new(assistant_content_parts(&output)),
                 ));
                 self.waiting_for_tool_results = true;
 
@@ -920,6 +909,7 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
                     runtime_context: self.runtime_context.clone(),
                     tools_context: self.tools_context.clone(),
                     provider_executed_tool_results: output.provider_executed_tool_results,
+                    ui_message_chunks: ui_message_chunks_from_parts(output.chunks),
                 }))
             }
             FinishReason::Stop => {
@@ -941,6 +931,7 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
                     runtime_context: self.runtime_context.clone(),
                     tools_context: self.tools_context.clone(),
                     provider_executed_tool_results: output.provider_executed_tool_results,
+                    ui_message_chunks: ui_message_chunks_from_parts(output.chunks),
                 }))
             }
             FinishReason::Length
@@ -956,6 +947,7 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
                     runtime_context: self.runtime_context.clone(),
                     tools_context: self.tools_context.clone(),
                     provider_executed_tool_results: output.provider_executed_tool_results,
+                    ui_message_chunks: ui_message_chunks_from_parts(output.chunks),
                 }))
             }
         }
@@ -978,6 +970,43 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
             })
             .collect()
     }
+}
+
+/// Mirrors upstream `normalizeFinishReason`.
+pub fn normalize_finish_reason(value: Option<&JsonValue>) -> String {
+    let Some(value) = value else {
+        return "other".to_string();
+    };
+
+    if let Some(reason) = value.as_str() {
+        return match reason {
+            "stop" | "tool-calls" | "length" | "content-filter" | "error" | "other" => {
+                reason.to_string()
+            }
+            "" => String::new(),
+            _ => "other".to_string(),
+        };
+    }
+
+    let Some(reason) = value
+        .as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(JsonValue::as_str)
+    else {
+        return "other".to_string();
+    };
+
+    match reason {
+        "stop" | "tool-calls" | "length" | "content-filter" | "error" | "other" => {
+            reason.to_string()
+        }
+        _ => "other".to_string(),
+    }
+}
+
+/// Mirrors upstream `safeParseToolCallInput`.
+pub fn safe_parse_tool_call_input(input: Option<&str>) -> JsonValue {
+    parse_tool_call_input_with_status(input, "").0
 }
 
 /// Executor that returns pre-collected stream steps.
@@ -1199,23 +1228,93 @@ pub fn sanitize_provider_metadata_for_tool_call(
     metadata: Option<&ProviderMetadata>,
 ) -> Option<ProviderOptions> {
     let metadata = metadata?;
-    let mut sanitized = ProviderOptions::new();
-
-    for (provider, provider_metadata) in metadata {
-        let mut provider_options = provider_metadata.clone();
-        if provider == "openai" {
-            provider_options.remove("itemId");
-        }
-        if !provider_options.is_empty() {
-            sanitized.insert(provider.clone(), provider_options);
-        }
-    }
+    let sanitized: ProviderOptions = metadata
+        .iter()
+        .filter(|(_, provider_metadata)| !provider_metadata.is_empty())
+        .map(|(provider, provider_metadata)| (provider.clone(), provider_metadata.clone()))
+        .collect();
 
     if sanitized.is_empty() {
         None
     } else {
         Some(sanitized)
     }
+}
+
+fn parse_tool_call_input_with_status(
+    input: Option<&str>,
+    tool_name: &str,
+) -> (JsonValue, Option<bool>, Option<String>) {
+    let Some(input) = input else {
+        return (JsonValue::Object(JsonObject::new()), None, None);
+    };
+    if input.is_empty() {
+        return (JsonValue::Object(JsonObject::new()), None, None);
+    }
+
+    match serde_json::from_str::<JsonValue>(input) {
+        Ok(parsed) => (parsed, None, None),
+        Err(error) => (
+            JsonValue::String(input.to_string()),
+            Some(true),
+            Some(format!(
+                "Tool call '{tool_name}' did not contain valid JSON input: {error}"
+            )),
+        ),
+    }
+}
+
+fn assistant_content_parts(output: &DoStreamStepOutput) -> Vec<LanguageModelAssistantContentPart> {
+    let mut parts = Vec::new();
+
+    for chunk in &output.chunks {
+        match chunk {
+            LanguageModelStreamPart::TextDelta(part) => {
+                parts.push(LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new(part.delta.clone()),
+                ));
+            }
+            LanguageModelStreamPart::ReasoningDelta(part) => {
+                let mut reasoning = LanguageModelReasoningPart::new(part.delta.clone());
+                if let Some(provider_options) =
+                    sanitize_provider_metadata_for_tool_call(part.provider_metadata.as_ref())
+                {
+                    reasoning = reasoning.with_provider_options(provider_options);
+                }
+                parts.push(LanguageModelAssistantContentPart::Reasoning(reasoning));
+            }
+            LanguageModelStreamPart::ToolCall(part) => {
+                if let Some(parsed) = output
+                    .tool_calls
+                    .iter()
+                    .find(|tool_call| tool_call.tool_call_id == part.tool_call_id)
+                {
+                    parts.push(LanguageModelAssistantContentPart::ToolCall(
+                        tool_call_prompt_part(parsed),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        output
+            .tool_calls
+            .iter()
+            .map(tool_call_prompt_part)
+            .map(LanguageModelAssistantContentPart::ToolCall)
+            .collect()
+    } else {
+        parts
+    }
+}
+
+fn ui_message_chunks_from_parts(parts: Vec<LanguageModelStreamPart>) -> Vec<UiMessageChunk> {
+    parts
+        .into_iter()
+        .filter_map(|part| crate::to_ui_message_chunk(&part))
+        .collect()
 }
 
 fn apply_system_message(prompt: &mut WorkflowPrompt, system: String) {
@@ -1371,6 +1470,85 @@ mod tests {
             }))
             .expect("schema is an object"),
         )
+    }
+
+    #[test]
+    fn do_stream_step_upstream_normalize_finish_reason_matches_strings_objects_and_edges() {
+        for reason in [
+            "stop",
+            "tool-calls",
+            "length",
+            "content-filter",
+            "error",
+            "other",
+        ] {
+            assert_eq!(normalize_finish_reason(Some(&json!(reason))), reason);
+            assert_eq!(
+                normalize_finish_reason(Some(
+                    &json!({ "type": reason, "metadata": { "foo": "bar" } })
+                )),
+                reason
+            );
+        }
+
+        assert_eq!(
+            normalize_finish_reason(Some(&json!({ "type": "unknown" }))),
+            "other"
+        );
+        assert_eq!(normalize_finish_reason(Some(&json!({}))), "other");
+        assert_eq!(
+            normalize_finish_reason(Some(&json!({ "type": null }))),
+            "other"
+        );
+        assert_eq!(normalize_finish_reason(None), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(null))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(42))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(true))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(["stop"]))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(""))), "");
+    }
+
+    #[test]
+    fn do_stream_step_upstream_safe_parse_tool_call_input_parses_missing_and_malformed_inputs() {
+        assert_eq!(
+            safe_parse_tool_call_input(Some(r#"{"city":"San Francisco"}"#)),
+            json!({ "city": "San Francisco" })
+        );
+        assert_eq!(safe_parse_tool_call_input(None), json!({}));
+        assert_eq!(safe_parse_tool_call_input(Some("")), json!({}));
+        assert_eq!(
+            safe_parse_tool_call_input(Some(r#"{"city":"San Francisco""#)),
+            json!(r#"{"city":"San Francisco""#)
+        );
+    }
+
+    #[test]
+    fn do_stream_step_upstream_should_not_throw_when_streamed_tool_call_input_is_malformed_json() {
+        let output = output_from_parts(
+            [
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "getWeather",
+                    r#"{"city":"San Francisco""#,
+                )),
+                finish(FinishReason::ToolCalls),
+            ],
+            0,
+        );
+
+        assert_eq!(output.tool_calls.len(), 1);
+        assert_eq!(
+            output.tool_calls[0].input,
+            json!(r#"{"city":"San Francisco""#)
+        );
+        assert_eq!(output.tool_calls[0].invalid, Some(true));
+        assert!(
+            output.tool_calls[0]
+                .error
+                .as_deref()
+                .expect("parse error")
+                .contains("did not contain valid JSON input")
+        );
     }
 
     #[test]
@@ -1819,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors()
+    fn stream_text_iterator_upstream_should_preserve_openai_provider_metadata_including_item_id_now_that_reasoning_is_preserved()
      {
         let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
             .with_provider_metadata(provider_metadata(json!({
@@ -1852,12 +2030,16 @@ mod tests {
         let prompt = &iterator.executor().calls()[1].prompt;
         assert_eq!(
             assistant_tool_call_provider_options(prompt, "testTool"),
-            Some(None)
+            Some(Some(provider_metadata(json!({
+                "openai": {
+                    "itemId": "fc_0402bf2d292dd7ed00697a35fb10e0819ab0098545c4d0d7f5"
+                }
+            }))))
         );
     }
 
     #[test]
-    fn stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id()
+    fn stream_text_iterator_upstream_should_preserve_all_openai_metadata_fields_including_item_id()
     {
         let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
             .with_provider_metadata(provider_metadata(json!({
@@ -1893,6 +2075,7 @@ mod tests {
             assistant_tool_call_provider_options(prompt, "testTool"),
             Some(Some(provider_metadata(json!({
                 "openai": {
+                    "itemId": "fc_0402bf2d292dd7ed00697a35fb10e0819ab0098545c4d0d7f5",
                     "someOtherField": "should-be-preserved"
                 }
             }))))
@@ -1900,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata()
+    fn stream_text_iterator_upstream_should_preserve_both_gemini_and_openai_metadata_in_mixed_provider_metadata()
      {
         let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
             .with_provider_metadata(provider_metadata(json!({
@@ -1908,7 +2091,7 @@ mod tests {
                     "thoughtSignature": "sig_gemini_preserved"
                 },
                 "openai": {
-                    "itemId": "fc_should_be_stripped"
+                    "itemId": "fc_should_be_preserved"
                 }
             })));
         let executor = ScriptedStreamTextStepExecutor::new([
@@ -1939,20 +2122,23 @@ mod tests {
             Some(Some(provider_metadata(json!({
                 "google": {
                     "thoughtSignature": "sig_gemini_preserved"
+                },
+                "openai": {
+                    "itemId": "fc_should_be_preserved"
                 }
             }))))
         );
     }
 
     #[test]
-    fn stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata() {
+    fn stream_text_iterator_preserves_openai_item_id_and_other_metadata() {
         let tool_call = LanguageModelToolCall::new("call-1", "mixedTool", "{}")
             .with_provider_metadata(provider_metadata(json!({
                 "google": {
                     "thoughtSignature": "sig_gemini"
                 },
                 "openai": {
-                    "itemId": "fc_should_be_stripped",
+                    "itemId": "fc_should_be_preserved",
                     "reasoningSummary": "keep"
                 }
             })));
@@ -1986,9 +2172,277 @@ mod tests {
                     "thoughtSignature": "sig_gemini"
                 },
                 "openai": {
+                    "itemId": "fc_should_be_preserved",
                     "reasoningSummary": "keep"
                 }
             }))))
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_include_reasoning_parts_before_tool_call_parts() {
+        let reasoning_metadata = provider_metadata(json!({
+            "openai": {
+                "itemId": "rs_123"
+            }
+        }));
+        let tool_metadata = provider_metadata(json!({
+            "openai": {
+                "itemId": "fc_123"
+            }
+        }));
+        let tool_call = LanguageModelToolCall::new("call-1", "testTool", "{}")
+            .with_provider_metadata(tool_metadata.clone());
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ReasoningDelta(
+                        ai_sdk_provider::LanguageModelReasoningDelta::new(
+                            "reasoning-1",
+                            "thinking",
+                        )
+                        .with_provider_metadata(reasoning_metadata.clone()),
+                    ),
+                    LanguageModelStreamPart::ToolCall(tool_call),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "ok": true }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        let assistant = prompt
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Assistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("assistant message");
+        assert!(matches!(
+            assistant.content[0],
+            LanguageModelAssistantContentPart::Reasoning(_)
+        ));
+        assert!(matches!(
+            assistant.content[1],
+            LanguageModelAssistantContentPart::ToolCall(_)
+        ));
+        match &assistant.content[0] {
+            LanguageModelAssistantContentPart::Reasoning(reasoning) => {
+                assert_eq!(reasoning.text, "thinking");
+                assert_eq!(reasoning.provider_options, Some(reasoning_metadata));
+            }
+            _ => panic!("expected reasoning"),
+        }
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_preserve_reasoning_provider_options() {
+        let reasoning_metadata = provider_metadata(json!({
+            "anthropic": {
+                "cacheControl": {
+                    "type": "ephemeral"
+                }
+            }
+        }));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ReasoningDelta(
+                        ai_sdk_provider::LanguageModelReasoningDelta::new(
+                            "reasoning-1",
+                            "thinking...",
+                        )
+                        .with_provider_metadata(reasoning_metadata.clone()),
+                    ),
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "call-1", "testTool", "{}",
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "ok": true }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        let assistant = prompt
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Assistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("assistant message");
+
+        match &assistant.content[0] {
+            LanguageModelAssistantContentPart::Reasoning(reasoning) => {
+                assert_eq!(reasoning.provider_options, Some(reasoning_metadata));
+            }
+            _ => panic!("expected reasoning"),
+        }
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_not_add_reasoning_parts_when_step_has_no_reasoning() {
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "call-1", "testTool", "{}",
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "ok": true }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        let assistant = prompt
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Assistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("assistant message");
+
+        assert_eq!(assistant.content.len(), 1);
+        assert!(matches!(
+            assistant.content[0],
+            LanguageModelAssistantContentPart::ToolCall(_)
+        ));
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_apply_system_message_when_prepare_step_returns_only_system()
+     {
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_prepare_step(WorkflowPrepareStepCallback::new(|_| {
+                    WorkflowPrepareStepResult::default().with_system("You are helpful.")
+                }));
+
+        iterator
+            .next(None)
+            .expect("step succeeds")
+            .expect("yield exists");
+
+        let call_prompt = &iterator.executor().calls()[0].prompt;
+        assert_eq!(
+            call_prompt[0],
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("You are helpful."))
+        );
+        assert_eq!(call_prompt[1], user_text_message("test"));
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_replace_existing_system_message_when_messages_already_contains_one()
+     {
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_prepare_step(WorkflowPrepareStepCallback::new(|_| {
+                    WorkflowPrepareStepResult::default()
+                        .with_messages(vec![
+                            LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                                "Old system.",
+                            )),
+                            user_text_message("replacement"),
+                        ])
+                        .with_system("New system.")
+                }));
+
+        iterator
+            .next(None)
+            .expect("step succeeds")
+            .expect("yield exists");
+
+        let call_prompt = &iterator.executor().calls()[0].prompt;
+        assert_eq!(
+            call_prompt[0],
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("New system."))
+        );
+        assert_eq!(call_prompt[1], user_text_message("replacement"));
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_update_system_message_on_subsequent_steps() {
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "call-1", "testTool", "{}",
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_prepare_step(WorkflowPrepareStepCallback::new(|info| {
+                    WorkflowPrepareStepResult::default()
+                        .with_system(format!("System prompt v{}", info.step_number))
+                }));
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "testTool",
+                json!({ "ok": true }),
+            )]))
+            .expect("second step succeeds");
+
+        let calls = iterator.executor().calls();
+        assert_eq!(
+            calls[0].prompt[0],
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("System prompt v0"))
+        );
+        assert_eq!(
+            calls[1].prompt[0],
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("System prompt v1"))
         );
     }
 

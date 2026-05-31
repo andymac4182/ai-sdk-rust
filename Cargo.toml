@@ -46,6 +46,7 @@ members = [
     "crates/open-agents-slack",
     "crates/repo-naming-check",
     "crates/workflow",
+    "crates/workflow-ai",
     "crates/workflow-core",
     "crates/workflow-errors",
     "crates/workflow-utils",
