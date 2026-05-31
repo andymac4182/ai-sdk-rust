@@ -51,6 +51,7 @@ pub mod skills;
 pub mod speech_model;
 pub mod stream_object;
 pub mod stream_text;
+pub mod subagents;
 pub mod telemetry;
 pub mod text_stream_response;
 pub mod togetherai;
@@ -449,6 +450,14 @@ pub use stream_text::{
     TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart,
     TextStreamReasoningDeltaPart, TextStreamReasoningFilePart, TextStreamStartPart,
     TextStreamStartStepPart, TextStreamTextDeltaPart, smooth_stream, stream_text,
+};
+pub use subagents::{
+    SUBAGENT_STEP_LIMIT, SubagentInheritedContext, SubagentProfile, SubagentRegistry,
+    SubagentSkillContext, SubagentTaskError, SubagentTaskPermit, SubagentTaskState, SubagentType,
+    TASK_TOOL_NAME, TaskPendingToolCall, TaskToolInput, TaskToolOutput, TaskToolRunFuture,
+    TaskToolRunResult, TaskToolRunner, ToolLoopSubagentRunner, add_language_model_usage,
+    add_token_counts, default_subagent_profiles, inherited_subagent_abort_signal,
+    sum_language_model_usage, task_tool,
 };
 pub use telemetry::{
     AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL, LegacyOpenTelemetryRecorder, OpenTelemetryRecorder,
