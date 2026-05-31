@@ -34,6 +34,7 @@ pub mod language_model_middleware;
 pub mod logger;
 pub mod mock_models;
 pub mod object_transport;
+pub mod open_agents_tools;
 pub mod open_responses;
 pub mod openai;
 pub mod openai_compatible;
@@ -303,6 +304,11 @@ pub use object_transport::{
     ObjectRequestOptions, ObjectStreamResult, ObjectStreamUpdate, ObjectTransport,
     ObjectTransportMethod, ObjectTransportOptions, ObjectTransportRequest,
     parse_object_stream_final_json, process_object_text_stream,
+};
+pub use open_agents_tools::{
+    OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH, OpenAgentToolApprovalPolicy, OpenAgentToolsOptions,
+    command_needs_approval, is_allowed_web_url, is_dotenv_file_path, open_agent_tools,
+    open_agent_tools_in_workspace, open_agent_tools_with_options,
 };
 pub use open_responses::{
     OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
