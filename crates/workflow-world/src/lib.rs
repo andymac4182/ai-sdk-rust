@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 pub mod attributes;
 pub mod data;
 pub mod error;
@@ -35,6 +37,12 @@ pub use spec_version::*;
 pub use steps::*;
 pub use ulid::*;
 pub use waits::*;
+
+/// Shared string header map used by queue and HTTP contracts.
+pub type Headers = BTreeMap<String, String>;
+
+/// Compatibility alias for world implementation pagination helpers.
+pub type Pagination = PaginationOptions;
 
 /// Worlds that can clear their backing state for deterministic local tests.
 pub trait ClearableWorld {

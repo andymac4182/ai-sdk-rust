@@ -12,6 +12,45 @@ pub const STEP_QUEUE_PREFIX: &str = "__wkf_step_";
 pub const WORKFLOW_QUEUE_PREFIX: &str = "__wkf_workflow_";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueRoute {
+    Flow,
+    Step,
+}
+
+pub fn queue_route(queue_name: &str) -> Option<QueueRoute> {
+    if queue_name.starts_with(STEP_QUEUE_PREFIX) {
+        Some(QueueRoute::Step)
+    } else if queue_name.starts_with(WORKFLOW_QUEUE_PREFIX) {
+        Some(QueueRoute::Flow)
+    } else {
+        None
+    }
+}
+
+pub fn split_queue_name(queue_name: &str) -> Option<(&'static str, &str)> {
+    if let Some(id) = queue_name.strip_prefix(STEP_QUEUE_PREFIX) {
+        Some((STEP_QUEUE_PREFIX, id))
+    } else {
+        queue_name
+            .strip_prefix(WORKFLOW_QUEUE_PREFIX)
+            .map(|id| (WORKFLOW_QUEUE_PREFIX, id))
+    }
+}
+
+pub fn sanitize_queue_name(queue_name: &str) -> String {
+    queue_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueuePrefix {
     #[serde(rename = "__wkf_step_")]
     Step,
@@ -154,6 +193,34 @@ pub enum QueuePayload {
     HealthCheck(HealthCheckPayload),
 }
 
+impl QueuePayload {
+    pub fn workflow_headers(&self) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::new();
+        match self {
+            Self::Workflow(payload) => {
+                headers.insert("x-vercel-workflow-run-id".into(), payload.run_id.clone());
+            }
+            Self::Step(payload) => {
+                headers.insert(
+                    "x-vercel-workflow-run-id".into(),
+                    payload.workflow_run_id.clone(),
+                );
+                headers.insert("x-vercel-workflow-step-id".into(), payload.step_id.clone());
+            }
+            Self::HealthCheck(_) => {}
+        }
+        headers
+    }
+
+    pub fn workflow_run_id(&self) -> Option<&str> {
+        match self {
+            Self::Workflow(payload) => Some(&payload.run_id),
+            Self::Step(payload) => Some(&payload.workflow_run_id),
+            Self::HealthCheck(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueOptions {
@@ -162,6 +229,41 @@ pub struct QueueOptions {
     pub headers: Option<BTreeMap<String, String>>,
     pub delay_seconds: Option<u32>,
     pub spec_version: Option<SpecVersion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueEnvelope {
+    pub payload: QueuePayload,
+    pub queue_name: String,
+    pub deployment_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSendPlan {
+    pub deployment_id: String,
+    pub topic_name: String,
+    pub envelope: QueueEnvelope,
+    pub idempotency_key: Option<String>,
+    pub delay_seconds: Option<u64>,
+    pub headers: BTreeMap<String, String>,
+    pub content_type: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueHandlerMetadata {
+    pub queue_name: String,
+    pub message_id: String,
+    pub attempt: u32,
+    pub request_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueHandlerResult {
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
