@@ -38,6 +38,11 @@ members = [
     "crates/chat-sdk-state-memory",
     "crates/chat-sdk-state-pg",
     "crates/chat-sdk-state-redis",
+    "crates/open-agents-core",
+    "crates/open-agents-runtime",
+    "crates/open-agents-sandbox",
+    "crates/open-agents-service",
+    "crates/open-agents-slack",
 ]
 resolver = "3"
 

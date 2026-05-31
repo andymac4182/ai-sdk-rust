@@ -1,0 +1,29 @@
+[package]
+name = "open-agents-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Service entrypoint skeleton for the Rust Open Agents Slack remote agent."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "open_agents_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "open-agents-slack"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+open-agents-core = { path = "../open-agents-core" }
+open-agents-runtime = { path = "../open-agents-runtime" }
+open-agents-sandbox = { path = "../open-agents-sandbox" }
+open-agents-slack = { path = "../open-agents-slack" }
