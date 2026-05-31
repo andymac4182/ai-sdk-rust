@@ -66,6 +66,83 @@ leave no portable upstream row without a Rust counterpart. A bucket that
 implements behavior without mapping the upstream test rows is incomplete even
 if its Rust-only tests pass.
 
+## WF07 Core Runtime Engine Slice
+
+Branch: `codex/workflow-sdk-07-core-runtime-engine`
+
+Base: `098eb03f10bfadd04d4b76cea6320b55eb938906`
+
+Upstream refresh: `npx opensrc fetch https://github.com/vercel/workflow`
+
+Upstream files inspected for this slice:
+
+- `packages/core/src/runtime.ts`
+- `packages/core/src/events-consumer.ts`
+- `packages/core/src/flushable-stream.ts`
+- `packages/core/src/hook-sleep-interaction.test.ts`
+- `packages/core/src/runtime.test.ts`
+- `packages/core/src/runtime/constants.ts`
+- `packages/core/src/runtime/helpers.ts`
+- `packages/core/src/runtime/replay-budget.ts`
+- `packages/core/src/runtime/run.ts`
+- `packages/core/src/runtime/runs.ts`
+- `packages/core/src/runtime/start.ts`
+- `packages/core/src/runtime/step-executor.ts`
+- `packages/core/src/runtime/step-handler.ts`
+- `packages/core/src/runtime/suspension-handler.ts`
+- `packages/core/src/runtime/wait-completion-replay.test.ts`
+- `packages/core/src/runtime/world-init.ts`
+- `packages/core/src/runtime/world.ts`
+- `packages/core/e2e/*.test.ts`
+
+Implemented runtime surface in `crates/workflow-core`:
+
+- deterministic `RuntimeWorld` trait with `InMemoryWorld` fake for event
+  creation, event pagination, run/step state, queue dispatch, deployment
+  resolution, encryption-key context capture, hook-token conflicts, and
+  retry/error injection;
+- start/run APIs with spec-version selection, deployment `latest` resolution,
+  resilient start, run serialization, return-value failure hydration fallback,
+  and wake-up of pending waits;
+- event consumer, replay-budget, replay-timeout handling, queue-name
+  validation, event-log loading, wait-completion replay refresh, corrupted
+  wait/hook replay guards, step executor/handler, suspension handling, world
+  init registry seam, and flushable stream state.
+
+Case mapping in [Workflow SDK Test Inventory](workflow-test-inventory.md):
+
+| Upstream slice | Rows | Classification after WF07 |
+| --- | ---: | --- |
+| `src/events-consumer.test.ts` | 22 | `verified` with named Rust tests |
+| `src/flushable-stream.test.ts` | 10 | `verified` with named Rust tests |
+| `src/hook-sleep-interaction.test.ts` | 18 | `verified` with named Rust tests |
+| `src/runtime.test.ts` | 5 | `verified` with named Rust tests |
+| `src/runtime/constants.test.ts` | 13 | `verified` with named Rust tests |
+| `src/runtime/helpers.test.ts` | 19 | `verified` with named Rust tests |
+| `src/runtime/replay-budget.test.ts` | 13 | `verified` with named Rust tests |
+| `src/runtime/runs.test.ts` | 15 | `verified` with named Rust tests |
+| `src/runtime/start.test.ts` | 17 portable + 3 type-only | portable rows `verified`; overload inference rows `type-system-impossible` |
+| `src/runtime/step-handler.test.ts` | 18 | `verified` with named Rust tests |
+| `src/runtime/wait-completion-replay.test.ts` | 4 | `verified` with named Rust tests |
+| `src/runtime/world-init.test.ts` | 3 | `verified` with named Rust tests |
+| Host/build/AI E2E rows (`build-errors`, `dev`, `e2e-agent`, `local-build`, `manifest`, source-map helper E2E, selected route/CLI/bundler rows) | 48 | `js-only-documented` |
+
+WF07 verified 157 portable core runtime rows. The generator now emits these
+row mappings so `node scripts/workflow-test-inventory.mjs --check` remains the
+authoritative gate.
+
+Remaining blocked WF07-adjacent rows:
+
+- 106 `packages/core/e2e/e2e.test.ts` and
+  `packages/core/e2e/event-log-race-repro.test.ts` rows remain
+  `needs-review`. They mix portable workflow semantics with host VM,
+  serializer, class/closure transform, distributed abort, HTTP route, and
+  framework runner behavior. A follow-up bucket must classify them
+  case-by-case before `packages/core` can be marked complete.
+- 3 `packages/core/src/runtime/start.test.ts` overload inference rows are
+  explicitly `type-system-impossible` because they assert TypeScript overload
+  behavior, not runtime semantics.
+
 ## Package Inventory
 
 | Upstream package | Version | Class | Status | Rust owner | Major source and test files | Notes |
@@ -74,7 +151,7 @@ if its Rust-only tests pass.
 | `packages/astro` (`@workflow/astro`) | `5.0.0-beta.10` | host-framework binding | not-started | none | Source: `src/builder.ts`, `src/index.ts`, `src/plugin.ts`. Tests: none. | Astro integration; defer until portable runtime and builder contracts exist. |
 | `packages/builders` (`@workflow/builders`) | `5.0.0-beta.10` | Rust tooling | not-started | none | Source: `src/base-builder.ts`, `src/build-queue.ts`, `src/workflows-extractor.ts`, `src/swc-esbuild-plugin.ts`, `src/standalone.ts`. Tests: 11 files including `src/discover-entries-esbuild-plugin.test.ts`, `src/get-input-files.test.ts`, `src/workflow-alias.test.ts`. | Build pipeline and transform infrastructure. Needs a separate tooling crate decision before porting behavior. |
 | `packages/cli` (`@workflow/cli`) | `5.0.0-beta.10` | Rust tooling | not-started | none | Source: `bin/run.js`, `src/base.ts`, `src/commands/*.ts`, `src/lib/inspect/*.ts`. Tests: `src/lib/inspect/output.test.ts`. | Command surface for build/dev/start/inspect flows. |
-| `packages/core` (`@workflow/core`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow-core` | Source: `runtime.js`, `runtime.d.ts`, `src/workflow.ts`, `src/step.ts`, `src/runtime/*.ts`, `src/serialization/*.ts`, `src/vm/*.ts`, e2e files, and WF04 primitives/diagnostics files listed below. Tests: 52 files including `src/workflow.test.ts`, `src/step.test.ts`, `src/runtime/start.test.ts`, `src/serialization/serialization.test.ts`, `src/vm/index.test.ts`, and e2e tests. | WF04 verifies primitive/diagnostic rows; WF05 verifies portable serialization, encryption, stream framing, observability hydration, async-deserialization ordering, UUID, and base64/hex utility rows; WF06 verifies workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream API rows. Runtime engine, persistence-backed worlds, and remaining core e2e rows remain follow-up work. |
+| `packages/core` (`@workflow/core`) | `5.0.0-beta.10` | portable Rust runtime | in-progress | `crates/workflow-core` | Source: `runtime.js`, `runtime.d.ts`, `src/workflow.ts`, `src/step.ts`, `src/runtime/*.ts`, `src/serialization/*.ts`, `src/vm/*.ts`, e2e files, and WF04 primitives/diagnostics files listed below. Tests: 52 files including `src/workflow.test.ts`, `src/step.test.ts`, `src/runtime/start.test.ts`, `src/serialization/serialization.test.ts`, `src/vm/index.test.ts`, and e2e tests. | WF04 verifies primitive/diagnostic rows; WF05 verifies portable serialization, encryption, stream framing, observability hydration, async-deserialization ordering, UUID, and base64/hex utility rows; WF06 verifies workflow/step/hook/sleep/abort/context-storage/request-response/writable-stream API rows; WF07 verifies 157 runtime rows with deterministic fake-World tests. Package remains in-progress until remaining core E2E rows are owned/classified. |
 | `packages/docs-typecheck` (`@workflow/docs-typecheck`) | `0.0.1-beta.12` | docs/test-only | not-started | none | Source: `scripts/find-incomplete.ts`, `src/extractor.ts`, `src/type-checker.ts`. Tests: `src/__tests__/docs.test.ts`, `src/__tests__/sitemap-guard.test.ts`. | Documentation validation tooling; not part of runtime parity. |
 | `packages/errors` (`@workflow/errors`) | `5.0.0-beta.6` | portable Rust runtime | verified | `crates/workflow-errors` | Source: `src/index.ts`, `src/ansi.ts`, `src/error-codes.ts`, `src/internal-chalk.ts`. Tests: 6 files including `src/fatal-error.test.ts`, `src/serialization-error.test.ts`, `src/runtime-decryption-error.test.ts`. | Ports run error codes, framed ANSI/plain rendering, fatal/build/serialization/runtime-decryption/corrupted-event-log errors, and serde-backed stable error contracts. All 36 portable upstream rows are mapped in the test inventory and validated by `cargo test -p workflow-errors`. |
 | `packages/nest` (`@workflow/nest`) | `5.0.0-beta.10` | host-framework binding | not-started | none | Source: `src/index.ts`, `src/builder.ts`, `src/cli.ts`, `src/workflow.controller.ts`, `src/workflow.module.ts`. Tests: `src/cjs-rewrite.test.ts`, `src/parse-module-type.test.ts`. | NestJS integration; defer until runtime and builder crates exist. |

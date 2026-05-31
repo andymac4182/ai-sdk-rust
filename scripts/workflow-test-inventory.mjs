@@ -732,6 +732,18 @@ function ported(rustTestName, note = '') {
   };
 }
 
+const wf07Note =
+  'WF07 core runtime engine: deterministic Rust test covers this portable upstream row with fake World/event-log seams.';
+
+function verified(testName, note = wf07Note) {
+  return {
+    portability: 'portable',
+    status: 'verified',
+    rustTestName: testName,
+    note,
+  };
+}
+
 function jsOnly(note) {
   return {
     portability: 'js-only-documented',
@@ -1131,6 +1143,143 @@ function bucket05Override(row) {
   return undefined;
 }
 
+function workflowCoreWf07Override(row) {
+  if (row.packageName !== 'core') return {};
+
+  const file = row.file;
+  const line = Number(row.line);
+
+  if (file === 'packages/core/src/events-consumer.test.ts') {
+    if (line <= 74) {
+      return verified('events_consumer_initializes_and_subscribes_callbacks');
+    }
+    if (line <= 228) {
+      return verified('events_consumer_consumes_finished_not_consumed_and_null_events');
+    }
+    if (line <= 340) {
+      return verified('events_consumer_complex_sequences_and_callback_errors');
+    }
+    return verified('events_consumer_defers_and_cancels_unconsumed_checks');
+  }
+
+  if (file === 'packages/core/src/flushable-stream.test.ts') {
+    if ([11, 132, 358].includes(line)) {
+      return verified('flushable_stream_state_propagates_errors_and_cancellation');
+    }
+    if ([31, 85, 176].includes(line)) {
+      return verified('flushable_stream_state_resolves_on_lock_release_or_close');
+    }
+    if ([218, 260, 285].includes(line)) {
+      return verified('flushable_stream_state_tracks_concurrent_writes_and_single_pollers');
+    }
+    return verified('flushable_stream_state_handles_stream_end_while_ops_in_flight');
+  }
+
+  if (file === 'packages/core/src/hook-sleep-interaction.test.ts') {
+    return verified('hook_sleep_interaction_preserves_waiters_steps_and_payload_ordering');
+  }
+
+  if (file === 'packages/core/src/runtime.test.ts') {
+    return verified('workflow_entrypoint_guards_record_world_contract_and_corrupted_logs');
+  }
+
+  if (file === 'packages/core/src/runtime/constants.test.ts') {
+    return verified('replay_timeout_env_parsing_matches_upstream_bounds_and_warnings');
+  }
+
+  if (file === 'packages/core/src/runtime/helpers.test.ts') {
+    if (line <= 100) {
+      return verified('workflow_queue_name_validation_matches_upstream_safe_pattern');
+    }
+    if (line <= 209) {
+      return verified('load_workflow_run_events_paginates_preserves_cursors_and_dedupes');
+    }
+    return verified('load_workflow_run_events_retries_bad_incremental_cursor_and_fails_bad_contracts');
+  }
+
+  if (file === 'packages/core/src/runtime/replay-budget.test.ts') {
+    if (line <= 130) {
+      return verified('replay_budget_accounts_for_non_step_time_and_pause_resume_cycles');
+    }
+    return verified('replay_budget_exhaustion_uses_world_redelivery_capability');
+  }
+
+  if (file === 'packages/core/src/runtime/runs.test.ts') {
+    if ([68, 89, 156, 189, 231].includes(line)) {
+      return verified('run_wakeup_targets_pending_waits_and_queues_continuation');
+    }
+    return verified('run_handle_exists_wakeup_serialization_and_return_value_errors');
+  }
+
+  if (file === 'packages/core/src/runtime/start.test.ts') {
+    if (row.suitePath.includes('overload type inference')) {
+      return {
+        portability: 'type-system-impossible',
+        status: 'type-system-impossible',
+        rustTestName: '',
+        note: 'TypeScript overload inference assertion; Rust API uses static types instead of runtime overload tests.',
+      };
+    }
+    if (row.suitePath.includes('resilient start')) {
+      return verified('start_resilient_start_and_failure_paths_match_upstream');
+    }
+    return verified('start_validates_workflow_and_resolves_spec_deployment_and_encryption_context');
+  }
+
+  if (file === 'packages/core/src/runtime/step-handler.test.ts') {
+    if (line <= 550) {
+      return verified('step_executor_handles_conflicts_and_request_id_propagation');
+    }
+    if (line <= 638) {
+      return verified('step_handler_max_deliveries_and_under_limit_paths');
+    }
+    return verified('step_executor_handles_missing_fatal_abort_and_retryable_failures');
+  }
+
+  if (file === 'packages/core/src/runtime/wait-completion-replay.test.ts') {
+    return verified('wait_completion_replay_uses_incremental_cursor_and_falls_back_when_needed');
+  }
+
+  if (file === 'packages/core/src/runtime/world-init.test.ts') {
+    return verified('world_init_registry_registers_lazy_world_and_preserves_prior_registration');
+  }
+
+  if (
+    file === 'packages/core/e2e/build-errors.test.ts' ||
+    file === 'packages/core/e2e/dev.test.ts' ||
+    file === 'packages/core/e2e/local-build.test.ts' ||
+    file === 'packages/core/e2e/manifest.test.ts' ||
+    file === 'packages/core/e2e/utils.test.ts'
+  ) {
+    return jsOnly(
+      'Host build/dev/manifest/source-map E2E behavior; Rust core runtime has no Node, Next.js, webpack, turbopack, or filesystem build analogue.'
+    );
+  }
+
+  if (file === 'packages/core/e2e/e2e-agent.test.ts') {
+    return jsOnly(
+      'AI/provider-backed agent E2E behavior belongs to the AI integration port; WF07 core runtime uses deterministic fake steps and no live services.'
+    );
+  }
+
+  if (file === 'packages/core/e2e/e2e.test.ts') {
+    const text = `${row.suitePath} ${row.caseName}`;
+    if (
+      text.includes('pages router') ||
+      text.includes('health check (CLI)') ||
+      text.includes('pathsAliasWorkflow') ||
+      text.includes('importMetaUrlWorkflow') ||
+      text.includes('webhook route with invalid token')
+    ) {
+      return jsOnly(
+        'Host route, CLI, bundler, or framework E2E behavior; no portable Rust core-runtime counterpart in WF07.'
+      );
+    }
+  }
+
+  return {};
+}
+
 function escapeCell(value) {
   return String(value ?? '')
     .replaceAll('\\', '\\\\')
@@ -1206,7 +1355,8 @@ function parseFile(filePath) {
         dynamicName: call.dynamicName,
       };
       const classified = { ...row, ...classify(row, source) };
-      rows.push({ ...classified, ...bucket05Override(classified) });
+      const bucket05 = { ...classified, ...bucket05Override(classified) };
+      rows.push({ ...bucket05, ...workflowCoreWf07Override(bucket05) });
     }
   }
 
