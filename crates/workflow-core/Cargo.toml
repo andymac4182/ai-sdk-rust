@@ -20,4 +20,5 @@ all = "warn"
 
 [dependencies]
 workflow-errors = { path = "../workflow-errors" }
+workflow-serde = { path = "../workflow-serde" }
 workflow-world = { path = "../workflow-world" }

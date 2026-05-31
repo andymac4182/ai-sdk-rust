@@ -29,10 +29,112 @@ const foundationalPackages = new Set([
 const rustOwners = new Map([
   ['core', 'workflow-core'],
   ['errors', 'workflow-errors'],
+  ['serde', 'workflow-serde'],
   ['utils', 'workflow-utils'],
   ['workflow', 'workflow'],
   ['world', 'workflow-world'],
   ['world-local', 'workflow-world-local'],
+]);
+
+const verifiedRustFileTests = new Map([
+  [
+    'errors|packages/errors/src/ansi.test.ts',
+    {
+      testName: 'upstream_ansi_cases',
+      note: 'Ported in workflow-errors; validated by cargo test -p workflow-errors.',
+    },
+  ],
+  [
+    'errors|packages/errors/src/build-error.test.ts',
+    {
+      testName: 'upstream_build_error_cases',
+      note: 'Ported in workflow-errors; validated by cargo test -p workflow-errors.',
+    },
+  ],
+  [
+    'errors|packages/errors/src/corrupted-event-log-error.test.ts',
+    {
+      testName: 'upstream_corrupted_event_log_error_cases',
+      note: 'Ported in workflow-errors; validated by cargo test -p workflow-errors.',
+    },
+  ],
+  [
+    'errors|packages/errors/src/fatal-error.test.ts',
+    {
+      testName: 'upstream_fatal_error_cases',
+      note: 'Ported in workflow-errors; validated by cargo test -p workflow-errors.',
+    },
+  ],
+  [
+    'errors|packages/errors/src/runtime-decryption-error.test.ts',
+    {
+      testName: 'upstream_runtime_decryption_error_cases',
+      note: 'Ported in workflow-errors; validated by cargo test -p workflow-errors.',
+    },
+  ],
+  [
+    'errors|packages/errors/src/serialization-error.test.ts',
+    {
+      testName: 'upstream_serialization_error_cases',
+      note: 'Ported in workflow-errors; validated by cargo test -p workflow-errors.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/check-data-dir.test.ts',
+    {
+      testName: 'upstream_check_data_dir_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/get-port.test.ts',
+    {
+      testName: 'upstream_get_port_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/parse-name.test.ts',
+    {
+      testName: 'upstream_parse_name_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/pluralize.test.ts',
+    {
+      testName: 'upstream_pluralize_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/promise.test.ts',
+    {
+      testName: 'upstream_promise_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/re-exports.test.ts',
+    {
+      testName: 'upstream_re_exports_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/time.test.ts',
+    {
+      testName: 'upstream_time_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
+  [
+    'utils|packages/utils/src/world-target.test.ts',
+    {
+      testName: 'upstream_world_target_cases',
+      note: 'Ported in workflow-utils; validated by cargo test -p workflow-utils.',
+    },
+  ],
 ]);
 
 const hostFrameworkPackages = new Set([
@@ -576,19 +678,24 @@ function renderInventory(rows, testFiles) {
     summary.typeSystem,
   ]);
 
-  const caseRows = rows.map((row) => [
-    row.packageName,
-    row.file,
-    row.line,
-    row.suitePath || '(root)',
-    row.caseName,
-    row.declaration,
-    row.portability,
-    rustOwners.get(row.packageName) ?? 'unassigned',
-    '',
-    row.status,
-    row.note,
-  ]);
+  const caseRows = rows.map((row) => {
+    const verifiedRustFileTest = verifiedRustFileTests.get(
+      `${row.packageName}|${row.file}`
+    );
+    return [
+      row.packageName,
+      row.file,
+      row.line,
+      row.suitePath || '(root)',
+      row.caseName,
+      row.declaration,
+      row.portability,
+      rustOwners.get(row.packageName) ?? 'unassigned',
+      verifiedRustFileTest?.testName ?? '',
+      verifiedRustFileTest ? 'verified' : row.status,
+      verifiedRustFileTest?.note ?? row.note,
+    ];
+  });
 
   return `# Workflow SDK Test Inventory
 
