@@ -8,6 +8,7 @@
 
 pub use workflow_core as core;
 pub use workflow_errors as errors;
+pub use workflow_serde as serde;
 pub use workflow_utils as workflow_utilities;
 
 /// Upstream repository used for this crate boundary.

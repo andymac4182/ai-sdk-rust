@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub use workflow_errors as errors;
+pub use workflow_serde as serde;
 pub use workflow_world as world;
 
 /// Upstream repository used for this crate boundary.

@@ -48,6 +48,7 @@ members = [
     "crates/workflow",
     "crates/workflow-core",
     "crates/workflow-errors",
+    "crates/workflow-serde",
     "crates/workflow-utils",
     "crates/workflow-world",
     "crates/workflow-world-local",
