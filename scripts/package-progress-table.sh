@@ -3,17 +3,20 @@ set -euo pipefail
 
 ledger="docs/upstream-parity.md"
 estimates="docs/package-progress-estimates.tsv"
+strict_inventory=""
 portable_only=0
 output=""
 title="AI SDK Rust Package Progress"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/package-progress-table.sh [--ledger PATH] [--estimates PATH] [--portable-only] [--output PATH] [--title TITLE]
+Usage: scripts/package-progress-table.sh [--ledger PATH] [--estimates PATH] [--strict-inventory PATH] [--portable-only] [--output PATH] [--title TITLE]
 
 Emits a Markdown package-completion report from docs/upstream-parity.md.
 For in-progress package rows, estimates come from docs/package-progress-estimates.tsv.
 Verified and JavaScript-only rows are always 100%; not-started rows are always 0%.
+When a strict test inventory is available, package rows with unmapped portable
+upstream test cases are treated as in-progress regardless of their ledger status.
 --title overrides the report's top-level heading (default: "AI SDK Rust Package Progress").
 USAGE
 }
@@ -26,6 +29,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --estimates)
       estimates="$2"
+      shift 2
+      ;;
+    --strict-inventory)
+      strict_inventory="$2"
       shift 2
       ;;
     --portable-only)
@@ -57,12 +64,17 @@ if [ ! -f "$ledger" ]; then
   exit 1
 fi
 
-ruby - "$ledger" "$estimates" "$portable_only" "$output" "$title" <<'RUBY'
-ledger_path, estimates_path, portable_only_arg, output_path, title = ARGV
+if [ -z "$strict_inventory" ] && [ "$ledger" = "docs/upstream-parity.md" ] && [ -f "docs/ai-strict-test-inventory.md" ]; then
+  strict_inventory="docs/ai-strict-test-inventory.md"
+fi
+
+ruby - "$ledger" "$estimates" "$strict_inventory" "$portable_only" "$output" "$title" <<'RUBY'
+ledger_path, estimates_path, strict_inventory_path, portable_only_arg, output_path, title = ARGV
 portable_only = portable_only_arg == "1"
 title = "AI SDK Rust Package Progress" if title.nil? || title.empty?
 
 Estimate = Struct.new(:percent, :basis)
+StrictInventory = Struct.new(:cases, :portable_mapped, :portable_unmapped, :js_only, :type_system, :sample_ids)
 
 def abort_with(message)
   warn(message)
@@ -78,6 +90,39 @@ def short_text(value, limit = 120)
   return text if text.length <= limit
 
   text[0, limit - 1].sub(/\s+\S*\z/, "") + "..."
+end
+
+def strip_code(value)
+  value.to_s.strip.sub(/\A`/, "").sub(/`\z/, "")
+end
+
+def split_markdown_row(line)
+  stripped = line.strip
+  return nil unless stripped.start_with?("|") && stripped.end_with?("|")
+
+  cells = []
+  current = +""
+  escaped = false
+  stripped[1...-1].each_char do |char|
+    if escaped
+      current << char
+      escaped = false
+    elsif char == "\\"
+      current << char
+      escaped = true
+    elsif char == "|"
+      cells << current.strip.gsub('\|', "|").gsub('\\\\', "\\")
+      current = +""
+    else
+      current << char
+    end
+  end
+  cells << current.strip.gsub('\|', "|").gsub('\\\\', "\\")
+  cells
+end
+
+def separator_row?(cells)
+  cells && cells.all? { |cell| cell.match?(/\A:?-{3,}:?\z/) }
 end
 
 def status_label(status)
@@ -135,6 +180,53 @@ if File.exist?(estimates_path)
   end
 end
 
+strict_rows = {}
+strict_global = {}
+if strict_inventory_path && !strict_inventory_path.empty?
+  abort_with("strict inventory not found: #{strict_inventory_path}") unless File.exist?(strict_inventory_path)
+
+  in_summary = false
+  headers = nil
+  File.readlines(strict_inventory_path, chomp: true).each do |line|
+    cells = split_markdown_row(line)
+    if cells && cells.length == 2 && !separator_row?(cells)
+      strict_global[cells[0]] = strip_code(cells[1])
+    end
+
+    if line == "## Package Summary"
+      in_summary = true
+      headers = nil
+      next
+    end
+    if in_summary && line.start_with?("## ")
+      in_summary = false
+    end
+    next unless in_summary
+    next unless line.start_with?("|")
+
+    next if separator_row?(cells)
+    if headers.nil?
+      headers = cells
+      next
+    end
+    next unless cells && cells.length == headers.length
+
+    values = headers.zip(cells).to_h
+    item = strip_code(values["Item"])
+    next unless item.start_with?("packages/")
+
+    package_dir = item.delete_prefix("packages/")
+    strict_rows[package_dir] = StrictInventory.new(
+      Integer(values["Cases"], 10),
+      Integer(values["Portable mapped"], 10),
+      Integer(values["Portable unmapped"], 10),
+      Integer(values["JS-only"], 10),
+      Integer(values["Type-system impossible"], 10),
+      values["Sample failing IDs"],
+    )
+  end
+end
+
 rows = []
 in_package_inventory = false
 File.readlines(ledger_path, chomp: true).each_with_index do |line, index|
@@ -158,8 +250,15 @@ File.readlines(ledger_path, chomp: true).each_with_index do |line, index|
 
   display_name = item[/\((`[^`]+`)\)/, 1]&.delete("`") || package_dir
   status = status.delete("`")
+  ledger_status = status
   portable = status != "js-only-documented"
   estimate = estimates[package_dir]
+  strict = strict_rows[package_dir]
+  strict_forced = strict && portable && strict.portable_unmapped.positive?
+  if strict_forced
+    status = "in-progress" unless ledger_status == "not-started"
+  end
+
   percent =
     case status
     when "verified", "js-only-documented"
@@ -173,17 +272,26 @@ File.readlines(ledger_path, chomp: true).each_with_index do |line, index|
     else
       abort_with("#{ledger_path}:#{index + 1}: unknown status #{status.inspect}")
     end
+  if strict_forced
+    portable_total = strict.portable_mapped + strict.portable_unmapped
+    percent = portable_total.zero? ? percent : (strict.portable_mapped * 100.0 / portable_total).floor
+    percent = [percent, 99].min
+  end
 
   basis =
-    case status
-    when "verified"
-      "verified"
-    when "js-only-documented"
-      "intentionally JavaScript-only"
-    when "not-started"
-      "not started"
+    if strict_forced
+      "strict test inventory: #{strict.portable_unmapped} portable upstream cases still need named Rust tests; sample failing IDs: #{strict.sample_ids}"
     else
-      estimate&.basis || notes[/Remaining work:\s*(.+)\z/, 1] || "in progress"
+      case status
+      when "verified"
+        "verified"
+      when "js-only-documented"
+        "intentionally JavaScript-only"
+      when "not-started"
+        "not started"
+      else
+        estimate&.basis || notes[/Remaining work:\s*(.+)\z/, 1] || "in progress"
+      end
     end
 
   rows << {
@@ -191,15 +299,18 @@ File.readlines(ledger_path, chomp: true).each_with_index do |line, index|
     display_name: display_name,
     kind: kind,
     status: status,
+    ledger_status: ledger_status,
     portable: portable,
     percent: percent,
     basis: basis,
+    strict_inventory: strict,
+    strict_forced: strict_forced,
   }
 end
 
 abort_with("no package rows found in #{ledger_path}") if rows.empty?
 
-in_progress_package_dirs = rows.select { |row| row[:status] == "in-progress" }.map { |row| row[:package_dir] }
+in_progress_package_dirs = rows.select { |row| row[:status] == "in-progress" && !row[:strict_forced] }.map { |row| row[:package_dir] }
 missing_estimates = in_progress_package_dirs - estimates.keys
 abort_with("missing package progress estimates for in-progress rows: #{missing_estimates.join(", ")}") unless missing_estimates.empty?
 
@@ -218,6 +329,10 @@ closed_rows = rows.count { |row| ["verified", "js-only-documented"].include?(row
 portable_verified_rows = portable_rows.count { |row| row[:status] == "verified" }
 in_progress_rows = rows.count { |row| row[:status] == "in-progress" }
 not_started_rows = rows.count { |row| row[:status] == "not-started" }
+strict_display_rows = rows.select { |row| row[:strict_inventory] }
+strict_portable_mapped = strict_display_rows.sum { |row| row[:strict_inventory].portable_mapped }
+strict_portable_unmapped = strict_display_rows.sum { |row| row[:strict_inventory].portable_unmapped }
+strict_portable_total = strict_portable_mapped + strict_portable_unmapped
 
 closed = rows.select { |row| ["verified", "js-only-documented"].include?(row[:status]) }
 in_progress = rows.select { |row| row[:status] == "in-progress" }
@@ -226,7 +341,9 @@ not_started = rows.select { |row| row[:status] == "not-started" }
 document = []
 document << "# #{title}"
 document << ""
-document << "_Generated from `#{escape_markdown(ledger_path)}` and `#{escape_markdown(estimates_path)}`._"
+generated_from = "_Generated from `#{escape_markdown(ledger_path)}` and `#{escape_markdown(estimates_path)}`"
+generated_from += " with strict test inventory `#{escape_markdown(strict_inventory_path)}`" if strict_inventory_path && !strict_inventory_path.empty?
+document << "#{generated_from}._"
 document << ""
 document << "- Displayed package rows: #{rows.length}"
 document << "- Average estimated completion: #{format('%.1f%%', average(rows.map { |row| row[:percent] }))}"
@@ -235,6 +352,19 @@ document << "- Closed package rows: #{closed_rows} / #{rows.length}"
 document << "- Strict portable verified rows: #{portable_verified_rows} / #{portable_rows.length}"
 document << "- In-progress rows: #{in_progress_rows}"
 document << "- Not-started rows: #{not_started_rows}"
+if strict_portable_total.positive?
+  if strict_global["Upstream cases scanned"]
+    document << "- Strict inventory full upstream cases scanned: #{strict_global["Upstream cases scanned"]}"
+  end
+  if strict_global["Portable mapped denominator"]
+    document << "- Strict inventory full portable cases mapped: #{strict_global["Portable mapped denominator"]}"
+  end
+  if strict_global["Portable cases still missing named Rust tests"]
+    document << "- Strict inventory full portable cases unmapped: #{strict_global["Portable cases still missing named Rust tests"]}"
+  end
+  document << "- Displayed-row strict portable test cases mapped: #{strict_portable_mapped} / #{strict_portable_total}"
+  document << "- Displayed-row strict portable test cases unmapped: #{strict_portable_unmapped}"
+end
 document << ""
 document << "## 100% Closed"
 document << ""
