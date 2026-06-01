@@ -16,6 +16,30 @@ path = "src/lib.rs"
 name = "open-agents-slack"
 path = "src/main.rs"
 
+[[bin]]
+name = "healthz"
+path = "api/healthz.rs"
+
+[[bin]]
+name = "readyz"
+path = "api/readyz.rs"
+
+[[bin]]
+name = "status"
+path = "api/status.rs"
+
+[[bin]]
+name = "slack-events"
+path = "api/slack/events.rs"
+
+[[bin]]
+name = "slack-interactions"
+path = "api/slack/interactions.rs"
+
+[[bin]]
+name = "slack-commands"
+path = "api/slack/commands.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
@@ -29,6 +53,7 @@ async-trait = "0.1.89"
 chat-sdk-adapter-slack = { path = "../chat-sdk-adapter-slack" }
 chat-sdk-chat = { path = "../chat-sdk-chat" }
 chat-sdk-state-memory = { path = "../chat-sdk-state-memory" }
+http-body-util = "0.1"
 open-agents-core = { path = "../open-agents-core" }
 open-agents-persistence = { path = "../open-agents-persistence" }
 open-agents-runtime = { path = "../open-agents-runtime" }
@@ -38,6 +63,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 time = { version = "0.3.45", features = ["serde", "serde-well-known"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+vercel_runtime = "2.2.0"
 
 [dev-dependencies]
 hmac = "0.12"

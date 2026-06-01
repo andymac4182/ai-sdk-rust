@@ -71,14 +71,14 @@ run_check_config() {
       OPEN_AGENTS_STATE="${OPEN_AGENTS_STATE:-memory}" \
       OPEN_AGENTS_SANDBOX="${OPEN_AGENTS_SANDBOX:-local}" \
       OPEN_AGENTS_SANDBOX_ROOT="${OPEN_AGENTS_SANDBOX_ROOT:-$repo_root}" \
-      cargo run -p open-agents-service -- --check-config
+      cargo run -p open-agents-service --bin open-agents-slack -- --check-config
   )
 }
 
 run_fixture() {
   (
     cd "$repo_root"
-    cargo run -p open-agents-service -- --fixture
+    cargo run -p open-agents-service --bin open-agents-slack -- --fixture
   )
 }
 

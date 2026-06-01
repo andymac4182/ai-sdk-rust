@@ -1,0 +1,8 @@
+target/
+**/target/
+.git/
+docs/
+scripts/
+.plan/
+**/.env.local
+**/.vercel/

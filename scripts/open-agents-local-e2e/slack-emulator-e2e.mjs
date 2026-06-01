@@ -185,7 +185,7 @@ async function main() {
 }
 
 function startService(port, slackUrl) {
-  const child = spawn("cargo", ["run", "-p", "open-agents-service"], {
+  const child = spawn("cargo", ["run", "-p", "open-agents-service", "--bin", "open-agents-slack"], {
     cwd: repoRoot,
     env: {
       ...process.env,

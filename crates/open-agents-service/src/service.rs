@@ -118,6 +118,11 @@ impl OpenAgentsService {
         self.runtime.clone()
     }
 
+    /// Handle an HTTP request from an external runtime adapter.
+    pub async fn handle_http_request(&self, request: ServiceHttpRequest) -> ServiceHttpResponse {
+        ServiceHttpResponse::from(self.handle(HttpRequest::from(request)).await)
+    }
+
     async fn handle(&self, request: HttpRequest) -> HttpResponse {
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/healthz" | "/readyz" | "/status") => {
@@ -173,6 +178,48 @@ impl OpenAgentsService {
         }
         Ok(())
     }
+}
+
+/// Runtime-neutral HTTP request passed to the service router.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceHttpRequest {
+    /// HTTP method such as `GET` or `POST`.
+    pub method: String,
+    /// Route path as seen by the service, for example `/slack/events`.
+    pub path: String,
+    /// HTTP headers as name/value pairs. Header names are compared
+    /// case-insensitively by the downstream Slack adapter.
+    pub headers: Vec<(String, String)>,
+    /// UTF-8 request body.
+    pub body: String,
+}
+
+impl ServiceHttpRequest {
+    /// Build a request for the service router.
+    pub fn new(
+        method: impl Into<String>,
+        path: impl Into<String>,
+        headers: Vec<(String, String)>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            method: method.into(),
+            path: path.into(),
+            headers,
+            body: body.into(),
+        }
+    }
+}
+
+/// Runtime-neutral HTTP response returned by the service router.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceHttpResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response content type.
+    pub content_type: String,
+    /// UTF-8 response body.
+    pub body: String,
 }
 
 /// Runtime/outbound kind captured by the local deterministic service route.
@@ -1223,6 +1270,17 @@ struct HttpRequest {
     body: String,
 }
 
+impl From<ServiceHttpRequest> for HttpRequest {
+    fn from(request: ServiceHttpRequest) -> Self {
+        Self {
+            method: request.method,
+            path: request.path,
+            headers: request.headers,
+            body: request.body,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct HttpResponse {
     status: u16,
@@ -1264,6 +1322,16 @@ impl HttpResponse {
             self.body
         )
         .into_bytes()
+    }
+}
+
+impl From<HttpResponse> for ServiceHttpResponse {
+    fn from(response: HttpResponse) -> Self {
+        Self {
+            status: response.status,
+            content_type: response.content_type,
+            body: response.body,
+        }
     }
 }
 
@@ -1586,6 +1654,35 @@ mod tests {
         let bytes = mac.finalize().into_bytes();
         let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         format!("v0={hex}")
+    }
+
+    #[tokio::test]
+    async fn service_http_request_bridge_traverses_slack_url_verification() {
+        let service = OpenAgentsService::from_config(OpenAgentsServiceConfig::fixture()).unwrap();
+        service.health().set_ready(true);
+        let body = json!({
+            "type": "url_verification",
+            "challenge": "challenge-token"
+        })
+        .to_string();
+        let timestamp = current_timestamp();
+        let signature = sign(&body, &timestamp);
+
+        let response = service
+            .handle_http_request(ServiceHttpRequest::new(
+                "POST",
+                SLACK_EVENTS_PATH,
+                vec![
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("x-slack-request-timestamp".to_string(), timestamp),
+                    ("x-slack-signature".to_string(), signature),
+                ],
+                body,
+            ))
+            .await;
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "challenge-token");
     }
 
     fn app_mention_body(text: &str, event_id: &str, ts: &str) -> String {
