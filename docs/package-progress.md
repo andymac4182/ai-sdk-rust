@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 98.8%
-- Portable package average: 98.5%
-- Closed package rows: 51 / 52
-- Strict portable verified rows: 41 / 42
-- In-progress rows: 1
+- Average estimated completion: 100.0%
+- Portable package average: 100.0%
+- Closed package rows: 52 / 52
+- Strict portable verified rows: 42 / 42
+- In-progress rows: 0
 - Not-started rows: 0
 
 ## 100% Closed
@@ -23,6 +23,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/amazon-bedrock` | 100% | Verified | provider package |
 | `@ai-sdk/google` | 100% | Verified | provider package |
 | `@ai-sdk/google-vertex` | 100% | Verified | provider package |
+| `@ai-sdk/xai` | 100% | Verified | provider package |
 | `@ai-sdk/alibaba` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
 | `@ai-sdk/azure` | 100% | Verified | provider package |
@@ -70,7 +71,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, shared server/custom tool, chat, and image provider wrapper exists; files, video, xAI-specific tool... |
 
 ## Not Started
 
