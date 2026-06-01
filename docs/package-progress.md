@@ -2,18 +2,18 @@
 
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
-- Displayed package rows: 52
-- Average estimated completion: 46.2%
-- Portable package average: 33.5%
-- Closed package rows: 23 / 52
-- Strict portable verified rows: 13 / 42
-- In-progress rows: 29
+- Displayed package rows: 53
+- Average estimated completion: 45.6%
+- Portable package average: 32.9%
+- Closed package rows: 23 / 53
+- Strict portable verified rows: 13 / 43
+- In-progress rows: 30
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 8762
-- Strict inventory full portable cases mapped: 3159 / 7501
-- Strict inventory full portable cases unmapped: 4342
-- Displayed-row strict portable test cases mapped: 3072 / 4285
-- Displayed-row strict portable test cases unmapped: 1213
+- Strict inventory full portable cases mapped: 3409 / 7498
+- Strict inventory full portable cases unmapped: 4089
+- Displayed-row strict portable test cases mapped: 3322 / 6597
+- Displayed-row strict portable test cases unmapped: 3275
 
 ## 100% Closed
 
@@ -47,6 +47,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
+| `ai` | 10% | In progress | root core SDK package | strict test inventory: 2062 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/openai-compatible` | 0% | In progress | provider base package | strict test inventory: 232 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/open-responses` | 0% | In progress | provider package | strict test inventory: 69 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/alibaba` | 0% | In progress | provider package | strict test inventory: 87 portable upstream cases still need named Rust tests; sample failing IDs:... |

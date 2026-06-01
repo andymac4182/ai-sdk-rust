@@ -2908,6 +2908,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_generate_passes_timeout_to_generate_text() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options = ToolLoopAgentCallOptions::from_prompt("Hello")
+            .with_timeout(TimeoutConfiguration::total_ms(5_000));
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let calls = model.generate_calls();
+        assert_eq!(calls.len(), 1);
+        let abort_signal = calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("generate_text receives timeout abort signal");
+        assert!(!abort_signal.is_aborted());
+    }
+
+    #[test]
     fn tool_loop_agent_generate_passes_timeout_to_tool_execution() {
         let model = MockLanguageModel::new()
             .with_generate_results([tool_call_result(), text_result("done")]);
@@ -3893,6 +3912,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_stream_passes_timeout_to_stream_text() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options = ToolLoopAgentCallOptions::from_prompt("Hello")
+            .with_timeout(TimeoutConfiguration::total_ms(5_000));
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        let abort_signal = calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("stream_text receives timeout abort signal");
+        assert!(!abort_signal.is_aborted());
+    }
+
+    #[test]
     fn tool_loop_agent_stream_passes_timeout_to_tool_execution() {
         let model = MockLanguageModel::new()
             .with_stream_results([stream_tool_call_result(), stream_text_result("done")]);
@@ -4485,6 +4523,33 @@ mod tests {
                 user_message("Hello, world!")
             ]
         );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_merges_start_callbacks_in_order() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let settings_calls = Rc::clone(&calls);
+        let call_calls = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_on_start(
+            move |_event| {
+                let calls = Rc::clone(&settings_calls);
+                async move {
+                    calls.borrow_mut().push("settings");
+                }
+            },
+        ));
+        let options = ToolLoopAgentCallOptions::from_prompt("Hello").with_on_start(move |_event| {
+            let calls = Rc::clone(&call_calls);
+            async move {
+                calls.borrow_mut().push("call");
+            }
+        });
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(&*calls.borrow(), &["settings", "call"]);
     }
 
     #[test]

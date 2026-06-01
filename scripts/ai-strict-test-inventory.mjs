@@ -22,6 +22,10 @@ const FOUNDATIONAL_INVENTORY_PATH = path.join(
   repositoryRoot,
   'docs/ai-foundational-provider-inventory.md',
 );
+const AI_CORE_INVENTORY_PATH = path.join(
+  repositoryRoot,
+  'docs/ai-core-package-inventory.md',
+);
 const AI_02_INVENTORY_PATH = path.join(
   repositoryRoot,
   'docs/ai-02-openai-compatible-providers.md',
@@ -565,7 +569,10 @@ function addRustToken(value, names) {
   }
 }
 
-function parseFoundationalMappings(docPath) {
+function parseFoundationalMappings(
+  docPath,
+  source = relativePath(docPath, repositoryRoot),
+) {
   const mappings = {
     byLocation: new Map(),
     byName: new Map(),
@@ -606,7 +613,7 @@ function parseFoundationalMappings(docPath) {
     }
 
     const entry = {
-      source: relativePath(docPath, repositoryRoot),
+      source,
       status,
       rustTarget: values['Rust test / exception'],
       rustTests: status === 'portable-mapped'
@@ -1756,6 +1763,7 @@ function classifyCase(
   testCase,
   item,
   foundationalMappings,
+  aiCoreMappings,
   ai02Mappings,
   providerUtilsMappings,
   rustTests,
@@ -1770,6 +1778,17 @@ function classifyCase(
   const foundationalQueue = foundationalMappings.byName.get(foundationalKey);
   if (foundationalQueue?.length) {
     return foundationalQueue.shift();
+  }
+
+  const aiCore = aiCoreMappings.byLocation.get(locationKey);
+  if (aiCore) {
+    return aiCore;
+  }
+
+  const aiCoreKey = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
+  const aiCoreQueue = aiCoreMappings.byName.get(aiCoreKey);
+  if (aiCoreQueue?.length) {
+    return aiCoreQueue.shift();
   }
 
   const ai02Key = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
@@ -1817,6 +1836,10 @@ function buildInventory(args) {
     FOUNDATIONAL_INVENTORY_PATH,
     AI_05_INVENTORY_PATH,
   ]);
+  const aiCoreMappings = parseFoundationalMappings(
+    AI_CORE_INVENTORY_PATH,
+    'docs/ai-core-package-inventory.md',
+  );
   const ai02Mappings = mergeNamedCaseMappings(
     parseAi02Mappings(AI_02_INVENTORY_PATH),
     parseAi02Mappings(
@@ -1843,6 +1866,7 @@ function buildInventory(args) {
           testCase,
           item,
           foundationalMappings,
+          aiCoreMappings,
           ai02Mappings,
           providerUtilsMappings,
           rustTests,
