@@ -20,7 +20,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::commands::CommandRegistry;
 use crate::encoding::OutputPayload;
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
-use crate::fs::{CpOptions, MkdirOptions, RmOptions, VirtualFileSystem};
+use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
 use crate::path::resolve_path;
 
 /// Stable metadata label for the Rust in-process backend.
@@ -506,10 +506,34 @@ impl JustBashSession {
         fs.read_file(path)
     }
 
+    /// Reads raw bytes from the session filesystem.
+    pub fn read_file_buffer(&self, path: &str) -> JustBashResult<Vec<u8>> {
+        let fs = self.inner.fs.lock().map_err(|_| lock_poisoned_error())?;
+        fs.read_file_buffer(path)
+    }
+
     /// Writes a UTF-8 file to the session filesystem.
     pub fn write_file(&self, path: &str, content: &str) -> JustBashResult<()> {
         let mut fs = self.inner.fs.lock().map_err(|_| lock_poisoned_error())?;
         fs.write_file(path, content)
+    }
+
+    /// Returns file or directory information from the session filesystem.
+    pub fn stat(&self, path: &str) -> JustBashResult<FileStat> {
+        let fs = self.inner.fs.lock().map_err(|_| lock_poisoned_error())?;
+        fs.stat(path)
+    }
+
+    /// Creates a directory in the session filesystem.
+    pub fn mkdir(&self, path: &str, options: MkdirOptions) -> JustBashResult<()> {
+        let mut fs = self.inner.fs.lock().map_err(|_| lock_poisoned_error())?;
+        fs.mkdir(path, options)
+    }
+
+    /// Reads a directory with virtual file types from the session filesystem.
+    pub fn readdir_with_file_types(&self, path: &str) -> JustBashResult<Vec<DirentEntry>> {
+        let fs = self.inner.fs.lock().map_err(|_| lock_poisoned_error())?;
+        fs.readdir_with_file_types(path)
     }
 
     /// Returns true when a virtual path exists.

@@ -37,7 +37,7 @@ print_matrix() {
 | Waiting, answer, approval, cancel | Emulator-backed question/approval prompts plus direct signed answer/approval/cancel block action payloads | Live Slack interaction proof still TODO |
 | Outbound Slack message/update | Emulator Web API state assertions for postMessage; Slack outbound body tests cover post/update shapes | Emulator-backed chat.update scenario still TODO |
 | Persistence | In-memory service route run and active-run keys | Postgres-backed persistence still TODO |
-| Sandbox command | Service route records sandbox.exec pwd proof | Broader sandbox and git automation proof still TODO |
+| Sandbox command | Service route records bash pwd proof through the crate-backed Just Bash virtual backend | Live Vercel sandbox and git automation proof still TODO |
 | Model/sandbox errors | Scripted local model and sandbox failures persist failed run status and notify Slack | Live Gateway/Vercel failure proof still TODO |
 | Git automation summary | Finish actions can emit local git no-change/commit/PR/error summaries after completed runs | Live push/PR execution proof still TODO |
 | Health/readiness | Service health/readiness tests, manual probes, and emulator readiness polling | Live deployment probes still TODO |
@@ -70,8 +70,7 @@ run_check_config() {
     SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-xoxb-local-test}" \
       SLACK_SIGNING_SECRET="${SLACK_SIGNING_SECRET:-open-agents-local-signing-secret}" \
       OPEN_AGENTS_STATE="${OPEN_AGENTS_STATE:-memory}" \
-      OPEN_AGENTS_SANDBOX="${OPEN_AGENTS_SANDBOX:-local}" \
-      OPEN_AGENTS_SANDBOX_ROOT="${OPEN_AGENTS_SANDBOX_ROOT:-$repo_root}" \
+      OPEN_AGENTS_SANDBOX="${OPEN_AGENTS_SANDBOX:-just-bash}" \
       OPEN_AGENTS_PLUGIN_ROOTS="${OPEN_AGENTS_PLUGIN_ROOTS:-$repo_root/crates/open-agents-service/fixtures/open-plugin/minimal}" \
       OPEN_AGENTS_PLUGIN_DATA_DIR="${OPEN_AGENTS_PLUGIN_DATA_DIR:-$repo_root/target/open-agents-plugin-data}" \
       cargo run -p open-agents-service --bin open-agents-slack -- --check-config

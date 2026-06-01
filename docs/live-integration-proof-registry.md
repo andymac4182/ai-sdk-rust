@@ -352,8 +352,8 @@ answer and cancel interaction payloads directly to the service, and confirms
 thread replies through `conversations.replies`.
 
 Required credentials: none. The harness supplies local fixture values for
-`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPEN_AGENTS_SLACK_API_URL`,
-`OPEN_AGENTS_SANDBOX`, and `OPEN_AGENTS_SANDBOX_ROOT`.
+`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPEN_AGENTS_SLACK_API_URL`, and
+`OPEN_AGENTS_SANDBOX=just-bash`.
 
 Expected output includes:
 

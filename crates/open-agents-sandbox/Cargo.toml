@@ -24,6 +24,7 @@ all = "warn"
 
 [dependencies]
 flate2 = "1.1.5"
+just-bash = { path = "../just-bash" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tar = "0.4.44"

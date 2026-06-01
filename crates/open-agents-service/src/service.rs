@@ -58,8 +58,9 @@ use open_agents_runtime::{
 };
 use open_agents_sandbox::{
     GitCredentials, GitFinishOptions, GitFinishReport, GitFinishStatus, GitSandbox,
-    PullRequestOptions, PushOptions, SandboxConnectConfig, SandboxConnectOptions, SandboxContext,
-    SandboxError, SandboxExecOptions, SandboxState, connect_sandbox, run_git_finish,
+    JUST_BASH_DEFAULT_WORKING_DIRECTORY, PullRequestOptions, PushOptions, SandboxConnectConfig,
+    SandboxConnectOptions, SandboxContext, SandboxError, SandboxExecOptions, SandboxState,
+    connect_sandbox, run_git_finish,
 };
 use open_agents_slack::{
     SlackHttpRequest, SlackHttpResponse, SlackIngress, SlackIngressOptions, SlackIngressRoute,
@@ -1321,6 +1322,33 @@ struct ServiceSandbox {
 impl ServiceSandbox {
     fn from_config(config: &OpenAgentsServiceConfig) -> Result<Self, ServiceError> {
         match config.sandbox() {
+            SandboxMode::JustBash => {
+                let state = SandboxState::JustBash {
+                    workspace_id: "open-agents-service".to_string(),
+                    working_directory: JUST_BASH_DEFAULT_WORKING_DIRECTORY.to_string(),
+                    current_branch: None,
+                    expires_at: None,
+                };
+                let raw =
+                    serde_json::to_value(&state).unwrap_or_else(|_| json!({"type": "just-bash"}));
+                let environment_details =
+                    "Just Bash virtual filesystem; no host shell or external sandbox provider"
+                        .to_string();
+                Ok(Self {
+                    connect: sandbox_connect_config(state, config),
+                    context: SandboxContext::new(raw.clone(), JUST_BASH_DEFAULT_WORKING_DIRECTORY)
+                        .with_environment_details(environment_details.clone()),
+                    persisted: PersistedSandboxState {
+                        provider: "just-bash".to_string(),
+                        sandbox_id: None,
+                        sandbox_name: None,
+                        working_directory: Some(JUST_BASH_DEFAULT_WORKING_DIRECTORY.to_string()),
+                        current_branch: None,
+                        environment_details: Some(environment_details),
+                        raw,
+                    },
+                })
+            }
             SandboxMode::Local { root } => {
                 let root = absolutize(root)?;
                 let root_string = root.to_string_lossy().to_string();
@@ -1384,6 +1412,21 @@ impl ServiceSandbox {
     }
 
     fn for_run(&self, run_id: &str) -> Self {
+        if matches!(&self.connect.state, SandboxState::JustBash { .. }) {
+            let mut next = self.clone();
+            let state = SandboxState::JustBash {
+                workspace_id: format!("run_{run_id}"),
+                working_directory: JUST_BASH_DEFAULT_WORKING_DIRECTORY.to_string(),
+                current_branch: None,
+                expires_at: None,
+            };
+            next.connect.state = state.clone();
+            let raw = serde_json::to_value(&state).unwrap_or_else(|_| json!({"type": "just-bash"}));
+            next.context.state = raw.clone();
+            next.persisted.raw = raw;
+            return next;
+        }
+
         let SandboxState::Vercel {
             sandbox_name: None,
             sandbox_id: None,
@@ -2841,6 +2884,7 @@ mod tests {
             "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
             "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
             "OPEN_AGENTS_BIND_ADDR" => Some("127.0.0.1:0".to_string()),
+            "OPEN_AGENTS_SANDBOX" => Some("local".to_string()),
             "OPEN_AGENTS_SANDBOX_ROOT" => Some(sandbox_root.to_string_lossy().to_string()),
             "OPEN_AGENTS_GIT_FINISH" => Some("report".to_string()),
             _ => None,
@@ -2991,6 +3035,55 @@ mod tests {
                 .iter()
                 .any(|message| message.kind == LocalOutboundKind::Final)
         );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn slack_app_mention_routes_bash_tool_call_through_just_bash_without_vercel_credentials()
+    {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000105";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body("inspect the repo", "EvJustBashRoute", thread_ts),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let runtime = server.service.local_runtime();
+        let mapping = runtime
+            .mapping_for_slack_thread_id(&thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let session = runtime
+            .persistence
+            .get_session(&mapping.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let sandbox_state = session.sandbox_state.expect("sandbox state");
+        assert_eq!(sandbox_state.provider, "just-bash");
+        assert_eq!(
+            sandbox_state.working_directory.as_deref(),
+            Some(JUST_BASH_DEFAULT_WORKING_DIRECTORY)
+        );
+
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Finished);
+        let messages = runtime
+            .persistence
+            .list_chat_messages(&mapping.chat_id)
+            .await
+            .unwrap();
+        let assistant_json = serde_json::to_string(&messages[1].parts).unwrap();
+        assert!(assistant_json.contains("tool-bash"));
+        assert!(assistant_json.contains("/workspace"));
+        assert!(!assistant_json.contains("/bin/bash"));
         server.stop().await;
     }
 

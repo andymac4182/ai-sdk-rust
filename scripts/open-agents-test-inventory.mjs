@@ -800,7 +800,7 @@ function verifiedRustTestName(relative) {
     ],
     [
       'packages/agent/tools/tools.test.ts',
-      'open_agent_file_tools_read_write_and_edit_with_fake_sandbox; open_agent_file_tools_reject_directories_replace_all_and_truncate_grep_matches; open_agent_search_bash_and_todo_tools_execute_with_fake_sandbox; open_agent_risky_commands_need_approval; open_agent_web_fetch_blocks_private_hosts; open_agent_web_fetch_treats_curl_exit_23_as_truncated_success; open_agent_tool_schemas_serialize_for_tool_loop_agent; open_agent_ask_user_question_formats_model_output; skill_tool_emits_status_and_final_skill_content',
+      'open_agent_file_tools_read_write_and_edit_with_fake_sandbox; open_agent_file_tools_reject_directories_replace_all_and_truncate_grep_matches; open_agent_search_bash_and_todo_tools_execute_with_fake_sandbox; open_agent_risky_commands_need_approval; just_bash_executes_echo_pwd_and_cat_without_host_process; just_bash_persists_virtual_files_across_exec_calls; just_bash_resets_env_and_cwd_between_exec_calls; just_bash_maps_failures_to_shell_shaped_exec_results; slack_app_mention_routes_bash_tool_call_through_just_bash_without_vercel_credentials; open_agent_web_fetch_blocks_private_hosts; open_agent_web_fetch_treats_curl_exit_23_as_truncated_success; open_agent_tool_schemas_serialize_for_tool_loop_agent; open_agent_ask_user_question_formats_model_output; skill_tool_emits_status_and_final_skill_content',
     ],
     [
       'packages/agent/tools/utils.test.ts',
@@ -823,7 +823,7 @@ function partialRustTestName(relative) {
     ],
     [
       'packages/agent/tools/tools.test.ts',
-      'open_agent_file_tools_read_write_and_edit_with_fake_sandbox; open_agent_search_bash_and_todo_tools_execute_with_fake_sandbox; open_agent_tool_schemas_serialize_for_tool_loop_agent',
+      'open_agent_file_tools_read_write_and_edit_with_fake_sandbox; open_agent_search_bash_and_todo_tools_execute_with_fake_sandbox; just_bash_executes_echo_pwd_and_cat_without_host_process; just_bash_persists_virtual_files_across_exec_calls; just_bash_resets_env_and_cwd_between_exec_calls; just_bash_maps_failures_to_shell_shaped_exec_results; slack_app_mention_routes_bash_tool_call_through_just_bash_without_vercel_credentials; open_agent_tool_schemas_serialize_for_tool_loop_agent',
     ],
     [
       'packages/agent/tools/utils.test.ts',

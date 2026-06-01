@@ -12,7 +12,8 @@ selection, local Slack event fixtures, a testable signed Slack HTTP route,
 optional Slack Web API base URL override, durable run resume and block-action
 approval handling, finish-action reporting, real sandbox/model error reporting,
 a real Vercel AI Gateway runtime mode, deterministic Gateway async completion
-coverage, and an ignored live Slack smoke test.
+coverage, a temporary safe `just-bash` virtual sandbox default for local bash
+tool execution, and an ignored live Slack smoke test.
 
 Keep this document honest as OA-01 lands the full upstream inventory: add exact
 gate commands and mapped upstream test names there rather than guessing from
@@ -166,9 +167,11 @@ scripts/open-agents-local-e2e.sh --check-config
 
 ## Fixture Path
 
-The fixture path does not require Slack credentials. It parses a synthetic
-`app_mention`, records progress in memory, performs fake sandbox proof
-(`sandbox.exec pwd`), persists the run, and emits a final Slack-thread message.
+The legacy fixture path does not require Slack credentials. It parses a
+synthetic `app_mention`, records progress in memory, performs a deterministic
+fake sandbox proof (`sandbox.exec pwd`), persists the run, and emits a final
+Slack-thread message. The service-backed local Slack route uses the default
+Just Bash virtual backend instead.
 
 ```sh
 cargo run -p open-agents-service -- --fixture
@@ -283,14 +286,14 @@ Known emulator limits:
 
 ## Local Slack App Run
 
-Use memory state and a local sandbox boundary while connecting a real Slack app:
+Use memory state and the default Just Bash virtual sandbox while connecting a
+real Slack app:
 
 ```sh
 export SLACK_BOT_TOKEN=xoxb-...
 export SLACK_SIGNING_SECRET=...
 export OPEN_AGENTS_STATE=memory
-export OPEN_AGENTS_SANDBOX=local
-export OPEN_AGENTS_SANDBOX_ROOT="$PWD"
+export OPEN_AGENTS_SANDBOX=just-bash
 export OPEN_AGENTS_BIND_ADDR=127.0.0.1:8080
 
 cargo run -p open-agents-service -- --check-config
@@ -327,8 +330,16 @@ Common local settings:
 
 - `OPEN_AGENTS_BIND_ADDR`, default `127.0.0.1:8080`
 - `OPEN_AGENTS_STATE=memory`, the current deterministic local state backend
-- `OPEN_AGENTS_SANDBOX=local`, the current local sandbox boundary
-- `OPEN_AGENTS_SANDBOX_ROOT`, default `.`
+- `OPEN_AGENTS_SANDBOX=just-bash`, the default safe in-process virtual
+  filesystem backend for bash tool execution. The Open Agents smoke tests cover
+  `echo`, `pwd`, `cat`, `printf`, `mkdir`, `ls`, `touch`, `cd`, `export`,
+  `true`, `false`, simple env expansion, pipes, `;`, `&&`, and `>`/`>>`
+  redirection through `crates/just-bash`. It does not execute host `/bin/bash`
+  or arbitrary host processes.
+- `OPEN_AGENTS_SANDBOX=local`, explicit host local sandbox boundary for
+  development workflows that intentionally need host process execution
+- `OPEN_AGENTS_SANDBOX_ROOT`, default `.`, used only with
+  `OPEN_AGENTS_SANDBOX=local`
 
 Optional production or live settings:
 
@@ -451,7 +462,7 @@ path through a real Slack app once live outbound assertions are available.
 | Flow | Local coverage today | Command or evidence | Gap before durable runtime E2E |
 | --- | --- | --- | --- |
 | URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Live Slack app proof still TODO |
-| App mention | Covered through the signed service route and emulator-backed local service path; Gateway mode has a credential-gated signed-event smoke | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture` | Live deployed Slack app proof still TODO |
+| App mention | Covered through the signed service route and emulator-backed local service path; Gateway mode has a credential-gated signed-event smoke | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-service slack_app_mention_routes_bash_tool_call_through_just_bash_without_vercel_credentials`; `cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture` | Live deployed Slack app proof still TODO |
 | DM | `open-agents-slack` covers DM routing | `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator-backed DM scenario still TODO |
 | Thread routing | Emulator-backed app mention thread replay plus parser/router tests; active waiting runs resume instead of duplicating | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service threaded_message_resumes_waiting_run_without_starting_duplicate` | Broader DM/thread matrix still TODO |
 | Durable run completion | Covered locally through the service route with a scripted durable runtime; Gateway mode waits for async model completion and is credential-gated for live Gateway | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future`; `cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture` | Live deployed Slack app proof still TODO |
@@ -459,7 +470,7 @@ path through a real Slack app once live outbound assertions are available.
 | Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
 | Open Plugin components | Config validation loads `.plugin/plugin.json`, namespaced fixture skills, and sanitized MCP server planning metadata without live Slack, Gateway, Vercel, or subprocess execution | `scripts/open-agents-local-e2e.sh --check-config`; `cargo test -p open-agents-service from_reader_loads_open_plugin_fixture_components`; `cargo test -p open-agents-service local_runtime_exposes_open_plugin_components_without_starting_mcp`; `cargo test -p open-agents-runtime open_agent_prepare_composes_prompt_context_model_and_tools` | Executable plugin MCP adapters remain a pending OP-03/runtime adapter seam |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
-| Sandbox command | Local service route executes `sandbox.exec pwd`; Gateway runtime passes Open Agent tools through the selected sandbox command adapter; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel sandbox plus live git mutation proof remains credential-gated |
+| Sandbox command | Default local service route executes `bash`/`pwd` through the crate-backed Just Bash virtual backend; explicit local and Vercel backends remain selectable; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service slack_app_mention_routes_bash_tool_call_through_just_bash_without_vercel_credentials`; `cargo test -p open-agents-sandbox just_bash`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel sandbox/git mutation proof remains credential-gated |
 | Model/sandbox errors | Scripted local model and sandbox failures persist failed run status, clear active run state, and post Slack errors | `cargo test -p open-agents-service scripted_runtime_failure_is_persisted_and_reported_to_slack` | Live Gateway/Vercel failure proof remains credential-gated |
 | Git automation summary | Finish actions can emit local git no-change/commit/PR/error summaries after a completed run; renderer coverage verifies Slack shapes | `cargo test -p open-agents-service finish_action_errors_are_reported_without_failing_finished_run`; `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | Live push/PR execution remains credential-gated |
 | Health/readiness | Covered by service tests, manual probes, and emulator readiness polling | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Live deployment probes still TODO |

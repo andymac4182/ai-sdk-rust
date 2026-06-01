@@ -2,7 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use open_agents_sandbox::GitRemoteActionMode;
+use open_agents_sandbox::{GitRemoteActionMode, JUST_BASH_DEFAULT_WORKING_DIRECTORY};
 use open_agents_slack::SlackIngressMode;
 
 use crate::plugin::{
@@ -47,6 +47,8 @@ impl fmt::Debug for StateStore {
 /// Sandbox backend selected for agent tool execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxMode {
+    /// In-process Just Bash virtual filesystem backend.
+    JustBash,
     /// Local filesystem/shell execution boundary for fixtures and local runs.
     Local { root: PathBuf },
     /// Vercel Sandbox cloud backend.
@@ -60,6 +62,7 @@ impl SandboxMode {
     /// Stable operator-facing label.
     pub fn label(&self) -> &'static str {
         match self {
+            Self::JustBash => "just-bash",
             Self::Local { .. } => "local",
             Self::Vercel { .. } => "vercel",
         }
@@ -317,9 +320,7 @@ impl OpenAgentsServiceConfig {
             slack_signing_secret: "fixture-signing-secret".to_string(),
             slack_app_token: None,
             slack_api_url: None,
-            sandbox: SandboxMode::Local {
-                root: PathBuf::from("."),
-            },
+            sandbox: SandboxMode::JustBash,
             runtime: AgentRuntimeMode::Fixture,
             model_api_key: None,
             model_id: DEFAULT_GATEWAY_MODEL_ID.to_string(),
@@ -420,11 +421,12 @@ impl OpenAgentsServiceConfig {
     /// Redacted summary safe to print in operator logs.
     pub fn operator_summary(&self) -> String {
         format!(
-            "bind_addr={} state={} slack_ingress={} sandbox={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} finish_git={} finish_push={} finish_pr={} github_token={} plugin_roots={} plugins={} plugin_skills={} plugin_mcp_servers={} plugin_data_dir={} plugin_diagnostics={}",
+            "bind_addr={} state={} slack_ingress={} sandbox={} sandbox_working_directory={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} finish_git={} finish_push={} finish_pr={} github_token={} plugin_roots={} plugins={} plugin_skills={} plugin_mcp_servers={} plugin_data_dir={} plugin_diagnostics={}",
             self.bind_addr,
             self.state_store.label(),
             slack_ingress_label(self.slack_ingress),
             self.sandbox.label(),
+            sandbox_working_directory_label(&self.sandbox),
             self.runtime.label(),
             present_label(Some(&self.slack_bot_token)),
             present_label(Some(&self.slack_signing_secret)),
@@ -559,7 +561,8 @@ fn parse_sandbox(
     raw: Option<&str>,
     read_var: &mut impl FnMut(&'static str) -> Option<String>,
 ) -> Result<SandboxMode, ConfigError> {
-    match raw.unwrap_or("local") {
+    match raw.unwrap_or("just-bash") {
+        "just-bash" | "just_bash" | "justbash" => Ok(SandboxMode::JustBash),
         "local" => Ok(SandboxMode::Local {
             root: present(read_var("OPEN_AGENTS_SANDBOX_ROOT"))
                 .map(PathBuf::from)
@@ -574,8 +577,16 @@ fn parse_sandbox(
         value => Err(ConfigError::InvalidVar {
             name: "OPEN_AGENTS_SANDBOX",
             value: value.to_string(),
-            expected: "local or vercel",
+            expected: "just-bash, local, or vercel",
         }),
+    }
+}
+
+fn sandbox_working_directory_label(sandbox: &SandboxMode) -> String {
+    match sandbox {
+        SandboxMode::JustBash => JUST_BASH_DEFAULT_WORKING_DIRECTORY.to_string(),
+        SandboxMode::Local { root } => root.display().to_string(),
+        SandboxMode::Vercel { .. } => "/vercel/sandbox".to_string(),
     }
 }
 
@@ -740,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn from_reader_defaults_to_memory_webhook_and_local_sandbox() {
+    fn from_reader_defaults_to_memory_webhook_and_just_bash_sandbox() {
         let config = load(&[
             ("SLACK_BOT_TOKEN", "xoxb-test"),
             ("SLACK_SIGNING_SECRET", "secret"),
@@ -751,7 +762,7 @@ mod tests {
         assert_eq!(config.state_store().label(), "memory");
         assert_eq!(config.slack_ingress(), SlackIngressMode::Webhook);
         assert_eq!(config.slack_api_url(), None);
-        assert_eq!(config.sandbox().label(), "local");
+        assert_eq!(config.sandbox().label(), "just-bash");
         assert_eq!(config.runtime(), AgentRuntimeMode::Fixture);
         assert_eq!(config.model_id(), DEFAULT_GATEWAY_MODEL_ID);
     }
@@ -862,6 +873,24 @@ mod tests {
     }
 
     #[test]
+    fn from_reader_accepts_explicit_local_sandbox_for_host_process_backend() {
+        let config = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("OPEN_AGENTS_SANDBOX", "local"),
+            ("OPEN_AGENTS_SANDBOX_ROOT", "/tmp/open-agents-local"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.sandbox(),
+            &SandboxMode::Local {
+                root: PathBuf::from("/tmp/open-agents-local"),
+            }
+        );
+    }
+
+    #[test]
     fn from_reader_loads_open_plugin_fixture_components() {
         let plugin_root = plugin_fixture_root()
             .canonicalize()
@@ -921,6 +950,8 @@ mod tests {
         assert!(summary.contains("plugin_skills=1"));
         assert!(summary.contains("plugin_mcp_servers=1"));
         assert!(summary.contains("plugin_data_dir=present"));
+        assert!(summary.contains("sandbox=just-bash"));
+        assert!(summary.contains("sandbox_working_directory=/workspace"));
         assert!(!summary.contains("xoxb-test"));
         assert!(!summary.contains("signing-real-secret"));
     }
@@ -1013,6 +1044,7 @@ mod tests {
         assert!(summary.contains("slack_bot_token=present"));
         assert!(summary.contains("socket_mode_token=present"));
         assert!(summary.contains("runtime=fixture"));
+        assert!(summary.contains("sandbox=just-bash"));
         assert!(summary.contains("model=openai/gpt-4.1-mini"));
         assert!(summary.contains("github_token=missing"));
         assert!(!summary.contains("xoxb-real-secret"));

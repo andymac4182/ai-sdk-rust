@@ -4,6 +4,7 @@
 
 pub mod git;
 pub mod git_finish;
+pub mod just_bash;
 pub mod vercel;
 
 use std::collections::BTreeMap;
@@ -63,6 +64,7 @@ pub use git_finish::{
     GitFinishOptions, GitFinishReport, GitFinishStatus, PullRequestOptions, PullRequestOutcome,
     run_git_finish,
 };
+pub use just_bash::{JUST_BASH_DEFAULT_WORKING_DIRECTORY, JustBashSandbox, JustBashSandboxOptions};
 pub use vercel::{
     VercelCommandData, VercelSandbox, VercelSandboxClient, VercelSandboxConfig,
     VercelSandboxCreateRequest, VercelSandboxCredentials, VercelSandboxMetadata,
@@ -119,6 +121,8 @@ impl SandboxContext {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxType {
+    /// In-process Just Bash virtual filesystem backend.
+    JustBash,
     /// Local filesystem and process sandbox for tests and development.
     Local,
     /// Vercel Sandbox cloud backend.
@@ -128,6 +132,7 @@ pub enum SandboxType {
 impl fmt::Display for SandboxType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::JustBash => formatter.write_str("just-bash"),
             Self::Local => formatter.write_str("local"),
             Self::Vercel => formatter.write_str("vercel"),
         }
@@ -138,6 +143,26 @@ impl fmt::Display for SandboxType {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SandboxState {
+    /// In-process Just Bash virtual filesystem state.
+    #[serde(rename = "just-bash")]
+    JustBash {
+        /// Process-local virtual workspace id used to reconnect in-memory state.
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        /// Current virtual working directory exposed to agents.
+        #[serde(rename = "workingDirectory")]
+        working_directory: String,
+        /// Current git branch, when known.
+        #[serde(
+            default,
+            rename = "currentBranch",
+            skip_serializing_if = "Option::is_none"
+        )]
+        current_branch: Option<String>,
+        /// Runtime expiration timestamp, in milliseconds since Unix epoch.
+        #[serde(default, rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+        expires_at: Option<u64>,
+    },
     /// Local sandbox state.
     #[serde(rename = "local")]
     Local {
@@ -190,6 +215,7 @@ impl SandboxState {
     /// Returns the backend discriminator for this state.
     pub const fn sandbox_type(&self) -> SandboxType {
         match self {
+            Self::JustBash { .. } => SandboxType::JustBash,
             Self::Local { .. } => SandboxType::Local,
             Self::Vercel { .. } => SandboxType::Vercel,
         }
@@ -360,6 +386,24 @@ impl SandboxConnectConfig {
 /// Connects to a sandbox from serialized state.
 pub fn connect_sandbox(config: SandboxConnectConfig) -> SandboxResult<Box<dyn Sandbox>> {
     match config.state {
+        SandboxState::JustBash {
+            workspace_id,
+            working_directory,
+            current_branch,
+            expires_at,
+        } => {
+            let options = JustBashSandboxOptions {
+                env: config.options.env,
+                current_branch,
+                timeout_ms: config.options.timeout_ms,
+                expires_at_ms: expires_at,
+            };
+            Ok(Box::new(JustBashSandbox::with_options(
+                workspace_id,
+                working_directory,
+                options,
+            )?))
+        }
         SandboxState::Local {
             root,
             current_branch,

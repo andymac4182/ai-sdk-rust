@@ -29,7 +29,7 @@ Optional:
 
 - `OPEN_AGENTS_SLACK_API_URL`
 - `OPEN_AGENTS_STATE`
-- `OPEN_AGENTS_SANDBOX`
+- `OPEN_AGENTS_SANDBOX` (`just-bash` by default; set `vercel` explicitly for live Vercel Sandbox execution)
 - `OPEN_AGENTS_BIND_ADDR`
 
 For Vercel Sandbox execution set:

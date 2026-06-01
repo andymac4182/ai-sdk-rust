@@ -272,7 +272,7 @@ pub fn sandbox_creation_installs_global_skills() -> bool {
 }
 
 pub fn is_supported_sandbox_type(kind: &str) -> bool {
-    matches!(kind, "local" | "vercel")
+    matches!(kind, "just-bash" | "local" | "vercel")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,6 +592,7 @@ mod tests {
 
     #[test]
     fn sandbox_route_rejects_unsupported_sandbox_types() {
+        assert!(is_supported_sandbox_type("just-bash"));
         assert!(is_supported_sandbox_type("local"));
         assert!(is_supported_sandbox_type("vercel"));
         assert!(!is_supported_sandbox_type("docker"));
