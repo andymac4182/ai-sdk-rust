@@ -906,6 +906,150 @@ const jbc15CaseGroups = [
   },
 ];
 
+const jbc16CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.test.ts',
+    lines: [
+      6, 15, 26, 33, 42, 51, 60, 69, 80, 107, 121, 134, 146, 158, 170,
+      182, 224, 261, 274, 300, 309, 318, 325, 334, 343, 350, 357, 366, 384,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_flags_files_functions_and_operators_close_rows',
+    notes:
+      'JBC-16 verifies portable jq flags, file/stdin inputs, JSON streams, error/help handling, exit status, compact/raw output, and deterministic in-memory file behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.operators.test.ts',
+    lines: [6, 12, 18, 36, 60, 110, 116],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_flags_files_functions_and_operators_close_rows',
+    notes:
+      'JBC-16 verifies portable jq arithmetic, string concatenation, equality, not, and alternative operators over JSON stdin.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
+    lines: [22, 45, 61, 68, 83, 92, 99, 108, 124, 131],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_flags_files_functions_and_operators_close_rows',
+    notes:
+      'JBC-16 verifies portable jq length, type, first, last, reverse, sort, unique, add, min, and max functions.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.filters.test.ts',
+    lines: [6, 14],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_flags_files_functions_and_operators_close_rows',
+    notes:
+      'JBC-16 verifies portable jq select and map filters for simple in-memory JSON arrays.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.strings.test.ts',
+    lines: [12, 30, 66, 96],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_flags_files_functions_and_operators_close_rows',
+    notes:
+      'JBC-16 verifies portable jq join, startswith, ascii_downcase, and index string helpers.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [
+      6, 17, 33, 50, 66, 100, 111, 124, 135, 287, 305, 314, 324, 331,
+      340, 347, 534, 542, 550, 571, 591, 600, 609, 618, 627,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_yaml_json_env_and_error_rows',
+    notes:
+      'JBC-16 verifies portable yq YAML/JSON navigation, JSON rendering, raw/compact output, env/error paths, exit status, and simple jq-compatible functions.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.env.test.ts',
+    lines: [8, 38, 60],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_yaml_json_env_and_error_rows',
+    notes:
+      'JBC-16 verifies portable yq env object field lookup, missing env nulls, and empty env strings inside the scoped Rust session.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.basic.test.ts',
+    lines: [27, 34, 41, 48, 57, 64, 89, 116, 127, 147, 156, 163, 172, 179, 186, 193, 202],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_basic_columns_data_filter_rows',
+    notes:
+      'JBC-16 verifies portable xan count, headers, head/tail, slice, reverse, enum, behead, help/error, and unimplemented-command diagnostics over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.columns.test.ts',
+    lines: [27, 54, 75, 105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_basic_columns_data_filter_rows',
+    notes:
+      'JBC-16 verifies portable xan select/drop/rename column transforms over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [42],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_basic_columns_data_filter_rows',
+    notes:
+      'JBC-16 verifies portable xan from-json conversion to CSV with deterministic header ordering.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.filter-sort.test.ts',
+    lines: [27, 47, 83, 103, 167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_basic_columns_data_filter_rows',
+    notes:
+      'JBC-16 verifies portable xan numeric filters, inverted filters, numeric sorting, dedup, and column-scoped regex search.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.test.ts',
+    lines: [6, 24, 32, 73, 84],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_options_errors_and_simple_select_rows',
+    notes:
+      'JBC-16 verifies portable sqlite3 help, missing-argument handling, stdin SQL, and simple in-memory CREATE/INSERT/SELECT behavior without WASM workers.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.formatters.test.ts',
+    lines: [6, 13, 20, 42, 82],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_options_errors_and_simple_select_rows',
+    notes:
+      'JBC-16 verifies portable sqlite3 list/csv/json formatting for simple SELECT result sets.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.options.test.ts',
+    lines: [6, 24, 79],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_options_errors_and_simple_select_rows',
+    notes:
+      'JBC-16 verifies portable sqlite3 version, custom row separator, and custom column separator options.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.errors.test.ts',
+    lines: [6, 15, 24, 33, 42, 49, 104, 125],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_options_errors_and_simple_select_rows',
+    notes:
+      'JBC-16 verifies portable sqlite3 missing option argument errors, required-argument errors, unknown options, and load_extension blocking.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -937,6 +1081,7 @@ function caseOverrideFor(testCase) {
     ...jbc12CaseGroups,
     ...jbc13CaseGroups,
     ...jbc15CaseGroups,
+    ...jbc16CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

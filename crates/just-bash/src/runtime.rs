@@ -3166,4 +3166,513 @@ and exhibited clearly, with a label attached.\n";
             "42\n"
         );
     }
+
+    #[test]
+    fn structured_data_jq_flags_files_functions_and_operators_close_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.json".to_string(), "{\"value\":123}".to_string()),
+                (
+                    "/a.json".to_string(),
+                    "{\"name\":\"alice\",\"items\":[\"x\",\"y\"]}".to_string(),
+                ),
+                (
+                    "/b.json".to_string(),
+                    "{\"name\":\"bob\",\"items\":[\"z\"]}".to_string(),
+                ),
+                ("/file.json".to_string(), "{\"from\":\"file\"}".to_string()),
+                (
+                    "/obj.json".to_string(),
+                    "{\"type\":\"object\",\"value\":42}".to_string(),
+                ),
+                ("/arr.json".to_string(), "[1,2,3]".to_string()),
+                ("/str.json".to_string(), "\"hello\"".to_string()),
+                ("/x1.json".to_string(), "{\"x\":1}".to_string()),
+                ("/x2.json".to_string(), "{\"x\":2}".to_string()),
+                (
+                    "/stream.ndjson".to_string(),
+                    "{\"id\":1}\n{\"id\":2}".to_string(),
+                ),
+                (
+                    "/concat.json".to_string(),
+                    "{\"a\":1}{\"b\":2}{\"c\":3}".to_string(),
+                ),
+                (
+                    "/mixed.json".to_string(),
+                    "{\"obj\":true}\n[1,2,3]\n\"string\"\n42\ntrue\nnull".to_string(),
+                ),
+                ("/empty.json".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("echo '{\"name\":\"test\"}' | jq -r '.name'")
+                .stdout,
+            "test\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1,\"b\":2}' | jq -c '.'").stdout,
+            "{\"a\":1,\"b\":2}\n"
+        );
+        assert_eq!(env.exec("jq -n 'empty'").stdout, "");
+        assert_eq!(
+            env.exec("echo '1\n2\n3' | jq -s '.'").stdout,
+            "[\n  1,\n  2,\n  3\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"z\":1,\"a\":2}' | jq -S '.'").stdout,
+            "{\n  \"a\": 2,\n  \"z\": 1\n}\n"
+        );
+        assert_eq!(env.exec("jq '.value' /data.json").stdout, "123\n");
+        assert_eq!(
+            env.exec("jq '.name' /a.json /b.json").stdout,
+            "\"alice\"\n\"bob\"\n"
+        );
+        assert_eq!(env.exec("jq '.id' /stream.ndjson").stdout, "1\n2\n");
+        assert_eq!(
+            env.exec("jq 'type' /obj.json /arr.json /str.json").stdout,
+            "\"object\"\n\"array\"\n\"string\"\n"
+        );
+        assert_eq!(
+            env.exec("jq -r '.name' /a.json /b.json").stdout,
+            "alice\nbob\n"
+        );
+        assert_eq!(
+            env.exec("jq '.items[]' /a.json /b.json").stdout,
+            "\"x\"\n\"y\"\n\"z\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"from\":\"stdin\"}' | jq '.from' - /file.json")
+                .stdout,
+            "\"stdin\"\n\"file\"\n"
+        );
+        assert_eq!(
+            env.exec("jq '.x' /x1.json /empty.json /x2.json").stdout,
+            "1\n2\n"
+        );
+        assert_eq!(
+            env.exec("cat /concat.json | jq '.'").stdout,
+            "{\n  \"a\": 1\n}\n{\n  \"b\": 2\n}\n{\n  \"c\": 3\n}\n"
+        );
+        assert_eq!(
+            env.exec("cat /mixed.json | jq -c '.'").stdout,
+            "{\"obj\":true}\n[1,2,3]\n\"string\"\n42\ntrue\nnull\n"
+        );
+        assert_eq!(
+            env.exec("cat /stream.ndjson | jq -s 'length'").stdout,
+            "2\n"
+        );
+        assert_eq!(env.exec("echo '5' | jq '. + 3'").stdout, "8\n");
+        assert_eq!(env.exec("echo '10' | jq '. - 4'").stdout, "6\n");
+        assert_eq!(env.exec("echo '6' | jq '. * 7'").stdout, "42\n");
+        assert_eq!(
+            env.exec("echo '{\"a\":\"foo\",\"b\":\"bar\"}' | jq '.a + .b'")
+                .stdout,
+            "\"foobar\"\n"
+        );
+        assert_eq!(env.exec("echo '5' | jq '. == 5'").stdout, "true\n");
+        assert_eq!(env.exec("echo 'true' | jq 'not'").stdout, "false\n");
+        assert_eq!(
+            env.exec("echo '{\"a\":null}' | jq '.a // \"default\"'")
+                .stdout,
+            "\"default\"\n"
+        );
+        assert_eq!(env.exec("echo '[1,2,3]' | jq 'length'").stdout, "3\n");
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq 'type'").stdout,
+            "\"object\"\n"
+        );
+        assert_eq!(env.exec("echo '[5,10,15]' | jq 'first'").stdout, "5\n");
+        assert_eq!(env.exec("echo '[5,10,15]' | jq 'last'").stdout, "15\n");
+        assert_eq!(
+            env.exec("echo '[3,1,2]' | jq 'sort'").stdout,
+            "[\n  1,\n  2,\n  3\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '[1,2,1,3]' | jq 'unique'").stdout,
+            "[\n  1,\n  2,\n  3\n]\n"
+        );
+        assert_eq!(env.exec("echo '[1,2,3,4]' | jq 'add'").stdout, "10\n");
+        assert_eq!(env.exec("echo '[5,2,8,1]' | jq 'min'").stdout, "1\n");
+        assert_eq!(env.exec("echo '[5,2,8,1]' | jq 'max'").stdout, "8\n");
+        assert_eq!(
+            env.exec("echo '[1,2,3,4,5]' | jq '[.[] | select(. > 3)]'")
+                .stdout,
+            "[\n  4,\n  5\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '[1,2,3]' | jq 'map(. * 2)'").stdout,
+            "[\n  2,\n  4,\n  6\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '[1,2,3]' | jq 'reverse'").stdout,
+            "[\n  3,\n  2,\n  1\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\",\"c\"]' | jq 'join(\"-\")'")
+                .stdout,
+            "\"a-b-c\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"hello world\"' | jq 'startswith(\"hello\")'")
+                .stdout,
+            "true\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"HELLO\"' | jq 'ascii_downcase'").stdout,
+            "\"hello\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"foobar\"' | jq 'index(\"bar\")'").stdout,
+            "3\n"
+        );
+        assert_eq!(env.exec("echo 'not json' | jq '.'").exit_code, 5);
+        assert_eq!(env.exec("jq . /missing.json").exit_code, 2);
+        assert_eq!(env.exec("jq --unknown '.'").exit_code, 1);
+        assert_eq!(env.exec("jq -x '.'").exit_code, 1);
+        assert!(env.exec("jq --help").stdout.contains("JSON"));
+        assert_eq!(env.exec("echo '{\"a\":1}' | jq -e '.missing'").exit_code, 1);
+        assert_eq!(env.exec("echo 'null' | jq -e '.'").exit_code, 1);
+        assert_eq!(env.exec("echo 'false' | jq -e '.'").exit_code, 1);
+        assert_eq!(env.exec("echo '{\"a\":1}' | jq -e '.a'").exit_code, 0);
+        assert_eq!(env.exec("echo '1' | jq -e '.'").exit_code, 0);
+        assert_eq!(env.exec("echo '[1,2,3]' | jq -j '.[]'").stdout, "123");
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -rc '.'").stdout,
+            "{\"a\":1}\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"name\":\"test\"}' | jq -rc '.name'")
+                .stdout,
+            "test\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_yq_yaml_json_env_and_error_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.yaml".to_string(),
+                    "name: test\nversion: 1\n".to_string(),
+                ),
+                (
+                    "/nested.yaml".to_string(),
+                    "config:\n  database:\n    host: localhost\n    port: 5432\n".to_string(),
+                ),
+                (
+                    "/items.yaml".to_string(),
+                    "items:\n  - name: foo\n    value: 1\n  - name: bar\n    value: 2\n"
+                        .to_string(),
+                ),
+                (
+                    "/fruits.yaml".to_string(),
+                    "fruits:\n  - apple\n  - banana\n  - cherry\n".to_string(),
+                ),
+                (
+                    "/users.yaml".to_string(),
+                    "users:\n  - name: alice\n    active: true\n  - name: bob\n    active: false\n  - name: charlie\n    active: true\n"
+                        .to_string(),
+                ),
+                (
+                    "/data.json".to_string(),
+                    "{\"name\":\"test\",\"value\":42}".to_string(),
+                ),
+            ]),
+            env: BTreeMap::from([
+                ("TEST_VAR".to_string(), "test_value".to_string()),
+                ("EMPTY".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("yq '.name' /data.yaml").stdout, "test\n");
+        assert_eq!(
+            env.exec("yq '.config.database.host' /nested.yaml").stdout,
+            "localhost\n"
+        );
+        assert_eq!(env.exec("yq '.items[0].name' /items.yaml").stdout, "foo\n");
+        assert_eq!(
+            env.exec("yq '.fruits[]' /fruits.yaml").stdout,
+            "apple\nbanana\ncherry\n"
+        );
+        assert_eq!(
+            env.exec("yq '.users[] | select(.active) | .name' /users.yaml")
+                .stdout,
+            "alice\ncharlie\n"
+        );
+        assert_eq!(
+            env.exec("yq -c -o json '.' /data.yaml").stdout,
+            "{\"name\":\"test\",\"version\":1}\n"
+        );
+        assert_eq!(
+            env.exec("yq -r -o json '.name' /data.yaml").stdout,
+            "test\n"
+        );
+        assert_eq!(env.exec("yq -p json '.name' /data.json").stdout, "test\n");
+        assert!(
+            env.exec("yq -p json '.' /data.json")
+                .stdout
+                .contains("name: test")
+        );
+        assert_eq!(env.exec("cat /data.yaml | yq '.name' -").stdout, "test\n");
+        assert_eq!(env.exec("yq -n 'length'").stdout, "0\n");
+        assert_eq!(
+            env.exec("echo 'null' | yq -o json 'env.TEST_VAR'").stdout,
+            "\"test_value\"\n"
+        );
+        assert_eq!(
+            env.exec("echo 'null' | yq -o json 'env.MISSING'").stdout,
+            "null\n"
+        );
+        assert_eq!(
+            env.exec("echo 'null' | yq -o json 'env.EMPTY'").stdout,
+            "\"\"\n"
+        );
+        assert_eq!(env.exec("yq '.name' /missing.yaml").exit_code, 1);
+        assert_eq!(env.exec("yq --unknown '.'").exit_code, 1);
+        assert!(env.exec("yq --help").stdout.contains("YAML"));
+        assert!(
+            env.exec("yq --input-format=nope '.' /data.yaml")
+                .stderr
+                .contains("invalid input format")
+        );
+        assert!(
+            env.exec("yq --output-format=nope '.' /data.yaml")
+                .stderr
+                .contains("invalid output format")
+        );
+        assert!(
+            env.exec("yq -p nope '.' /data.yaml")
+                .stderr
+                .contains("invalid input format")
+        );
+        assert!(
+            env.exec("yq -o nope '.' /data.yaml")
+                .stderr
+                .contains("invalid output format")
+        );
+        assert_eq!(env.exec("echo 'true' | yq -e '.'").exit_code, 0);
+        assert_eq!(env.exec("echo 'null' | yq -e '.'").exit_code, 1);
+        assert_eq!(env.exec("echo 'false' | yq -e '.'").exit_code, 1);
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | yq -rc -o json '.'").stdout,
+            "{\"a\":1}\n"
+        );
+        assert_eq!(
+            env.exec("echo '[5,10,15]' | yq -o json 'first'").stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec("echo '[5,10,15]' | yq -o json 'last'").stdout,
+            "15\n"
+        );
+        assert_eq!(
+            env.exec("echo '[1,2,3,4]' | yq -o json 'add'").stdout,
+            "10\n"
+        );
+        assert_eq!(
+            env.exec("echo '[5,2,8,1]' | yq -o json 'min'").stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec("echo '[5,2,8,1]' | yq -o json 'max'").stdout,
+            "8\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_basic_columns_data_filter_rows() {
+        let users = "name,age,email,active\nalice,30,alice@example.com,true\nbob,25,bob@example.com,false\ncharlie,35,charlie@example.com,true\ndiana,28,diana@example.com,true\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/users.csv".to_string(), users.to_string()),
+                ("/empty.csv".to_string(), "name,age\n".to_string()),
+                ("/numbers.csv".to_string(), "n\n1\n2\n3\n4\n5\n".to_string()),
+                ("/products.csv".to_string(), "id,name,price,category,in_stock\n1,Widget,19.99,electronics,true\n2,Gadget,29.99,electronics,true\n3,Gizmo,9.99,accessories,false\n".to_string()),
+                ("/data.json".to_string(), "[{\"name\":\"alice\",\"age\":30},{\"name\":\"bob\",\"age\":25}]".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("xan count /users.csv").stdout, "4\n");
+        assert_eq!(env.exec("xan count /numbers.csv").stdout, "5\n");
+        assert_eq!(env.exec("xan count /empty.csv").stdout, "0\n");
+        assert_eq!(env.exec("echo 'a\n1\n2\n3' | xan count").stdout, "3\n");
+        assert_eq!(
+            env.exec("xan headers /users.csv").stdout,
+            "0   name\n1   age\n2   email\n3   active\n"
+        );
+        assert_eq!(
+            env.exec("xan headers -j /users.csv").stdout,
+            "name\nage\nemail\nactive\n"
+        );
+        assert_eq!(
+            env.exec("xan head -l 2 /users.csv").stdout,
+            "name,age,email,active\nalice,30,alice@example.com,true\nbob,25,bob@example.com,false\n"
+        );
+        assert_eq!(
+            env.exec("xan tail -l 2 /users.csv").stdout,
+            "name,age,email,active\ncharlie,35,charlie@example.com,true\ndiana,28,diana@example.com,true\n"
+        );
+        assert_eq!(
+            env.exec("xan slice -s 1 -e 3 /users.csv").stdout,
+            "name,age,email,active\nbob,25,bob@example.com,false\ncharlie,35,charlie@example.com,true\n"
+        );
+        assert_eq!(
+            env.exec("xan reverse /numbers.csv").stdout,
+            "n\n5\n4\n3\n2\n1\n"
+        );
+        assert_eq!(
+            env.exec("xan enum -c row /numbers.csv").stdout,
+            "row,n\n0,1\n1,2\n2,3\n3,4\n4,5\n"
+        );
+        assert_eq!(
+            env.exec("xan enum /numbers.csv").stdout,
+            "index,n\n0,1\n1,2\n2,3\n3,4\n4,5\n"
+        );
+        assert_eq!(
+            env.exec("xan behead /numbers.csv").stdout,
+            "1\n2\n3\n4\n5\n"
+        );
+        assert_eq!(
+            env.exec("xan select name,email /users.csv").stdout,
+            "name,email\nalice,alice@example.com\nbob,bob@example.com\ncharlie,charlie@example.com\ndiana,diana@example.com\n"
+        );
+        assert_eq!(
+            env.exec("xan select 0-1 /users.csv").stdout,
+            "name,age\nalice,30\nbob,25\ncharlie,35\ndiana,28\n"
+        );
+        assert_eq!(
+            env.exec("xan drop email,active /users.csv").stdout,
+            "name,age\nalice,30\nbob,25\ncharlie,35\ndiana,28\n"
+        );
+        assert_eq!(
+            env.exec("xan rename VALUE /numbers.csv").stdout,
+            "VALUE\n1\n2\n3\n4\n5\n"
+        );
+        assert_eq!(
+            env.exec("xan to json /numbers.csv").stdout,
+            "[\n  {\n    \"n\": 1\n  },\n  {\n    \"n\": 2\n  },\n  {\n    \"n\": 3\n  },\n  {\n    \"n\": 4\n  },\n  {\n    \"n\": 5\n  }\n]\n"
+        );
+        assert_eq!(
+            env.exec("xan from -f json /data.json").stdout,
+            "age,name\n30,alice\n25,bob\n"
+        );
+        assert_eq!(
+            env.exec("xan filter 'age > 28' /users.csv").stdout,
+            "name,age,email,active\nalice,30,alice@example.com,true\ncharlie,35,charlie@example.com,true\n"
+        );
+        assert_eq!(
+            env.exec("xan filter -v 'age > 28' /users.csv").stdout,
+            "name,age,email,active\nbob,25,bob@example.com,false\ndiana,28,diana@example.com,true\n"
+        );
+        assert_eq!(
+            env.exec("xan sort -s age -N /users.csv").stdout,
+            "name,age,email,active\nbob,25,bob@example.com,false\ndiana,28,diana@example.com,true\nalice,30,alice@example.com,true\ncharlie,35,charlie@example.com,true\n"
+        );
+        assert_eq!(
+            env.exec("xan dedup -s category /products.csv").stdout,
+            "id,name,price,category,in_stock\n1,Widget,19.99,electronics,true\n3,Gizmo,9.99,accessories,false\n"
+        );
+        assert_eq!(
+            env.exec("xan search -s name -r '^a' /users.csv").stdout,
+            "name,age,email,active\nalice,30,alice@example.com,true\n"
+        );
+        assert_eq!(env.exec("xan count /missing.csv").exit_code, 1);
+        assert!(env.exec("xan --help").stdout.contains("xan"));
+        assert_eq!(env.exec("xan foobar /data.csv").exit_code, 1);
+        assert_eq!(
+            env.exec("xan parallel").stderr,
+            "xan parallel: not yet implemented\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
+        let env = bash();
+
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1, 2, 3\"").stdout,
+            "1|2|3\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -list :memory: \"SELECT 1, 2, 3\"").stdout,
+            "1|2|3\n"
+        );
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t\""
+            )
+            .stdout,
+            "1\n2\n3\n"
+        );
+        assert_eq!(
+            env.exec(
+                "echo \"CREATE TABLE t(x); INSERT INTO t VALUES(42); SELECT * FROM t\" | sqlite3 :memory:"
+            )
+            .stdout,
+            "42\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -list -header :memory: \"SELECT 1 as a, 2 as b\"")
+                .stdout,
+            "a|b\n1|2\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -csv :memory: \"SELECT 1 as col1, 2 as col2\"")
+                .stdout,
+            "1,2\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -csv -header :memory: \"SELECT 1 as col1, 2 as col2\"")
+                .stdout,
+            "col1,col2\n1,2\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -json :memory: \"SELECT 1 as t, 0 as f\"")
+                .stdout,
+            "[{\"t\":1,\"f\":0}]\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -separator , :memory: \"SELECT 1, 2\"")
+                .stdout,
+            "1,2\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -newline '|' :memory: \"SELECT 1; SELECT 2\"")
+                .stdout,
+            "1|2|"
+        );
+        assert!(env.exec("sqlite3 -version").stdout.starts_with("3."));
+        assert!(env.exec("sqlite3 --help").stdout.contains("DATABASE"));
+        assert!(env.exec("sqlite3 -help").stdout.contains("DATABASE"));
+        assert_eq!(
+            env.exec(
+                "sqlite3 -newline '|' :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t\""
+            )
+            .stdout,
+            "1|2|3|"
+        );
+        assert_eq!(
+            env.exec(
+                "sqlite3 -separator ',' :memory: \"CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2); SELECT * FROM t\""
+            )
+            .stdout,
+            "1,2\n"
+        );
+        assert_eq!(env.exec("sqlite3").exit_code, 1);
+        assert_eq!(env.exec("sqlite3 :memory:").exit_code, 1);
+        assert_eq!(env.exec("sqlite3 :memory: -separator").exit_code, 1);
+        assert_eq!(env.exec("sqlite3 :memory: -newline").exit_code, 1);
+        assert_eq!(env.exec("sqlite3 :memory: -nullvalue").exit_code, 1);
+        assert_eq!(env.exec("sqlite3 :memory: -cmd").exit_code, 1);
+        assert_eq!(env.exec("sqlite3 -xyz :memory: \"SELECT 1\"").exit_code, 1);
+        assert!(
+            env.exec("sqlite3 :memory: \"SELECT load_extension('/tmp/evil.so')\"")
+                .stdout
+                .contains("not authorized")
+        );
+    }
 }

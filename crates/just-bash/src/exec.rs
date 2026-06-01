@@ -802,6 +802,9 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "find" => command_find(state, &tokens[1..]),
         "read" => command_read(state, &tokens[1..], &stdin),
         "jq" => command_jq(state, &tokens[1..], &stdin),
+        "yq" => command_yq(state, &tokens[1..], &stdin),
+        "xan" => command_xan(state, &tokens[1..], &stdin),
+        "sqlite3" => command_sqlite3(state, &tokens[1..], &stdin),
         "which" => command_which(state, &tokens[1..]),
         "whoami" => stdout_result("user\n"),
         "sleep" => command_sleep(state, &tokens[1..]),
@@ -4943,38 +4946,250 @@ fn command_read(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> Comm
     CommandResult::default()
 }
 
-fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let Some(filter) = args.first() else {
-        return stderr_result(2, "jq: missing filter\n");
-    };
-    let input = match collect_text_inputs(state, &args[1..], stdin) {
-        Ok(input) => input,
-        Err(error) => return stderr_result(1, format!("jq: {error}\n")),
-    };
-    let Ok(value) = serde_json::from_str::<JsonValue>(&input) else {
-        return stderr_result(4, "jq: invalid JSON\n");
-    };
-    let selected = match eval_jq_filter(&value, filter) {
-        Ok(selected) => selected,
-        Err(error) => return stderr_result(3, format!("jq: {error}\n")),
-    };
-    let mut stdout = String::new();
-    for value in selected {
-        stdout.push_str(&render_jq_value(&value));
-        stdout.push('\n');
-    }
-    stdout_result(stdout)
+#[derive(Clone, Debug, Default)]
+struct JqOptions {
+    filter: String,
+    paths: Vec<String>,
+    raw_output: bool,
+    compact: bool,
+    null_input: bool,
+    slurp: bool,
+    exit_status: bool,
+    join_output: bool,
+    tab_indent: bool,
 }
 
-fn eval_jq_filter(value: &JsonValue, filter: &str) -> Result<Vec<JsonValue>, String> {
+fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let options = match parse_jq_options(args) {
+        Ok(options) => options,
+        Err(result) => return result,
+    };
+    if options.filter == "__help__" {
+        return stdout_result(
+            "jq - commandline JSON processor\nUsage: jq [options] <filter> [file...]\n",
+        );
+    }
+    let inputs = match collect_jq_inputs(state, &options, stdin) {
+        Ok(inputs) => inputs,
+        Err(result) => return result,
+    };
+    let mut stdout = String::new();
+    let mut last_value = JsonValue::Null;
+    let mut saw_value = false;
+    for input in inputs {
+        let selected = match eval_structured_filter(&input, &input, &options.filter, None) {
+            Ok(selected) => selected,
+            Err(error) => return stderr_result(3, format!("jq: {error}\n")),
+        };
+        for value in selected {
+            saw_value = true;
+            last_value = value.clone();
+            stdout.push_str(&render_json_output(
+                &value,
+                StructuredOutput {
+                    raw: options.raw_output,
+                    compact: options.compact,
+                    tab_indent: options.tab_indent,
+                    default_scalar_raw: false,
+                },
+            ));
+            if !options.join_output {
+                stdout.push('\n');
+            }
+        }
+    }
+    let mut result = stdout_result(stdout);
+    if options.exit_status && (!saw_value || !is_truthy(&last_value)) {
+        result.exit_code = 1;
+    }
+    result
+}
+
+fn parse_jq_options(args: &[String]) -> Result<JqOptions, CommandResult> {
+    let mut options = JqOptions::default();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if !options.filter.is_empty() {
+            options.paths.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        if arg == "--help" {
+            options.filter = "__help__".to_string();
+            return Ok(options);
+        }
+        match arg.as_str() {
+            "--raw-output" => options.raw_output = true,
+            "--tab" => options.tab_indent = true,
+            "-r" => options.raw_output = true,
+            "-c" => options.compact = true,
+            "-n" => options.null_input = true,
+            "-s" => options.slurp = true,
+            "-S" => {}
+            "-e" => options.exit_status = true,
+            "-j" => options.join_output = true,
+            _ if arg.starts_with("--") => {
+                return Err(stderr_result(
+                    1,
+                    format!("jq: unrecognized option '{arg}'\n"),
+                ));
+            }
+            _ if arg.starts_with('-') && arg.len() > 2 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'r' => options.raw_output = true,
+                        'c' => options.compact = true,
+                        'n' => options.null_input = true,
+                        's' => options.slurp = true,
+                        'S' => {}
+                        'e' => options.exit_status = true,
+                        'j' => options.join_output = true,
+                        other => {
+                            return Err(stderr_result(
+                                1,
+                                format!("jq: invalid option -- '{other}'\n"),
+                            ));
+                        }
+                    }
+                }
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                let flag = arg.trim_start_matches('-');
+                return Err(stderr_result(
+                    1,
+                    format!("jq: invalid option -- '{flag}'\n"),
+                ));
+            }
+            _ => options.filter = arg.clone(),
+        }
+        index += 1;
+    }
+    if options.filter.is_empty() {
+        return Err(stderr_result(2, "jq: missing filter\n"));
+    }
+    Ok(options)
+}
+
+fn collect_jq_inputs(
+    state: &ExecState<'_>,
+    options: &JqOptions,
+    stdin: &str,
+) -> Result<Vec<JsonValue>, CommandResult> {
+    if options.null_input {
+        return if options.slurp {
+            Ok(vec![JsonValue::Array(Vec::new())])
+        } else {
+            Ok(vec![JsonValue::Null])
+        };
+    }
+    let mut values = Vec::new();
+    if options.paths.is_empty() {
+        values.extend(
+            parse_json_stream(stdin)
+                .map_err(|error| stderr_result(5, format!("jq: parse error: {error}\n")))?,
+        );
+    } else {
+        let fs = state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| stderr_result(1, "jq: filesystem lock poisoned\n"))?;
+        for raw_path in &options.paths {
+            let text = if raw_path == "-" {
+                stdin.to_string()
+            } else {
+                let path = resolve_path(&state.cwd, raw_path);
+                fs.read_file(&path).map_err(|_| {
+                    stderr_result(2, format!("jq: {path}: No such file or directory\n"))
+                })?
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            values.extend(
+                parse_json_stream(&text)
+                    .map_err(|error| stderr_result(5, format!("jq: parse error: {error}\n")))?,
+            );
+        }
+    }
+    if options.slurp {
+        Ok(vec![JsonValue::Array(values)])
+    } else {
+        Ok(values)
+    }
+}
+
+fn parse_json_stream(input: &str) -> Result<Vec<JsonValue>, String> {
+    let mut values = Vec::new();
+    let mut rest = input.trim_start();
+    while !rest.is_empty() {
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<JsonValue>();
+        let Some(next) = stream.next() else {
+            break;
+        };
+        let value = next.map_err(|error| format!("{error}"))?;
+        let offset = stream.byte_offset();
+        if offset == 0 {
+            return Err("invalid JSON stream".to_string());
+        }
+        values.push(value);
+        rest = rest[offset..].trim_start();
+    }
+    Ok(values)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StructuredOutput {
+    raw: bool,
+    compact: bool,
+    tab_indent: bool,
+    default_scalar_raw: bool,
+}
+
+fn render_json_output(value: &JsonValue, options: StructuredOutput) -> String {
+    if options.raw || options.default_scalar_raw {
+        match value {
+            JsonValue::String(value) => return value.clone(),
+            JsonValue::Null if options.raw => return "null".to_string(),
+            JsonValue::Bool(_) | JsonValue::Number(_) if options.raw => return value.to_string(),
+            _ if options.raw => {}
+            _ => return value.to_string(),
+        }
+    }
+    if options.compact {
+        return serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    }
+    if options.tab_indent {
+        return serde_json::to_string_pretty(value)
+            .unwrap_or_else(|_| value.to_string())
+            .replace("  ", "\t");
+    }
+    match value {
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn eval_structured_filter(
+    value: &JsonValue,
+    root: &JsonValue,
+    filter: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Vec<JsonValue>, String> {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return Ok(vec![value.clone()]);
+    }
     let mut output = Vec::new();
-    for branch in filter.split(',') {
+    for branch in split_top_level(filter, ',') {
         let mut current = vec![value.clone()];
-        for segment in branch.split('|') {
-            let selector = segment.trim();
+        for segment in split_top_level(branch, '|') {
             let mut next = Vec::new();
             for value in &current {
-                next.extend(eval_jq_selector(value, selector)?);
+                next.extend(eval_structured_expr(value, root, segment.trim(), env)?);
             }
             current = next;
         }
@@ -4983,40 +5198,535 @@ fn eval_jq_filter(value: &JsonValue, filter: &str) -> Result<Vec<JsonValue>, Str
     Ok(output)
 }
 
-fn eval_jq_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue>, String> {
+fn eval_structured_expr(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Vec<JsonValue>, String> {
+    let expr = trim_outer_parens(expr.trim());
+    if expr.is_empty() {
+        return Ok(vec![value.clone()]);
+    }
+    if expr == "empty" {
+        return Ok(Vec::new());
+    }
+    if let Some(env_expr) = expr
+        .strip_prefix("env.")
+        .or_else(|| expr.strip_prefix("$ENV."))
+    {
+        return Ok(vec![
+            env.and_then(|env| env.get(env_expr))
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        ]);
+    }
+    if expr == "env" || expr == "$ENV" {
+        let object = env
+            .map(|env| {
+                env.iter()
+                    .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+                    .collect::<JsonMap<_, _>>()
+            })
+            .unwrap_or_default();
+        return Ok(vec![JsonValue::Object(object)]);
+    }
+    if let Some(result) = eval_conditional_expr(value, root, expr, env)? {
+        return Ok(vec![result]);
+    }
+    if let Some((left, op, right)) = split_binary_expr(expr, &["//", " or ", " and "]) {
+        let left_value = eval_first(value, root, left, env)?;
+        return Ok(vec![match op.trim() {
+            "//" => {
+                if matches!(left_value, JsonValue::Null | JsonValue::Bool(false)) {
+                    eval_first(value, root, right, env)?
+                } else {
+                    left_value
+                }
+            }
+            "or" => JsonValue::Bool(
+                is_truthy(&left_value) || is_truthy(&eval_first(value, root, right, env)?),
+            ),
+            "and" => JsonValue::Bool(
+                is_truthy(&left_value) && is_truthy(&eval_first(value, root, right, env)?),
+            ),
+            _ => unreachable!(),
+        }]);
+    }
+    if let Some((left, op, right)) = split_binary_expr(expr, &["==", "!=", "<=", ">=", "<", ">"]) {
+        let left_value = eval_first(value, root, left, env)?;
+        let right_value = eval_first(value, root, right, env)?;
+        return Ok(vec![JsonValue::Bool(compare_json(
+            &left_value,
+            &right_value,
+            op,
+        ))]);
+    }
+    if let Some((left, op, right)) = split_binary_expr(expr, &[" + ", " - "]) {
+        let left_value = eval_first(value, root, left, env)?;
+        let right_value = eval_first(value, root, right, env)?;
+        return Ok(vec![apply_json_arithmetic(
+            &left_value,
+            &right_value,
+            op.trim(),
+        )?]);
+    }
+    if let Some((left, op, right)) = split_binary_expr(expr, &[" * ", " / ", " % "]) {
+        let left_value = eval_first(value, root, left, env)?;
+        let right_value = eval_first(value, root, right, env)?;
+        return Ok(vec![apply_json_arithmetic(
+            &left_value,
+            &right_value,
+            op.trim(),
+        )?]);
+    }
+    if expr.starts_with('[') && expr.ends_with(']') {
+        let inner = &expr[1..expr.len() - 1];
+        if inner.trim().is_empty() {
+            return Ok(vec![JsonValue::Array(Vec::new())]);
+        }
+        let mut values = Vec::new();
+        for part in split_top_level(inner, ',') {
+            values.extend(eval_structured_filter(value, root, part.trim(), env)?);
+        }
+        return Ok(vec![JsonValue::Array(values)]);
+    }
+    if expr.starts_with('{') && expr.ends_with('}') {
+        return Ok(vec![eval_object_construction(value, root, expr, env)?]);
+    }
+    if let Ok(literal) = serde_json::from_str::<JsonValue>(expr) {
+        return Ok(vec![literal]);
+    }
+    if let Some(inner) = function_arg(expr, "select") {
+        return if is_truthy(&eval_first(value, root, inner, env)?) {
+            Ok(vec![value.clone()])
+        } else {
+            Ok(Vec::new())
+        };
+    }
+    if let Some(result) = eval_function(value, root, expr, env)? {
+        return Ok(vec![result]);
+    }
+    if expr == "not" {
+        return Ok(vec![JsonValue::Bool(!is_truthy(value))]);
+    }
+    if expr.starts_with('.') {
+        return eval_path_selector(value, expr);
+    }
+    Err(format!("unsupported filter '{expr}'"))
+}
+
+fn eval_first(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<JsonValue, String> {
+    Ok(eval_structured_filter(value, root, expr, env)?
+        .into_iter()
+        .next()
+        .unwrap_or(JsonValue::Null))
+}
+
+fn eval_conditional_expr(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Option<JsonValue>, String> {
+    if !expr.starts_with("if ") || !expr.ends_with(" end") {
+        return Ok(None);
+    }
+    let body = &expr[3..expr.len() - 4];
+    let Some((condition, rest)) = body.split_once(" then ") else {
+        return Err("invalid if expression".to_string());
+    };
+    if let Some((then_expr, else_expr)) = rest.split_once(" else ") {
+        let selected = if is_truthy(&eval_first(value, root, condition, env)?) {
+            then_expr
+        } else {
+            else_expr
+        };
+        return Ok(Some(eval_first(value, root, selected, env)?));
+    }
+    Ok(None)
+}
+
+fn eval_object_construction(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<JsonValue, String> {
+    let mut object = JsonMap::new();
+    let inner = &expr[1..expr.len() - 1];
+    for entry in split_top_level(inner, ',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some((raw_key, raw_value)) = split_object_entry(entry) {
+            let key = object_key(value, root, raw_key.trim(), env)?;
+            let value = eval_first(value, root, raw_value.trim(), env)?;
+            object.insert(key, value);
+        } else {
+            let key = entry.trim().trim_matches('"').to_string();
+            object.insert(
+                key.clone(),
+                eval_first(value, root, &format!(".{key}"), env)?,
+            );
+        }
+    }
+    Ok(JsonValue::Object(object))
+}
+
+fn split_object_entry(entry: &str) -> Option<(&str, &str)> {
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (index, ch) in entry.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ':' if depth == 0 => return Some((&entry[..index], &entry[index + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn object_key(
+    value: &JsonValue,
+    root: &JsonValue,
+    raw_key: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<String, String> {
+    if raw_key.starts_with('(') && raw_key.ends_with(')') {
+        return Ok(
+            match eval_first(value, root, &raw_key[1..raw_key.len() - 1], env)? {
+                JsonValue::String(value) => value,
+                other => other.to_string(),
+            },
+        );
+    }
+    Ok(raw_key.trim_matches('"').to_string())
+}
+
+fn eval_function(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Option<JsonValue>, String> {
+    match expr {
+        "type" => return Ok(Some(JsonValue::String(json_type(value).to_string()))),
+        "length" => return Ok(Some(json_number(json_length(value) as f64))),
+        "keys" => return Ok(Some(json_keys(value))),
+        "first" => return Ok(Some(json_first(value))),
+        "last" => return Ok(Some(json_last(value))),
+        "reverse" => return Ok(Some(json_reverse(value))),
+        "sort" => return Ok(Some(json_sort(value))),
+        "unique" => return Ok(Some(json_unique(value))),
+        "add" => return Ok(Some(json_add(value)?)),
+        "min" => return Ok(Some(json_minmax(value, false))),
+        "max" => return Ok(Some(json_minmax(value, true))),
+        "floor" => return Ok(Some(json_number(value.as_f64().unwrap_or(0.0).floor()))),
+        "ceil" => return Ok(Some(json_number(value.as_f64().unwrap_or(0.0).ceil()))),
+        "round" => return Ok(Some(json_number(value.as_f64().unwrap_or(0.0).round()))),
+        "sqrt" => return Ok(Some(json_number(value.as_f64().unwrap_or(0.0).sqrt()))),
+        "abs" => return Ok(Some(json_number(value.as_f64().unwrap_or(0.0).abs()))),
+        "tostring" => {
+            return Ok(Some(JsonValue::String(match value {
+                JsonValue::String(value) => value.clone(),
+                other => other.to_string(),
+            })));
+        }
+        "tonumber" => {
+            return Ok(Some(match value {
+                JsonValue::String(value) => value
+                    .parse::<f64>()
+                    .map(json_number)
+                    .unwrap_or(JsonValue::Null),
+                JsonValue::Number(_) => value.clone(),
+                _ => JsonValue::Null,
+            }));
+        }
+        "flatten" => return Ok(Some(json_flatten(value, usize::MAX))),
+        "to_entries" => return Ok(Some(json_to_entries(value))),
+        "from_entries" => return Ok(Some(json_from_entries(value))),
+        _ => {}
+    }
+    if let Some(inner) = function_arg(expr, "map") {
+        let JsonValue::Array(values) = value else {
+            return Ok(Some(JsonValue::Array(Vec::new())));
+        };
+        let mut mapped = Vec::new();
+        for item in values {
+            mapped.extend(eval_structured_filter(item, root, inner, env)?);
+        }
+        return Ok(Some(JsonValue::Array(mapped)));
+    }
+    if let Some(inner) = function_arg(expr, "has") {
+        let key = eval_first(value, root, inner, env)?;
+        return Ok(Some(JsonValue::Bool(match (value, key) {
+            (JsonValue::Object(map), JsonValue::String(key)) => map.contains_key(&key),
+            (JsonValue::Array(values), JsonValue::Number(index)) => index
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .is_some_and(|index| index < values.len()),
+            _ => false,
+        })));
+    }
+    if let Some(inner) = function_arg(expr, "contains") {
+        let needle = eval_first(value, root, inner, env)?;
+        return Ok(Some(JsonValue::Bool(json_contains(value, &needle))));
+    }
+    if let Some(inner) = function_arg(expr, "any") {
+        let JsonValue::Array(values) = value else {
+            return Ok(Some(JsonValue::Bool(false)));
+        };
+        return Ok(Some(JsonValue::Bool(values.iter().any(|item| {
+            eval_first(item, root, inner, env).is_ok_and(|value| is_truthy(&value))
+        }))));
+    }
+    if let Some(inner) = function_arg(expr, "all") {
+        let JsonValue::Array(values) = value else {
+            return Ok(Some(JsonValue::Bool(false)));
+        };
+        return Ok(Some(JsonValue::Bool(values.iter().all(|item| {
+            eval_first(item, root, inner, env).is_ok_and(|value| is_truthy(&value))
+        }))));
+    }
+    if let Some(inner) = function_arg(expr, "sort_by") {
+        return Ok(Some(json_sort_by(value, root, inner, env)));
+    }
+    if let Some(inner) = function_arg(expr, "min_by") {
+        return Ok(Some(json_minmax_by(value, root, inner, env, false)));
+    }
+    if let Some(inner) = function_arg(expr, "max_by") {
+        return Ok(Some(json_minmax_by(value, root, inner, env, true)));
+    }
+    if let Some(inner) = function_arg(expr, "unique_by") {
+        return Ok(Some(json_unique_by(value, root, inner, env)));
+    }
+    if let Some(inner) = function_arg(expr, "group_by") {
+        return Ok(Some(json_group_by(value, root, inner, env)));
+    }
+    if let Some(inner) = function_arg(expr, "flatten") {
+        let depth = inner.trim().parse::<usize>().unwrap_or(usize::MAX);
+        return Ok(Some(json_flatten(value, depth)));
+    }
+    if let Some(inner) = function_arg(expr, "split") {
+        let separator = string_arg(inner);
+        return Ok(Some(JsonValue::Array(
+            value
+                .as_str()
+                .unwrap_or_default()
+                .split(&separator)
+                .map(|part| JsonValue::String(part.to_string()))
+                .collect(),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "join") {
+        let separator = string_arg(inner);
+        let JsonValue::Array(values) = value else {
+            return Ok(Some(JsonValue::String(String::new())));
+        };
+        return Ok(Some(JsonValue::String(
+            values
+                .iter()
+                .map(json_scalar_string)
+                .collect::<Vec<_>>()
+                .join(&separator),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "test") {
+        let pattern = string_arg(inner);
+        let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
+        return Ok(Some(JsonValue::Bool(
+            value.as_str().is_some_and(|value| regex.is_match(value)),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "startswith") {
+        let prefix = string_arg(inner);
+        return Ok(Some(JsonValue::Bool(
+            value
+                .as_str()
+                .is_some_and(|value| value.starts_with(&prefix)),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "endswith") {
+        let suffix = string_arg(inner);
+        return Ok(Some(JsonValue::Bool(
+            value.as_str().is_some_and(|value| value.ends_with(&suffix)),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "ltrimstr") {
+        let prefix = string_arg(inner);
+        return Ok(Some(JsonValue::String(
+            value
+                .as_str()
+                .unwrap_or_default()
+                .strip_prefix(&prefix)
+                .unwrap_or_else(|| value.as_str().unwrap_or_default())
+                .to_string(),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "rtrimstr") {
+        let suffix = string_arg(inner);
+        return Ok(Some(JsonValue::String(
+            value
+                .as_str()
+                .unwrap_or_default()
+                .strip_suffix(&suffix)
+                .unwrap_or_else(|| value.as_str().unwrap_or_default())
+                .to_string(),
+        )));
+    }
+    if expr == "ascii_downcase" {
+        return Ok(Some(JsonValue::String(
+            value.as_str().unwrap_or_default().to_ascii_lowercase(),
+        )));
+    }
+    if expr == "ascii_upcase" {
+        return Ok(Some(JsonValue::String(
+            value.as_str().unwrap_or_default().to_ascii_uppercase(),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "sub") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let pattern = string_arg(args[0]);
+            let replacement = string_arg(args[1]);
+            return Ok(Some(JsonValue::String(
+                value
+                    .as_str()
+                    .unwrap_or_default()
+                    .replacen(&pattern, &replacement, 1),
+            )));
+        }
+    }
+    if let Some(inner) = function_arg(expr, "gsub") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let pattern = string_arg(args[0]);
+            let replacement = string_arg(args[1]);
+            return Ok(Some(JsonValue::String(
+                value
+                    .as_str()
+                    .unwrap_or_default()
+                    .replace(&pattern, &replacement),
+            )));
+        }
+    }
+    if let Some(inner) = function_arg(expr, "index") {
+        let needle = string_arg(inner);
+        return Ok(Some(
+            value
+                .as_str()
+                .and_then(|value| value.find(&needle))
+                .map_or(JsonValue::Null, |index| json_number(index as f64)),
+        ));
+    }
+    if let Some(inner) = function_arg(expr, "indices") {
+        let needle = string_arg(inner);
+        let mut indexes = Vec::new();
+        if !needle.is_empty() {
+            let mut rest = value.as_str().unwrap_or_default();
+            let mut offset = 0;
+            while let Some(index) = rest.find(&needle) {
+                indexes.push(json_number((offset + index) as f64));
+                offset += index + needle.len();
+                rest = &rest[index + needle.len()..];
+            }
+        }
+        return Ok(Some(JsonValue::Array(indexes)));
+    }
+    if let Some(inner) = function_arg(expr, "range") {
+        let args = split_top_level(inner, ';');
+        let (start, end) = if args.len() == 1 {
+            (0, args[0].trim().parse::<i64>().unwrap_or(0))
+        } else {
+            (
+                args[0].trim().parse::<i64>().unwrap_or(0),
+                args[1].trim().parse::<i64>().unwrap_or(0),
+            )
+        };
+        return Ok(Some(JsonValue::Array(
+            (start..end)
+                .map(|value| json_number(value as f64))
+                .collect(),
+        )));
+    }
+    if let Some(inner) = function_arg(expr, "first") {
+        return Ok(Some(
+            eval_structured_filter(value, root, inner, env)?
+                .into_iter()
+                .next()
+                .unwrap_or(JsonValue::Null),
+        ));
+    }
+    Ok(None)
+}
+
+fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue>, String> {
     if selector == "." {
         return Ok(vec![value.clone()]);
     }
     if selector == ".[]" {
-        return Ok(jq_iter_values(value));
+        return Ok(json_iter_values(value));
     }
     let mut current = value.clone();
     let mut rest = selector
         .strip_prefix('.')
         .ok_or_else(|| "unsupported filter".to_string())?;
     while !rest.is_empty() {
+        rest = rest.trim_start();
         if rest == "[]" {
-            return Ok(jq_iter_values(&current));
+            return Ok(json_iter_values(&current));
         }
-        if let Some(index) = rest.strip_prefix('[').and_then(|tail| tail.split_once(']')) {
-            current = jq_index(&current, index.0).unwrap_or(JsonValue::Null);
-            rest = index.1.strip_prefix('.').unwrap_or(index.1);
+        if let Some((inside, tail)) = rest.strip_prefix('[').and_then(|tail| tail.split_once(']')) {
+            let inside = inside.trim().trim_matches('"');
+            current = json_index_or_field(&current, inside).unwrap_or(JsonValue::Null);
+            rest = tail.strip_prefix('.').unwrap_or(tail);
             continue;
         }
-        let (field, tail) = rest
-            .split_once('.')
-            .map_or((rest, ""), |(field, tail)| (field, tail));
+        let quoted = rest.starts_with('"');
+        let (field, tail) = if quoted {
+            let Some(end) = rest[1..].find('"') else {
+                return Err("unterminated field string".to_string());
+            };
+            (&rest[1..1 + end], &rest[1 + end + 1..])
+        } else {
+            let split = rest.find(['.', '[']).unwrap_or(rest.len());
+            (&rest[..split], &rest[split..])
+        };
+        let field = field.strip_suffix('?').unwrap_or(field);
         if let Some(field) = field.strip_suffix("[]") {
             current = current.get(field).cloned().unwrap_or(JsonValue::Null);
-            return Ok(jq_iter_values(&current));
+            return Ok(json_iter_values(&current));
+        }
+        if field.is_empty() {
+            return Err("empty field selector".to_string());
         }
         current = current.get(field).cloned().unwrap_or(JsonValue::Null);
-        rest = tail;
+        rest = tail.strip_prefix('.').unwrap_or(tail);
     }
     Ok(vec![current])
 }
 
-fn jq_iter_values(value: &JsonValue) -> Vec<JsonValue> {
+fn json_iter_values(value: &JsonValue) -> Vec<JsonValue> {
     match value {
         JsonValue::Array(values) => values.clone(),
         JsonValue::Object(values) => values.values().cloned().collect(),
@@ -5024,25 +5734,1932 @@ fn jq_iter_values(value: &JsonValue) -> Vec<JsonValue> {
     }
 }
 
-fn jq_index(value: &JsonValue, index: &str) -> Option<JsonValue> {
-    let JsonValue::Array(values) = value else {
-        return None;
-    };
-    let index = index.parse::<isize>().ok()?;
-    let index = if index < 0 {
-        values.len().checked_sub(index.unsigned_abs())?
-    } else {
-        index as usize
-    };
-    values.get(index).cloned()
+fn json_index_or_field(value: &JsonValue, index: &str) -> Option<JsonValue> {
+    if let JsonValue::Array(values) = value
+        && let Ok(index) = index.parse::<isize>()
+    {
+        let index = if index < 0 {
+            values.len().checked_sub(index.unsigned_abs())?
+        } else {
+            index as usize
+        };
+        return values.get(index).cloned();
+    }
+    value.get(index).cloned()
 }
 
-fn render_jq_value(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+fn split_top_level(input: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (index, ch) in input.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
         }
-        _ => value.to_string(),
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if ch == separator && depth == 0 => {
+                parts.push(input[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(input[start..].trim());
+    parts
+}
+
+fn split_binary_expr<'a>(expr: &'a str, ops: &[&'a str]) -> Option<(&'a str, &'a str, &'a str)> {
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let chars = expr.char_indices().collect::<Vec<_>>();
+    for (index, ch) in chars {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if depth == 0 => {
+                for op in ops {
+                    if expr[index..].starts_with(op) {
+                        return Some((expr[..index].trim(), *op, expr[index + op.len()..].trim()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn trim_outer_parens(expr: &str) -> &str {
+    let mut trimmed = expr.trim();
+    loop {
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+            return trimmed;
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if split_top_level(inner, ',').len() == 1 {
+            trimmed = inner.trim();
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+fn function_arg<'a>(expr: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}(");
+    expr.strip_prefix(&prefix)?.strip_suffix(')')
+}
+
+fn string_arg(raw: &str) -> String {
+    let raw = raw.trim();
+    serde_json::from_str::<String>(raw).unwrap_or_else(|_| raw.trim_matches('"').to_string())
+}
+
+fn json_number(value: f64) -> JsonValue {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
+        return json_integer(value as i64);
+    }
+    serde_json::Number::from_f64(value)
+        .map(JsonValue::Number)
+        .unwrap_or(JsonValue::Null)
+}
+
+fn json_integer(value: i64) -> JsonValue {
+    JsonValue::Number(serde_json::Number::from(value))
+}
+
+fn json_type(value: &JsonValue) -> &'static str {
+    match value {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "boolean",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
+    }
+}
+
+fn json_length(value: &JsonValue) -> usize {
+    match value {
+        JsonValue::Array(values) => values.len(),
+        JsonValue::Object(values) => values.len(),
+        JsonValue::String(value) => value.chars().count(),
+        JsonValue::Null => 0,
+        _ => 1,
+    }
+}
+
+fn json_keys(value: &JsonValue) -> JsonValue {
+    let keys = match value {
+        JsonValue::Object(map) => map.keys().cloned().collect::<Vec<_>>(),
+        JsonValue::Array(values) => (0..values.len()).map(|index| index.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    JsonValue::Array(keys.into_iter().map(JsonValue::String).collect())
+}
+
+fn json_first(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Array(values) => values.first().cloned().unwrap_or(JsonValue::Null),
+        JsonValue::String(value) => value
+            .chars()
+            .next()
+            .map(|ch| JsonValue::String(ch.to_string()))
+            .unwrap_or(JsonValue::Null),
+        _ => JsonValue::Null,
+    }
+}
+
+fn json_last(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Array(values) => values.last().cloned().unwrap_or(JsonValue::Null),
+        JsonValue::String(value) => value
+            .chars()
+            .next_back()
+            .map(|ch| JsonValue::String(ch.to_string()))
+            .unwrap_or(JsonValue::Null),
+        _ => JsonValue::Null,
+    }
+}
+
+fn json_reverse(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Array(values) => JsonValue::Array(values.iter().cloned().rev().collect()),
+        JsonValue::String(value) => JsonValue::String(value.chars().rev().collect()),
+        _ => JsonValue::Null,
+    }
+}
+
+fn json_sort(value: &JsonValue) -> JsonValue {
+    let JsonValue::Array(values) = value else {
+        return JsonValue::Null;
+    };
+    let mut values = values.clone();
+    values.sort_by_key(json_sort_key);
+    JsonValue::Array(values)
+}
+
+fn json_unique(value: &JsonValue) -> JsonValue {
+    let JsonValue::Array(values) = json_sort(value) else {
+        return JsonValue::Null;
+    };
+    let mut output = Vec::new();
+    for value in values {
+        if !output.iter().any(|existing| existing == &value) {
+            output.push(value);
+        }
+    }
+    JsonValue::Array(output)
+}
+
+fn json_add(value: &JsonValue) -> Result<JsonValue, String> {
+    let JsonValue::Array(values) = value else {
+        return Ok(JsonValue::Null);
+    };
+    if values.iter().all(JsonValue::is_number) {
+        return Ok(json_number(
+            values.iter().filter_map(JsonValue::as_f64).sum(),
+        ));
+    }
+    if values.iter().all(JsonValue::is_string) {
+        return Ok(JsonValue::String(
+            values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>()
+                .join(""),
+        ));
+    }
+    if values.iter().all(JsonValue::is_array) {
+        let mut output = Vec::new();
+        for value in values {
+            if let JsonValue::Array(values) = value {
+                output.extend(values.clone());
+            }
+        }
+        return Ok(JsonValue::Array(output));
+    }
+    Err("unsupported add inputs".to_string())
+}
+
+fn json_minmax(value: &JsonValue, max: bool) -> JsonValue {
+    let JsonValue::Array(values) = value else {
+        return JsonValue::Null;
+    };
+    if max {
+        values
+            .iter()
+            .cloned()
+            .max_by_key(json_sort_key)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .cloned()
+            .min_by_key(json_sort_key)
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn json_flatten(value: &JsonValue, depth: usize) -> JsonValue {
+    let JsonValue::Array(values) = value else {
+        return value.clone();
+    };
+    let mut output = Vec::new();
+    for item in values {
+        if depth > 0
+            && let JsonValue::Array(_) = item
+            && let JsonValue::Array(flat) = json_flatten(item, depth.saturating_sub(1))
+        {
+            output.extend(flat);
+            continue;
+        }
+        output.push(item.clone());
+    }
+    JsonValue::Array(output)
+}
+
+fn json_to_entries(value: &JsonValue) -> JsonValue {
+    let JsonValue::Object(map) = value else {
+        return JsonValue::Array(Vec::new());
+    };
+    JsonValue::Array(
+        map.iter()
+            .map(|(key, value)| {
+                JsonValue::Object(JsonMap::from_iter([
+                    ("key".to_string(), JsonValue::String(key.clone())),
+                    ("value".to_string(), value.clone()),
+                ]))
+            })
+            .collect(),
+    )
+}
+
+fn json_from_entries(value: &JsonValue) -> JsonValue {
+    let JsonValue::Array(entries) = value else {
+        return JsonValue::Object(JsonMap::new());
+    };
+    let mut map = JsonMap::new();
+    for entry in entries {
+        if let JsonValue::Object(entry) = entry
+            && let Some(JsonValue::String(key)) = entry.get("key")
+        {
+            map.insert(
+                key.clone(),
+                entry.get("value").cloned().unwrap_or(JsonValue::Null),
+            );
+        }
+    }
+    JsonValue::Object(map)
+}
+
+fn json_sort_by(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> JsonValue {
+    let JsonValue::Array(values) = value else {
+        return JsonValue::Null;
+    };
+    let mut values = values.clone();
+    values.sort_by_key(|value| {
+        json_sort_key(&eval_first(value, root, expr, env).unwrap_or(JsonValue::Null))
+    });
+    JsonValue::Array(values)
+}
+
+fn json_minmax_by(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+    max: bool,
+) -> JsonValue {
+    let JsonValue::Array(values) = value else {
+        return JsonValue::Null;
+    };
+    if max {
+        values
+            .iter()
+            .cloned()
+            .max_by_key(|value| {
+                json_sort_key(&eval_first(value, root, expr, env).unwrap_or(JsonValue::Null))
+            })
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .cloned()
+            .min_by_key(|value| {
+                json_sort_key(&eval_first(value, root, expr, env).unwrap_or(JsonValue::Null))
+            })
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn json_unique_by(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> JsonValue {
+    let JsonValue::Array(values) = value else {
+        return JsonValue::Null;
+    };
+    let mut output = Vec::new();
+    let mut keys = Vec::new();
+    for value in values {
+        let key = json_sort_key(&eval_first(value, root, expr, env).unwrap_or(JsonValue::Null));
+        if !keys.contains(&key) {
+            keys.push(key);
+            output.push(value.clone());
+        }
+    }
+    JsonValue::Array(output)
+}
+
+fn json_group_by(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> JsonValue {
+    let JsonValue::Array(values) = json_sort_by(value, root, expr, env) else {
+        return JsonValue::Null;
+    };
+    let mut groups: Vec<Vec<JsonValue>> = Vec::new();
+    let mut previous = None;
+    for value in values {
+        let key = json_sort_key(&eval_first(&value, root, expr, env).unwrap_or(JsonValue::Null));
+        if previous.as_ref() != Some(&key) {
+            groups.push(Vec::new());
+            previous = Some(key);
+        }
+        if let Some(group) = groups.last_mut() {
+            group.push(value);
+        }
+    }
+    JsonValue::Array(groups.into_iter().map(JsonValue::Array).collect())
+}
+
+fn json_contains(value: &JsonValue, needle: &JsonValue) -> bool {
+    match (value, needle) {
+        (JsonValue::Array(values), JsonValue::Array(needles)) => {
+            needles.iter().all(|needle| values.contains(needle))
+        }
+        (JsonValue::Object(values), JsonValue::Object(needles)) => needles
+            .iter()
+            .all(|(key, needle)| values.get(key).is_some_and(|value| value == needle)),
+        (JsonValue::String(value), JsonValue::String(needle)) => value.contains(needle),
+        _ => value == needle,
+    }
+}
+
+fn compare_json(left: &JsonValue, right: &JsonValue, op: &str) -> bool {
+    match op {
+        "==" => left == right,
+        "!=" => left != right,
+        "<" => json_sort_key(left) < json_sort_key(right),
+        ">" => json_sort_key(left) > json_sort_key(right),
+        "<=" => json_sort_key(left) <= json_sort_key(right),
+        ">=" => json_sort_key(left) >= json_sort_key(right),
+        _ => false,
+    }
+}
+
+fn apply_json_arithmetic(
+    left: &JsonValue,
+    right: &JsonValue,
+    op: &str,
+) -> Result<JsonValue, String> {
+    if op == "+" {
+        return match (left, right) {
+            (JsonValue::String(left), JsonValue::String(right)) => {
+                Ok(JsonValue::String(format!("{left}{right}")))
+            }
+            (JsonValue::Array(left), JsonValue::Array(right)) => {
+                let mut output = left.clone();
+                output.extend(right.clone());
+                Ok(JsonValue::Array(output))
+            }
+            (JsonValue::Object(left), JsonValue::Object(right)) => {
+                let mut output = left.clone();
+                output.extend(right.clone());
+                Ok(JsonValue::Object(output))
+            }
+            _ => Ok(json_number(
+                left.as_f64().unwrap_or(0.0) + right.as_f64().unwrap_or(0.0),
+            )),
+        };
+    }
+    let left = left.as_f64().unwrap_or(0.0);
+    let right = right.as_f64().unwrap_or(0.0);
+    Ok(json_number(match op {
+        "-" => left - right,
+        "*" => left * right,
+        "/" => left / right,
+        "%" => left % right,
+        _ => return Err(format!("unsupported operator {op}")),
+    }))
+}
+
+fn is_truthy(value: &JsonValue) -> bool {
+    !matches!(value, JsonValue::Null | JsonValue::Bool(false))
+}
+
+fn json_sort_key(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Number(number) => format!("0:{:020.8}", number.as_f64().unwrap_or(0.0)),
+        JsonValue::String(value) => format!("1:{value}"),
+        JsonValue::Bool(value) => format!("2:{value}"),
+        other => format!("3:{other}"),
+    }
+}
+
+fn json_scalar_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct YqOptions {
+    filter: String,
+    paths: Vec<String>,
+    input_format: Option<String>,
+    output_format: String,
+    raw_output: bool,
+    compact: bool,
+    null_input: bool,
+    exit_status: bool,
+    join_output: bool,
+    indent: usize,
+}
+
+impl Default for YqOptions {
+    fn default() -> Self {
+        Self {
+            filter: String::new(),
+            paths: Vec::new(),
+            input_format: None,
+            output_format: "yaml".to_string(),
+            raw_output: false,
+            compact: false,
+            null_input: false,
+            exit_status: false,
+            join_output: false,
+            indent: 2,
+        }
+    }
+}
+
+fn command_yq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let options = match parse_yq_options(args) {
+        Ok(options) => options,
+        Err(result) => return result,
+    };
+    if options.filter == "__help__" {
+        return stdout_result("yq - YAML/JSON processor\nUsage: yq [options] <filter> [file]\n");
+    }
+    let inputs = match collect_yq_inputs(state, &options, stdin) {
+        Ok(inputs) => inputs,
+        Err(result) => return result,
+    };
+    let mut stdout = String::new();
+    let mut saw_value = false;
+    let mut last_value = JsonValue::Null;
+    for input in inputs {
+        let selected =
+            match eval_structured_filter(&input, &input, &options.filter, Some(&state.env)) {
+                Ok(selected) => selected,
+                Err(error) => return stderr_result(1, format!("yq: {error}\n")),
+            };
+        for value in selected {
+            saw_value = true;
+            last_value = value.clone();
+            stdout.push_str(&render_yq_output(&value, &options));
+            if !options.join_output {
+                stdout.push('\n');
+            }
+        }
+    }
+    let mut result = stdout_result(stdout);
+    if options.exit_status && (!saw_value || !is_truthy(&last_value)) {
+        result.exit_code = 1;
+    }
+    result
+}
+
+fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
+    let mut options = YqOptions::default();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--help" {
+            options.filter = "__help__".to_string();
+            return Ok(options);
+        }
+        if let Some(format) = arg.strip_prefix("--input-format=") {
+            options.input_format = Some(validate_yq_format(format, "input")?);
+            index += 1;
+            continue;
+        }
+        if let Some(format) = arg.strip_prefix("--output-format=") {
+            options.output_format = validate_yq_format(format, "output")?;
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "-p" | "--input-format" => {
+                let Some(format) = args.get(index + 1) else {
+                    return Err(stderr_result(1, "yq: missing argument to -p\n"));
+                };
+                options.input_format = Some(validate_yq_format(format, "input")?);
+                index += 2;
+                continue;
+            }
+            "-o" | "--output-format" => {
+                let Some(format) = args.get(index + 1) else {
+                    return Err(stderr_result(1, "yq: missing argument to -o\n"));
+                };
+                options.output_format = validate_yq_format(format, "output")?;
+                index += 2;
+                continue;
+            }
+            "-I" => {
+                if let Some(indent) = args.get(index + 1).and_then(|value| value.parse().ok()) {
+                    options.indent = indent;
+                    index += 2;
+                    continue;
+                }
+            }
+            "-r" => options.raw_output = true,
+            "-c" => options.compact = true,
+            "-n" => options.null_input = true,
+            "-e" => options.exit_status = true,
+            "-j" => options.join_output = true,
+            _ if arg.starts_with('-') && arg.len() > 2 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'r' => options.raw_output = true,
+                        'c' => options.compact = true,
+                        'n' => options.null_input = true,
+                        'e' => options.exit_status = true,
+                        'j' => options.join_output = true,
+                        _ => {
+                            return Err(stderr_result(1, format!("yq: unknown option: -{flag}\n")));
+                        }
+                    }
+                }
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return Err(stderr_result(1, format!("yq: unknown option: {arg}\n")));
+            }
+            _ if options.filter.is_empty() => options.filter = arg.clone(),
+            _ => options.paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if options.filter.is_empty() {
+        return Err(stderr_result(1, "yq: missing filter\n"));
+    }
+    Ok(options)
+}
+
+fn validate_yq_format(format: &str, kind: &str) -> Result<String, CommandResult> {
+    let normalized = format.to_ascii_lowercase();
+    match normalized.as_str() {
+        "yaml" | "yml" | "json" | "xml" | "csv" | "ini" | "toml" | "tsv" => Ok(normalized),
+        _ => Err(stderr_result(
+            1,
+            format!("yq: invalid {kind} format: {format}\n"),
+        )),
+    }
+}
+
+fn collect_yq_inputs(
+    state: &ExecState<'_>,
+    options: &YqOptions,
+    stdin: &str,
+) -> Result<Vec<JsonValue>, CommandResult> {
+    if options.null_input {
+        return Ok(vec![JsonValue::Null]);
+    }
+    let raw_path = options.paths.first().map(String::as_str);
+    let input = if let Some(path) = raw_path {
+        if path == "-" {
+            stdin.to_string()
+        } else {
+            let resolved = resolve_path(&state.cwd, path);
+            state
+                .session
+                .inner
+                .fs
+                .lock()
+                .map_err(|_| stderr_result(1, "yq: filesystem lock poisoned\n"))?
+                .read_file(&resolved)
+                .map_err(|_| {
+                    stderr_result(1, format!("yq: {resolved}: No such file or directory\n"))
+                })?
+        }
+    } else {
+        stdin.to_string()
+    };
+    let format = options
+        .input_format
+        .clone()
+        .or_else(|| raw_path.and_then(input_format_from_path))
+        .unwrap_or_else(|| {
+            let trimmed = input.trim_start();
+            if trimmed.starts_with(['{', '[', '"'])
+                || matches!(trimmed.trim(), "null" | "true" | "false")
+                || trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_digit() || ch == '-')
+            {
+                "json".to_string()
+            } else {
+                "yaml".to_string()
+            }
+        });
+    match format.as_str() {
+        "json" => parse_json_stream(&input)
+            .map_err(|error| stderr_result(1, format!("yq: parse error: {error}\n"))),
+        "yaml" | "yml" => parse_simple_yaml(&input)
+            .map(|value| vec![value])
+            .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
+        _ => Err(stderr_result(
+            1,
+            format!("yq: input format {format} is not implemented in the Rust backend\n"),
+        )),
+    }
+}
+
+fn input_format_from_path(path: &str) -> Option<String> {
+    path.rsplit_once('.').map(|(_, extension)| match extension {
+        "json" => "json".to_string(),
+        "yaml" | "yml" => "yaml".to_string(),
+        other => other.to_string(),
+    })
+}
+
+fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
+    if options.output_format == "json" {
+        return render_json_output(
+            value,
+            StructuredOutput {
+                raw: options.raw_output,
+                compact: options.compact,
+                tab_indent: false,
+                default_scalar_raw: false,
+            },
+        );
+    }
+    if options.raw_output {
+        return json_scalar_string(value);
+    }
+    match value {
+        JsonValue::Array(_) | JsonValue::Object(_) => render_yaml_value(value, 0, options.indent),
+        _ => json_scalar_string(value),
+    }
+}
+
+fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {
+    let lines = input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            (
+                line.chars().take_while(|ch| *ch == ' ').count(),
+                line.trim().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    if lines.is_empty() {
+        return Ok(JsonValue::Null);
+    }
+    parse_yaml_block(&lines, &mut index, lines[0].0)
+}
+
+fn parse_yaml_block(
+    lines: &[(usize, String)],
+    index: &mut usize,
+    indent: usize,
+) -> Result<JsonValue, String> {
+    if lines
+        .get(*index)
+        .is_some_and(|(line_indent, line)| *line_indent == indent && line.starts_with("- "))
+    {
+        let mut values = Vec::new();
+        while let Some((line_indent, line)) = lines.get(*index) {
+            if *line_indent != indent || !line.starts_with("- ") {
+                break;
+            }
+            let item = line[2..].trim();
+            *index += 1;
+            let mut value = if item.is_empty() {
+                parse_yaml_block(lines, index, indent + 2)?
+            } else if let Some((key, raw_value)) = item.split_once(':') {
+                let mut object = JsonMap::new();
+                object.insert(key.trim().to_string(), parse_yaml_scalar(raw_value.trim()));
+                JsonValue::Object(object)
+            } else {
+                parse_yaml_scalar(item)
+            };
+            if lines
+                .get(*index)
+                .is_some_and(|(line_indent, line)| *line_indent > indent && !line.starts_with("- "))
+                && let JsonValue::Object(object) = &mut value
+                && let JsonValue::Object(extra) = parse_yaml_block(lines, index, indent + 2)?
+            {
+                object.extend(extra);
+            }
+            values.push(value);
+        }
+        return Ok(JsonValue::Array(values));
+    }
+    let mut object = JsonMap::new();
+    while let Some((line_indent, line)) = lines.get(*index) {
+        if *line_indent != indent || line.starts_with("- ") {
+            break;
+        }
+        let Some((key, raw_value)) = line.split_once(':') else {
+            return Err(format!("invalid YAML line: {line}"));
+        };
+        *index += 1;
+        let value = if raw_value.trim().is_empty() {
+            parse_yaml_block(lines, index, indent + 2)?
+        } else {
+            parse_yaml_scalar(raw_value.trim())
+        };
+        object.insert(key.trim().to_string(), value);
+    }
+    Ok(JsonValue::Object(object))
+}
+
+fn parse_yaml_scalar(raw: &str) -> JsonValue {
+    let raw = raw.trim().trim_matches('"').trim_matches('\'');
+    match raw {
+        "" => JsonValue::String(String::new()),
+        "true" => JsonValue::Bool(true),
+        "false" => JsonValue::Bool(false),
+        "null" | "~" => JsonValue::Null,
+        _ => raw
+            .parse::<i64>()
+            .map(json_integer)
+            .or_else(|_| raw.parse::<f64>().map(json_number))
+            .unwrap_or_else(|_| JsonValue::String(raw.to_string())),
+    }
+}
+
+fn render_yaml_value(value: &JsonValue, indent: usize, step: usize) -> String {
+    let spaces = " ".repeat(indent);
+    match value {
+        JsonValue::Object(map) => {
+            let mut output = String::new();
+            for (key, value) in map {
+                match value {
+                    JsonValue::Array(_) | JsonValue::Object(_) => {
+                        output.push_str(&format!("{spaces}{key}:\n"));
+                        output.push_str(&render_yaml_value(value, indent + step, step));
+                    }
+                    _ => {
+                        output.push_str(&format!("{spaces}{key}: {}\n", json_scalar_string(value)))
+                    }
+                }
+            }
+            output.trim_end_matches('\n').to_string()
+        }
+        JsonValue::Array(values) => {
+            let mut output = String::new();
+            for value in values {
+                match value {
+                    JsonValue::Array(_) | JsonValue::Object(_) => {
+                        output.push_str(&format!("{spaces}-\n"));
+                        output.push_str(&render_yaml_value(value, indent + step, step));
+                        output.push('\n');
+                    }
+                    _ => output.push_str(&format!("{spaces}- {}\n", json_scalar_string(value))),
+                }
+            }
+            output.trim_end_matches('\n').to_string()
+        }
+        _ => json_scalar_string(value),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CsvData {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return stdout_result("xan - CSV command toolkit\n");
+    };
+    if subcommand == "--help" || subcommand == "-h" {
+        return stdout_result("xan - CSV command toolkit\n");
+    }
+    match subcommand {
+        "count" => xan_count(state, &args[1..], stdin),
+        "headers" => xan_headers(state, &args[1..], stdin),
+        "head" => xan_head_tail(state, &args[1..], stdin, true),
+        "tail" => xan_head_tail(state, &args[1..], stdin, false),
+        "slice" => xan_slice(state, &args[1..], stdin),
+        "reverse" => xan_reverse(state, &args[1..], stdin),
+        "enum" => xan_enum(state, &args[1..], stdin),
+        "behead" => xan_behead(state, &args[1..], stdin),
+        "select" => xan_select_drop(state, &args[1..], stdin, false),
+        "drop" => xan_select_drop(state, &args[1..], stdin, true),
+        "rename" => xan_rename(state, &args[1..], stdin),
+        "to" => xan_to(state, &args[1..], stdin),
+        "from" => xan_from(state, &args[1..], stdin),
+        "filter" => xan_filter(state, &args[1..], stdin),
+        "sort" => xan_sort_cmd(state, &args[1..], stdin),
+        "dedup" => xan_dedup(state, &args[1..], stdin),
+        "search" => xan_search(state, &args[1..], stdin),
+        "parallel" => stderr_result(1, "xan parallel: not yet implemented\n"),
+        other => stderr_result(1, format!("xan: unknown command: {other}\n")),
+    }
+}
+
+fn xan_count(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    match read_csv_arg(state, args.last().map(String::as_str), stdin, "xan count") {
+        Ok(csv) => stdout_result(format!("{}\n", csv.rows.len())),
+        Err(result) => result,
+    }
+}
+
+fn xan_headers(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let just_names = args.iter().any(|arg| arg == "-j");
+    match read_csv_arg(
+        state,
+        args.iter()
+            .find(|arg| !arg.starts_with('-'))
+            .map(String::as_str),
+        stdin,
+        "xan headers",
+    ) {
+        Ok(csv) => {
+            let output = if just_names {
+                csv.headers.join("\n")
+            } else {
+                csv.headers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, header)| format!("{index}   {header}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            stdout_result(format!("{output}\n"))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_head_tail(state: &ExecState<'_>, args: &[String], stdin: &str, head: bool) -> CommandResult {
+    let limit = option_value(args, "-l")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10);
+    match read_csv_arg(
+        state,
+        positional_arg(args),
+        stdin,
+        if head { "xan head" } else { "xan tail" },
+    ) {
+        Ok(mut csv) => {
+            csv.rows = if head {
+                csv.rows.into_iter().take(limit).collect()
+            } else {
+                csv.rows
+                    .into_iter()
+                    .rev()
+                    .take(limit)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            };
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_slice(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let start = option_value(args, "-s")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let end: Option<usize> = option_value(args, "-e").and_then(|value| value.parse().ok());
+    let len: Option<usize> = option_value(args, "-l").and_then(|value| value.parse().ok());
+    match read_csv_arg(state, positional_arg(args), stdin, "xan slice") {
+        Ok(mut csv) => {
+            let end = end
+                .or_else(|| len.map(|len| start + len))
+                .unwrap_or(csv.rows.len());
+            csv.rows = csv
+                .rows
+                .into_iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect();
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_reverse(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    match read_csv_arg(state, positional_arg(args), stdin, "xan reverse") {
+        Ok(mut csv) => {
+            csv.rows.reverse();
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_enum(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let name = option_value(args, "-c").unwrap_or("index");
+    match read_csv_arg(state, positional_arg(args), stdin, "xan enum") {
+        Ok(mut csv) => {
+            csv.headers.insert(0, name.to_string());
+            for (index, row) in csv.rows.iter_mut().enumerate() {
+                row.insert(0, index.to_string());
+            }
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_behead(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    match read_csv_arg(state, positional_arg(args), stdin, "xan behead") {
+        Ok(csv) => stdout_result(
+            csv.rows
+                .iter()
+                .map(|row| row.join(","))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + if csv.rows.is_empty() { "" } else { "\n" },
+        ),
+        Err(result) => result,
+    }
+}
+
+fn xan_select_drop(
+    state: &ExecState<'_>,
+    args: &[String],
+    stdin: &str,
+    drop: bool,
+) -> CommandResult {
+    let Some(spec) = args.first() else {
+        return stderr_result(1, "xan select: missing column selector\n");
+    };
+    match read_csv_arg(state, args.get(1).map(String::as_str), stdin, "xan select") {
+        Ok(csv) => {
+            let selected = csv_column_indexes(&csv.headers, spec);
+            let indexes = (0..csv.headers.len())
+                .filter(|index| selected.contains(index) != drop)
+                .collect::<Vec<_>>();
+            stdout_result(render_csv(&project_csv(&csv, &indexes)))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_rename(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(new_names) = args.first() else {
+        return stderr_result(1, "xan rename: missing column names\n");
+    };
+    let selector = option_value(args, "-s");
+    match read_csv_arg(state, positional_arg(args), stdin, "xan rename") {
+        Ok(mut csv) => {
+            if let Some(selector) = selector {
+                for index in csv_column_indexes(&csv.headers, selector) {
+                    if let Some(header) = csv.headers.get_mut(index) {
+                        *header = new_names.to_string();
+                    }
+                }
+            } else {
+                csv.headers = new_names.split(',').map(ToString::to_string).collect();
+            }
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_to(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.first().map(String::as_str) != Some("json") {
+        return stderr_result(1, "xan to: usage: xan to <format> [FILE]\n");
+    }
+    match read_csv_arg(state, args.get(1).map(String::as_str), stdin, "xan to") {
+        Ok(csv) => {
+            let values = csv
+                .rows
+                .iter()
+                .map(|row| {
+                    JsonValue::Object(
+                        csv.headers
+                            .iter()
+                            .zip(row)
+                            .map(|(key, value)| (key.clone(), csv_json_value(value)))
+                            .collect(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            stdout_result(format!(
+                "{}\n",
+                serde_json::to_string_pretty(&JsonValue::Array(values)).unwrap()
+            ))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_from(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if option_value(args, "-f") != Some("json") {
+        return stderr_result(1, "xan from: usage: xan from -f <format> [FILE]\n");
+    }
+    let Some(path) = positional_arg(args) else {
+        return stderr_result(1, "xan from: usage: xan from -f <format> [FILE]\n");
+    };
+    let text = match read_text_arg(state, Some(path), stdin, "xan from") {
+        Ok(text) => text,
+        Err(result) => return result,
+    };
+    let Ok(value) = serde_json::from_str::<JsonValue>(&text) else {
+        return stderr_result(1, "xan from: invalid JSON input\n");
+    };
+    match json_to_csv(&value) {
+        Some(csv) => stdout_result(render_csv(&csv)),
+        None => stderr_result(1, "xan from: invalid JSON input\n"),
+    }
+}
+
+fn xan_filter(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let invert = args.iter().any(|arg| arg == "-v");
+    let limit = option_value(args, "-l").and_then(|value| value.parse().ok());
+    let expression = args
+        .iter()
+        .find(|arg| !arg.starts_with('-') && option_predecessor(args, arg) != Some("-l"));
+    let Some(expression) = expression.map(String::as_str) else {
+        return stderr_result(1, "xan filter: missing expression\n");
+    };
+    match read_csv_arg(
+        state,
+        args.last()
+            .filter(|arg| *arg != expression)
+            .map(String::as_str),
+        stdin,
+        "xan filter",
+    ) {
+        Ok(mut csv) => {
+            let mut rows = Vec::new();
+            for row in &csv.rows {
+                let matched = eval_csv_predicate(&csv.headers, row, expression);
+                if matched != invert {
+                    rows.push(row.clone());
+                }
+                if limit.is_some_and(|limit| rows.len() >= limit) {
+                    break;
+                }
+            }
+            csv.rows = rows;
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_sort_cmd(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(column) = option_value(args, "-s") else {
+        return stderr_result(1, "xan sort: missing -s column\n");
+    };
+    let numeric = args.iter().any(|arg| arg == "-N");
+    let reverse = args.iter().any(|arg| arg == "-R");
+    match read_csv_arg(state, positional_arg(args), stdin, "xan sort") {
+        Ok(mut csv) => {
+            let index = csv
+                .headers
+                .iter()
+                .position(|header| header == column)
+                .unwrap_or(0);
+            csv.rows
+                .sort_by(|left, right| compare_csv_cell(&left[index], &right[index], numeric));
+            if reverse {
+                csv.rows.reverse();
+            }
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_dedup(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(column) = option_value(args, "-s") else {
+        return stderr_result(1, "xan dedup: missing -s column\n");
+    };
+    match read_csv_arg(state, positional_arg(args), stdin, "xan dedup") {
+        Ok(mut csv) => {
+            let index = csv
+                .headers
+                .iter()
+                .position(|header| header == column)
+                .unwrap_or(0);
+            let mut seen = Vec::new();
+            csv.rows.retain(|row| {
+                let key = row.get(index).cloned().unwrap_or_default();
+                if seen.contains(&key) {
+                    false
+                } else {
+                    seen.push(key);
+                    true
+                }
+            });
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_search(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let invert = args.iter().any(|arg| arg == "-v");
+    let ignore_case = args.iter().any(|arg| arg == "-i");
+    let column = option_value(args, "-s");
+    let pattern = option_value(args, "-r").or_else(|| {
+        args.iter()
+            .find(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+    });
+    let Some(pattern) = pattern else {
+        return stderr_result(1, "xan search: missing pattern\n");
+    };
+    let regex = match RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+    {
+        Ok(regex) => regex,
+        Err(error) => return stderr_result(1, format!("xan search: invalid regex: {error}\n")),
+    };
+    match read_csv_arg(state, positional_arg(args), stdin, "xan search") {
+        Ok(mut csv) => {
+            let indexes = column.map_or_else(
+                || (0..csv.headers.len()).collect::<Vec<_>>(),
+                |column| csv_column_indexes(&csv.headers, column),
+            );
+            csv.rows.retain(|row| {
+                let matched = indexes
+                    .iter()
+                    .filter_map(|index| row.get(*index))
+                    .any(|cell| regex.is_match(cell));
+                matched != invert
+            });
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn read_csv_arg(
+    state: &ExecState<'_>,
+    path: Option<&str>,
+    stdin: &str,
+    command: &str,
+) -> Result<CsvData, CommandResult> {
+    read_text_arg(state, path, stdin, command).map(|text| parse_csv(&text))
+}
+
+fn read_text_arg(
+    state: &ExecState<'_>,
+    path: Option<&str>,
+    stdin: &str,
+    command: &str,
+) -> Result<String, CommandResult> {
+    let Some(path) = path else {
+        return Ok(stdin.to_string());
+    };
+    let path = resolve_path(&state.cwd, path);
+    state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, format!("{command}: filesystem lock poisoned\n")))?
+        .read_file(&path)
+        .map_err(|_| stderr_result(1, format!("{command}: {path}: No such file\n")))
+}
+
+fn parse_csv(text: &str) -> CsvData {
+    let mut lines = text.lines();
+    let headers = lines.next().map(parse_csv_line).unwrap_or_default();
+    let rows = lines.map(parse_csv_line).collect();
+    CsvData { headers, rows }
+}
+
+fn parse_csv_line(line: &str) -> Vec<String> {
+    line.split(',')
+        .map(|cell| cell.trim_matches('"').to_string())
+        .collect()
+}
+
+fn render_csv(csv: &CsvData) -> String {
+    let mut output = String::new();
+    output.push_str(&csv.headers.join(","));
+    output.push('\n');
+    for row in &csv.rows {
+        output.push_str(&row.join(","));
+        output.push('\n');
+    }
+    output
+}
+
+fn option_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == option)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
+fn option_predecessor<'a>(args: &'a [String], value: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == value)
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| args.get(index))
+        .map(String::as_str)
+}
+
+fn positional_arg(args: &[String]) -> Option<&str> {
+    let mut skip_next = false;
+    let mut positional = None;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if matches!(arg.as_str(), "-l" | "-s" | "-e" | "-c" | "-f" | "-r") {
+            skip_next = true;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            positional = Some(arg.as_str());
+        }
+    }
+    positional
+}
+
+fn csv_column_indexes(headers: &[String], spec: &str) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    for part in spec.split(',') {
+        if let Some((start, end)) = part.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) {
+                indexes.extend(start..=end.min(headers.len().saturating_sub(1)));
+            }
+        } else if let Ok(index) = part.parse::<usize>() {
+            indexes.push(index);
+        } else if let Some(index) = headers.iter().position(|header| header == part) {
+            indexes.push(index);
+        }
+    }
+    indexes
+}
+
+fn project_csv(csv: &CsvData, indexes: &[usize]) -> CsvData {
+    CsvData {
+        headers: indexes
+            .iter()
+            .filter_map(|index| csv.headers.get(*index).cloned())
+            .collect(),
+        rows: csv
+            .rows
+            .iter()
+            .map(|row| {
+                indexes
+                    .iter()
+                    .filter_map(|index| row.get(*index).cloned())
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+fn csv_json_value(value: &str) -> JsonValue {
+    match value {
+        "true" => JsonValue::Bool(true),
+        "false" => JsonValue::Bool(false),
+        "" => JsonValue::String(String::new()),
+        _ => value
+            .parse::<i64>()
+            .map(json_integer)
+            .or_else(|_| value.parse::<f64>().map(json_number))
+            .unwrap_or_else(|_| JsonValue::String(value.to_string())),
+    }
+}
+
+fn json_to_csv(value: &JsonValue) -> Option<CsvData> {
+    let JsonValue::Array(rows) = value else {
+        return None;
+    };
+    if rows.first().is_some_and(JsonValue::is_array) {
+        let JsonValue::Array(header_row) = &rows[0] else {
+            return None;
+        };
+        let headers = header_row
+            .iter()
+            .map(json_scalar_string)
+            .collect::<Vec<_>>();
+        let rows = rows
+            .iter()
+            .skip(1)
+            .filter_map(|row| match row {
+                JsonValue::Array(row) => Some(row.iter().map(json_scalar_string).collect()),
+                _ => None,
+            })
+            .collect();
+        return Some(CsvData { headers, rows });
+    }
+    let mut headers = rows
+        .iter()
+        .filter_map(|row| match row {
+            JsonValue::Object(map) => Some(map.keys().cloned().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    headers.sort();
+    headers.dedup();
+    let rows = rows
+        .iter()
+        .filter_map(|row| match row {
+            JsonValue::Object(map) => Some(
+                headers
+                    .iter()
+                    .map(|header| map.get(header).map(json_scalar_string).unwrap_or_default())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect();
+    Some(CsvData { headers, rows })
+}
+
+fn eval_csv_predicate(headers: &[String], row: &[String], expression: &str) -> bool {
+    let parts = expression.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return false;
+    }
+    let left = headers
+        .iter()
+        .position(|header| header == parts[0])
+        .and_then(|index| row.get(index))
+        .map(String::as_str)
+        .unwrap_or_default();
+    let right = parts[2].trim_matches('"');
+    match parts[1] {
+        "eq" => left == right,
+        ">" => left.parse::<f64>().unwrap_or(0.0) > right.parse::<f64>().unwrap_or(0.0),
+        "<" => left.parse::<f64>().unwrap_or(0.0) < right.parse::<f64>().unwrap_or(0.0),
+        ">=" => left.parse::<f64>().unwrap_or(0.0) >= right.parse::<f64>().unwrap_or(0.0),
+        "<=" => left.parse::<f64>().unwrap_or(0.0) <= right.parse::<f64>().unwrap_or(0.0),
+        _ => false,
+    }
+}
+
+fn compare_csv_cell(left: &str, right: &str, numeric: bool) -> CmpOrdering {
+    if numeric {
+        left.parse::<f64>()
+            .unwrap_or(0.0)
+            .partial_cmp(&right.parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(CmpOrdering::Equal)
+    } else {
+        left.cmp(right)
+    }
+}
+
+fn command_sqlite3(_state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    sqlite3_minimal(args, stdin)
+}
+
+#[derive(Clone, Debug)]
+struct SqliteOptions {
+    mode: SqliteMode,
+    header: bool,
+    separator: String,
+    newline: String,
+    null_value: String,
+    echo: bool,
+    bail: bool,
+    pre_commands: Vec<String>,
+}
+
+impl Default for SqliteOptions {
+    fn default() -> Self {
+        Self {
+            mode: SqliteMode::List,
+            header: false,
+            separator: "|".to_string(),
+            newline: "\n".to_string(),
+            null_value: String::new(),
+            echo: false,
+            bail: false,
+            pre_commands: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SqliteMode {
+    List,
+    Csv,
+    Json,
+    Line,
+    Tabs,
+    Quote,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SqlValue {
+    raw: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SqlResultSet {
+    columns: Vec<String>,
+    rows: Vec<Vec<SqlValue>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MiniSqlDb {
+    tables: BTreeMap<String, SqlResultSet>,
+}
+
+fn sqlite3_minimal(args: &[String], stdin: &str) -> CommandResult {
+    let (options, database, sql) = match parse_sqlite_args(args, stdin) {
+        Ok(parsed) => parsed,
+        Err(result) => return result,
+    };
+    if database == "__version__" {
+        return stdout_result("3.45.0 0000000000000000000000000000000000000000\n");
+    }
+    if database == "__help__" {
+        return stdout_result("Usage: sqlite3 [OPTIONS] DATABASE [SQL]\n");
+    }
+    let mut db = MiniSqlDb::default();
+    let full_sql = options
+        .pre_commands
+        .iter()
+        .chain(std::iter::once(&sql))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(";");
+    let statements = split_sql_statements(&full_sql);
+    let mut stdout = String::new();
+    if options.echo && !sql.trim().is_empty() {
+        stdout.push_str(sql.trim());
+        stdout.push('\n');
+    }
+    for statement in statements {
+        match execute_sql_statement(&mut db, &statement) {
+            Ok(Some(result_set)) => stdout.push_str(&format_sql_result(&result_set, &options)),
+            Ok(None) => {}
+            Err(error) => {
+                if options.bail {
+                    return CommandResult {
+                        stdout,
+                        stderr: format!("Error: {error}\n"),
+                        exit_code: 1,
+                        exit_requested: false,
+                    };
+                }
+                stdout.push_str(&format!("Error: {error}\n"));
+            }
+        }
+    }
+    stdout_result(stdout)
+}
+
+fn parse_sqlite_args(
+    args: &[String],
+    stdin: &str,
+) -> Result<(SqliteOptions, String, String), CommandResult> {
+    let mut options = SqliteOptions::default();
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            positionals.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        match arg.as_str() {
+            "-version" | "--version" => {
+                return Ok((options, "__version__".to_string(), String::new()));
+            }
+            "-help" | "--help" => return Ok((options, "__help__".to_string(), String::new())),
+            "-list" => options.mode = SqliteMode::List,
+            "-csv" => options.mode = SqliteMode::Csv,
+            "-json" => options.mode = SqliteMode::Json,
+            "-line" => options.mode = SqliteMode::Line,
+            "-tabs" => {
+                options.mode = SqliteMode::Tabs;
+                options.separator = "\t".to_string();
+            }
+            "-quote" => options.mode = SqliteMode::Quote,
+            "-header" => options.header = true,
+            "-noheader" => options.header = false,
+            "-echo" => options.echo = true,
+            "-bail" => options.bail = true,
+            "-separator" | "-newline" | "-nullvalue" | "-cmd" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        1,
+                        format!("sqlite3: Error: missing argument to {arg}\n"),
+                    ));
+                };
+                match arg.as_str() {
+                    "-separator" => options.separator = value.clone(),
+                    "-newline" => options.newline = value.clone(),
+                    "-nullvalue" => options.null_value = value.clone(),
+                    "-cmd" => options.pre_commands.push(value.clone()),
+                    _ => {}
+                }
+                index += 2;
+                continue;
+            }
+            _ if arg.starts_with("--") => {
+                let normalized = arg.trim_start_matches('-');
+                return Err(stderr_result(
+                    1,
+                    format!(
+                        "sqlite3: Error: unknown option: -{normalized}\nUse -help for a list of options.\n"
+                    ),
+                ));
+            }
+            _ if arg.starts_with('-') => {
+                return Err(stderr_result(
+                    1,
+                    format!(
+                        "sqlite3: Error: unknown option: {arg}\nUse -help for a list of options.\n"
+                    ),
+                ));
+            }
+            _ => positionals.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let Some(database) = positionals.first().cloned() else {
+        return Err(stderr_result(1, "sqlite3: missing database argument\n"));
+    };
+    let sql = if positionals.len() > 1 {
+        positionals[1..].join(" ")
+    } else {
+        stdin.to_string()
+    };
+    if sql.trim().is_empty() {
+        return Err(stderr_result(1, "sqlite3: no SQL provided\n"));
+    }
+    Ok((options, database, sql))
+}
+
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let chars = sql.char_indices().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte_index, ch) = chars[index];
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.get(index + 1).is_some_and(|(_, next)| *next == '\'') {
+                    index += 1;
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => in_double = !in_double,
+            ';' if !in_single && !in_double => {
+                let statement = sql[start..byte_index].trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                start = byte_index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let statement = sql[start..].trim();
+    if !statement.is_empty() {
+        statements.push(statement.to_string());
+    }
+    statements
+}
+
+fn execute_sql_statement(
+    db: &mut MiniSqlDb,
+    statement: &str,
+) -> Result<Option<SqlResultSet>, String> {
+    let upper = statement.to_ascii_uppercase();
+    if upper.contains("LOAD_EXTENSION") {
+        return Err("not authorized".to_string());
+    }
+    if upper.starts_with("CREATE TABLE ") {
+        create_sql_table(db, statement)?;
+        return Ok(None);
+    }
+    if upper.starts_with("INSERT INTO ") {
+        insert_sql_rows(db, statement)?;
+        return Ok(None);
+    }
+    if upper.starts_with("SELECT ") {
+        return select_sql(db, statement).map(Some);
+    }
+    Err(format!(
+        "near \"{}\": syntax error",
+        statement.split_whitespace().next().unwrap_or(statement)
+    ))
+}
+
+fn create_sql_table(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["CREATE TABLE ".len()..].trim();
+    let Some((name, columns)) = rest.split_once('(') else {
+        return Err("invalid CREATE TABLE".to_string());
+    };
+    let columns = columns
+        .trim_end_matches(')')
+        .split(',')
+        .filter_map(|column| column.split_whitespace().next())
+        .map(|column| column.trim_matches('"').to_string())
+        .collect::<Vec<_>>();
+    db.tables.insert(
+        name.trim().to_string(),
+        SqlResultSet {
+            columns,
+            rows: Vec::new(),
+        },
+    );
+    Ok(())
+}
+
+fn insert_sql_rows(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["INSERT INTO ".len()..].trim();
+    let Some((table, values)) = rest.split_once("VALUES") else {
+        return Err("invalid INSERT".to_string());
+    };
+    let table = table.split_whitespace().next().unwrap_or(table).trim();
+    let Some(result_set) = db.tables.get_mut(table) else {
+        return Err(format!("no such table: {table}"));
+    };
+    for row in parse_sql_value_groups(values) {
+        result_set.rows.push(row);
+    }
+    Ok(())
+}
+
+fn parse_sql_value_groups(values: &str) -> Vec<Vec<SqlValue>> {
+    let mut rows = Vec::new();
+    let mut depth = 0_i32;
+    let mut start = 0;
+    let mut in_single = false;
+    let chars = values.char_indices().collect::<Vec<_>>();
+    for (index, ch) in chars {
+        match ch {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => {
+                if depth == 0 {
+                    start = index + 1;
+                }
+                depth += 1;
+            }
+            ')' if !in_single => {
+                depth -= 1;
+                if depth == 0 {
+                    rows.push(parse_sql_values(&values[start..index]));
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn parse_sql_values(values: &str) -> Vec<SqlValue> {
+    split_top_level(values, ',')
+        .into_iter()
+        .map(parse_sql_value)
+        .collect()
+}
+
+fn parse_sql_value(value: &str) -> SqlValue {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("NULL") {
+        return SqlValue { raw: None };
+    }
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        return SqlValue {
+            raw: Some(value[1..value.len() - 1].replace("''", "'")),
+        };
+    }
+    SqlValue {
+        raw: Some(value.to_string()),
+    }
+}
+
+fn select_sql(db: &MiniSqlDb, statement: &str) -> Result<SqlResultSet, String> {
+    let body = statement["SELECT ".len()..].trim();
+    if let Some((projection, table)) = body.split_once(" FROM ") {
+        let table = table.trim();
+        let Some(source) = db.tables.get(table) else {
+            return Err(format!("no such table: {table}"));
+        };
+        if projection.trim() == "*" {
+            return Ok(source.clone());
+        }
+        let columns = projection
+            .split(',')
+            .map(|column| column.trim().to_string())
+            .collect::<Vec<_>>();
+        let indexes = columns
+            .iter()
+            .map(|column| {
+                source
+                    .columns
+                    .iter()
+                    .position(|source| source == column)
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+        return Ok(SqlResultSet {
+            columns,
+            rows: source
+                .rows
+                .iter()
+                .map(|row| {
+                    indexes
+                        .iter()
+                        .filter_map(|index| row.get(*index).cloned())
+                        .collect()
+                })
+                .collect(),
+        });
+    }
+    let values = split_top_level(body, ',');
+    let mut columns = Vec::new();
+    let mut row = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        let (raw_value, alias) = split_sql_alias(value);
+        columns.push(alias.unwrap_or_else(|| (index + 1).to_string()));
+        row.push(parse_sql_value(raw_value));
+    }
+    Ok(SqlResultSet {
+        columns,
+        rows: vec![row],
+    })
+}
+
+fn split_sql_alias(value: &str) -> (&str, Option<String>) {
+    let lower = value.to_ascii_lowercase();
+    if let Some(index) = lower.rfind(" as ") {
+        return (&value[..index], Some(value[index + 4..].trim().to_string()));
+    }
+    (value, None)
+}
+
+fn format_sql_result(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    match options.mode {
+        SqliteMode::Json => format_sql_json(result_set),
+        SqliteMode::Line => format_sql_line(result_set, options),
+        SqliteMode::Csv => format_sql_delimited(result_set, options, ","),
+        SqliteMode::Tabs => format_sql_delimited(result_set, options, "\t"),
+        SqliteMode::Quote => format_sql_quote(result_set),
+        SqliteMode::List => format_sql_delimited(result_set, options, &options.separator),
+    }
+}
+
+fn format_sql_delimited(
+    result_set: &SqlResultSet,
+    options: &SqliteOptions,
+    separator: &str,
+) -> String {
+    let mut output = String::new();
+    if options.header {
+        output.push_str(&result_set.columns.join(separator));
+        output.push_str(&options.newline);
+    }
+    for row in &result_set.rows {
+        output.push_str(
+            &row.iter()
+                .map(|value| sql_value_text(value, &options.null_value))
+                .collect::<Vec<_>>()
+                .join(separator),
+        );
+        output.push_str(&options.newline);
+    }
+    output
+}
+
+fn format_sql_json(result_set: &SqlResultSet) -> String {
+    if result_set.rows.is_empty() {
+        return String::new();
+    }
+    let rows = result_set
+        .rows
+        .iter()
+        .map(|row| {
+            let fields = result_set
+                .columns
+                .iter()
+                .zip(row)
+                .map(|(column, value)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(column).unwrap(),
+                        value
+                            .raw
+                            .as_ref()
+                            .map(|value| serde_json::to_string(&csv_json_value(value)).unwrap())
+                            .unwrap_or_else(|| "null".to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{fields}}}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rows}]\n")
+}
+
+fn format_sql_line(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    let mut output = String::new();
+    for row in &result_set.rows {
+        for (column, value) in result_set.columns.iter().zip(row) {
+            output.push_str(&format!(
+                "{column:>5} = {}\n",
+                sql_value_text(value, &options.null_value)
+            ));
+        }
+    }
+    output
+}
+
+fn format_sql_quote(result_set: &SqlResultSet) -> String {
+    let mut output = String::new();
+    for row in &result_set.rows {
+        output.push_str(
+            &row.iter()
+                .map(sql_value_quote)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        output.push('\n');
+    }
+    output
+}
+
+fn sql_value_text(value: &SqlValue, null_value: &str) -> String {
+    value.raw.clone().unwrap_or_else(|| null_value.to_string())
+}
+
+fn sql_value_quote(value: &SqlValue) -> String {
+    match &value.raw {
+        None => "NULL".to_string(),
+        Some(value) if value.parse::<f64>().is_ok() => value.clone(),
+        Some(value) => format!("'{}'", value.replace('\'', "''")),
     }
 }
 

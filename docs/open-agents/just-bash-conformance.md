@@ -25,8 +25,8 @@ inventory. Strict parity closes only when every portable upstream row in
 
 Just Bash is now part of the parent TypeScript-to-Rust parity goal and tracked
 alongside Open Agents, AI SDK, Chat SDK, Workflow SDK, and Open Plugin Spec.
-The current parity ledger maps 1,751 upstream rows to named Rust tests or generated corpus proofs, leaves
-8,061 rows `portable-pending`, documents 124 JS-only exceptions, and has 8,061 strict gate gaps. The next closure rows are coordinated in
+The current parity ledger maps 1,879 upstream rows to named Rust tests or generated corpus proofs, leaves
+7,933 rows `portable-pending`, documents 124 JS-only exceptions, and has 7,933 strict gate gaps. The next closure rows are coordinated in
 `docs/ts-to-rust-migration-tracker.md`.
 
 ## Source Snapshot
