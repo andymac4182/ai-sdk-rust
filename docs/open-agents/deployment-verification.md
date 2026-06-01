@@ -9,7 +9,8 @@ runtime path.
 The current Rust slice extends the existing `open-agents-service` process with
 configuration validation, health checks, graceful shutdown, state and sandbox
 selection, local Slack event fixtures, a testable signed Slack HTTP route,
-optional Slack Web API base URL override, and an ignored live Slack smoke test.
+optional Slack Web API base URL override, a real Vercel AI Gateway runtime mode,
+and an ignored live Slack smoke test.
 
 Keep this document honest as later durable-runtime buckets land: replace
 remaining TODOs with exact commands only after those branches wire production
@@ -65,6 +66,34 @@ cargo test -p open-agents-service
 `--fixture` drives the deterministic local Slack event harness. `--emulator`
 starts the local Slack emulator and service together. `--matrix` prints the
 coverage table from this guide for CI logs and local handoffs.
+
+## Runtime Selection
+
+`OPEN_AGENTS_RUNTIME=auto` is the default. It selects `gateway` when
+`AI_GATEWAY_API_KEY` or `AI_SDK_RUST_AI_GATEWAY_API_KEY` is present, otherwise
+it selects the deterministic `fixture` runtime. Operators can force either path:
+
+```sh
+export OPEN_AGENTS_RUNTIME=gateway
+export AI_GATEWAY_API_KEY=...
+export AI_GATEWAY_MODEL=openai/gpt-4.1-mini
+export OPEN_AGENTS_MODEL_MAX_STEPS=8
+export OPEN_AGENTS_MODEL_MAX_OUTPUT_TOKENS=2048
+export OPEN_AGENTS_TOOL_APPROVAL=sensitive
+```
+
+For repository-changing work that must push branches and open PRs, the sandbox
+command environment also needs a GitHub token:
+
+```sh
+export OPEN_AGENTS_GITHUB_TOKEN=ghp_...
+```
+
+The service passes `OPEN_AGENTS_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`
+through to sandbox commands as both `GITHUB_TOKEN` and `GH_TOKEN`. Do not enable
+repository mutation in production until the selected sandbox backend is
+disposable and the token has only the repository permissions required by the
+target workflow.
 
 ## Fixture Path
 
@@ -309,15 +338,15 @@ path through a real Slack app once live outbound assertions are available.
 | Flow | Local coverage today | Command or evidence | Gap before durable runtime E2E |
 | --- | --- | --- | --- |
 | URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Live Slack app proof still TODO |
-| App mention | Covered through the signed service route and emulator-backed local service path | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live model runtime proof still TODO |
+| App mention | Covered through the signed service route and emulator-backed local service path | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live Slack-to-Gateway proof still TODO |
 | DM | `open-agents-slack` covers DM routing | `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator-backed DM scenario still TODO |
 | Thread routing | Emulator-backed app mention thread replay plus parser/router tests | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Broader DM/thread matrix still TODO |
-| Durable run completion | Covered locally through the service route with a scripted durable runtime | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live model runtime proof still TODO |
+| Durable run completion | Covered locally through the service route with a scripted durable runtime; Gateway runtime is selectable when AI Gateway credentials are present | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live Slack-to-Gateway proof still TODO |
 | Waiting, answer, cancel | Emulator-backed question prompt plus direct signed block action payload; service cancel test | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
 | Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
-| Sandbox command | Local service route executes `sandbox.exec pwd`; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel proof is ignored and credential-gated |
-| Git automation summary | Unit renderer coverage only | `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | End-to-end auto-commit/PR summary from a run still TODO |
+| Sandbox command | Local service route executes `sandbox.exec pwd`; Gateway runtime passes Open Agent tools through the selected sandbox command adapter; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel sandbox plus live git mutation proof remains credential-gated |
+| Git automation summary | Unit renderer coverage only; Gateway runtime can expose GitHub tokens to sandbox commands when configured | `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | End-to-end auto-commit/PR summary from a run still TODO |
 | Health/readiness | Covered by service tests, manual probes, and emulator readiness polling | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Live deployment probes still TODO |
 
 ## CI Shape

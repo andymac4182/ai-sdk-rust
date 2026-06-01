@@ -17,6 +17,8 @@ pub struct HealthSnapshot {
     pub state_store: String,
     pub slack_ingress: String,
     pub sandbox: String,
+    pub runtime: String,
+    pub model: String,
 }
 
 /// Mutable health state shared by the service and probe server.
@@ -34,6 +36,8 @@ impl HealthCheck {
             state_store: config.state_store().label().to_string(),
             slack_ingress: format!("{:?}", config.slack_ingress()),
             sandbox: config.sandbox().label().to_string(),
+            runtime: config.runtime().label().to_string(),
+            model: config.model_id().to_string(),
         })
     }
 

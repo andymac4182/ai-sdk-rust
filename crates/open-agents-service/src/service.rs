@@ -4,9 +4,21 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
-use ai_sdk_rust::{FinishReason, UiMessageChunk};
+use ai_sdk_rust::{
+    FinishReason, ToolLoopAgentModelSettings, UiMessageChunk,
+    VercelAiGatewayOpenAICompatibleProvider,
+    open_agents_tools::{
+        OpenAgentToolApprovalPolicy, OpenAgentToolsOptions, open_agent_tools_with_options,
+    },
+    provider_utils::{
+        ExperimentalSandbox, SandboxCommandOptions as AiSandboxCommandOptions,
+        SandboxCommandResult as AiSandboxCommandResult, SandboxRunCommandFuture,
+    },
+};
 use ai_sdk_workflow::{
     DurableRunAgent, DurableRunAgentContext, DurableRunAgentError, DurableRunAgentOutput,
     DurableRunEngine, DurableRunError, DurableRunEventPayload, DurableRunExecution,
@@ -37,10 +49,11 @@ use open_agents_persistence::{
     SandboxStateUpdate, SessionRepository, SlackThreadKey, SlackThreadMappingRecord,
     SlackThreadMappingRepository,
 };
-use open_agents_runtime::{DEFAULT_OPEN_AGENT_MODEL_LABEL, RemoteAgentRunRequest};
+use open_agents_runtime::RemoteAgentRunRequest;
+use open_agents_runtime::{OpenAgent, OpenAgentCallOptions, OpenAgentSettings};
 use open_agents_sandbox::{
-    SandboxConnectConfig, SandboxContext, SandboxError, SandboxExecOptions, SandboxState,
-    connect_sandbox,
+    SandboxConnectConfig, SandboxConnectOptions, SandboxContext, SandboxError, SandboxExecOptions,
+    SandboxState, connect_sandbox,
 };
 use open_agents_slack::{
     SlackHttpRequest, SlackHttpResponse, SlackIngress, SlackIngressOptions, SlackIngressRoute,
@@ -54,7 +67,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::{OpenAgentsServiceConfig, SandboxMode};
+use crate::config::{
+    AgentRuntimeMode, AgentToolApprovalMode, OpenAgentsServiceConfig, SandboxMode,
+};
 use crate::health::HealthCheck;
 use crate::{SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL};
 
@@ -265,17 +280,24 @@ impl LocalOutbound {
 #[derive(Debug)]
 pub struct LocalRuntimeRouter {
     persistence: MemoryPersistenceStore,
-    engine: Mutex<DurableRunEngine<InMemoryDurableRunStore, LocalScriptedAgent>>,
+    engine: Mutex<DurableRunEngine<InMemoryDurableRunStore, ServiceAgent>>,
     scenarios: Arc<Mutex<HashMap<String, ScriptedRunScenario>>>,
     outbounds: Mutex<Vec<LocalOutbound>>,
     sandbox: ServiceSandbox,
+    model_id: String,
 }
 
 impl LocalRuntimeRouter {
     fn new(config: &OpenAgentsServiceConfig) -> Result<Self, ServiceError> {
         let scenarios = Arc::new(Mutex::new(HashMap::new()));
-        let agent = LocalScriptedAgent {
-            scenarios: scenarios.clone(),
+        let agent = match config.runtime() {
+            AgentRuntimeMode::Fixture => ServiceAgent::Scripted(LocalScriptedAgent {
+                scenarios: scenarios.clone(),
+            }),
+            AgentRuntimeMode::Gateway => ServiceAgent::Gateway(GatewayOpenAgent::new(
+                scenarios.clone(),
+                GatewayOpenAgentSettings::from_config(config)?,
+            )),
         };
         Ok(Self {
             persistence: MemoryPersistenceStore::new(),
@@ -283,6 +305,7 @@ impl LocalRuntimeRouter {
             scenarios,
             outbounds: Mutex::new(Vec::new()),
             sandbox: ServiceSandbox::from_config(config)?,
+            model_id: config.model_id().to_string(),
         })
     }
 
@@ -429,7 +452,7 @@ impl LocalRuntimeRouter {
             id: ids.chat_id.clone(),
             session_id: ids.session_id.clone(),
             title: "Slack remote agent".to_string(),
-            model_id: Some(DEFAULT_OPEN_AGENT_MODEL_LABEL.to_string()),
+            model_id: Some(self.model_id.clone()),
         };
         self.persistence
             .create_session_with_initial_chat(session, chat)
@@ -481,7 +504,7 @@ impl LocalRuntimeRouter {
                 session_id: mapping.session_id.clone(),
                 chat_id: mapping.chat_id.clone(),
                 user_id: user_id.clone(),
-                model_id: Some(DEFAULT_OPEN_AGENT_MODEL_LABEL.to_string()),
+                model_id: Some(self.model_id.clone()),
                 status: RunStatus::Running,
                 idempotency_key: request.event_id.clone(),
                 started_at: None,
@@ -503,7 +526,7 @@ impl LocalRuntimeRouter {
         let runtime_request = RemoteAgentRunRequest::new(
             RemoteAgentIdentity::new(mapping.session_id.clone(), mapping.chat_id.clone())
                 .with_run_id(run_id.clone()),
-            AgentModelSelection::new(DEFAULT_OPEN_AGENT_MODEL_LABEL),
+            AgentModelSelection::new(self.model_id.clone()),
             self.sandbox.runtime_context(),
         )
         .with_message(json!({
@@ -975,7 +998,7 @@ impl ServiceSandbox {
                 )
                 .with_environment_details("local deterministic Open Agents service route");
                 Ok(Self {
-                    connect: SandboxConnectConfig::new(state),
+                    connect: sandbox_connect_config(state, config),
                     context,
                     persisted: PersistedSandboxState {
                         provider: "local".to_string(),
@@ -1002,7 +1025,7 @@ impl ServiceSandbox {
                     expires_at: None,
                 };
                 Ok(Self {
-                    connect: SandboxConnectConfig::new(state.clone()),
+                    connect: sandbox_connect_config(state.clone(), config),
                     context: SandboxContext::new(
                         serde_json::to_value(&state).unwrap_or_else(|_| json!({"type": "vercel"})),
                         "/vercel/sandbox",
@@ -1031,6 +1054,22 @@ impl ServiceSandbox {
     }
 }
 
+fn sandbox_connect_config(
+    state: SandboxState,
+    config: &OpenAgentsServiceConfig,
+) -> SandboxConnectConfig {
+    let mut options = SandboxConnectOptions::new()
+        .with_env("GIT_TERMINAL_PROMPT", "0")
+        .with_timeout_ms(120_000);
+    if let Some(token) = config.github_token() {
+        options = options
+            .with_env("GITHUB_TOKEN", token)
+            .with_env("GH_TOKEN", token)
+            .with_github_token(token);
+    }
+    SandboxConnectConfig::new(state).with_options(options)
+}
+
 #[derive(Debug, Clone)]
 struct ScriptedRunScenario {
     prompt: String,
@@ -1053,6 +1092,260 @@ impl ScriptedRunScenario {
 
     fn wants_question(&self) -> bool {
         self.prompt.to_ascii_lowercase().contains("question")
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ServiceAgent {
+    Scripted(LocalScriptedAgent),
+    Gateway(GatewayOpenAgent),
+}
+
+impl DurableRunAgent for ServiceAgent {
+    fn next_turn(
+        &mut self,
+        context: DurableRunAgentContext,
+    ) -> Result<DurableRunAgentOutput, DurableRunAgentError> {
+        match self {
+            Self::Scripted(agent) => agent.next_turn(context),
+            Self::Gateway(agent) => agent.next_turn(context),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GatewayOpenAgentSettings {
+    api_key: String,
+    model_id: String,
+    max_steps: usize,
+    max_output_tokens: u64,
+    tool_approval: AgentToolApprovalMode,
+}
+
+impl fmt::Debug for GatewayOpenAgentSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GatewayOpenAgentSettings")
+            .field("api_key", &"<redacted>")
+            .field("model_id", &self.model_id)
+            .field("max_steps", &self.max_steps)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("tool_approval", &self.tool_approval)
+            .finish()
+    }
+}
+
+impl GatewayOpenAgentSettings {
+    fn from_config(config: &OpenAgentsServiceConfig) -> Result<Self, ServiceError> {
+        let api_key = config.model_api_key().ok_or_else(|| {
+            ServiceError::BadRequest("AI Gateway runtime requires AI_GATEWAY_API_KEY".to_string())
+        })?;
+        Ok(Self {
+            api_key: api_key.to_string(),
+            model_id: config.model_id().to_string(),
+            max_steps: config.model_max_steps(),
+            max_output_tokens: config.model_max_output_tokens(),
+            tool_approval: config.tool_approval(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GatewayOpenAgent {
+    scenarios: Arc<Mutex<HashMap<String, ScriptedRunScenario>>>,
+    settings: GatewayOpenAgentSettings,
+}
+
+impl GatewayOpenAgent {
+    fn new(
+        scenarios: Arc<Mutex<HashMap<String, ScriptedRunScenario>>>,
+        settings: GatewayOpenAgentSettings,
+    ) -> Self {
+        Self {
+            scenarios,
+            settings,
+        }
+    }
+
+    fn prompt_instructions(&self, scenario: &ScriptedRunScenario) -> String {
+        format!(
+            "You are Open Agents running from Slack in Vercel cloud. Use the sandbox tools to inspect, clone, edit, test, commit, push, and open pull requests when the user asks for repository work. Keep Slack responses concise and report branch names, commits, PR URLs, and verification results. The current sandbox working directory is {}.",
+            scenario.runtime_request.sandbox.working_directory
+        )
+    }
+}
+
+impl DurableRunAgent for GatewayOpenAgent {
+    fn next_turn(
+        &mut self,
+        context: DurableRunAgentContext,
+    ) -> Result<DurableRunAgentOutput, DurableRunAgentError> {
+        if context.resume.is_some() {
+            return Err(DurableRunAgentError::new(
+                "Gateway-backed runs do not yet support Slack interaction resume",
+            ));
+        }
+
+        let scenario = self
+            .scenarios
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&context.run_id)
+            .cloned()
+            .ok_or_else(|| DurableRunAgentError::new("missing Gateway run scenario"))?;
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(ServiceExperimentalSandbox::new(
+            scenario.sandbox.connect.clone(),
+        ));
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(self.settings.api_key.clone());
+        let model = provider.language_model(self.settings.model_id.clone());
+        let tool_options = OpenAgentToolsOptions::new()
+            .with_working_directory(scenario.runtime_request.sandbox.working_directory.clone())
+            .with_approval_policy(match self.settings.tool_approval {
+                AgentToolApprovalMode::Sensitive => OpenAgentToolApprovalPolicy::Sensitive,
+                AgentToolApprovalMode::Never => OpenAgentToolApprovalPolicy::Never,
+                AgentToolApprovalMode::Always => OpenAgentToolApprovalPolicy::Always,
+            });
+        let mut agent_settings = OpenAgentSettings::new(&model)
+            .with_model_id(self.settings.model_id.clone())
+            .with_custom_instructions(self.prompt_instructions(&scenario))
+            .with_model_settings(
+                ToolLoopAgentModelSettings::new()
+                    .with_max_output_tokens(self.settings.max_output_tokens)
+                    .with_temperature(0.2),
+            );
+        for tool in open_agent_tools_with_options(tool_options) {
+            agent_settings = agent_settings.with_tool(tool);
+        }
+        let agent = OpenAgent::new(agent_settings);
+        let mut call = OpenAgentCallOptions::from_prompt(
+            scenario.prompt.clone(),
+            scenario.runtime_request.sandbox.clone(),
+        )
+        .with_model(AgentModelSelection::new(self.settings.model_id.clone()));
+        call.tool_loop_options = call
+            .tool_loop_options
+            .with_experimental_sandbox(sandbox)
+            .with_max_steps(self.settings.max_steps);
+
+        let result = poll_ready(agent.generate(call))
+            .map_err(|error| {
+                DurableRunAgentError::new(format!("Gateway Open Agent failed: {error}"))
+            })?
+            .map_err(|error| {
+                DurableRunAgentError::new(format!("Gateway Open Agent failed: {error}"))
+            })?;
+        Ok(DurableRunAgentOutput::Finished {
+            chunks: chunks_from_gateway_result(&context.run_id, result),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ServiceExperimentalSandbox {
+    connect: SandboxConnectConfig,
+    description: String,
+}
+
+impl ServiceExperimentalSandbox {
+    fn new(connect: SandboxConnectConfig) -> Self {
+        let description = format!("Open Agents {} sandbox", connect.state.sandbox_type());
+        Self {
+            connect,
+            description,
+        }
+    }
+}
+
+impl ExperimentalSandbox for ServiceExperimentalSandbox {
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn run_command(&self, options: AiSandboxCommandOptions) -> SandboxRunCommandFuture {
+        let connect = self.connect.clone();
+        Box::pin(async move {
+            let sandbox = match connect_sandbox(connect) {
+                Ok(sandbox) => sandbox,
+                Err(error) => {
+                    return AiSandboxCommandResult::new(1)
+                        .with_stderr(format!("failed to connect sandbox: {error}"));
+                }
+            };
+            let mut exec_options = SandboxExecOptions::new(options.command);
+            if let Some(cwd) = options.working_directory {
+                exec_options = exec_options.with_cwd(cwd);
+            }
+            match sandbox.exec(exec_options) {
+                Ok(result) => {
+                    AiSandboxCommandResult::new(result.exit_code.unwrap_or(if result.success {
+                        0
+                    } else {
+                        1
+                    }))
+                    .with_stdout(result.stdout)
+                    .with_stderr(result.stderr)
+                }
+                Err(error) => AiSandboxCommandResult::new(1).with_stderr(error.to_string()),
+            }
+        })
+    }
+}
+
+fn chunks_from_gateway_result(
+    run_id: &str,
+    result: ai_sdk_rust::GenerateTextResult,
+) -> Vec<UiMessageChunk> {
+    let mut chunks = vec![
+        UiMessageChunk::start_with_message_id(assistant_message_id(
+            run_id,
+            DurableRunState::Finished,
+        )),
+        UiMessageChunk::start_step(),
+    ];
+
+    if !result.text.trim().is_empty() {
+        chunks.push(UiMessageChunk::text_start("text-1"));
+        chunks.push(UiMessageChunk::text_delta("text-1", result.text.clone()));
+        chunks.push(UiMessageChunk::text_end("text-1"));
+    }
+
+    for tool_call in &result.tool_calls {
+        chunks.push(UiMessageChunk::tool_input_available(
+            tool_call.tool_call_id.clone(),
+            tool_call.tool_name.clone(),
+            tool_call.input.clone(),
+        ));
+    }
+    for tool_result in &result.tool_results {
+        chunks.push(UiMessageChunk::tool_output_available(
+            tool_result.tool_call_id.clone(),
+            tool_result.output.clone(),
+        ));
+    }
+
+    if result.text.trim().is_empty() && result.tool_results.is_empty() {
+        chunks.push(UiMessageChunk::text_start("text-1"));
+        chunks.push(UiMessageChunk::text_delta(
+            "text-1",
+            "Gateway run completed without final text.",
+        ));
+        chunks.push(UiMessageChunk::text_end("text-1"));
+    }
+
+    chunks.push(UiMessageChunk::finish_step());
+    chunks.push(UiMessageChunk::finish_with_reason(result.finish_reason));
+    chunks
+}
+
+fn poll_ready<T>(future: impl Future<Output = T>) -> Result<T, String> {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = Box::pin(future);
+
+    match Future::poll(Pin::as_mut(&mut future), &mut context) {
+        Poll::Ready(value) => Ok(value),
+        Poll::Pending => Err("future unexpectedly pending".to_string()),
     }
 }
 
@@ -1559,6 +1852,7 @@ mod tests {
     use hmac::{Hmac, Mac};
     use open_agents_slack::SlackThreadAddress;
     use sha2::Sha256;
+    use std::env;
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
@@ -1864,6 +2158,69 @@ mod tests {
                 .any(|request| request.contains("Fixture agent finished"))
         );
         server.stop().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AI_GATEWAY_API_KEY or AI_SDK_RUST_AI_GATEWAY_API_KEY and makes a live Gateway model call"]
+    async fn live_gateway_runtime_handles_app_mention_without_fixture_text() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway runtime test because no API key is configured");
+            return;
+        };
+        let model = env::var("OPEN_AGENTS_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let config = OpenAgentsServiceConfig::from_reader(|name| match name {
+            "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
+            "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
+            "OPEN_AGENTS_RUNTIME" => Some("gateway".to_string()),
+            "AI_GATEWAY_API_KEY" => Some(api_key.clone()),
+            "OPEN_AGENTS_MODEL" => Some(model.clone()),
+            "OPEN_AGENTS_MODEL_MAX_STEPS" => Some("1".to_string()),
+            "OPEN_AGENTS_MODEL_MAX_OUTPUT_TOKENS" => Some("64".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let service = OpenAgentsService::from_config(config).unwrap();
+        let thread_ts = "1710000000.000777";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+        let body = app_mention_body(
+            "Reply in exactly two words: gateway ok. Do not use tools.",
+            "EvGatewayLive",
+            thread_ts,
+        );
+        let timestamp = current_timestamp();
+        let signature = sign(&body, &timestamp);
+
+        let response = service
+            .handle_http_request(ServiceHttpRequest::new(
+                "POST",
+                SLACK_EVENTS_PATH,
+                vec![
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("x-slack-request-timestamp".to_string(), timestamp),
+                    ("x-slack-signature".to_string(), signature),
+                ],
+                body,
+            ))
+            .await;
+
+        assert_eq!(response.status, 200);
+        let outbounds = service.local_runtime().outbound_for_thread(&thread_id);
+        assert!(
+            outbounds.iter().any(|message| {
+                message.kind == LocalOutboundKind::Final
+                    && !message.text.contains("Fixture agent finished")
+            }),
+            "expected a non-fixture final outbound, got {outbounds:#?}"
+        );
+    }
+
+    fn live_gateway_api_key() -> Option<String> {
+        env::var("AI_GATEWAY_API_KEY")
+            .or_else(|_| env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
     }
 
     #[tokio::test]

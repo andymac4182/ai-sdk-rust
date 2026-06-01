@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use open_agents_slack::SlackIngressMode;
 
+const DEFAULT_GATEWAY_MODEL_ID: &str = "openai/gpt-4.1-mini";
+const DEFAULT_GATEWAY_MAX_STEPS: usize = 8;
+const DEFAULT_GATEWAY_MAX_OUTPUT_TOKENS: u64 = 2048;
+
 /// Storage backend selected for the service.
 #[derive(Clone, PartialEq, Eq)]
 pub enum StateStore {
@@ -57,6 +61,47 @@ impl SandboxMode {
     }
 }
 
+/// Runtime agent implementation selected for Slack-started runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRuntimeMode {
+    /// Deterministic scripted runtime used by fixtures and no-credential local runs.
+    Fixture,
+    /// Real model-backed Open Agent using Vercel AI Gateway credentials.
+    Gateway,
+}
+
+impl AgentRuntimeMode {
+    /// Stable operator-facing label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fixture => "fixture",
+            Self::Gateway => "gateway",
+        }
+    }
+}
+
+/// Tool approval policy used by the Gateway-backed agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentToolApprovalMode {
+    /// Match Open Agents defaults for sensitive file/network/shell operations.
+    Sensitive,
+    /// Execute model-requested tools without pausing for approval.
+    Never,
+    /// Ask for approval for every tool that exposes an approval check.
+    Always,
+}
+
+impl AgentToolApprovalMode {
+    /// Stable operator-facing label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sensitive => "sensitive",
+            Self::Never => "never",
+            Self::Always => "always",
+        }
+    }
+}
+
 /// Deployable service configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OpenAgentsServiceConfig {
@@ -68,7 +113,13 @@ pub struct OpenAgentsServiceConfig {
     slack_app_token: Option<String>,
     slack_api_url: Option<String>,
     sandbox: SandboxMode,
+    runtime: AgentRuntimeMode,
     model_api_key: Option<String>,
+    model_id: String,
+    model_max_steps: usize,
+    model_max_output_tokens: u64,
+    tool_approval: AgentToolApprovalMode,
+    github_token: Option<String>,
 }
 
 impl fmt::Debug for OpenAgentsServiceConfig {
@@ -86,9 +137,18 @@ impl fmt::Debug for OpenAgentsServiceConfig {
             )
             .field("slack_api_url", &self.slack_api_url)
             .field("sandbox", &self.sandbox)
+            .field("runtime", &self.runtime)
             .field(
                 "model_api_key",
                 &self.model_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("model_id", &self.model_id)
+            .field("model_max_steps", &self.model_max_steps)
+            .field("model_max_output_tokens", &self.model_max_output_tokens)
+            .field("tool_approval", &self.tool_approval)
+            .field(
+                "github_token",
+                &self.github_token.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -146,6 +206,32 @@ impl OpenAgentsServiceConfig {
 
         let model_api_key = present(read_var("AI_GATEWAY_API_KEY"))
             .or_else(|| present(read_var("AI_SDK_RUST_AI_GATEWAY_API_KEY")));
+        let runtime = parse_runtime(
+            present(read_var("OPEN_AGENTS_RUNTIME")).as_deref(),
+            model_api_key.is_some(),
+        )?;
+        if runtime == AgentRuntimeMode::Gateway && model_api_key.is_none() {
+            return Err(ConfigError::MissingVar("AI_GATEWAY_API_KEY"));
+        }
+        let model_id = present(read_var("OPEN_AGENTS_MODEL"))
+            .or_else(|| present(read_var("AI_GATEWAY_MODEL")))
+            .or_else(|| present(read_var("AI_SDK_RUST_GATEWAY_MODEL")))
+            .unwrap_or_else(|| DEFAULT_GATEWAY_MODEL_ID.to_string());
+        let model_max_steps = parse_usize(
+            present(read_var("OPEN_AGENTS_MODEL_MAX_STEPS")).as_deref(),
+            "OPEN_AGENTS_MODEL_MAX_STEPS",
+            DEFAULT_GATEWAY_MAX_STEPS,
+        )?;
+        let model_max_output_tokens = parse_u64(
+            present(read_var("OPEN_AGENTS_MODEL_MAX_OUTPUT_TOKENS")).as_deref(),
+            "OPEN_AGENTS_MODEL_MAX_OUTPUT_TOKENS",
+            DEFAULT_GATEWAY_MAX_OUTPUT_TOKENS,
+        )?;
+        let tool_approval =
+            parse_tool_approval(present(read_var("OPEN_AGENTS_TOOL_APPROVAL")).as_deref())?;
+        let github_token = present(read_var("OPEN_AGENTS_GITHUB_TOKEN"))
+            .or_else(|| present(read_var("GITHUB_TOKEN")))
+            .or_else(|| present(read_var("GH_TOKEN")));
 
         Ok(Self {
             bind_addr,
@@ -156,7 +242,13 @@ impl OpenAgentsServiceConfig {
             slack_app_token,
             slack_api_url,
             sandbox,
+            runtime,
             model_api_key,
+            model_id,
+            model_max_steps,
+            model_max_output_tokens,
+            tool_approval,
+            github_token,
         })
     }
 
@@ -175,7 +267,13 @@ impl OpenAgentsServiceConfig {
             sandbox: SandboxMode::Local {
                 root: PathBuf::from("."),
             },
+            runtime: AgentRuntimeMode::Fixture,
             model_api_key: None,
+            model_id: DEFAULT_GATEWAY_MODEL_ID.to_string(),
+            model_max_steps: DEFAULT_GATEWAY_MAX_STEPS,
+            model_max_output_tokens: DEFAULT_GATEWAY_MAX_OUTPUT_TOKENS,
+            tool_approval: AgentToolApprovalMode::Sensitive,
+            github_token: None,
         }
     }
 
@@ -219,24 +317,60 @@ impl OpenAgentsServiceConfig {
         &self.sandbox
     }
 
+    /// Selected agent runtime.
+    pub fn runtime(&self) -> AgentRuntimeMode {
+        self.runtime
+    }
+
     /// Optional model credential. Callers must not log this value.
     pub fn model_api_key(&self) -> Option<&str> {
         self.model_api_key.as_deref()
     }
 
+    /// Gateway model id used by real model-backed runs.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Maximum model/tool-loop steps for Gateway-backed runs.
+    pub fn model_max_steps(&self) -> usize {
+        self.model_max_steps
+    }
+
+    /// Maximum model output tokens for Gateway-backed runs.
+    pub fn model_max_output_tokens(&self) -> u64 {
+        self.model_max_output_tokens
+    }
+
+    /// Tool approval policy for Gateway-backed runs.
+    pub fn tool_approval(&self) -> AgentToolApprovalMode {
+        self.tool_approval
+    }
+
+    /// Optional GitHub token exposed only to sandbox commands for clone/push/PR workflows.
+    pub fn github_token(&self) -> Option<&str> {
+        self.github_token.as_deref()
+    }
+
     /// Redacted summary safe to print in operator logs.
     pub fn operator_summary(&self) -> String {
         format!(
-            "bind_addr={} state={} slack_ingress={} sandbox={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={}",
+            "bind_addr={} state={} slack_ingress={} sandbox={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} github_token={}",
             self.bind_addr,
             self.state_store.label(),
             slack_ingress_label(self.slack_ingress),
             self.sandbox.label(),
+            self.runtime.label(),
             present_label(Some(&self.slack_bot_token)),
             present_label(Some(&self.slack_signing_secret)),
             present_label(self.slack_app_token.as_ref()),
             present_label(self.slack_api_url.as_ref()),
             present_label(self.model_api_key.as_ref()),
+            self.model_id,
+            self.model_max_steps,
+            self.model_max_output_tokens,
+            self.tool_approval.label(),
+            present_label(self.github_token.as_ref()),
         )
     }
 }
@@ -362,6 +496,65 @@ fn parse_sandbox(
     }
 }
 
+fn parse_runtime(
+    raw: Option<&str>,
+    has_model_api_key: bool,
+) -> Result<AgentRuntimeMode, ConfigError> {
+    match raw.unwrap_or("auto") {
+        "auto" => Ok(if has_model_api_key {
+            AgentRuntimeMode::Gateway
+        } else {
+            AgentRuntimeMode::Fixture
+        }),
+        "fixture" | "scripted" | "local" => Ok(AgentRuntimeMode::Fixture),
+        "gateway" | "ai-gateway" | "model" => Ok(AgentRuntimeMode::Gateway),
+        value => Err(ConfigError::InvalidVar {
+            name: "OPEN_AGENTS_RUNTIME",
+            value: value.to_string(),
+            expected: "auto, fixture, or gateway",
+        }),
+    }
+}
+
+fn parse_tool_approval(raw: Option<&str>) -> Result<AgentToolApprovalMode, ConfigError> {
+    match raw.unwrap_or("sensitive") {
+        "sensitive" | "default" => Ok(AgentToolApprovalMode::Sensitive),
+        "never" | "off" | "none" => Ok(AgentToolApprovalMode::Never),
+        "always" | "all" => Ok(AgentToolApprovalMode::Always),
+        value => Err(ConfigError::InvalidVar {
+            name: "OPEN_AGENTS_TOOL_APPROVAL",
+            value: value.to_string(),
+            expected: "sensitive, never, or always",
+        }),
+    }
+}
+
+fn parse_usize(
+    raw: Option<&str>,
+    name: &'static str,
+    default: usize,
+) -> Result<usize, ConfigError> {
+    match raw {
+        Some(value) => value.parse::<usize>().map_err(|_| ConfigError::InvalidVar {
+            name,
+            value: value.to_string(),
+            expected: "a positive integer",
+        }),
+        None => Ok(default),
+    }
+}
+
+fn parse_u64(raw: Option<&str>, name: &'static str, default: u64) -> Result<u64, ConfigError> {
+    match raw {
+        Some(value) => value.parse::<u64>().map_err(|_| ConfigError::InvalidVar {
+            name,
+            value: value.to_string(),
+            expected: "a positive integer",
+        }),
+        None => Ok(default),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +583,8 @@ mod tests {
         assert_eq!(config.slack_ingress(), SlackIngressMode::Webhook);
         assert_eq!(config.slack_api_url(), None);
         assert_eq!(config.sandbox().label(), "local");
+        assert_eq!(config.runtime(), AgentRuntimeMode::Fixture);
+        assert_eq!(config.model_id(), DEFAULT_GATEWAY_MODEL_ID);
     }
 
     #[test]
@@ -437,6 +632,41 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err, ConfigError::MissingVar("SLACK_APP_TOKEN"));
+    }
+
+    #[test]
+    fn from_reader_auto_selects_gateway_when_gateway_key_is_present() {
+        let config = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("AI_GATEWAY_API_KEY", "gateway-key"),
+            ("AI_GATEWAY_MODEL", "openai/gpt-test"),
+            ("OPEN_AGENTS_MODEL_MAX_STEPS", "4"),
+            ("OPEN_AGENTS_MODEL_MAX_OUTPUT_TOKENS", "512"),
+            ("OPEN_AGENTS_TOOL_APPROVAL", "never"),
+            ("GITHUB_TOKEN", "ghp-test"),
+        ])
+        .unwrap();
+
+        assert_eq!(config.runtime(), AgentRuntimeMode::Gateway);
+        assert_eq!(config.model_api_key(), Some("gateway-key"));
+        assert_eq!(config.model_id(), "openai/gpt-test");
+        assert_eq!(config.model_max_steps(), 4);
+        assert_eq!(config.model_max_output_tokens(), 512);
+        assert_eq!(config.tool_approval(), AgentToolApprovalMode::Never);
+        assert_eq!(config.github_token(), Some("ghp-test"));
+    }
+
+    #[test]
+    fn from_reader_requires_gateway_key_when_gateway_runtime_is_explicit() {
+        let err = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("OPEN_AGENTS_RUNTIME", "gateway"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err, ConfigError::MissingVar("AI_GATEWAY_API_KEY"));
     }
 
     #[test]
@@ -496,6 +726,9 @@ mod tests {
         let summary = config.operator_summary();
         assert!(summary.contains("slack_bot_token=present"));
         assert!(summary.contains("socket_mode_token=present"));
+        assert!(summary.contains("runtime=fixture"));
+        assert!(summary.contains("model=openai/gpt-4.1-mini"));
+        assert!(summary.contains("github_token=missing"));
         assert!(!summary.contains("xoxb-real-secret"));
         assert!(!summary.contains("signing-secret"));
         assert!(!summary.contains("xapp-secret"));
