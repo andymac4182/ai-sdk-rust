@@ -15,6 +15,10 @@ const outputPath = path.join(
   repositoryRoot,
   'docs/open-agents/just-bash-parity.md'
 );
+const rustRunnerFixturePath = path.join(
+  repositoryRoot,
+  'crates/just-bash/tests/fixtures/just-bash-conformance.json'
+);
 
 const upstreamRepo = 'vercel-labs/just-bash';
 const upstreamHead = 'd64009aef6bc1556e7c84b22ed455863275ea953';
@@ -689,6 +693,42 @@ function readExistingLedger() {
   return { sourceRows, caseRows };
 }
 
+let cachedRustRunnerProofs;
+
+function readRustRunnerProofs() {
+  if (cachedRustRunnerProofs) {
+    return cachedRustRunnerProofs;
+  }
+  const byLedgerKey = new Map();
+  const proofNames = new Set();
+
+  if (fs.existsSync(rustRunnerFixturePath)) {
+    const fixture = JSON.parse(fs.readFileSync(rustRunnerFixturePath, 'utf8'));
+    for (const testCase of fixture.cases ?? []) {
+      if (testCase.kind !== 'comparison-fixture' || testCase.status !== 'portable-verified') {
+        continue;
+      }
+      const ledgerKey = testCase.parity?.ledgerKey;
+      const rustTestName = testCase.rustTestName;
+      if (!ledgerKey || !rustTestName) {
+        continue;
+      }
+      byLedgerKey.set(ledgerKey, {
+        status: 'portable-verified',
+        owner: testCase.parity?.owner ?? 'crates/just-bash::conformance_corpus',
+        rustTest: rustTestName,
+        notes:
+          testCase.parity?.notes ??
+          'JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.',
+      });
+      proofNames.add(rustTestName);
+    }
+  }
+
+  cachedRustRunnerProofs = { byLedgerKey, proofNames };
+  return cachedRustRunnerProofs;
+}
+
 function packageIdFor(relativePath) {
   if (relativePath === 'package.json') {
     return 'root';
@@ -1244,6 +1284,9 @@ function discoverRustTests() {
       }
     }
   }
+  for (const proofName of readRustRunnerProofs().proofNames) {
+    names.add(proofName);
+  }
   return names;
 }
 
@@ -1332,6 +1375,10 @@ function caseRowWithOverride(testCase, existingRows) {
         notes: existing.Notes || row.notes,
       }
     : row;
+  const rustRunnerProof = readRustRunnerProofs().byLedgerKey.get(testCaseKey(testCase));
+  if (rustRunnerProof) {
+    return { ...merged, ...rustRunnerProof };
+  }
   const jb03Override = jb03CaseOverrides.get(`${testCase.file}:${testCase.line}`);
   if (jb03Override) {
     return { ...merged, ...jb03Override };
@@ -1579,7 +1626,7 @@ function renderMarkdown(inventory, rustTests, gaps) {
     '## Status Rules',
     '',
     '- `portable-pending`: Rust ownership is identified, but no named Rust test closes the upstream row yet. This is not parity.',
-    '- `portable-verified`: the row names one or more existing Rust `#[test]` or `#[tokio::test]` functions in `Rust test name or exception`.',
+    '- `portable-verified`: the row names one or more existing Rust `#[test]` / `#[tokio::test]` functions or generated conformance corpus-case proof names in `Rust test name or exception`.',
     '- `js-only-documented`: the row is explicitly excluded because it only verifies JavaScript packaging, browser bundling, Vitest harness behavior, or other non-Rust-runtime behavior. The notes column must explain why.',
     '- `type-system-impossible`: the row only verifies TypeScript type-system behavior that cannot become a Rust runtime test. The notes column must explain why.',
     '',
@@ -1589,7 +1636,7 @@ function renderMarkdown(inventory, rustTests, gaps) {
     '',
     '- The refreshed upstream count is expected to be exactly 8 package manifests, 908 TS/TSX files outside `dist`, `vendor`, and `node_modules`, and 485 test files.',
     '- `--check` is the non-blocking inventory gate. It fails for upstream drift, stale generated markdown, invalid statuses, missing owners, or undocumented exceptions.',
-    '- `--strict` is the implementation gate. It additionally fails when any `portable-pending` test case remains or when a `portable-verified` row names a Rust test that does not exist in the workspace.',
+    '- `--strict` is the implementation gate. It additionally fails when any `portable-pending` test case remains or when a `portable-verified` row names a Rust test or generated corpus-case proof that does not exist in the workspace.',
     '- Extra Rust tests are additive. They do not close an upstream row unless the row names the Rust test.',
     '- `scripts/master-parity-gate.sh --check` runs this ledger in non-strict mode now; set `JUST_BASH_STRICT_GATE=1` only after JBC-08 closes every portable row.',
     '',

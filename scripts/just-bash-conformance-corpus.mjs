@@ -22,6 +22,10 @@ const corpusPath = path.join(
   repositoryRoot,
   'fixtures/just-bash-conformance/corpus.json'
 );
+const rustRunnerFixturePath = path.join(
+  repositoryRoot,
+  'crates/just-bash/tests/fixtures/just-bash-conformance.json'
+);
 const docsPath = path.join(
   repositoryRoot,
   'docs/open-agents/just-bash-conformance.md'
@@ -33,6 +37,189 @@ const parityPath = path.join(
 
 const comparisonRoot = 'packages/just-bash/src/comparison-tests';
 const comparisonFixturesRoot = `${comparisonRoot}/fixtures`;
+
+const rustRunnerComparisonCaseIds = [
+  'comparison:awk:5fb5a4d01bc7c720',
+  'comparison:awk:6264f92b9b03799d',
+  'comparison:awk:63976ead5650d0f3',
+  'comparison:awk:6db4e318ce10b410',
+  'comparison:awk:85e7f320bff75570',
+  'comparison:awk:a3fb3f515b8a3f55',
+  'comparison:awk:b25e52b8fe953d50',
+  'comparison:awk:c08393a24070a7cf',
+  'comparison:awk:d4640ec4826f2d8a',
+  'comparison:cat:020bff53c7000330',
+  'comparison:cat:42f9ff247ca8f7cd',
+  'comparison:cat:65267847ad4c8e53',
+  'comparison:cat:8dd4a90d66412d09',
+  'comparison:cat:a0b709d7c5c60114',
+  'comparison:cat:b4be835a35eac7c5',
+  'comparison:cat:c84d818ff334dff2',
+  'comparison:cat:cbe3ef438087c1a8',
+  'comparison:cat:db717349fcf9c635',
+  'comparison:cut:0cba64b76da7f808',
+  'comparison:cut:28816a80e989e492',
+  'comparison:cut:2eb408055b7a522e',
+  'comparison:cut:3e2ec57dea32ba0e',
+  'comparison:cut:4dadb8bb49cd2b8f',
+  'comparison:cut:5598daa7b2921ab3',
+  'comparison:cut:5a0904ccec88b009',
+  'comparison:cut:6c073b55e3ef8b55',
+  'comparison:cut:7e719d7ee4405bdb',
+  'comparison:cut:82970bf54db893a1',
+  'comparison:cut:89b537a138b0ab7f',
+  'comparison:cut:bb380ea6e3b92bfa',
+  'comparison:cut:bcabce27d2a32b75',
+  'comparison:cut:cdee4db0798144f5',
+  'comparison:cut:f403dfb5d076f255',
+  'comparison:cut:fad0e2104d458d84',
+  'comparison:echo:217dbca3c809b994',
+  'comparison:echo:2a6325b6743f5466',
+  'comparison:echo:5f4ae12ab484e5ab',
+  'comparison:echo:b6db373a2a54b19b',
+  'comparison:echo:c96e83b264c545b8',
+  'comparison:echo:cd1f9aa10c18f518',
+  'comparison:echo:d17ea61d90fa289b',
+  'comparison:echo:d99299972a3e4bf7',
+  'comparison:echo:db1e757b6d72f5a8',
+  'comparison:export:662fe76a74e0d0ea',
+  'comparison:export:7b6a73a19e04e211',
+  'comparison:export:8f93ecc4a3a9e58d',
+  'comparison:export:dbc45ae674bf0324',
+  'comparison:export:ec458e22502c7bb9',
+  'comparison:export:ffc9146bd57203d1',
+  'comparison:glob:e71d5efd2763b87f',
+  'comparison:grep:1025e358d7a34e01',
+  'comparison:grep:185ed628b5425dc6',
+  'comparison:grep:387f744404b105ca',
+  'comparison:grep:3a66482f45995ea4',
+  'comparison:grep:45aa0fe09d422b8b',
+  'comparison:grep:4acb0878b7c7321a',
+  'comparison:grep:51eb3a9e5a93c353',
+  'comparison:grep:5c8ae50b50d2af09',
+  'comparison:grep:60b5f71f1ea8f004',
+  'comparison:grep:7ce150b1d31c7157',
+  'comparison:grep:96c3aa3ddb21f038',
+  'comparison:grep:a2abcfaed619014a',
+  'comparison:grep:b004d9dd542ae06b',
+  'comparison:grep:bf613f70adc0289f',
+  'comparison:grep:ff06d4155ef88658',
+  'comparison:head-tail:034c1ad958ac4e81',
+  'comparison:head-tail:056423c9a1c3be0a',
+  'comparison:head-tail:3342a2278ef2818f',
+  'comparison:head-tail:4e164a360a6e2537',
+  'comparison:head-tail:522b5f5822ebb4ae',
+  'comparison:head-tail:70b15d1e3fefb5d3',
+  'comparison:head-tail:7b6bcefac6d2c797',
+  'comparison:head-tail:8436b406d6d6c02f',
+  'comparison:head-tail:84dc6e37eee2a8f7',
+  'comparison:head-tail:c43bf46c4255c75a',
+  'comparison:head-tail:c441335822eca032',
+  'comparison:head-tail:d99b0046180efb2b',
+  'comparison:head-tail:e1cf4bd4e1e39e27',
+  'comparison:head-tail:e72c50c3f9f71f29',
+  'comparison:jq:10c509b3ce6cdbb2',
+  'comparison:jq:23c97b80a1a55790',
+  'comparison:jq:3276c73f2ae560a6',
+  'comparison:jq:7520876197cdc6be',
+  'comparison:jq:91c885f22f4323a6',
+  'comparison:jq:a20be29f72c20715',
+  'comparison:jq:b9af66a6586c6d00',
+  'comparison:jq:c0f228f8add71471',
+  'comparison:jq:de6ea82b7109ba1d',
+  'comparison:jq:ff7f24721da0b6cc',
+  'comparison:ls:3b7d8ce2d6992be7',
+  'comparison:ls:3ff2b49021e0b8df',
+  'comparison:ls:4123d9b2a8de2d7c',
+  'comparison:ls:537fc7f40660ced4',
+  'comparison:ls:7ae1c663742d227c',
+  'comparison:ls:893bb7f655a1464e',
+  'comparison:ls:a7c8be4092c3fc30',
+  'comparison:ls:ed09e77729197e0d',
+  'comparison:ls:ed367bb71e17d454',
+  'comparison:pipes-redirections:020bff53c7000330',
+  'comparison:pipes-redirections:182b9b5e6bfa1c28',
+  'comparison:pipes-redirections:1f5358d0ff5415db',
+  'comparison:pipes-redirections:3beedbeba9d2a5c4',
+  'comparison:pipes-redirections:45eaab46734d3047',
+  'comparison:pipes-redirections:58a6a0ce46d73fa0',
+  'comparison:pipes-redirections:598e7cefd65169e2',
+  'comparison:pipes-redirections:6bd0123402cec7ad',
+  'comparison:pipes-redirections:7086f6a3f4dc0698',
+  'comparison:pipes-redirections:911c532960333408',
+  'comparison:pipes-redirections:aac86b7188cd3d4b',
+  'comparison:pipes-redirections:abe00fe64964cee1',
+  'comparison:pipes-redirections:c2a3ca246a760ea3',
+  'comparison:pipes-redirections:d64cf6f964b36cd8',
+  'comparison:pipes-redirections:ea44840781b9f76b',
+  'comparison:pipes-redirections:ed9a9c9eb3f510bc',
+  'comparison:pipes-redirections:ee691337fb0fd9fb',
+  'comparison:pipes-redirections:fd39ca6c0c831f40',
+  'comparison:pipes-redirections:fd81fd5b0ed0f85e',
+  'comparison:sed:00e1632371dda029',
+  'comparison:sed:0b3b3909e74c705c',
+  'comparison:sed:105c923aee90005e',
+  'comparison:sed:2740f51bf2c34b7e',
+  'comparison:sed:28ab150746b66692',
+  'comparison:sed:33d522291dad4a36',
+  'comparison:sed:3bdabfafbd59f654',
+  'comparison:sed:40f1b2a20c3eb769',
+  'comparison:sed:4390f65c1a932838',
+  'comparison:sed:4497ac2c76063386',
+  'comparison:sed:4b03689ded6f7203',
+  'comparison:sed:5d80ef05bb6ca3e0',
+  'comparison:sed:66a6e1b137ee8afe',
+  'comparison:sed:67ca047cc1bcee3d',
+  'comparison:sed:8dc8277fda7aa887',
+  'comparison:sed:90d978b05dc721c4',
+  'comparison:sed:afd90b3a99597517',
+  'comparison:sed:b94e2de48f9e2e33',
+  'comparison:sed:dab2a9c75588cf44',
+  'comparison:sed:f14853e5d5ebb553',
+  'comparison:sed:f274c250c1fcff7b',
+  'comparison:sed:f3bf3f6fcf370329',
+  'comparison:sort:144a0a82fb4ffd95',
+  'comparison:sort:335547cbd220ee19',
+  'comparison:sort:4a3da2790df3b3e2',
+  'comparison:sort:972a3cbce4c80459',
+  'comparison:sort:9bd8d04e1fe4c298',
+  'comparison:sort:abe97e27f804e3e7',
+  'comparison:sort:cad2b2e2302002a5',
+  'comparison:sort:ce27a7876e30e3c6',
+  'comparison:sort:d5a4c74bbc48b229',
+  'comparison:sort:e90055ad73f7de6e',
+  'comparison:sort:e9fe665b16497404',
+  'comparison:sort:f9a02dc02cc47cde',
+  'comparison:tr:06b38615c4fee0b4',
+  'comparison:tr:0f00e2b388db24a3',
+  'comparison:tr:16fee68ec84c6781',
+  'comparison:tr:3768a0c282f76267',
+  'comparison:tr:48af8d3cbc0dc282',
+  'comparison:tr:532b92338017f3e3',
+  'comparison:tr:5c6bf42ed3f77572',
+  'comparison:tr:6568d3f3ee19db46',
+  'comparison:tr:672a7ba48d6b4c4d',
+  'comparison:tr:94ea30b921ff3a8d',
+  'comparison:tr:9996c4a89e05e0da',
+  'comparison:tr:9de9409449faf359',
+  'comparison:tr:ada03462d8dd64bd',
+  'comparison:tr:b46f146c5cab934a',
+  'comparison:tr:c48537396397fc11',
+  'comparison:tr:e56a3c786c9fa17c',
+  'comparison:uniq:08b2af999ca280b9',
+  'comparison:uniq:1ed1c9beb7525bb1',
+  'comparison:uniq:5de0d1af06731848',
+  'comparison:uniq:740e9a36c7fe3331',
+  'comparison:uniq:947e03113a427ace',
+  'comparison:uniq:a300c9f1f5c05058',
+  'comparison:uniq:d2218cb430d74d51',
+  'comparison:uniq:d56570a322584c87',
+  'comparison:uniq:dde066d078d791b9',
+  'comparison:uniq:e6ed6da7f4f2d8dd',
+  'comparison:uniq:f116fef97f175cad',
+  'comparison:wc:fbae9795c34391b6',
+];
+const rustRunnerComparisonCaseIdSet = new Set(rustRunnerComparisonCaseIds);
 
 const unitSourceFiles = [
   'packages/just-bash/src/commands/printf/printf.test.ts',
@@ -198,6 +385,58 @@ function fixtureIdFor(command, files) {
     .map((key) => `${key}:${files[key]}`)
     .join('|');
   return sha256(`${command}|||${sortedFiles}`).slice(0, 16);
+}
+
+function rustRunnerCaseName(id) {
+  const suffix = id.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return `just_bash_runs_shared_conformance_corpus::${suffix}`;
+}
+
+function rustRunnerProofFor(testCase) {
+  if (!rustRunnerComparisonCaseIdSet.has(testCase.id)) {
+    return undefined;
+  }
+  return {
+    status: 'portable-verified',
+    owner: 'crates/just-bash::conformance_corpus',
+    rustTest: rustRunnerCaseName(testCase.id),
+    notes:
+      'JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.',
+  };
+}
+
+function withRustRunnerProof(testCase) {
+  const proof = rustRunnerProofFor(testCase);
+  if (!proof) {
+    return testCase;
+  }
+  return {
+    ...testCase,
+    status: proof.status,
+    rustTestName: proof.rustTest,
+    parity: {
+      ...testCase.parity,
+      status: proof.status,
+      owner: proof.owner,
+      rustTest: proof.rustTest,
+      notes: proof.notes,
+    },
+    runnerProof: {
+      source: 'JBC-11',
+      engine: 'rust-just-bash',
+      assertion: 'stdout-stderr-exit-code-exact',
+    },
+  };
+}
+
+function countCasesBy(cases, key) {
+  return Object.fromEntries(
+    [...cases.reduce((counts, testCase) => {
+      const value = testCase[key] ?? '(missing)';
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+      return counts;
+    }, new Map())].sort()
+  );
 }
 
 function liveUpstreamHead() {
@@ -1659,6 +1898,31 @@ function validateCorpus(corpus) {
       errors.push(`${testCase.id}: missing expected.exitCode field`);
     }
   }
+  const corpusIds = new Set(corpus.cases.map((testCase) => testCase.id));
+  for (const proofId of rustRunnerComparisonCaseIds) {
+    if (!corpusIds.has(proofId)) {
+      errors.push(`${proofId}: missing Rust runner proof case`);
+    }
+  }
+  const rustRunnerCases = corpus.cases.filter((testCase) =>
+    rustRunnerComparisonCaseIdSet.has(testCase.id)
+  );
+  if (rustRunnerCases.length !== rustRunnerComparisonCaseIds.length) {
+    errors.push(
+      `expected ${rustRunnerComparisonCaseIds.length} Rust runner proof cases, found ${rustRunnerCases.length}`
+    );
+  }
+  for (const testCase of rustRunnerCases) {
+    if (testCase.kind !== 'comparison-fixture') {
+      errors.push(`${testCase.id}: Rust runner proof must be a comparison fixture`);
+    }
+    if (testCase.status !== 'portable-verified') {
+      errors.push(`${testCase.id}: Rust runner proof must be portable-verified`);
+    }
+    if (testCase.rustTestName !== rustRunnerCaseName(testCase.id)) {
+      errors.push(`${testCase.id}: missing stable Rust runner case name`);
+    }
+  }
   return errors;
 }
 
@@ -1680,9 +1944,9 @@ function buildCorpus() {
   const comparisonCases = buildComparisonFixtureCases(parityRows);
   const unitCases = buildUnitExecCases(parityRows);
   const specCases = buildSpecCases(parityRows);
-  const cases = [...comparisonCases, ...unitCases, ...specCases].sort((left, right) =>
-    left.id.localeCompare(right.id)
-  );
+  const cases = [...comparisonCases, ...unitCases, ...specCases]
+    .map(withRustRunnerProof)
+    .sort((left, right) => left.id.localeCompare(right.id));
   const summary = summarizeCases(cases);
 
   return {
@@ -1714,6 +1978,38 @@ function buildCorpus() {
   };
 }
 
+function buildRustRunnerFixture(corpus) {
+  const cases = corpus.cases
+    .filter((testCase) => rustRunnerComparisonCaseIdSet.has(testCase.id))
+    .sort((left, right) => left.rustTestName.localeCompare(right.rustTestName));
+
+  return {
+    schemaVersion: 2,
+    defaultCwd: '/workspace',
+    generatedOn: inventoryDate,
+    source: {
+      corpusPath: 'fixtures/just-bash-conformance/corpus.json',
+      repository: corpus.source.repository,
+      upstreamHead: corpus.source.upstreamHead,
+      parityLedger: corpus.source.parityLedger,
+    },
+    runnerContract: {
+      testCommand: 'cargo test -p just-bash --test conformance_corpus',
+      assertion: 'Each case must match expected stdout, stderr, and exitCode exactly.',
+      skipPolicy:
+        'Only js-only-documented and type-system-impossible cases with skipReason may be skipped.',
+      expectedFailures: 0,
+    },
+    summary: {
+      totalCases: cases.length,
+      byKind: countCasesBy(cases, 'kind'),
+      byDomain: countCasesBy(cases, 'domain'),
+      byStatus: countCasesBy(cases, 'status'),
+    },
+    cases,
+  };
+}
+
 function renderTable(headers, rows) {
   const lines = [
     `| ${headers.map(escapeCell).join(' | ')} |`,
@@ -1735,6 +2031,12 @@ function renderDocs(corpus) {
   const statusRows = Object.entries(corpus.summary.byStatus)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([status, count]) => [status, count]);
+  const rustRunnerCases = corpus.cases.filter((testCase) =>
+    rustRunnerComparisonCaseIdSet.has(testCase.id)
+  );
+  const rustRunnerRows = Object.entries(countCasesBy(rustRunnerCases, 'domain'))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([domain, count]) => [domain, count]);
 
   return `# Just Bash Conformance Plan
 
@@ -1769,6 +2071,7 @@ inventory. Strict parity closes only when every portable upstream row in
 | Current tracked upstream commit | \`${corpus.source.upstreamHead}\` |
 | OpenSrc cache | \`${corpus.source.localSourcePath}\` |
 | Corpus path | \`fixtures/just-bash-conformance/corpus.json\` |
+| Rust runner fixture | \`crates/just-bash/tests/fixtures/just-bash-conformance.json\` |
 | Parity ledger | \`${corpus.source.parityLedger}\` |
 | Corpus check command | \`node scripts/just-bash-conformance-corpus.mjs --check\` |
 
@@ -1821,6 +2124,21 @@ ${renderTable(['Domain', 'Cases'], domainRows)}
 ## Ledger Status Summary
 
 ${renderTable(['Status', 'Cases'], statusRows)}
+
+## Rust Runner Fixture
+
+The Rust integration test consumes a generated portable subset at
+\`crates/just-bash/tests/fixtures/just-bash-conformance.json\`. JBC-11
+promotes only comparison fixture rows that the Rust backend matched exactly for
+stdout, stderr, and exit code; mismatching rows remain \`portable-pending\`.
+
+| Field | Value |
+| --- | --- |
+| Exact-pass comparison cases | ${rustRunnerCases.length} |
+| Expected failures | 0 |
+| Test command | \`cargo test -p just-bash --test conformance_corpus\` |
+
+${renderTable(['Domain', 'Exact-pass cases'], rustRunnerRows)}
 
 ## Representative Slice
 
@@ -1888,6 +2206,8 @@ function main() {
   }
 
   const corpusJson = asciiJson(corpus);
+  const rustRunnerFixture = buildRustRunnerFixture(corpus);
+  const rustRunnerFixtureJson = asciiJson(rustRunnerFixture);
   const docsMarkdown = renderDocs(corpus);
 
   if (options.check) {
@@ -1897,6 +2217,12 @@ function main() {
       : undefined;
     if (currentCorpus !== corpusJson) {
       mismatches.push('fixtures/just-bash-conformance/corpus.json is stale');
+    }
+    const currentRustRunnerFixture = fs.existsSync(rustRunnerFixturePath)
+      ? fs.readFileSync(rustRunnerFixturePath, 'utf8')
+      : undefined;
+    if (currentRustRunnerFixture !== rustRunnerFixtureJson) {
+      mismatches.push('crates/just-bash/tests/fixtures/just-bash-conformance.json is stale');
     }
     const currentDocs = fs.existsSync(docsPath)
       ? fs.readFileSync(docsPath, 'utf8')
@@ -1914,11 +2240,13 @@ function main() {
   }
 
   ensureParent(corpusPath);
+  ensureParent(rustRunnerFixturePath);
   ensureParent(docsPath);
   fs.writeFileSync(corpusPath, corpusJson);
+  fs.writeFileSync(rustRunnerFixturePath, rustRunnerFixtureJson);
   fs.writeFileSync(docsPath, docsMarkdown);
   console.log(
-    `wrote ${path.relative(repositoryRoot, corpusPath)} and ${path.relative(repositoryRoot, docsPath)} (${corpus.summary.totalCases} cases)`
+    `wrote ${path.relative(repositoryRoot, corpusPath)}, ${path.relative(repositoryRoot, rustRunnerFixturePath)}, and ${path.relative(repositoryRoot, docsPath)} (${corpus.summary.totalCases} cases; ${rustRunnerFixture.summary.totalCases} Rust runner cases)`
   );
 }
 

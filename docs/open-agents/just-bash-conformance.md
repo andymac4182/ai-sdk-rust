@@ -31,6 +31,7 @@ inventory. Strict parity closes only when every portable upstream row in
 | Current tracked upstream commit | `d64009aef6bc1556e7c84b22ed455863275ea953` |
 | OpenSrc cache | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel-labs/just-bash/main` |
 | Corpus path | `fixtures/just-bash-conformance/corpus.json` |
+| Rust runner fixture | `crates/just-bash/tests/fixtures/just-bash-conformance.json` |
 | Parity ledger | `docs/open-agents/just-bash-parity.md` |
 | Corpus check command | `node scripts/just-bash-conformance-corpus.mjs --check` |
 
@@ -119,8 +120,38 @@ inventory. Strict parity closes only when every portable upstream row in
 
 | Status | Cases |
 | --- | --- |
-| portable-pending | 1554 |
-| portable-verified | 117 |
+| portable-pending | 1375 |
+| portable-verified | 296 |
+
+## Rust Runner Fixture
+
+The Rust integration test consumes a generated portable subset at
+`crates/just-bash/tests/fixtures/just-bash-conformance.json`. JBC-11
+promotes only comparison fixture rows that the Rust backend matched exactly for
+stdout, stderr, and exit code; mismatching rows remain `portable-pending`.
+
+| Field | Value |
+| --- | --- |
+| Exact-pass comparison cases | 179 |
+| Expected failures | 0 |
+| Test command | `cargo test -p just-bash --test conformance_corpus` |
+
+| Domain | Exact-pass cases |
+| --- | --- |
+| awk | 9 |
+| cat | 7 |
+| cut | 14 |
+| echo | 26 |
+| grep | 19 |
+| head-tail | 12 |
+| jq | 10 |
+| ls | 9 |
+| pipes-redirections | 10 |
+| pwd-cd-env | 6 |
+| sed | 22 |
+| sort | 11 |
+| tr | 14 |
+| uniq | 10 |
 
 ## Representative Slice
 

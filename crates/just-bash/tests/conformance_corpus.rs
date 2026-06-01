@@ -11,6 +11,8 @@ const SKIPPABLE_STATUSES: &[&str] = &["js-only-documented", "type-system-impossi
 #[derive(Clone, Debug)]
 struct CorpusCase {
     id: String,
+    rust_test_name: Option<String>,
+    kind: Option<String>,
     status: Option<String>,
     skip_reason: Option<String>,
     command: Option<String>,
@@ -56,17 +58,26 @@ struct CorpusEnvelope {
 struct RawCase {
     #[serde(default, alias = "caseId", alias = "upstreamId")]
     id: Option<String>,
+    #[serde(default, alias = "rustTestName")]
+    rust_test_name: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
     #[serde(default, alias = "portability", alias = "disposition")]
     status: Option<String>,
     #[serde(default, alias = "reason")]
     skip_reason: Option<String>,
-    #[serde(default, alias = "script")]
+    #[serde(default)]
     command: Option<String>,
     #[serde(default)]
+    script: Option<String>,
+    #[serde(default, alias = "initialFiles")]
     files: BTreeMap<String, String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     cwd: Option<String>,
+    stdin: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
     #[serde(default)]
     commands: Option<Vec<String>>,
     #[serde(default, alias = "execOptions")]
@@ -131,7 +142,12 @@ fn just_bash_runs_shared_conformance_corpus() {
 fn conformance_failure_reports_upstream_case_id() {
     let mut case = CorpusCase {
         id: "packages/just-bash/src/comparison-tests/fixtures/echo.comparison.fixtures.json#d17ea61d90fa289b".to_string(),
-        status: Some("portable-pending".to_string()),
+        rust_test_name: Some(
+            "just_bash_runs_shared_conformance_corpus::comparison_echo_d17ea61d90fa289b"
+                .to_string(),
+        ),
+        kind: Some("comparison-fixture".to_string()),
+        status: Some("portable-verified".to_string()),
         skip_reason: None,
         command: Some("echo hello".to_string()),
         files: BTreeMap::new(),
@@ -190,17 +206,26 @@ impl RawCase {
     fn into_case(self, fallback_id: &str, default_cwd: &str) -> Result<CorpusCase, String> {
         let id = self.id.unwrap_or_else(|| fallback_id.to_string());
         let expected = self.expected.unwrap_or_default();
+        let mut options = self.options;
+        if options.stdin.is_none() {
+            options.stdin = self.stdin;
+        }
+        if options.args.is_empty() {
+            options.args = self.args;
+        }
 
         Ok(CorpusCase {
             id,
+            rust_test_name: self.rust_test_name,
+            kind: self.kind,
             status: self.status,
             skip_reason: self.skip_reason,
-            command: self.command,
+            command: self.command.or(self.script),
             files: self.files,
             env: self.env,
-            cwd: self.cwd.or_else(|| Some(default_cwd.to_string())),
+            cwd: Some(effective_cwd(self.cwd.as_deref(), default_cwd)),
             commands: self.commands,
-            options: self.options,
+            options,
             expected: ExpectedFixture {
                 stdout: self.stdout.or(expected.stdout),
                 stderr: self.stderr.or(expected.stderr),
@@ -214,31 +239,47 @@ fn run_case(case: &CorpusCase) -> Result<CaseOutcome, String> {
     if should_skip(case)? {
         return Ok(CaseOutcome::Skipped);
     }
+    let display_name = case.rust_test_name.as_deref().unwrap_or(&case.id);
+    if case.status.as_deref() == Some("portable-pending") {
+        return Err(format!(
+            "{display_name}: portable-pending cases must not be included in the Rust runner fixture"
+        ));
+    }
+    if case.kind.as_deref() == Some("comparison-fixture")
+        && case
+            .rust_test_name
+            .as_ref()
+            .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err(format!(
+            "{}: comparison fixture is missing rustTestName",
+            case.id
+        ));
+    }
     if case.skip_reason.is_some() {
         return Err(format!(
-            "{}: portable case has skipReason but is not explicitly js-only-documented or type-system-impossible",
-            case.id
+            "{display_name}: portable case has skipReason but is not explicitly js-only-documented or type-system-impossible"
         ));
     }
 
     let command = case
         .command
         .as_deref()
-        .ok_or_else(|| format!("{}: portable case is missing command/script", case.id))?;
+        .ok_or_else(|| format!("{display_name}: portable case is missing command/script"))?;
     let expected_stdout = case
         .expected
         .stdout
         .as_deref()
-        .ok_or_else(|| format!("{}: portable case is missing expected stdout", case.id))?;
+        .ok_or_else(|| format!("{display_name}: portable case is missing expected stdout"))?;
     let expected_stderr = case
         .expected
         .stderr
         .as_deref()
-        .ok_or_else(|| format!("{}: portable case is missing expected stderr", case.id))?;
+        .ok_or_else(|| format!("{display_name}: portable case is missing expected stderr"))?;
     let expected_exit_code = case
         .expected
         .exit_code
-        .ok_or_else(|| format!("{}: portable case is missing expected exitCode", case.id))?;
+        .ok_or_else(|| format!("{display_name}: portable case is missing expected exitCode"))?;
 
     let bash = Bash::with_options(BashOptions {
         files: seed_files(case),
@@ -272,7 +313,7 @@ fn run_case(case: &CorpusCase) -> Result<CaseOutcome, String> {
         Ok(CaseOutcome::Ran)
     } else {
         Err(format!(
-            "{} failed while running {:?}:\n{}",
+            "{display_name} ({}) failed while running {:?}:\n{}",
             case.id,
             command,
             mismatches.join("\n")
@@ -313,6 +354,19 @@ fn seed_files(case: &CorpusCase) -> BTreeMap<String, String> {
             (resolved, content.clone())
         })
         .collect()
+}
+
+fn effective_cwd(cwd: Option<&str>, default_cwd: &str) -> String {
+    match cwd {
+        Some(cwd) if !cwd.trim().is_empty() && cwd != "." => {
+            if cwd.starts_with('/') {
+                cwd.to_string()
+            } else {
+                resolve_path(default_cwd, cwd)
+            }
+        }
+        _ => default_cwd.to_string(),
+    }
 }
 
 fn exec_options(options: &ExecOptionsFixture) -> JustBashExecOptions {
