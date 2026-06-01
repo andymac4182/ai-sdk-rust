@@ -689,12 +689,13 @@ function caseNameAliases(caseName) {
   return [...names].filter(Boolean);
 }
 
-function collectRustTestNames() {
+function collectRustTests() {
   const roots = ['src', 'crates', 'examples']
     .map(root => path.join(repositoryRoot, root))
     .filter(root => fs.existsSync(root));
   const files = roots.flatMap(root => walkFiles(root)).filter(file => file.endsWith('.rs'));
   const names = new Set();
+  const ordered = [];
 
   for (const file of files) {
     const source = fs.readFileSync(file, 'utf8');
@@ -704,11 +705,245 @@ function collectRustTestNames() {
       const fnMatch = after.match(/\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
       if (fnMatch) {
         names.add(fnMatch[1]);
+        ordered.push(fnMatch[1]);
       }
     }
   }
 
-  return names;
+  return { names, ordered };
+}
+
+function buildProviderUtilsMappings(rustTests) {
+  const byPrefix = prefix => rustTests
+    .filter(name => name.startsWith(prefix))
+    .map(name => [name]);
+  const byPredicate = predicate => rustTests
+    .filter(name => predicate(name))
+    .map(name => [name]);
+  const mediaTypeToExtensionRows = rustTests.filter(name =>
+    name.startsWith('media_type_to_extension_maps_audio_') ||
+    name.startsWith('media_type_to_extension_maps_uppercase_') ||
+    name === 'media_type_to_extension_maps_invalid_media_type_to_empty_string',
+  );
+
+  const byFile = new Map(Object.entries({
+    'packages/provider-utils/src/add-additional-properties-to-json-schema.test.ts':
+      byPrefix('add_additional_properties_to_json_schema_upstream_'),
+    'packages/provider-utils/src/as-array.test.ts':
+      byPrefix('as_array_upstream_'),
+    'packages/provider-utils/src/convert-async-iterator-to-readable-stream.test.ts':
+      byPrefix('convert_async_iterator_stream_upstream_'),
+    'packages/provider-utils/src/convert-image-model-file-to-data-uri.test.ts':
+      byPrefix('convert_image_model_file_to_data_uri_upstream_'),
+    'packages/provider-utils/src/convert-to-form-data.test.ts':
+      byPrefix('convert_to_form_data_upstream_'),
+    'packages/provider-utils/src/create-tool-name-mapping.test.ts':
+      byPrefix('create_tool_name_mapping_upstream_'),
+    'packages/provider-utils/src/delay.test.ts':
+      byPrefix('delay_upstream_'),
+    'packages/provider-utils/src/delayed-promise.test.ts':
+      byPrefix('delayed_promise_upstream_'),
+    'packages/provider-utils/src/detect-media-type.test.ts':
+      byPredicate(name =>
+        name.startsWith('detect_media_type_upstream_') ||
+        name.startsWith('get_top_level_media_type_upstream_') ||
+        name.startsWith('is_full_media_type_upstream_'),
+      ),
+    'packages/provider-utils/src/download-blob.test.ts':
+      byPredicate(name =>
+        name.startsWith('download_blob_upstream_') ||
+        name.startsWith('download_blob_ssrf_upstream_') ||
+        name.startsWith('download_error_upstream_'),
+      ),
+    'packages/provider-utils/src/filter-nullable.test.ts': [
+      ['filter_nullable_removes_null_and_undefined_values_from_value_list'],
+      ['filter_nullable_preserves_other_falsy_values'],
+    ],
+    'packages/provider-utils/src/generate-id.test.ts':
+      byPredicate(name =>
+        name.startsWith('create_id_generator_upstream_') ||
+        name.startsWith('generate_id_upstream_'),
+      ),
+    'packages/provider-utils/src/get-from-api.test.ts':
+      byPrefix('get_from_api_upstream_'),
+    'packages/provider-utils/src/get-runtime-environment-user-agent.test.ts':
+      byPrefix('get_runtime_environment_user_agent_upstream_'),
+    'packages/provider-utils/src/handle-fetch-error.test.ts':
+      byPrefix('handle_fetch_error_upstream_'),
+    'packages/provider-utils/src/inject-json-instruction.test.ts':
+      byPredicate(name =>
+        name.startsWith('inject_json_instruction_upstream_') ||
+        name.startsWith('inject_json_instruction_into_messages_upstream_'),
+      ),
+    'packages/provider-utils/src/is-json-serializable.test.ts':
+      byPrefix('is_json_serializable_upstream_'),
+    'packages/provider-utils/src/is-provider-reference.test.ts':
+      byPrefix('is_provider_reference_upstream_'),
+    'packages/provider-utils/src/is-url-supported.test.ts':
+      byPrefix('is_url_supported_upstream_'),
+    'packages/provider-utils/src/map-reasoning-to-provider.test.ts':
+      byPredicate(name =>
+        name.startsWith('map_reasoning_to_provider_effort_upstream_') ||
+        name.startsWith('is_custom_reasoning_upstream_') ||
+        name.startsWith('map_reasoning_to_provider_budget_upstream_'),
+      ),
+    'packages/provider-utils/src/media-type-to-extension.test.ts': [
+      mediaTypeToExtensionRows,
+    ],
+    'packages/provider-utils/src/normalize-headers.test.ts':
+      byPrefix('normalize_headers_upstream_'),
+    'packages/provider-utils/src/parse-json.test.ts':
+      byPredicate(name =>
+        name.startsWith('parse_json_upstream_') ||
+        name.startsWith('safe_parse_json_upstream_') ||
+        name.startsWith('is_parsable_json_upstream_'),
+      ),
+    'packages/provider-utils/src/read-response-with-size-limit.test.ts':
+      byPrefix('read_response_with_size_limit_upstream_'),
+    'packages/provider-utils/src/remove-undefined-entries.test.ts':
+      byPrefix('remove_undefined_entries_should_'),
+    'packages/provider-utils/src/resolve-full-media-type.test.ts':
+      byPredicate(name =>
+        name.startsWith('resolve_full_media_type_') &&
+        !name.startsWith('resolve_full_media_type_upstream_'),
+      ),
+    'packages/provider-utils/src/resolve-provider-reference.test.ts':
+      byPrefix('resolve_provider_reference_upstream_'),
+    'packages/provider-utils/src/resolve.test.ts':
+      byPredicate(name =>
+        name.startsWith('resolve_upstream_') ||
+        name.startsWith('resolve_headers_upstream_'),
+      ),
+    'packages/provider-utils/src/response-handler.test.ts':
+      byPrefix('response_handler_upstream_'),
+    'packages/provider-utils/src/schema.test.ts': [
+      ...byPrefix('as_schema_upstream_'),
+      ...byPrefix('standard_schema_upstream_'),
+    ],
+    'packages/provider-utils/src/secure-json-parse.test.ts':
+      byPrefix('secure_json_parse_upstream_'),
+    'packages/provider-utils/src/serialize-model-options.test.ts':
+      byPrefix('serialize_model_options_upstream_'),
+    'packages/provider-utils/src/streaming-tool-call-tracker.test.ts':
+      byPrefix('streaming_tool_call_tracker_upstream_'),
+    'packages/provider-utils/src/strip-file-extension.test.ts':
+      byPrefix('strip_file_extension_upstream_'),
+    'packages/provider-utils/src/types/executable-tool.test.ts':
+      byPrefix('is_executable_tool_upstream_'),
+    'packages/provider-utils/src/types/execute-tool.test.ts':
+      byPrefix('execute_tool_upstream_'),
+    'packages/provider-utils/src/validate-download-url.test.ts':
+      byPrefix('validate_download_url_upstream_'),
+    'packages/provider-utils/src/validate-types.test.ts':
+      byPredicate(name =>
+        name.startsWith('validate_types_upstream_') ||
+        name.startsWith('safe_validate_types_upstream_'),
+      ),
+    'packages/provider-utils/src/with-user-agent-suffix.test.ts':
+      byPrefix('with_user_agent_suffix_upstream_'),
+  }));
+
+  const exceptionsByLocation = new Map();
+  const addException = (location, status, rustTarget, notes) => {
+    exceptionsByLocation.set(location, {
+      source: 'provider-utils exact Rust test map',
+      status,
+      rustTarget,
+      rustTests: [],
+      notes,
+    });
+  };
+  const addZodSnapshotException = location => addException(
+    location,
+    'js-only-documented',
+    'exception: JavaScript Zod v4 runtime adapter snapshot',
+    'The upstream zodSchema case depends on Zod v4 runtime JSON-schema conversion and Vitest snapshots; Rust tracks portable StandardSchema and explicit JSON Schema behavior.',
+  );
+
+  addException(
+    'packages/provider-utils/src/download-blob.test.ts:158',
+    'js-only-documented',
+    'exception: JavaScript fetch AbortSignal passthrough',
+    'JavaScript downloadBlob passes AbortSignal into fetch; Rust download_blob uses an injected transport and documents abort as a transport integration concern.',
+  );
+  addException(
+    'packages/provider-utils/src/get-from-api.test.ts:176',
+    'js-only-documented',
+    'exception: JavaScript global fetch default',
+    'Upstream falls back to JavaScript global fetch when no fetch implementation is supplied; Rust provider-utils requires an injected transport and maps request construction separately.',
+  );
+  addException(
+    'packages/provider-utils/src/inject-json-instruction.test.ts:167',
+    'type-system-impossible',
+    'exception: JavaScript null optional-parameter coercion',
+    'The upstream case passes null through any-typed optional fields; Rust uses typed Option fields, so null cannot be supplied as a distinct runtime value.',
+  );
+  addException(
+    'packages/provider-utils/src/is-provider-reference.test.ts:33',
+    'js-only-documented',
+    'exception: JavaScript URL instance identity',
+    'The upstream case checks a JavaScript URL object; Rust provider reference detection operates on JSON-like records and has no URL class instance boundary.',
+  );
+
+  for (const line of [21, 32, 43, 54, 64, 74, 84, 94, 110, 127, 150, 160, 171]) {
+    addZodSnapshotException(`packages/provider-utils/src/schema.test.ts:${line}`);
+  }
+  addException(
+    'packages/provider-utils/src/schema.test.ts:189',
+    'js-only-documented',
+    'exception: JavaScript Zod v4 runtime adapter validation',
+    'The upstream case validates Zod transform output through the JavaScript zodSchema adapter; Rust maps portable transform validation through StandardSchema rows.',
+  );
+  addException(
+    'packages/provider-utils/src/serialize-model-options.test.ts:97',
+    'js-only-documented',
+    'exception: JavaScript promise-returning header callback',
+    'The upstream case observes resolveSync rejecting an async JavaScript headers callback; Rust serialize_model_options accepts already-materialized JSON config entries, not function-valued callbacks.',
+  );
+  addException(
+    'packages/provider-utils/src/serialize-model-options.test.ts:109',
+    'js-only-documented',
+    'exception: JavaScript promise-returning header callback',
+    'The upstream case observes resolveSync rejecting a Promise-returning JavaScript headers callback; Rust serialize_model_options accepts already-materialized JSON config entries, not function-valued callbacks.',
+  );
+
+  return { byFile, exceptionsByLocation };
+}
+
+function classifyProviderUtilsCase(testCase, providerUtilsMappings) {
+  if (!testCase.file.startsWith('packages/provider-utils/')) {
+    return null;
+  }
+
+  const locationKey = `${testCase.file}:${testCase.line}`;
+  const exception = providerUtilsMappings.exceptionsByLocation.get(locationKey);
+  if (exception) {
+    return exception;
+  }
+
+  const queue = providerUtilsMappings.byFile.get(testCase.file);
+  if (!queue?.length) {
+    return null;
+  }
+
+  const rustTests = queue.shift();
+  return {
+    source: 'provider-utils exact Rust test map',
+    status: 'portable-mapped',
+    rustTarget: rustTests.map(test => `test: ${test}`).join('; '),
+    rustTests,
+    notes: 'Mapped by the provider-utils row-level closure map.',
+  };
+}
+
+function providerUtilsMappingValidationErrors(providerUtilsMappings) {
+  const errors = [];
+  for (const [file, queue] of providerUtilsMappings.byFile) {
+    if (queue.length > 0) {
+      errors.push(`${file}: unused provider-utils Rust test mappings: ${queue.flat().join(', ')}`);
+    }
+  }
+  return errors;
 }
 
 function defaultClassification(testCase, item) {
@@ -777,7 +1012,13 @@ function defaultClassification(testCase, item) {
   };
 }
 
-function classifyCase(testCase, item, foundationalMappings, ai02Mappings) {
+function classifyCase(
+  testCase,
+  item,
+  foundationalMappings,
+  ai02Mappings,
+  providerUtilsMappings,
+) {
   const locationKey = `${testCase.file}:${testCase.line}`;
   const foundational = foundationalMappings.byLocation.get(locationKey);
   if (foundational) {
@@ -794,6 +1035,11 @@ function classifyCase(testCase, item, foundationalMappings, ai02Mappings) {
   const ai02Queue = ai02Mappings.get(ai02Key);
   if (ai02Queue?.length) {
     return ai02Queue.shift();
+  }
+
+  const providerUtils = classifyProviderUtilsCase(testCase, providerUtilsMappings);
+  if (providerUtils) {
+    return providerUtils;
   }
 
   return defaultClassification(testCase, item);
@@ -823,7 +1069,8 @@ function buildInventory(args) {
   const ledgerPackages = parseLedgerPackages(args.ledgerPath);
   const foundationalMappings = parseFoundationalMappings(FOUNDATIONAL_INVENTORY_PATH);
   const ai02Mappings = parseAi02Mappings(AI_02_INVENTORY_PATH);
-  const rustTests = collectRustTestNames();
+  const rustTests = collectRustTests();
+  const providerUtilsMappings = buildProviderUtilsMappings(rustTests.ordered);
   const validationErrors = [];
   const inventories = [];
 
@@ -841,6 +1088,7 @@ function buildInventory(args) {
           item,
           foundationalMappings,
           ai02Mappings,
+          providerUtilsMappings,
         );
         if (!VALID_STATUSES.has(classification.status)) {
           validationErrors.push(
@@ -854,7 +1102,7 @@ function buildInventory(args) {
             );
           }
           for (const rustTest of classification.rustTests) {
-            if (!rustTests.has(rustTest)) {
+            if (!rustTests.names.has(rustTest)) {
               validationErrors.push(
                 `${testCase.file}:${testCase.line}: mapped Rust test not found: ${rustTest}`,
               );
@@ -887,6 +1135,8 @@ function buildInventory(args) {
       ...statusCounts,
     });
   }
+
+  validationErrors.push(...providerUtilsMappingValidationErrors(providerUtilsMappings));
 
   return {
     inventories,
