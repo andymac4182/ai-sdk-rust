@@ -36,7 +36,8 @@ pub use file_reader::{
     ReadFileContent, ReadFilesOptions, ReadFilesResult, read_and_concat, read_files,
 };
 pub use fs::{
-    CpOptions, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, DirentEntry, FileStat, MkdirOptions, RmOptions,
+    CpOptions, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, DEFAULT_OVERLAY_MOUNT_POINT, DirentEntry,
+    FileStat, MkdirOptions, MountableFileSystem, OverlayFileSystem, ReadWriteFileSystem, RmOptions,
     SYMLINK_MODE, SymlinkPolicy, VirtualFileSystem,
 };
 pub use glob::{GlobOptions, glob_paths, match_glob};

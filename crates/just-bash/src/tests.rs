@@ -654,6 +654,669 @@ fn upstream_file_reader_fallback_and_concat_cases() {
 }
 
 #[test]
+fn upstream_read_write_fs_virtual_backend_reads_writes_stats_and_mutates_paths() {
+    let mut fs = ReadWriteFileSystem::with_text_files([
+        ("/test.txt", "real content"),
+        ("/subdir/file.txt", "nested"),
+        ("/append.txt", "start"),
+        ("/exists.txt", "content"),
+        ("/dir/file.txt", "content"),
+        ("/srcdir/file.txt", "content"),
+        ("/source.txt", "content"),
+        ("/original.txt", "content"),
+    ]);
+
+    assert_eq!(fs.read_file("/test.txt").unwrap(), "real content");
+    assert_eq!(fs.read_file("/subdir/file.txt").unwrap(), "nested");
+    assert_eq!(
+        fs.read_file("/nonexistent.txt").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.read_file("/dir").unwrap_err().kind(),
+        &JustBashErrorKind::IsDirectory
+    );
+
+    fs.write_file("/new.txt", "new content").unwrap();
+    fs.write_file("/deep/nested/file.txt", "content").unwrap();
+    fs.write_file("/test.txt", "modified").unwrap();
+    fs.write_file("/binary.bin", vec![0x00, 0x01, 0x02, 0xff])
+        .unwrap();
+    fs.append_file("/append.txt", "-end").unwrap();
+    fs.append_file("/created-by-append.txt", "content").unwrap();
+
+    assert_eq!(fs.read_file("/new.txt").unwrap(), "new content");
+    assert_eq!(fs.read_file("/deep/nested/file.txt").unwrap(), "content");
+    assert_eq!(fs.read_file("/test.txt").unwrap(), "modified");
+    assert_eq!(
+        fs.read_file_buffer("/binary.bin").unwrap(),
+        vec![0x00, 0x01, 0x02, 0xff]
+    );
+    assert_eq!(fs.read_file("/append.txt").unwrap(), "start-end");
+    assert_eq!(fs.read_file("/created-by-append.txt").unwrap(), "content");
+
+    assert!(fs.exists("/exists.txt"));
+    assert!(fs.exists("/dir"));
+    assert!(!fs.exists("/missing"));
+    assert!(fs.stat("/test.txt").unwrap().is_file);
+    assert!(fs.stat("/dir").unwrap().is_directory);
+    assert_eq!(
+        fs.stat("/missing").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+
+    fs.symlink("target.txt", "/link").unwrap();
+    assert!(fs.lstat("/link").unwrap().is_symbolic_link);
+    assert_eq!(fs.readlink("/link").unwrap(), "target.txt");
+
+    fs.mkdir("/newdir", MkdirOptions::default()).unwrap();
+    fs.mkdir("/a/b/c", MkdirOptions { recursive: true })
+        .unwrap();
+    assert_eq!(
+        fs.mkdir("/missing/dir", MkdirOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.mkdir("/newdir", MkdirOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::AlreadyExists
+    );
+
+    fs.write_file("/list/a.txt", "a").unwrap();
+    fs.write_file("/list/b.txt", "b").unwrap();
+    fs.mkdir("/list/subdir", MkdirOptions::default()).unwrap();
+    assert_eq!(
+        fs.readdir("/list").unwrap(),
+        vec!["a.txt", "b.txt", "subdir"]
+    );
+    assert_eq!(
+        fs.readdir("/missing").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.readdir("/list/a.txt").unwrap_err().kind(),
+        &JustBashErrorKind::NotDirectory
+    );
+
+    fs.rm("/source.txt", RmOptions::default()).unwrap();
+    assert!(!fs.exists("/source.txt"));
+    fs.rm(
+        "/dir",
+        RmOptions {
+            recursive: true,
+            force: false,
+        },
+    )
+    .unwrap();
+    assert!(!fs.exists("/dir/file.txt"));
+    assert_eq!(
+        fs.rm("/missing", RmOptions::default()).unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    fs.rm(
+        "/missing",
+        RmOptions {
+            recursive: false,
+            force: true,
+        },
+    )
+    .unwrap();
+
+    fs.cp("/test.txt", "/copied.txt", CpOptions::default())
+        .unwrap();
+    fs.cp("/srcdir", "/destdir", CpOptions { recursive: true })
+        .unwrap();
+    assert_eq!(fs.read_file("/copied.txt").unwrap(), "modified");
+    assert_eq!(fs.read_file("/destdir/file.txt").unwrap(), "content");
+    assert_eq!(
+        fs.cp("/missing", "/dest", CpOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotFound
+    );
+
+    fs.mv("/copied.txt", "/moved.txt").unwrap();
+    fs.mv("/destdir", "/moveddir").unwrap();
+    assert!(!fs.exists("/copied.txt"));
+    assert_eq!(fs.read_file("/moved.txt").unwrap(), "modified");
+    assert_eq!(fs.read_file("/moveddir/file.txt").unwrap(), "content");
+
+    fs.chmod("/moved.txt", 0o755).unwrap();
+    assert_eq!(fs.stat("/moved.txt").unwrap().mode, 0o755);
+    assert_eq!(
+        fs.chmod("/missing", 0o755).unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+
+    fs.link("/original.txt", "/hardlink.txt").unwrap();
+    assert_eq!(fs.read_file("/hardlink.txt").unwrap(), "content");
+    assert_eq!(
+        fs.link("/missing", "/hardlink-missing").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.link("/original.txt", "/hardlink.txt")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::AlreadyExists
+    );
+}
+
+#[test]
+fn upstream_read_write_fs_virtual_backend_encoding_readdir_and_path_inventory_cases() {
+    let mut fs = ReadWriteFileSystem::new();
+    fs.write_file_with_encoding("/base64.txt", "SGVsbG8gV29ybGQ=", BufferEncoding::Base64)
+        .unwrap();
+    fs.write_file_with_encoding("/hex.txt", "48656c6c6f", BufferEncoding::Hex)
+        .unwrap();
+    assert_eq!(fs.read_file("/base64.txt").unwrap(), "Hello World");
+    assert_eq!(fs.read_file("/hex.txt").unwrap(), "Hello");
+
+    fs.write_file("/typed/file.txt", "content").unwrap();
+    fs.mkdir("/typed/subdir", MkdirOptions::default()).unwrap();
+    fs.symlink("/typed/file.txt", "/typed/link.txt").unwrap();
+    let entries = fs.readdir_with_file_types("/typed").unwrap();
+    let names = entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["file.txt", "link.txt", "subdir"]);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "file.txt" && entry.is_file)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "subdir" && entry.is_directory)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "link.txt" && entry.is_symbolic_link)
+    );
+    assert_eq!(fs.readdir("/typed").unwrap(), names);
+    assert_eq!(
+        fs.readdir_with_file_types("/missing").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.readdir_with_file_types("/typed/file.txt")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotDirectory
+    );
+
+    let mut sorted = ReadWriteFileSystem::new();
+    sorted.write_file("/Zebra.txt", "z").unwrap();
+    sorted.write_file("/apple.txt", "a").unwrap();
+    sorted.write_file("/Banana.txt", "b").unwrap();
+    let sorted_names = sorted
+        .readdir_with_file_types("/")
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    assert_eq!(sorted_names, vec!["Banana.txt", "Zebra.txt", "apple.txt"]);
+
+    assert_eq!(fs.resolve_path("/dir", "file.txt"), "/dir/file.txt");
+    assert_eq!(fs.resolve_path("/dir", "../file.txt"), "/file.txt");
+    assert_eq!(
+        fs.resolve_path("/dir", "/other/file.txt"),
+        "/other/file.txt"
+    );
+
+    fs.write_file("/subdir/b.txt", "b").unwrap();
+    let paths = fs.get_all_paths();
+    assert!(paths.contains(&"/base64.txt".to_string()));
+    assert!(paths.contains(&"/hex.txt".to_string()));
+    assert!(paths.contains(&"/subdir/b.txt".to_string()));
+}
+
+#[test]
+fn upstream_overlay_fs_virtual_backend_mount_copy_on_write_deletion_and_read_only_cases() {
+    let lower = VirtualFileSystem::with_text_files([
+        ("/test.txt", "real content"),
+        ("/subdir/file.txt", "nested"),
+        ("/append.txt", "start"),
+        ("/delete.txt", "content"),
+        ("/a.txt", "a"),
+        ("/b.txt", "b"),
+        ("/recreate.txt", "original"),
+        ("/dir/file.txt", "content"),
+        ("/real.txt", "real"),
+        ("/source.txt", "source content"),
+        ("/srcdir/file.txt", "nested"),
+    ]);
+    let default_overlay = OverlayFileSystem::new(lower.clone());
+    assert_eq!(
+        default_overlay.get_mount_point(),
+        DEFAULT_OVERLAY_MOUNT_POINT
+    );
+    assert_eq!(
+        default_overlay
+            .read_file("/home/user/project/test.txt")
+            .unwrap(),
+        "real content"
+    );
+    assert!(
+        default_overlay
+            .readdir(DEFAULT_OVERLAY_MOUNT_POINT)
+            .unwrap()
+            .contains(&"test.txt".to_string())
+    );
+    assert_eq!(
+        default_overlay.read_file("/test.txt").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert!(default_overlay.exists("/home"));
+    assert!(default_overlay.exists("/home/user"));
+    assert!(default_overlay.exists("/home/user/project"));
+
+    let mut overlay = OverlayFileSystem::with_mount_point(lower, "/").unwrap();
+    assert_eq!(overlay.read_file("/test.txt").unwrap(), "real content");
+    assert_eq!(overlay.read_file("/subdir/file.txt").unwrap(), "nested");
+    assert!(overlay.stat("/test.txt").unwrap().is_file);
+    assert_eq!(overlay.stat("/test.txt").unwrap().size, 12);
+
+    overlay.write_file("/new.txt", "memory content").unwrap();
+    overlay.write_file("/test.txt", "modified").unwrap();
+    overlay.mkdir("/newdir", MkdirOptions::default()).unwrap();
+    overlay.append_file("/append.txt", "-end").unwrap();
+    assert_eq!(overlay.read_file("/new.txt").unwrap(), "memory content");
+    assert_eq!(overlay.read_file("/test.txt").unwrap(), "modified");
+    assert!(overlay.stat("/newdir").unwrap().is_directory);
+    assert_eq!(overlay.read_file("/append.txt").unwrap(), "start-end");
+
+    overlay.rm("/delete.txt", RmOptions::default()).unwrap();
+    assert!(!overlay.exists("/delete.txt"));
+    assert!(overlay.is_deleted("/delete.txt"));
+    overlay.rm("/a.txt", RmOptions::default()).unwrap();
+    let entries = overlay.readdir("/").unwrap();
+    assert!(!entries.contains(&"a.txt".to_string()));
+    assert!(entries.contains(&"b.txt".to_string()));
+    overlay.rm("/recreate.txt", RmOptions::default()).unwrap();
+    overlay.write_file("/recreate.txt", "new content").unwrap();
+    assert_eq!(overlay.read_file("/recreate.txt").unwrap(), "new content");
+
+    overlay
+        .rm(
+            "/dir",
+            RmOptions {
+                recursive: true,
+                force: false,
+            },
+        )
+        .unwrap();
+    assert!(!overlay.exists("/dir"));
+    assert!(!overlay.exists("/dir/file.txt"));
+
+    overlay.write_file("/memory.txt", "memory").unwrap();
+    let entries = overlay.readdir("/").unwrap();
+    assert!(entries.contains(&"real.txt".to_string()));
+    assert!(entries.contains(&"memory.txt".to_string()));
+    assert_eq!(
+        entries.iter().filter(|entry| *entry == "real.txt").count(),
+        1
+    );
+
+    assert_eq!(
+        overlay
+            .read_file("/../../../etc/passwd")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(overlay.read_file("/subdir/../real.txt").unwrap(), "real");
+    overlay.symlink("/target.txt", "/escape-link").unwrap();
+    assert_eq!(
+        overlay.read_file("/escape-link").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+
+    overlay.write_file("/target.txt", "target content").unwrap();
+    overlay.symlink("/target.txt", "/link").unwrap();
+    assert_eq!(overlay.read_file("/link").unwrap(), "target content");
+    assert_eq!(overlay.readlink("/link").unwrap(), "/target.txt");
+    assert!(overlay.lstat("/link").unwrap().is_symbolic_link);
+
+    overlay
+        .cp("/source.txt", "/copy.txt", CpOptions::default())
+        .unwrap();
+    overlay.mv("/source.txt", "/moved.txt").unwrap();
+    overlay
+        .cp("/srcdir", "/destdir", CpOptions { recursive: true })
+        .unwrap();
+    assert_eq!(overlay.read_file("/copy.txt").unwrap(), "source content");
+    assert!(!overlay.exists("/source.txt"));
+    assert_eq!(overlay.read_file("/moved.txt").unwrap(), "source content");
+    assert_eq!(overlay.read_file("/destdir/file.txt").unwrap(), "nested");
+
+    overlay.chmod("/real.txt", 0o755).unwrap();
+    assert_eq!(overlay.stat("/real.txt").unwrap().mode, 0o755);
+    overlay.link("/real.txt", "/hardlink.txt").unwrap();
+    assert_eq!(overlay.read_file("/hardlink.txt").unwrap(), "real");
+    assert!(overlay.exists("/real.txt"));
+    assert!(overlay.exists("/memory.txt"));
+    assert!(!overlay.exists("/deleted.txt"));
+    assert!(!overlay.exists("/nonexistent.txt"));
+
+    let mut read_only = OverlayFileSystem::with_mount_point(
+        VirtualFileSystem::with_text_files([
+            ("/existing.txt", "content"),
+            ("/delete.txt", "content"),
+            ("/source.txt", "content"),
+            ("/file.txt", "content"),
+        ]),
+        "/",
+    )
+    .unwrap()
+    .with_read_only(true);
+    assert_eq!(
+        read_only
+            .write_file("/test.txt", "content")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only
+            .append_file("/existing.txt", "more")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only
+            .mkdir("/newdir", MkdirOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only
+            .rm("/delete.txt", RmOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only
+            .cp("/source.txt", "/dest.txt", CpOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only.mv("/source.txt", "/dest.txt").unwrap_err().kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only.chmod("/file.txt", 0o755).unwrap_err().kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only.symlink("/target", "/link").unwrap_err().kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(
+        read_only
+            .link("/source.txt", "/hardlink.txt")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(read_only.read_file("/existing.txt").unwrap(), "content");
+    assert!(read_only.exists("/existing.txt"));
+    assert!(read_only.stat("/existing.txt").is_ok());
+    assert!(
+        read_only
+            .readdir("/")
+            .unwrap()
+            .contains(&"existing.txt".to_string())
+    );
+
+    let mut writable = OverlayFileSystem::with_mount_point(VirtualFileSystem::new(), "/").unwrap();
+    writable.write_file("/test.txt", "content").unwrap();
+    assert_eq!(writable.read_file("/test.txt").unwrap(), "content");
+}
+
+#[test]
+fn upstream_mountable_fs_routes_mounts_cross_mount_ops_and_virtual_dirs() {
+    let mut fs = MountableFileSystem::new();
+    fs.mount("/mnt/data", VirtualFileSystem::new()).unwrap();
+    assert!(fs.is_mount_point("/mnt/data"));
+    assert_eq!(fs.get_mounts(), vec!["/mnt/data"]);
+    fs.unmount("/mnt/data").unwrap();
+    assert!(!fs.is_mount_point("/mnt/data"));
+    assert!(fs.get_mounts().is_empty());
+    assert_eq!(
+        fs.unmount("/mnt/data").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+
+    fs.mount(
+        "/mnt/data",
+        VirtualFileSystem::with_text_files([("/file1.txt", "first")]),
+    )
+    .unwrap();
+    fs.mount(
+        "/mnt/data",
+        VirtualFileSystem::with_text_files([("/file2.txt", "second")]),
+    )
+    .unwrap();
+    assert_eq!(fs.get_mounts(), vec!["/mnt/data"]);
+    assert_eq!(fs.read_file("/mnt/data/file2.txt").unwrap(), "second");
+
+    let base = VirtualFileSystem::with_text_files([("/base.txt", "base content")]);
+    let mut fs = MountableFileSystem::with_base(base);
+    fs.mount(
+        "/mnt/data",
+        VirtualFileSystem::with_text_files([("/test.txt", "mounted content")]),
+    )
+    .unwrap();
+    assert_eq!(fs.read_file("/base.txt").unwrap(), "base content");
+    assert_eq!(
+        fs.read_file("/mnt/data/test.txt").unwrap(),
+        "mounted content"
+    );
+    fs.write_file("/mnt/data/written.txt", "hello").unwrap();
+    assert_eq!(fs.read_file("/mnt/data/written.txt").unwrap(), "hello");
+    assert!(fs.exists("/mnt/data"));
+    assert!(fs.stat("/mnt/data").unwrap().is_directory);
+
+    assert_eq!(
+        fs.mount("/", VirtualFileSystem::new()).unwrap_err().kind(),
+        &JustBashErrorKind::InvalidInput
+    );
+    assert_eq!(
+        fs.mount("/mnt/data/sub", VirtualFileSystem::new())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::InvalidInput
+    );
+    assert_eq!(
+        fs.mount("/mnt/../bad", VirtualFileSystem::new())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::InvalidInput
+    );
+    fs.mount("/mnt/other", VirtualFileSystem::new()).unwrap();
+    assert_eq!(fs.get_mounts(), vec!["/mnt/data", "/mnt/other"]);
+
+    assert_eq!(fs.readdir("/mnt").unwrap(), vec!["data", "other"]);
+    fs.write_file("/mnt/base.txt", "base").unwrap();
+    let entries = fs.readdir("/mnt").unwrap();
+    assert!(entries.contains(&"base.txt".to_string()));
+    assert!(entries.contains(&"data".to_string()));
+    assert!(
+        fs.readdir("/mnt/data")
+            .unwrap()
+            .contains(&"test.txt".to_string())
+    );
+    fs.mkdir("/mnt/data/subdir", MkdirOptions::default())
+        .unwrap();
+    assert!(fs.exists("/mnt/data/subdir"));
+    fs.mkdir("/mnt/data", MkdirOptions { recursive: true })
+        .unwrap();
+    assert_eq!(
+        fs.mkdir("/mnt/data", MkdirOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::AlreadyExists
+    );
+
+    fs.rm("/mnt/data/written.txt", RmOptions::default())
+        .unwrap();
+    assert!(!fs.exists("/mnt/data/written.txt"));
+    assert_eq!(
+        fs.rm(
+            "/mnt/data",
+            RmOptions {
+                recursive: true,
+                force: false,
+            },
+        )
+        .unwrap_err()
+        .kind(),
+        &JustBashErrorKind::Busy
+    );
+    assert_eq!(
+        fs.rm(
+            "/mnt",
+            RmOptions {
+                recursive: true,
+                force: false,
+            },
+        )
+        .unwrap_err()
+        .kind(),
+        &JustBashErrorKind::Busy
+    );
+
+    let mut fs = MountableFileSystem::new();
+    fs.mount(
+        "/mnt/a",
+        VirtualFileSystem::with_text_files([
+            ("/src.txt", "content"),
+            ("/dir/a.txt", "a"),
+            ("/dir/b.txt", "b"),
+        ]),
+    )
+    .unwrap();
+    fs.mount("/mnt/b", VirtualFileSystem::new()).unwrap();
+    fs.cp("/mnt/a/src.txt", "/dest.txt", CpOptions::default())
+        .unwrap();
+    fs.cp("/dest.txt", "/mnt/b/dest.txt", CpOptions::default())
+        .unwrap();
+    fs.cp("/mnt/a/src.txt", "/mnt/b/dest2.txt", CpOptions::default())
+        .unwrap();
+    fs.cp("/mnt/a/dir", "/mnt/b/dir", CpOptions { recursive: true })
+        .unwrap();
+    assert_eq!(fs.read_file("/dest.txt").unwrap(), "content");
+    assert_eq!(fs.read_file("/mnt/b/dest.txt").unwrap(), "content");
+    assert_eq!(fs.read_file("/mnt/b/dest2.txt").unwrap(), "content");
+    assert_eq!(fs.read_file("/mnt/b/dir/a.txt").unwrap(), "a");
+    assert_eq!(fs.read_file("/mnt/b/dir/b.txt").unwrap(), "b");
+
+    fs.chmod("/mnt/a/src.txt", 0o755).unwrap();
+    fs.cp("/mnt/a/src.txt", "/mnt/b/script.sh", CpOptions::default())
+        .unwrap();
+    assert_eq!(fs.stat("/mnt/b/script.sh").unwrap().mode, 0o755);
+    fs.cp(
+        "/mnt/b/script.sh",
+        "/mnt/b/script-copy.sh",
+        CpOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(fs.read_file("/mnt/b/script-copy.sh").unwrap(), "content");
+
+    fs.mv("/mnt/a/src.txt", "/mnt/b/moved.txt").unwrap();
+    assert_eq!(fs.read_file("/mnt/b/moved.txt").unwrap(), "content");
+    assert!(!fs.exists("/mnt/a/src.txt"));
+    assert_eq!(
+        fs.mv("/mnt/a", "/mnt/c").unwrap_err().kind(),
+        &JustBashErrorKind::Busy
+    );
+    fs.mv("/mnt/b/script-copy.sh", "/mnt/b/script-moved.sh")
+        .unwrap();
+    assert_eq!(fs.read_file("/mnt/b/script-moved.sh").unwrap(), "content");
+
+    let paths = fs.get_all_paths();
+    assert!(paths.contains(&"/mnt".to_string()));
+    assert!(paths.contains(&"/mnt/a".to_string()));
+    assert!(paths.contains(&"/mnt/b/moved.txt".to_string()));
+
+    fs.write_file("/mnt/a/target.txt", "target").unwrap();
+    fs.symlink("/target.txt", "/mnt/a/link.txt").unwrap();
+    assert_eq!(fs.read_file("/mnt/a/link.txt").unwrap(), "target");
+    assert_eq!(fs.readlink("/mnt/a/link.txt").unwrap(), "/target.txt");
+    fs.symlink("/mnt/a/target.txt", "/mnt/b/cross-link.txt")
+        .unwrap();
+    let target = fs.readlink("/mnt/b/cross-link.txt").unwrap();
+    assert_eq!(target, "/mnt/a/target.txt");
+    assert_eq!(fs.read_file(&target).unwrap(), "target");
+    fs.cp(
+        "/mnt/a/link.txt",
+        "/mnt/b/copied-link.txt",
+        CpOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs.readlink("/mnt/b/copied-link.txt").unwrap(),
+        "/target.txt"
+    );
+
+    fs.link("/mnt/b/moved.txt", "/mnt/b/hardlink.txt").unwrap();
+    assert_eq!(fs.read_file("/mnt/b/hardlink.txt").unwrap(), "content");
+    assert_eq!(
+        fs.link("/mnt/b/moved.txt", "/mnt/a/hardlink.txt")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::CrossDevice
+    );
+
+    assert!(fs.stat("/mnt").unwrap().is_directory);
+    assert!(fs.exists("/mnt"));
+    assert!(fs.exists("/mnt/b"));
+    assert!(fs.stat("/mnt/b/moved.txt").unwrap().is_file);
+    assert_eq!(fs.stat("/mnt/b/moved.txt").unwrap().size, 7);
+    assert!(fs.lstat("/mnt/a/link.txt").unwrap().is_symbolic_link);
+    fs.append_file("/mnt/b/moved.txt", " world").unwrap();
+    assert_eq!(fs.read_file("/mnt/b/moved.txt").unwrap(), "content world");
+    fs.chmod("/mnt/b", 0o700).unwrap();
+    assert_eq!(fs.stat("/mnt/b").unwrap().mode, 0o700);
+    assert_eq!(
+        fs.resolve_path("/some/base", "/absolute/path"),
+        "/absolute/path"
+    );
+    assert_eq!(
+        fs.resolve_path("/some/base", "relative/path"),
+        "/some/base/relative/path"
+    );
+    assert_eq!(fs.resolve_path("/a/b", "../c"), "/a/c");
+
+    let mut edge = MountableFileSystem::new();
+    edge.mount(
+        "/mnt/data/",
+        VirtualFileSystem::with_text_files([("/test.txt", "content")]),
+    )
+    .unwrap();
+    assert!(edge.is_mount_point("/mnt/data"));
+    assert!(edge.is_mount_point("/mnt/data/"));
+    assert_eq!(edge.read_file("mnt/data/test.txt").unwrap(), "content");
+    assert_eq!(
+        edge.read_file("/mnt/data/../data/./test.txt").unwrap(),
+        "content"
+    );
+    assert_eq!(edge.readdir("/mnt").unwrap(), vec!["data"]);
+}
+
+#[test]
 fn upstream_session_persists_fs_and_resets_scoped_env_cwd() {
     let mut session = VirtualSession::new();
     session

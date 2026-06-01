@@ -695,6 +695,92 @@ const jbc12CaseGroups = [
   },
 ];
 
+const jbc13SourceGroups = [
+  {
+    files: [
+      'packages/just-bash/src/fs/read-write-fs/index.ts',
+      'packages/just-bash/src/fs/read-write-fs/read-write-fs.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::read-write',
+    notes:
+      'JBC-13 verifies read/write backend semantics with a deterministic virtual Rust adapter; host-root constructor and host filesystem security rows remain fail-closed as test rows.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/fs/overlay-fs/index.ts',
+      'packages/just-bash/src/fs/overlay-fs/overlay-fs.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::overlay',
+    notes:
+      'JBC-13 verifies overlay mount, lower/upper precedence, copy-on-write mutation, tombstones, symlinks, and read-only errors without host filesystem access.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/fs/mountable-fs/index.ts',
+      'packages/just-bash/src/fs/mountable-fs/mountable-fs.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::mountable',
+    notes:
+      'JBC-13 verifies mount routing, virtual mount parents, cross-mount copy/move/link behavior, chmod, symlinks, and path normalization over virtual Rust filesystems.',
+  },
+];
+
+const jbc13CaseGroups = [
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.test.ts',
+    lines: [
+      43, 51, 60, 69, 74, 82, 97, 107, 118, 130, 141, 153, 160, 167, 174,
+      184, 193, 200, 219, 229, 237, 243, 252, 264, 269, 277, 286, 296, 301,
+      310, 321, 333, 340, 352, 367, 377, 384, 409, 422, 429, 441, 454, 459,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::read-write',
+    rustTest: 'upstream_read_write_fs_virtual_backend_reads_writes_stats_and_mutates_paths',
+    notes:
+      'JBC-13 verifies read/write backend file, directory, stat, list, remove, copy, move, chmod, symlink, hard-link, and readlink behavior in the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.test.ts',
+    lines: [468, 475, 485, 499, 508, 519, 540, 554, 572, 580, 589],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::read-write',
+    rustTest: 'upstream_read_write_fs_virtual_backend_encoding_readdir_and_path_inventory_cases',
+    notes:
+      'JBC-13 verifies read/write backend resolvePath, getAllPaths, base64/hex encoding, sorted typed readdir entries, symlink typing, error cases, and readdir name parity.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/overlay-fs/overlay-fs.test.ts',
+    lines: [
+      45, 50, 59, 67, 74, 84, 103, 115, 128, 144, 160, 177, 195, 210, 230,
+      247, 263, 278, 295, 310, 328, 340, 353, 369, 383, 395, 409, 426, 440,
+      457, 472, 488, 499, 510, 522, 533, 546, 560, 573, 587, 601, 615, 629,
+      642, 656, 673,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::overlay',
+    rustTest: 'upstream_overlay_fs_virtual_backend_mount_copy_on_write_deletion_and_read_only_cases',
+    notes:
+      'JBC-13 verifies overlay mount points, lower-layer reads, upper-layer writes, deletion tombstones, merged listings, symlinks, copy/move/link/chmod, and read-only mutator errors without host filesystem access.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/mountable-fs/mountable-fs.test.ts',
+    lines: [
+      7, 18, 29, 37, 57, 67, 74, 86, 98, 109, 127, 136, 144, 156, 170, 179,
+      193, 206, 217, 226, 236, 247, 255, 267, 279, 291, 304, 321, 337, 350,
+      363, 373, 386, 398, 409, 419, 433, 444, 457, 476, 494, 505, 519, 528,
+      537, 546, 556, 570, 583, 594, 607, 613, 619, 627, 637, 646, 655,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::mountable',
+    rustTest: 'upstream_mountable_fs_routes_mounts_cross_mount_ops_and_virtual_dirs',
+    notes:
+      'JBC-13 verifies mount/unmount validation, route dispatch, virtual mount parents, busy mount errors, cross-mount copy/move/link, symlinks, modes, path resolution, and edge-case normalization.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -711,7 +797,7 @@ function rowOverrideFromGroup(group) {
 }
 
 function sourceOverrideFor(relativePath) {
-  const group = [...jb06SourceGroups, ...jbc12SourceGroups].find((entry) =>
+  const group = [...jb06SourceGroups, ...jbc12SourceGroups, ...jbc13SourceGroups].find((entry) =>
     groupMatchesFile(entry, relativePath)
   );
   return group ? rowOverrideFromGroup(group) : undefined;
@@ -724,6 +810,7 @@ function caseOverrideFor(testCase) {
     ...jbc09CaseGroups,
     ...jbc10CaseGroups,
     ...jbc12CaseGroups,
+    ...jbc13CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

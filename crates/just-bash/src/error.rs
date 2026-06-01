@@ -14,6 +14,9 @@ pub enum JustBashErrorKind {
     InvalidInput,
     SymlinkLoop,
     PermissionDenied,
+    ReadOnly,
+    Busy,
+    CrossDevice,
 }
 
 impl JustBashErrorKind {
@@ -27,6 +30,9 @@ impl JustBashErrorKind {
             Self::InvalidInput => "EINVAL",
             Self::SymlinkLoop => "ELOOP",
             Self::PermissionDenied => "EPERM",
+            Self::ReadOnly => "EROFS",
+            Self::Busy => "EBUSY",
+            Self::CrossDevice => "EXDEV",
         }
     }
 }
