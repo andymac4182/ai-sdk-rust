@@ -109,15 +109,19 @@ impl OpenAgentsService {
             state,
             router,
         ));
-        let slack_outbound = config.slack_api_url().map(|api_base| {
-            SlackAdapter::new(
-                SlackAdapterOptions::new(
+        let slack_outbound =
+            if config.runtime() == AgentRuntimeMode::Gateway || config.slack_api_url().is_some() {
+                let mut slack_options = SlackAdapterOptions::new(
                     config.slack_bot_token().to_string(),
                     config.slack_signing_secret().to_string(),
-                )
-                .with_api_base(api_base.to_string()),
-            )
-        });
+                );
+                if let Some(api_base) = config.slack_api_url() {
+                    slack_options = slack_options.with_api_base(api_base.to_string());
+                }
+                Some(SlackAdapter::new(slack_options))
+            } else {
+                None
+            };
 
         Ok(Self {
             health,
@@ -2473,6 +2477,7 @@ impl RemoteAgentRunRequestExt for RemoteAgentRunRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chat_sdk_adapter_slack::DEFAULT_API_BASE;
     use chat_sdk_adapter_slack::outbound::{SlackOutboundActionKind, encode_slack_action_id};
     use hmac::{Hmac, Mac};
     use open_agents_slack::SlackThreadAddress;
@@ -2810,6 +2815,25 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "challenge-token");
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gateway_service_defaults_slack_outbound_to_real_slack_api() {
+        let config = OpenAgentsServiceConfig::from_reader(|name| match name {
+            "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
+            "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
+            "OPEN_AGENTS_RUNTIME" => Some("gateway".to_string()),
+            "AI_GATEWAY_API_KEY" => Some("gateway-key".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let service = OpenAgentsService::from_config(config).unwrap();
+        let adapter = service
+            .slack_outbound
+            .as_ref()
+            .expect("Slack outbound adapter should be configured");
+
+        assert_eq!(adapter.api_base(), DEFAULT_API_BASE);
     }
 
     #[tokio::test]

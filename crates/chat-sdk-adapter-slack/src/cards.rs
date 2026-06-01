@@ -60,18 +60,10 @@ const SLACK_TABLE_MAX_ROWS: usize = 100;
 const SLACK_TABLE_MAX_COLS: usize = 20;
 const SLACK_TEXT_OBJECT_LIMIT: usize = 3000;
 
+#[derive(Default)]
 pub struct SlackBlockKitOptions<'a> {
     pub convert_emoji: Option<&'a dyn Fn(&str) -> String>,
     pub max_blocks: Option<usize>,
-}
-
-impl<'a> Default for SlackBlockKitOptions<'a> {
-    fn default() -> Self {
-        Self {
-            convert_emoji: None,
-            max_blocks: None,
-        }
-    }
 }
 
 /// Per-card renderer state. 1:1 with upstream's inline `state = {
