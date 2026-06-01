@@ -120,8 +120,8 @@ inventory. Strict parity closes only when every portable upstream row in
 
 | Status | Cases |
 | --- | --- |
-| portable-pending | 1375 |
-| portable-verified | 296 |
+| portable-pending | 1365 |
+| portable-verified | 306 |
 
 ## Rust Runner Fixture
 

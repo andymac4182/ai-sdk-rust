@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1375,
-      "portable-verified": 296
+      "portable-pending": 1365,
+      "portable-verified": 306
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -240,13 +240,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:91:it:should execute BEGIN before processing",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -289,13 +289,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:149:it:should format with %s",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -387,13 +387,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:133:it:should filter with NR condition",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -436,13 +436,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:160:it:should format with %d",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -485,13 +485,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:102:it:should execute END after processing",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -534,13 +534,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:212:it:should concatenate fields",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -748,13 +748,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:140:it:should filter with NR > condition",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -797,13 +797,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:126:it:should filter with regex pattern",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -956,13 +956,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:66:it:should use tab as field separator",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],
@@ -1319,13 +1319,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:113:it:should execute both BEGIN and END",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::awk",
+        "rustTest": "awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows",
+        "notes": "JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.",
         "found": true
       },
       "assertions": [],

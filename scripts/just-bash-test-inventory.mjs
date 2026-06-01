@@ -476,6 +476,66 @@ const jbc07CaseGroups = [
   },
 ];
 
+const jbc09CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.test.ts',
+    lines: [
+      5, 12, 19, 28, 35, 103, 136, 147, 158, 169, 178, 187, 198, 207, 220,
+      229, 236, 243, 253, 530, 539, 651,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows',
+    notes:
+      'JBC-09 verifies portable awk escapes, -v variables, BEGIN/END blocks, regex and NR patterns, printf, stdin, common errors, string concatenation, FILENAME/FNR, and regex field separators; full AWK arithmetic, arrays, functions, and control flow remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.output.test.ts',
+    lines: [6, 15, 24, 33, 44, 53, 64, 77, 86, 95, 106],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows',
+    notes:
+      'JBC-09 verifies portable awk OFS/ORS print output, print without arguments, printf without implicit newline, explicit printf newline, and parenthesized printf for simple formats.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
+    lines: [
+      6, 13, 22, 29, 106, 113, 120, 147, 174, 196, 205, 214, 227, 236,
+      243, 252, 261, 270,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_upstream_field_separator_output_and_filename_rows',
+    notes:
+      'JBC-09 verifies portable awk field access, missing fields, $NF, NF basics, OFS/ORS print separators, whitespace/-F/BEGIN FS separators, tab/regex FS, and empty single-character FS fields.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [6, 15, 26, 33],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors',
+    notes:
+      'JBC-09 verifies portable awk empty-file, empty-stdin, BEGIN/END-on-empty-input, and blank-record NR/NF behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/awk.comparison.test.ts',
+    lines: [
+      21, 28, 35, 42, 52, 59, 66, 75, 82, 91, 102, 113, 126, 133, 140,
+      149, 160, 196, 201, 212,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors; awk_upstream_field_separator_output_and_filename_rows',
+    notes:
+      'JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -497,7 +557,7 @@ function sourceOverrideFor(relativePath) {
 }
 
 function caseOverrideFor(testCase) {
-  const group = [...jb06CaseGroups, ...jbc07CaseGroups].find(
+  const group = [...jb06CaseGroups, ...jbc07CaseGroups, ...jbc09CaseGroups].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
       (!entry.lines || entry.lines.includes(testCase.line))

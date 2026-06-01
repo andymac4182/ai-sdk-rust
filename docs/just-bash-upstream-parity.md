@@ -12,7 +12,7 @@ Local mirror inspected at `/Users/andrewmcclenaghan/.opensrc/repos/github.com/ve
 
 JB-05 owns the portable command registry and earlier high-risk built-ins/coreutils/text/search command smoke coverage implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
 
-JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. This ledger does not claim upstream `fs/**`, parser/syntax, security rows, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test below.
+JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. This ledger does not claim upstream `fs/**`, parser/syntax, security rows, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test below.
 
 Mapped Rust tests:
 
@@ -37,6 +37,7 @@ Mapped Rust tests:
 | 20 exact rows in `packages/just-bash/src/commands/grep/grep.basic.test.ts`; 7 exact rows in `packages/just-bash/src/commands/rg/rg.basic.test.ts`; 10 exact rows in `packages/just-bash/src/commands/sed/sed.test.ts`; 8 exact rows in `packages/just-bash/src/commands/awk/awk.test.ts` | `text_search_grep_rg_sed_and_awk_close_upstream_rows` | portable-mapped | JBC-07 covers portable grep flags/stdin/files/recursive search, rg current-dir basics, sed substitution/addresses, and simple awk print-field behavior. |
 | 11 exact rows in `head.test.ts`; 16 in `tail.test.ts`; 12 in `wc.test.ts`; 10 in `sort.test.ts`; 11 in `uniq.test.ts`; 11 in `cut.test.ts`; 13 in `tr.test.ts` | `text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows` | portable-mapped | JBC-07 covers the highest-agent-value text pipeline commands over the virtual filesystem and stdin. |
 | 14 exact rows in `packages/just-bash/src/commands/jq/jq.basic.test.ts` | `structured_data_jq_basic_rows_access_and_iteration` | portable-mapped | JBC-07 covers jq identity pretty-printing, object/array access, missing/null handling, iteration, and simple pipes over JSON stdin. |
+| 55 additional exact `command:awk` rows across `awk.test.ts`, `awk.output.test.ts`, `awk.fields.test.ts`, and `awk.edge-cases.test.ts`; 20 exact AWK real-Bash comparison rows | `awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors`; `awk_upstream_field_separator_output_and_filename_rows` | portable-mapped | JBC-09 covers portable AWK escapes, `-v`, BEGIN/END, regex and NR patterns, printf, stdin/errors, string concatenation, `FILENAME`/`FNR`, `$NF`, FS/OFS/ORS basics, regex/tab separators, and empty input behavior. Arithmetic, arrays, functions, field mutation, and control flow remain pending. |
 
 ## JBC-06 Core Command Conformance Slice
 
@@ -57,21 +58,22 @@ Mapped Rust tests:
 
 The upstream command package currently has 4,899 command-domain cases in the
 JB-01 generated inventory. JB-05 maps 83 command cases plus 6 core registry
-cases, JBC-06 maps 92 additional exact core-command cases, and JBC-07 maps 143
-additional text/search/structured-data rows to named Rust tests. These slices
-do not claim full command parity. After regeneration the full Just Bash ledger
-is `931` verified / `8,889` pending / `116` JS-only.
+cases, JBC-06 maps 92 additional exact core-command cases, JBC-07 maps 143
+additional text/search/structured-data rows, and JBC-09 maps 55 additional
+`command:awk` rows plus 20 AWK comparison rows to named Rust tests. These
+slices do not claim full command parity. After regeneration the full Just Bash
+ledger is `1,006` verified / `8,814` pending / `116` JS-only.
 
 The counts below are the exact current upstream command-family case counts from
-`docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, and JBC-07 row
-mappings. Seed smoke coverage in these slices does not close rows outside the
-named verified cases.
+`docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, and
+JBC-09 row mappings. Seed smoke coverage in these slices does not close rows
+outside the named verified cases.
 
 | Family | Exact upstream command cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |
 | Core filesystem command rows closed by JBC-06 (`cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`) | 92 | 92 | 0 |
 | `grep` basic/advanced/perl/exclude/binary/UTF-8 suite | 213 | 20 | 193 |
-| Full `awk` command language suite | 643 | 8 | 635 |
+| Full `awk` command language suite | 643 | 63 | 580 |
 | Full `sed` command/address/error suite | 231 | 10 | 221 |
 | Full `rg` ripgrep compatibility suite, including imported tests | 590 | 7 | 583 |
 | `head` command suite | 17 | 11 | 6 |

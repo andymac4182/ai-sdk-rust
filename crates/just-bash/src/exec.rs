@@ -2256,21 +2256,44 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
 
 fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut separator = AwkSeparator::Whitespace;
+    let mut variables = BTreeMap::new();
     let mut program = None;
     let mut paths = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         match arg.as_str() {
+            "--help" if program.is_none() => {
+                return stdout_result(
+                    "awk - pattern scanning and processing language\n\
+Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
+                );
+            }
             "-F" => {
                 if let Some(value) = args.get(index + 1) {
-                    separator = AwkSeparator::Literal(value.clone());
+                    separator = AwkSeparator::from_value(value);
                     index += 2;
                 } else {
                     return stderr_result(1, "awk: option requires an argument -- F\n");
                 }
             }
             _ if arg.starts_with("-F") && arg.len() > 2 => {
-                separator = AwkSeparator::Literal(arg[2..].to_string());
+                separator = AwkSeparator::from_value(&arg[2..]);
+                index += 1;
+            }
+            "-v" => {
+                if let Some(value) = args.get(index + 1) {
+                    if let Err(error) = assign_awk_variable(value, &mut variables) {
+                        return stderr_result(1, format!("awk: {error}\n"));
+                    }
+                    index += 2;
+                } else {
+                    return stderr_result(1, "awk: option requires an argument -- v\n");
+                }
+            }
+            _ if arg.starts_with("-v") && arg.len() > 2 => {
+                if let Err(error) = assign_awk_variable(&arg[2..], &mut variables) {
+                    return stderr_result(1, format!("awk: {error}\n"));
+                }
                 index += 1;
             }
             _ if program.is_none() => {
@@ -2286,30 +2309,76 @@ fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     let Some(program) = program else {
         return stderr_result(1, "awk: missing program\n");
     };
-    let input = match collect_text_inputs(state, &paths, stdin) {
-        Ok(input) => input,
+    let program = match parse_awk_program(&program) {
+        Ok(program) => program,
         Err(error) => return stderr_result(1, format!("awk: {error}\n")),
     };
-    let Some(print_items) = parse_awk_print_items(&program) else {
-        return stderr_result(1, "awk: unsupported program\n");
+    let inputs = match collect_named_text_inputs(state, &paths, stdin, "awk") {
+        Ok(inputs) => inputs,
+        Err(error) => return stderr_result(1, format!("awk: {error}\n")),
     };
     let mut stdout = String::new();
-    for (record_index, line) in input.lines().enumerate() {
-        let fields = awk_fields(line, &separator);
-        let values = print_items
-            .iter()
-            .map(|item| match item {
-                AwkPrintItem::WholeLine => line.to_string(),
-                AwkPrintItem::Field(field) => fields
-                    .get(field.saturating_sub(1))
-                    .cloned()
-                    .unwrap_or_default(),
-                AwkPrintItem::Nr => (record_index + 1).to_string(),
-                AwkPrintItem::Nf => fields.len().to_string(),
-            })
-            .collect::<Vec<_>>();
-        stdout.push_str(&values.join(" "));
-        stdout.push('\n');
+    let mut runtime = AwkRuntime {
+        separator,
+        ofs: " ".to_string(),
+        ors: "\n".to_string(),
+        variables,
+    };
+    let mut nr = 0usize;
+    let mut last_filename = String::new();
+
+    for rule in program
+        .rules
+        .iter()
+        .filter(|rule| matches!(rule.pattern, AwkPattern::Begin))
+    {
+        let context = AwkRecordContext::empty(nr, &last_filename);
+        if let Err(error) =
+            execute_awk_actions(rule.actions.as_slice(), &context, &mut runtime, &mut stdout)
+        {
+            return stderr_result(1, format!("awk: {error}\n"));
+        }
+    }
+
+    for input in &inputs {
+        last_filename.clone_from(&input.label);
+        for (line_index, line) in input.text.lines().enumerate() {
+            nr += 1;
+            let fnr = line_index + 1;
+            let fields = awk_fields(line, &runtime.separator);
+            let context = AwkRecordContext {
+                line,
+                fields,
+                nr,
+                fnr,
+                filename: &input.label,
+            };
+            for rule in program.rules.iter().filter(|rule| rule.pattern.is_record()) {
+                if rule.pattern.matches(&context, &runtime) {
+                    if let Err(error) = execute_awk_actions(
+                        rule.actions.as_slice(),
+                        &context,
+                        &mut runtime,
+                        &mut stdout,
+                    ) {
+                        return stderr_result(1, format!("awk: {error}\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    for rule in program
+        .rules
+        .iter()
+        .filter(|rule| matches!(rule.pattern, AwkPattern::End))
+    {
+        let context = AwkRecordContext::empty(nr, &last_filename);
+        if let Err(error) =
+            execute_awk_actions(rule.actions.as_slice(), &context, &mut runtime, &mut stdout)
+        {
+            return stderr_result(1, format!("awk: {error}\n"));
+        }
     }
     stdout_result(stdout)
 }
@@ -2550,45 +2619,865 @@ fn sed_address_matches(
 #[derive(Clone, Debug)]
 enum AwkSeparator {
     Whitespace,
-    Literal(String),
+    Pattern(String),
+}
+
+#[derive(Clone, Debug)]
+struct AwkProgram {
+    rules: Vec<AwkRule>,
+}
+
+#[derive(Clone, Debug)]
+struct AwkRule {
+    pattern: AwkPattern,
+    actions: Vec<AwkAction>,
+}
+
+#[derive(Clone, Debug)]
+struct AwkRuntime {
+    separator: AwkSeparator,
+    ofs: String,
+    ors: String,
+    variables: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+struct AwkRecordContext<'a> {
+    line: &'a str,
+    fields: Vec<String>,
+    nr: usize,
+    fnr: usize,
+    filename: &'a str,
+}
+
+#[derive(Clone, Debug)]
+enum AwkPattern {
+    Begin,
+    End,
+    Always,
+    Regex(Regex),
+    Condition(AwkCondition),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum AwkPrintItem {
-    WholeLine,
-    Field(usize),
-    Nr,
-    Nf,
+enum AwkCondition {
+    Comparison {
+        left: AwkExpr,
+        op: AwkCompareOp,
+        right: AwkExpr,
+    },
+    And(Box<AwkCondition>, Box<AwkCondition>),
+    Or(Box<AwkCondition>, Box<AwkCondition>),
 }
 
-fn parse_awk_print_items(program: &str) -> Option<Vec<AwkPrintItem>> {
-    let body = program.trim().strip_prefix('{')?.strip_suffix('}')?.trim();
-    let body = body.strip_prefix("print")?.trim();
-    if body.is_empty() {
-        return Some(vec![AwkPrintItem::WholeLine]);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AwkCompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AwkAction {
+    Assign { name: String, value: AwkExpr },
+    Print(Vec<AwkExpr>),
+    Printf { format: AwkExpr, args: Vec<AwkExpr> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AwkExpr {
+    Concat(Vec<AwkAtom>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AwkAtom {
+    WholeLine,
+    Field(usize),
+    LastField,
+    Identifier(String),
+    Literal(String),
+}
+
+impl AwkSeparator {
+    fn from_value(value: &str) -> Self {
+        let value = awk_unescape_string(value);
+        if value == " " {
+            Self::Whitespace
+        } else {
+            Self::Pattern(value)
+        }
     }
-    body.split(',')
-        .map(|entry| parse_awk_print_item(entry.trim()))
+}
+
+impl<'a> AwkRecordContext<'a> {
+    fn empty(nr: usize, filename: &'a str) -> Self {
+        Self {
+            line: "",
+            fields: Vec::new(),
+            nr,
+            fnr: 0,
+            filename,
+        }
+    }
+}
+
+impl AwkPattern {
+    fn is_record(&self) -> bool {
+        !matches!(self, Self::Begin | Self::End)
+    }
+
+    fn matches(&self, context: &AwkRecordContext<'_>, runtime: &AwkRuntime) -> bool {
+        match self {
+            Self::Begin | Self::End => false,
+            Self::Always => true,
+            Self::Regex(regex) => regex.is_match(context.line),
+            Self::Condition(condition) => condition.matches(context, runtime),
+        }
+    }
+}
+
+impl AwkCondition {
+    fn matches(&self, context: &AwkRecordContext<'_>, runtime: &AwkRuntime) -> bool {
+        match self {
+            Self::Comparison { left, op, right } => {
+                let left = eval_awk_expr(left, context, runtime);
+                let right = eval_awk_expr(right, context, runtime);
+                compare_awk_values(&left, *op, &right)
+            }
+            Self::And(left, right) => {
+                left.matches(context, runtime) && right.matches(context, runtime)
+            }
+            Self::Or(left, right) => {
+                left.matches(context, runtime) || right.matches(context, runtime)
+            }
+        }
+    }
+}
+
+fn assign_awk_variable(
+    assignment: &str,
+    variables: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some((name, value)) = assignment.split_once('=') else {
+        return Err(format!("invalid variable assignment: {assignment}"));
+    };
+    let name = name.trim();
+    if !is_awk_identifier(name) {
+        return Err(format!("invalid variable name: {name}"));
+    }
+    variables.insert(name.to_string(), awk_unescape_string(value));
+    Ok(())
+}
+
+fn parse_awk_program(program: &str) -> Result<AwkProgram, String> {
+    let mut cursor = 0;
+    let mut rules = Vec::new();
+    let source = program.trim();
+    while cursor < source.len() {
+        cursor = skip_awk_whitespace(source, cursor);
+        if cursor >= source.len() {
+            break;
+        }
+
+        let (pattern, block_start) = if starts_awk_keyword(source, cursor, "BEGIN") {
+            cursor += "BEGIN".len();
+            cursor = skip_awk_whitespace(source, cursor);
+            (AwkPattern::Begin, expect_awk_block(source, cursor)?)
+        } else if starts_awk_keyword(source, cursor, "END") {
+            cursor += "END".len();
+            cursor = skip_awk_whitespace(source, cursor);
+            (AwkPattern::End, expect_awk_block(source, cursor)?)
+        } else if source.as_bytes().get(cursor) == Some(&b'{') {
+            (AwkPattern::Always, cursor)
+        } else if source.as_bytes().get(cursor) == Some(&b'/') {
+            let (pattern, next_cursor) = parse_awk_regex_pattern(source, cursor)?;
+            cursor = skip_awk_whitespace(source, next_cursor);
+            if source.as_bytes().get(cursor) == Some(&b'{') {
+                (pattern, cursor)
+            } else {
+                rules.push(AwkRule {
+                    pattern,
+                    actions: vec![AwkAction::Print(vec![AwkExpr::whole_line()])],
+                });
+                cursor = next_cursor;
+                continue;
+            }
+        } else if let Some(block_start) = find_next_awk_block(source, cursor) {
+            let condition = source[cursor..block_start].trim();
+            let pattern = AwkPattern::Condition(parse_awk_condition(condition)?);
+            (pattern, block_start)
+        } else {
+            let condition = source[cursor..].trim();
+            rules.push(AwkRule {
+                pattern: AwkPattern::Condition(parse_awk_condition(condition)?),
+                actions: vec![AwkAction::Print(vec![AwkExpr::whole_line()])],
+            });
+            cursor = source.len();
+            continue;
+        };
+
+        let block_end = find_matching_awk_brace(source, block_start)
+            .ok_or_else(|| "unterminated action block".to_string())?;
+        let body = &source[block_start + 1..block_end];
+        let actions = parse_awk_actions(body)?;
+        rules.push(AwkRule { pattern, actions });
+        cursor = block_end + 1;
+    }
+
+    if rules.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    Ok(AwkProgram { rules })
+}
+
+impl AwkExpr {
+    fn whole_line() -> Self {
+        Self::Concat(vec![AwkAtom::WholeLine])
+    }
+}
+
+fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
+    let mut actions = Vec::new();
+    for statement in split_awk_top_level(body, ';') {
+        let statement = statement.trim();
+        if statement.is_empty() {
+            continue;
+        }
+        if let Some(rest) = strip_awk_keyword(statement, "print") {
+            actions.push(AwkAction::Print(parse_awk_print_exprs(rest)?));
+            continue;
+        }
+        if let Some(rest) = strip_awk_keyword(statement, "printf") {
+            actions.push(parse_awk_printf_action(rest)?);
+            continue;
+        }
+        if let Some(index) = find_awk_assignment(statement) {
+            let name = statement[..index].trim();
+            if !is_awk_identifier(name) {
+                return Err("unsupported program".to_string());
+            }
+            let value = parse_awk_concat_expr(statement[index + 1..].trim())?;
+            actions.push(AwkAction::Assign {
+                name: name.to_string(),
+                value,
+            });
+            continue;
+        }
+        return Err("unsupported program".to_string());
+    }
+    Ok(actions)
+}
+
+fn parse_awk_printf_action(rest: &str) -> Result<AwkAction, String> {
+    let rest = strip_awk_parentheses(rest.trim());
+    let parts = split_awk_top_level(rest, ',');
+    let Some(format) = parts.first() else {
+        return Err("unsupported program".to_string());
+    };
+    Ok(AwkAction::Printf {
+        format: parse_awk_concat_expr(format.trim())?,
+        args: parts
+            .iter()
+            .skip(1)
+            .map(|part| parse_awk_concat_expr(part.trim()))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn parse_awk_print_exprs(rest: &str) -> Result<Vec<AwkExpr>, String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(vec![AwkExpr::whole_line()]);
+    }
+    split_awk_top_level(rest, ',')
+        .into_iter()
+        .map(|entry| parse_awk_concat_expr(entry.trim()))
         .collect()
 }
 
-fn parse_awk_print_item(value: &str) -> Option<AwkPrintItem> {
-    match value {
-        "$0" => Some(AwkPrintItem::WholeLine),
-        "NR" => Some(AwkPrintItem::Nr),
-        "NF" => Some(AwkPrintItem::Nf),
-        _ => value
-            .strip_prefix('$')
-            .and_then(|field| field.parse().ok())
-            .map(AwkPrintItem::Field),
+fn parse_awk_concat_expr(value: &str) -> Result<AwkExpr, String> {
+    let mut atoms = Vec::new();
+    let mut cursor = 0;
+    let value = value.trim();
+    while cursor < value.len() {
+        cursor = skip_awk_whitespace(value, cursor);
+        if cursor >= value.len() {
+            break;
+        }
+        let rest = &value[cursor..];
+        if rest.starts_with('"') {
+            let end = find_awk_string_end(value, cursor)
+                .ok_or_else(|| "unterminated string literal".to_string())?;
+            atoms.push(AwkAtom::Literal(awk_unescape_string(
+                &value[cursor + 1..end],
+            )));
+            cursor = end + 1;
+            continue;
+        }
+        if rest == "$0" || rest.starts_with("$0 ") {
+            atoms.push(AwkAtom::WholeLine);
+            cursor += 2;
+            continue;
+        }
+        if rest == "$NF" || rest.starts_with("$NF ") {
+            atoms.push(AwkAtom::LastField);
+            cursor += 3;
+            continue;
+        }
+        if let Some(field_digits) = rest.strip_prefix('$').and_then(take_awk_digits) {
+            let field = field_digits
+                .parse::<usize>()
+                .map_err(|_| "unsupported program".to_string())?;
+            atoms.push(AwkAtom::Field(field));
+            cursor += 1 + field_digits.len();
+            continue;
+        }
+        if let Some(identifier) = take_awk_identifier(rest) {
+            atoms.push(AwkAtom::Identifier(identifier.to_string()));
+            cursor += identifier.len();
+            continue;
+        }
+        if let Some(number) = take_awk_number(rest) {
+            atoms.push(AwkAtom::Literal(number.to_string()));
+            cursor += number.len();
+            continue;
+        }
+        return Err("unsupported program".to_string());
+    }
+
+    if atoms.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    Ok(AwkExpr::Concat(atoms))
+}
+
+fn parse_awk_condition(value: &str) -> Result<AwkCondition, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    if let Some(index) = find_awk_operator(value, "||") {
+        return Ok(AwkCondition::Or(
+            Box::new(parse_awk_condition(&value[..index])?),
+            Box::new(parse_awk_condition(&value[index + 2..])?),
+        ));
+    }
+    if let Some(index) = find_awk_operator(value, "&&") {
+        return Ok(AwkCondition::And(
+            Box::new(parse_awk_condition(&value[..index])?),
+            Box::new(parse_awk_condition(&value[index + 2..])?),
+        ));
+    }
+    for (token, op) in [
+        (">=", AwkCompareOp::Ge),
+        ("<=", AwkCompareOp::Le),
+        ("==", AwkCompareOp::Eq),
+        ("!=", AwkCompareOp::Ne),
+        (">", AwkCompareOp::Gt),
+        ("<", AwkCompareOp::Lt),
+    ] {
+        if let Some(index) = find_awk_operator(value, token) {
+            return Ok(AwkCondition::Comparison {
+                left: parse_awk_concat_expr(&value[..index])?,
+                op,
+                right: parse_awk_concat_expr(&value[index + token.len()..])?,
+            });
+        }
+    }
+    Err("unsupported program".to_string())
+}
+
+fn execute_awk_actions(
+    actions: &[AwkAction],
+    context: &AwkRecordContext<'_>,
+    runtime: &mut AwkRuntime,
+    stdout: &mut String,
+) -> Result<(), String> {
+    for action in actions {
+        match action {
+            AwkAction::Assign { name, value } => {
+                let value = eval_awk_expr(value, context, runtime);
+                match name.as_str() {
+                    "FS" => runtime.separator = AwkSeparator::from_value(&value),
+                    "OFS" => runtime.ofs = value,
+                    "ORS" => runtime.ors = value,
+                    _ => {
+                        runtime.variables.insert(name.clone(), value);
+                    }
+                }
+            }
+            AwkAction::Print(expressions) => {
+                let values = expressions
+                    .iter()
+                    .map(|expr| eval_awk_expr(expr, context, runtime))
+                    .collect::<Vec<_>>();
+                stdout.push_str(&values.join(&runtime.ofs));
+                stdout.push_str(&runtime.ors);
+            }
+            AwkAction::Printf { format, args } => {
+                let format = eval_awk_expr(format, context, runtime);
+                let values = args
+                    .iter()
+                    .map(|expr| eval_awk_expr(expr, context, runtime))
+                    .collect::<Vec<_>>();
+                stdout.push_str(&format_awk_printf(&format, &values)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eval_awk_expr(
+    expression: &AwkExpr,
+    context: &AwkRecordContext<'_>,
+    runtime: &AwkRuntime,
+) -> String {
+    match expression {
+        AwkExpr::Concat(atoms) => atoms
+            .iter()
+            .map(|atom| eval_awk_atom(atom, context, runtime))
+            .collect::<Vec<_>>()
+            .join(""),
+    }
+}
+
+fn eval_awk_atom(atom: &AwkAtom, context: &AwkRecordContext<'_>, runtime: &AwkRuntime) -> String {
+    match atom {
+        AwkAtom::WholeLine => context.line.to_string(),
+        AwkAtom::Field(0) => context.line.to_string(),
+        AwkAtom::Field(field) => context
+            .fields
+            .get(field.saturating_sub(1))
+            .cloned()
+            .unwrap_or_default(),
+        AwkAtom::LastField => context.fields.last().cloned().unwrap_or_default(),
+        AwkAtom::Identifier(identifier) => match identifier.as_str() {
+            "NR" => context.nr.to_string(),
+            "FNR" => context.fnr.to_string(),
+            "NF" => context.fields.len().to_string(),
+            "FILENAME" => context.filename.to_string(),
+            "FS" => runtime.separator.as_value(),
+            "OFS" => runtime.ofs.clone(),
+            "ORS" => runtime.ors.clone(),
+            _ => runtime
+                .variables
+                .get(identifier)
+                .cloned()
+                .unwrap_or_default(),
+        },
+        AwkAtom::Literal(value) => value.clone(),
+    }
+}
+
+fn compare_awk_values(left: &str, op: AwkCompareOp, right: &str) -> bool {
+    let numeric = left.parse::<f64>().ok().zip(right.parse::<f64>().ok());
+    if let Some((left, right)) = numeric {
+        return match op {
+            AwkCompareOp::Eq => left == right,
+            AwkCompareOp::Ne => left != right,
+            AwkCompareOp::Gt => left > right,
+            AwkCompareOp::Ge => left >= right,
+            AwkCompareOp::Lt => left < right,
+            AwkCompareOp::Le => left <= right,
+        };
+    }
+    match op {
+        AwkCompareOp::Eq => left == right,
+        AwkCompareOp::Ne => left != right,
+        AwkCompareOp::Gt => left > right,
+        AwkCompareOp::Ge => left >= right,
+        AwkCompareOp::Lt => left < right,
+        AwkCompareOp::Le => left <= right,
+    }
+}
+
+fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
+    let mut output = String::new();
+    let mut chars = format.chars().peekable();
+    let mut arg_index = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+        let Some(specifier) = chars.next() else {
+            return Err("invalid printf format".to_string());
+        };
+        if specifier == '%' {
+            output.push('%');
+            continue;
+        }
+        let value = args.get(arg_index).cloned().unwrap_or_default();
+        arg_index += 1;
+        match specifier {
+            's' => output.push_str(&value),
+            'd' | 'i' => {
+                let number = value.parse::<f64>().unwrap_or_default() as i64;
+                output.push_str(&number.to_string());
+            }
+            _ => return Err("unsupported printf format".to_string()),
+        }
+    }
+    Ok(output)
+}
+
+fn parse_awk_regex_pattern(source: &str, start: usize) -> Result<(AwkPattern, usize), String> {
+    let mut cursor = start + 1;
+    while cursor < source.len() {
+        if source.as_bytes()[cursor] == b'/' && !is_awk_escaped(source, cursor) {
+            let pattern = &source[start + 1..cursor];
+            let regex = Regex::new(pattern).map_err(|error| error.to_string())?;
+            return Ok((AwkPattern::Regex(regex), cursor + 1));
+        }
+        cursor += 1;
+    }
+    Err("unterminated regex pattern".to_string())
+}
+
+fn expect_awk_block(source: &str, cursor: usize) -> Result<usize, String> {
+    if source.as_bytes().get(cursor) == Some(&b'{') {
+        Ok(cursor)
+    } else {
+        Err("unsupported program".to_string())
+    }
+}
+
+fn find_next_awk_block(source: &str, start: usize) -> Option<usize> {
+    let mut cursor = start;
+    let mut in_string = false;
+    while cursor < source.len() {
+        let ch = source.as_bytes()[cursor];
+        if ch == b'"' && !is_awk_escaped(source, cursor) {
+            in_string = !in_string;
+        } else if ch == b'{' && !in_string {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn find_matching_awk_brace(source: &str, start: usize) -> Option<usize> {
+    let mut cursor = start;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    while cursor < source.len() {
+        let ch = source.as_bytes()[cursor];
+        if ch == b'"' && !is_awk_escaped(source, cursor) {
+            in_string = !in_string;
+        } else if !in_string {
+            if ch == b'{' {
+                depth += 1;
+            } else if ch == b'}' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn find_awk_string_end(source: &str, start: usize) -> Option<usize> {
+    let mut cursor = start + 1;
+    while cursor < source.len() {
+        if source.as_bytes()[cursor] == b'"' && !is_awk_escaped(source, cursor) {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn find_awk_assignment(statement: &str) -> Option<usize> {
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    while cursor < statement.len() {
+        let ch = statement.as_bytes()[cursor];
+        if ch == b'"' && !is_awk_escaped(statement, cursor) {
+            in_string = !in_string;
+        } else if ch == b'=' && !in_string {
+            let previous = cursor
+                .checked_sub(1)
+                .and_then(|index| statement.as_bytes().get(index));
+            let next = statement.as_bytes().get(cursor + 1);
+            if !matches!(previous, Some(b'!' | b'<' | b'>' | b'=')) && next != Some(&b'=') {
+                return Some(cursor);
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn find_awk_operator(value: &str, operator: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let operator_bytes = operator.as_bytes();
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    while cursor + operator_bytes.len() <= bytes.len() {
+        if bytes[cursor] == b'"' && !is_awk_escaped(value, cursor) {
+            in_string = !in_string;
+            cursor += 1;
+            continue;
+        }
+        if !in_string && &bytes[cursor..cursor + operator_bytes.len()] == operator_bytes {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn split_awk_top_level(value: &str, delimiter: char) -> Vec<String> {
+    let delimiter = delimiter as u8;
+    let bytes = value.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut paren_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' if !is_awk_escaped(value, cursor) => in_string = !in_string,
+            b'(' if !in_string => paren_depth += 1,
+            b')' if !in_string => paren_depth = paren_depth.saturating_sub(1),
+            ch if ch == delimiter && !in_string && paren_depth == 0 => {
+                parts.push(value[start..cursor].to_string());
+                start = cursor + 1;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    parts.push(value[start..].to_string());
+    parts
+}
+
+fn strip_awk_parentheses(value: &str) -> &str {
+    let value = value.trim();
+    if value.starts_with('(')
+        && value.ends_with(')')
+        && find_matching_awk_paren(value, 0) == Some(value.len() - 1)
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+fn find_matching_awk_paren(source: &str, start: usize) -> Option<usize> {
+    let mut cursor = start;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    while cursor < source.len() {
+        let ch = source.as_bytes()[cursor];
+        if ch == b'"' && !is_awk_escaped(source, cursor) {
+            in_string = !in_string;
+        } else if !in_string {
+            if ch == b'(' {
+                depth += 1;
+            } else if ch == b')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn strip_awk_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
+    if !value.starts_with(keyword) {
+        return None;
+    }
+    let rest = &value[keyword.len()..];
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+fn starts_awk_keyword(source: &str, cursor: usize, keyword: &str) -> bool {
+    source[cursor..].starts_with(keyword)
+        && source[cursor + keyword.len()..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
+}
+
+fn skip_awk_whitespace(value: &str, start: usize) -> usize {
+    let mut cursor = start;
+    while value
+        .as_bytes()
+        .get(cursor)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn is_awk_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn take_awk_identifier(value: &str) -> Option<&str> {
+    let mut end = 0usize;
+    for (index, ch) in value.char_indices() {
+        if index == 0 {
+            if !(ch == '_' || ch.is_ascii_alphabetic()) {
+                return None;
+            }
+        } else if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    Some(&value[..end])
+}
+
+fn take_awk_digits(value: &str) -> Option<&str> {
+    let end = value
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map(|(index, ch)| index + ch.len_utf8())?;
+    Some(&value[..end])
+}
+
+fn take_awk_number(value: &str) -> Option<&str> {
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    let mut end = 0usize;
+    for (index, ch) in value.char_indices() {
+        if ch.is_ascii_digit() {
+            seen_digit = true;
+            end = index + ch.len_utf8();
+        } else if ch == '.' && !seen_dot {
+            seen_dot = true;
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if seen_digit {
+        Some(&value[..end])
+    } else {
+        None
+    }
+}
+
+fn is_awk_escaped(value: &str, index: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut cursor = index;
+    while cursor > 0 && value.as_bytes()[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn awk_unescape_string(value: &str) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor < chars.len() {
+        if chars[cursor] != '\\' {
+            output.push(chars[cursor]);
+            cursor += 1;
+            continue;
+        }
+        cursor += 1;
+        let Some(ch) = chars.get(cursor).copied() else {
+            output.push('\\');
+            break;
+        };
+        match ch {
+            'n' => output.push('\n'),
+            't' => output.push('\t'),
+            'f' => output.push('\x0c'),
+            'r' => output.push('\r'),
+            'b' => output.push('\x08'),
+            'v' => output.push('\x0b'),
+            'a' => output.push('\x07'),
+            '\\' => output.push('\\'),
+            '"' => output.push('"'),
+            'x' => {
+                let mut hex = String::new();
+                for offset in 1..=2 {
+                    if let Some(next) = chars.get(cursor + offset)
+                        && next.is_ascii_hexdigit()
+                    {
+                        hex.push(*next);
+                    } else {
+                        break;
+                    }
+                }
+                if let Ok(value) = u8::from_str_radix(&hex, 16) {
+                    output.push(value as char);
+                    cursor += hex.len();
+                } else {
+                    output.push('x');
+                }
+            }
+            '0'..='7' => {
+                let mut octal = ch.to_string();
+                for offset in 1..=2 {
+                    if let Some(next @ '0'..='7') = chars.get(cursor + offset) {
+                        octal.push(*next);
+                    } else {
+                        break;
+                    }
+                }
+                if let Ok(value) = u8::from_str_radix(&octal, 8) {
+                    output.push(value as char);
+                    cursor += octal.len() - 1;
+                }
+            }
+            other => output.push(other),
+        }
+        cursor += 1;
+    }
+    output
+}
+
+impl AwkSeparator {
+    fn as_value(&self) -> String {
+        match self {
+            Self::Whitespace => " ".to_string(),
+            Self::Pattern(pattern) => pattern.clone(),
+        }
     }
 }
 
 fn awk_fields(line: &str, separator: &AwkSeparator) -> Vec<String> {
     match separator {
         AwkSeparator::Whitespace => line.split_whitespace().map(ToString::to_string).collect(),
-        AwkSeparator::Literal(separator) => {
-            line.split(separator).map(ToString::to_string).collect()
+        AwkSeparator::Pattern(separator) => {
+            if separator.is_empty() {
+                return line.chars().map(|ch| ch.to_string()).collect();
+            }
+            Regex::new(separator).map_or_else(
+                |_| line.split(separator).map(ToString::to_string).collect(),
+                |regex| regex.split(line).map(ToString::to_string).collect(),
+            )
         }
     }
 }
