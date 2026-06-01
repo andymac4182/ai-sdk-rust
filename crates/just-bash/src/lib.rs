@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod commands;
 mod encoding;
 mod error;
 mod exec;
@@ -12,11 +13,15 @@ mod file_reader;
 mod fs;
 mod glob;
 mod path;
+mod runtime;
 mod sanitize;
 pub mod security;
 mod session;
 mod shell;
 
+pub use commands::{
+    Builtin, CommandRegistry, UPSTREAM_COMMAND_REGISTRY, UPSTREAM_DEFAULT_COMMAND_NAMES,
+};
 pub use encoding::{
     BufferEncoding, ByteString, FileContent, OutputPayload, bytes_to_string, content_to_bytes,
 };
@@ -39,6 +44,7 @@ pub use path::{
     MAX_SYMLINK_DEPTH, dirname, is_path_within_root, join_path, normalize_path, resolve_path,
     resolve_symlink_target, validate_path,
 };
+pub use runtime::{Bash, BashOptions};
 pub use sanitize::{sanitize_error_message, sanitize_host_error_message};
 pub use security::{
     AllowedUrlEntry, CancellationState, CommandSecurityPolicy, DiagnosticSeverity, DnsAddress,

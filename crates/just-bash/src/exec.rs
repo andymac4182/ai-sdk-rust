@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+use crate::commands::CommandRegistry;
 use crate::encoding::OutputPayload;
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
-use crate::fs::{MkdirOptions, RmOptions, VirtualFileSystem};
+use crate::fs::{CpOptions, MkdirOptions, RmOptions, VirtualFileSystem};
 use crate::path::resolve_path;
 
 /// Stable metadata label for the Rust in-process backend.
@@ -317,6 +318,8 @@ pub struct JustBashSessionOptions {
     pub max_command_count: Option<usize>,
     /// Optional executor command registry.
     pub executor: Option<JustBashExecutor>,
+    /// Optional portable command allow-list.
+    pub commands: Option<Vec<String>>,
 }
 
 impl JustBashSessionOptions {
@@ -366,6 +369,16 @@ impl JustBashSessionOptions {
         self.executor = Some(executor);
         self
     }
+
+    /// Restricts the portable command registry.
+    pub fn with_commands<I, S>(mut self, commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.commands = Some(commands.into_iter().map(Into::into).collect());
+        self
+    }
 }
 
 /// In-process shell session with a persistent virtual filesystem and fresh
@@ -384,6 +397,7 @@ struct JustBashSessionInner {
     max_output_length: usize,
     max_command_count: usize,
     executor: Option<JustBashExecutor>,
+    commands: CommandRegistry,
 }
 
 impl JustBashSession {
@@ -420,6 +434,11 @@ impl JustBashSession {
                     .unwrap_or(JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH),
                 max_command_count: options.max_command_count.unwrap_or(10_000),
                 executor: options.executor,
+                commands: options
+                    .commands
+                    .as_deref()
+                    .map(CommandRegistry::filtered)
+                    .unwrap_or_default(),
             }),
         }
     }
@@ -491,6 +510,16 @@ impl JustBashSession {
     pub fn write_file(&self, path: &str, content: &str) -> JustBashResult<()> {
         let mut fs = self.inner.fs.lock().map_err(|_| lock_poisoned_error())?;
         fs.write_file(path, content)
+    }
+
+    /// Returns true when a virtual path exists.
+    pub fn file_exists(&self, path: &str) -> bool {
+        self.inner.fs.lock().is_ok_and(|fs| fs.stat(path).is_ok())
+    }
+
+    /// Returns sorted registered portable command names.
+    pub fn registered_command_names(&self) -> Vec<String> {
+        self.inner.commands.names()
     }
 }
 
@@ -595,8 +624,24 @@ fn execute_simple_command(
             ),
         );
     }
+    if let Some(result) = execute_assignment_substitution(state, command, &stdin) {
+        return result;
+    }
 
     let (command, redirect) = split_stdout_redirection(command);
+    let (command, stdin_redirect) = split_stdin_redirection(command);
+    let stdin = if let Some(path) = stdin_redirect {
+        let path = resolve_path(&state.cwd, &path);
+        match state.session.inner.fs.lock() {
+            Ok(fs) => match fs.read_file(&path) {
+                Ok(content) => content,
+                Err(_) => return stderr_result(1, format!("bash: {path}: No such file\n")),
+            },
+            Err(_) => return stderr_result(1, "bash: filesystem lock poisoned\n"),
+        }
+    } else {
+        stdin
+    };
     let mut tokens = match tokenize(command, &state.env) {
         Ok(tokens) => tokens,
         Err(error) => return stderr_result(2, format!("bash: {error}\n")),
@@ -670,6 +715,9 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
     if let Some(result) = execute_executor_command(state, command, &tokens[1..], &stdin) {
         return result;
     }
+    if !state.session.inner.commands.contains(command) {
+        return stderr_result(127, format!("bash: {}: command not found\n", tokens[0]));
+    }
 
     match command {
         "true" => CommandResult::default(),
@@ -702,17 +750,30 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
             }
             CommandResult::default()
         }
-        "printenv" | "env" => command_printenv(state, &tokens[1..]),
+        "env" => command_env(state, &tokens[1..], &stdin),
+        "printenv" => command_printenv(state, &tokens[1..]),
         "cd" => command_cd(state, tokens.get(1).map(String::as_str)),
         "cat" => command_cat(state, &tokens[1..], &stdin),
         "grep" => command_grep(state, &tokens[1..], &stdin),
+        "fgrep" | "egrep" => command_grep(state, &tokens[1..], &stdin),
+        "rg" => command_rg(state, &tokens[1..], &stdin),
+        "sed" => command_sed(state, &tokens[1..], &stdin),
+        "awk" => command_awk(state, &tokens[1..], &stdin),
+        "head" => command_head(state, &tokens[1..], &stdin),
         "wc" => command_wc(&tokens[1..], &stdin),
         "ls" => command_ls(state, &tokens[1..]),
         "mkdir" => command_mkdir(state, &tokens[1..]),
         "touch" => command_touch(state, &tokens[1..]),
         "rm" => command_rm(state, &tokens[1..]),
+        "cp" => command_cp(state, &tokens[1..]),
+        "mv" => command_mv(state, &tokens[1..]),
+        "find" => command_find(state, &tokens[1..]),
+        "read" => command_read(state, &tokens[1..], &stdin),
+        "jq" => command_jq(state, &tokens[1..], &stdin),
+        "which" => command_which(state, &tokens[1..]),
+        "whoami" => stdout_result("user\n"),
         "sleep" => command_sleep(state, &tokens[1..]),
-        "bash" => command_bash(state, &tokens[1..], stdin),
+        "bash" | "sh" => command_bash(command, state, &tokens[1..], stdin),
         _ => stderr_result(127, format!("bash: {}: command not found\n", tokens[0])),
     }
 }
@@ -722,10 +783,23 @@ fn command_echo(args: &[String]) -> CommandResult {
     let mut escapes = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-n" => newline = false,
-            "-e" => escapes = true,
-            _ => break,
+        if !arg.starts_with('-') || arg == "-" || arg == "--" {
+            break;
+        }
+        let mut recognized = true;
+        for flag in arg[1..].chars() {
+            match flag {
+                'n' => newline = false,
+                'e' => escapes = true,
+                'E' => escapes = false,
+                _ => {
+                    recognized = false;
+                    break;
+                }
+            }
+        }
+        if !recognized {
+            break;
         }
         index += 1;
     }
@@ -748,7 +822,7 @@ fn command_printf(args: &[String]) -> CommandResult {
     };
     let mut output = String::new();
     let mut arg_index = 1;
-    let placeholder_count = format.matches("%s").count();
+    let placeholder_count = count_printf_conversions(format);
     if placeholder_count == 0 {
         output.push_str(&render_printf_format(format, &[], &mut arg_index));
         return stdout_result(output);
@@ -764,21 +838,62 @@ fn render_printf_format(format: &str, args: &[String], arg_index: &mut usize) ->
     let mut chars = format.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '%' if matches!(chars.peek(), Some('s')) => {
-                chars.next();
-                if let Some(arg) = args.get(*arg_index) {
-                    output.push_str(arg);
-                    *arg_index += 1;
-                }
-            }
             '%' if matches!(chars.peek(), Some('%')) => {
                 chars.next();
                 output.push('%');
+            }
+            '%' => {
+                let specifier = chars.next().unwrap_or('%');
+                let value = args.get(*arg_index).map(String::as_str).unwrap_or("");
+                if matches!(specifier, 's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o') {
+                    *arg_index += usize::from(*arg_index < args.len());
+                }
+                match specifier {
+                    's' => output.push_str(value),
+                    'd' | 'i' => output.push_str(&value.parse::<i64>().unwrap_or(0).to_string()),
+                    'f' => output.push_str(&format!("{:.6}", value.parse::<f64>().unwrap_or(0.0))),
+                    'x' => output.push_str(&format!("{:x}", value.parse::<i64>().unwrap_or(0))),
+                    'X' => output.push_str(&format!("{:X}", value.parse::<i64>().unwrap_or(0))),
+                    'o' => output.push_str(&format!("{:o}", value.parse::<i64>().unwrap_or(0))),
+                    other => {
+                        output.push('%');
+                        output.push(other);
+                    }
+                }
             }
             '\\' => match chars.next() {
                 Some('n') => output.push('\n'),
                 Some('t') => output.push('\t'),
                 Some('r') => output.push('\r'),
+                Some('e') | Some('E') => output.push('\u{001b}'),
+                Some('x') => {
+                    let mut hex = String::new();
+                    for _ in 0..2 {
+                        if let Some(next) = chars.peek().copied()
+                            && next.is_ascii_hexdigit()
+                        {
+                            hex.push(next);
+                            chars.next();
+                        }
+                    }
+                    if let Ok(value) = u8::from_str_radix(&hex, 16) {
+                        output.push(value as char);
+                    }
+                }
+                Some(first @ '0'..='7') => {
+                    let mut octal = String::from(first);
+                    for _ in 0..2 {
+                        if let Some(next) = chars.peek().copied()
+                            && matches!(next, '0'..='7')
+                        {
+                            octal.push(next);
+                            chars.next();
+                        }
+                    }
+                    if let Ok(value) = u8::from_str_radix(&octal, 8) {
+                        output.push(value as char);
+                    }
+                }
                 Some(other) => {
                     output.push('\\');
                     output.push(other);
@@ -791,7 +906,26 @@ fn render_printf_format(format: &str, args: &[String], arg_index: &mut usize) ->
     output
 }
 
+fn count_printf_conversions(format: &str) -> usize {
+    let mut count = 0;
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        match chars.next() {
+            Some('%') | None => {}
+            Some('s' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o') => count += 1,
+            Some(_) => {}
+        }
+    }
+    count
+}
+
 fn command_printenv(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.first().is_some_and(|arg| arg == "--help") {
+        return stdout_result("Usage: printenv [NAME]...\nPrint environment variables.\n");
+    }
     if args.is_empty() {
         let stdout: String = state
             .env
@@ -815,6 +949,58 @@ fn command_printenv(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         exit_code,
         ..CommandResult::default()
     }
+}
+
+fn command_env(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.first().is_some_and(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]\nPrint or run a command in the environment.\n",
+        );
+    }
+
+    let mut env = state.env.clone();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-i" | "--ignore-environment" => {
+                env.clear();
+                index += 1;
+            }
+            "-u" | "--unset" => {
+                if let Some(name) = args.get(index + 1) {
+                    env.remove(name);
+                    index += 2;
+                } else {
+                    return stderr_result(125, "env: option requires an argument -- u\n");
+                }
+            }
+            _ if arg.starts_with("-u") && arg.len() > 2 => {
+                env.remove(&arg[2..]);
+                index += 1;
+            }
+            _ if is_assignment(arg) => {
+                let (key, value) = arg
+                    .split_once('=')
+                    .expect("assignment contains an equals sign");
+                env.insert(key.to_string(), value.to_string());
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+
+    if index == args.len() {
+        let stdout: String = env
+            .iter()
+            .map(|(key, value)| format!("{key}={value}\n"))
+            .collect();
+        return stdout_result(stdout);
+    }
+
+    let old_env = std::mem::replace(&mut state.env, env);
+    let result = execute_tokens(state, &args[index..], stdin.to_string());
+    state.env = old_env;
+    result
 }
 
 fn command_cd(state: &mut ExecState<'_>, target: Option<&str>) -> CommandResult {
@@ -881,37 +1067,84 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
 }
 
 fn command_grep(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let Some(pattern) = args.first() else {
+    let mut ignore_case = false;
+    let mut invert = false;
+    let mut line_number = false;
+    let mut count_only = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-i" | "--ignore-case" => ignore_case = true,
+            "-v" | "--invert-match" => invert = true,
+            "-n" | "--line-number" => line_number = true,
+            "-c" | "--count" => count_only = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'i' => ignore_case = true,
+                        'v' => invert = true,
+                        'n' => line_number = true,
+                        'c' => count_only = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => break,
+        }
+        index += 1;
+    }
+
+    let Some(pattern) = args.get(index) else {
         return stderr_result(2, "grep: missing pattern\n");
     };
-    let input = if args.len() == 1 {
-        stdin.to_string()
+    let files = &args[index + 1..];
+    let input = if files.is_empty() {
+        vec![("".to_string(), stdin.to_string())]
     } else {
         let fs = match state.session.inner.fs.lock() {
             Ok(fs) => fs,
             Err(_) => return stderr_result(1, "grep: filesystem lock poisoned\n"),
         };
-        let mut input = String::new();
-        for path in &args[1..] {
+        let mut inputs = Vec::new();
+        for path in files {
             let path = resolve_path(&state.cwd, path);
             match fs.read_file(&path) {
-                Ok(content) => input.push_str(&content),
+                Ok(content) => inputs.push((path, content)),
                 Err(_) => {
                     return stderr_result(2, format!("grep: {path}: No such file or directory\n"));
                 }
             }
         }
-        input
+        inputs
     };
     let mut stdout = String::new();
-    for line in input.lines() {
-        if line.contains(pattern) {
-            stdout.push_str(line);
-            stdout.push('\n');
+    let mut matches = 0;
+    for (path, text) in input {
+        for (line_index, line) in text.lines().enumerate() {
+            let matched = line_matches(line, pattern, ignore_case);
+            if matched ^ invert {
+                matches += 1;
+                if count_only {
+                    continue;
+                }
+                if files.len() > 1 {
+                    stdout.push_str(&path);
+                    stdout.push(':');
+                }
+                if line_number {
+                    stdout.push_str(&(line_index + 1).to_string());
+                    stdout.push(':');
+                }
+                stdout.push_str(line);
+                stdout.push('\n');
+            }
         }
     }
+    if count_only {
+        stdout.push_str(&format!("{matches}\n"));
+    }
     CommandResult {
-        exit_code: if stdout.is_empty() { 1 } else { 0 },
+        exit_code: if matches == 0 { 1 } else { 0 },
         stdout,
         ..CommandResult::default()
     }
@@ -964,11 +1197,18 @@ fn command_mkdir(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
 }
 
 fn command_touch(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let paths = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return stderr_result(1, "touch: missing file operand\n");
+    }
     let mut fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "touch: filesystem lock poisoned\n"),
     };
-    for path in args {
+    for path in paths {
         if let Err(error) = fs.append_file(&resolve_path(&state.cwd, path), "") {
             return stderr_result(1, format!("touch: {error}\n"));
         }
@@ -995,6 +1235,394 @@ fn command_rm(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
     CommandResult::default()
 }
 
+fn command_cp(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut recursive = false;
+    let paths = args
+        .iter()
+        .filter(|arg| match arg.as_str() {
+            "-r" | "-R" | "--recursive" => {
+                recursive = true;
+                false
+            }
+            _ if arg.starts_with('-') => false,
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    if paths.len() < 2 {
+        return stderr_result(1, "cp: missing file operand\n");
+    }
+    let src = resolve_path(&state.cwd, paths[0]);
+    let dest = resolve_path(&state.cwd, paths[1]);
+    match state.session.inner.fs.lock() {
+        Ok(mut fs) => match fs.cp(&src, &dest, CpOptions { recursive }) {
+            Ok(()) => CommandResult::default(),
+            Err(error) => stderr_result(1, format!("cp: {error}\n")),
+        },
+        Err(_) => stderr_result(1, "cp: filesystem lock poisoned\n"),
+    }
+}
+
+fn command_mv(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let paths = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .collect::<Vec<_>>();
+    if paths.len() < 2 {
+        return stderr_result(1, "mv: missing file operand\n");
+    }
+    let src = resolve_path(&state.cwd, paths[0]);
+    let dest = resolve_path(&state.cwd, paths[1]);
+    match state.session.inner.fs.lock() {
+        Ok(mut fs) => match fs.mv(&src, &dest) {
+            Ok(()) => CommandResult::default(),
+            Err(error) => stderr_result(1, format!("mv: {error}\n")),
+        },
+        Err(_) => stderr_result(1, "mv: filesystem lock poisoned\n"),
+    }
+}
+
+fn command_find(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    let root_arg = args
+        .iter()
+        .find(|arg| !arg.starts_with('-') && arg.as_str() != "f")
+        .map(String::as_str)
+        .unwrap_or(".");
+    let root = resolve_path(&state.cwd, root_arg);
+    let name_pattern = args
+        .windows(2)
+        .find_map(|window| (window[0] == "-name").then_some(window[1].as_str()));
+    let type_filter = args
+        .windows(2)
+        .find_map(|window| (window[0] == "-type").then_some(window[1].as_str()));
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "find: filesystem lock poisoned\n"),
+    };
+    let mut paths = fs
+        .get_all_paths()
+        .into_iter()
+        .filter(|path| path == &root || path.starts_with(&format!("{root}/")))
+        .filter(|path| {
+            let Ok(stat) = fs.stat(path) else {
+                return false;
+            };
+            match type_filter {
+                Some("f") => stat.is_file,
+                Some("d") => stat.is_directory,
+                _ => true,
+            }
+        })
+        .filter(|path| {
+            name_pattern.is_none_or(|pattern| {
+                wildcard_match(pattern, path.rsplit('/').next().unwrap_or(path))
+            })
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    stdout_result(
+        paths
+            .into_iter()
+            .map(|path| format!("{path}\n"))
+            .collect::<String>(),
+    )
+}
+
+fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(pattern) = args.iter().find(|arg| !arg.starts_with('-')) else {
+        return stderr_result(2, "rg: missing pattern\n");
+    };
+    let roots = args
+        .iter()
+        .skip_while(|arg| *arg != pattern)
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return command_grep(state, std::slice::from_ref(pattern), stdin);
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "rg: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut matches = 0;
+    for root in roots {
+        let root = resolve_path(&state.cwd, root);
+        let mut paths = fs
+            .get_all_paths()
+            .into_iter()
+            .filter(|path| path == &root || path.starts_with(&format!("{root}/")))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let Ok(stat) = fs.stat(&path) else {
+                continue;
+            };
+            if !stat.is_file {
+                continue;
+            }
+            if let Ok(content) = fs.read_file(&path) {
+                for line in content
+                    .lines()
+                    .filter(|line| line_matches(line, pattern, false))
+                {
+                    matches += 1;
+                    stdout.push_str(&path);
+                    stdout.push(':');
+                    stdout.push_str(line);
+                    stdout.push('\n');
+                }
+            }
+        }
+    }
+    CommandResult {
+        exit_code: if matches == 0 { 1 } else { 0 },
+        stdout,
+        ..CommandResult::default()
+    }
+}
+
+fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(script) = args.first() else {
+        return stderr_result(1, "sed: missing script\n");
+    };
+    let input = match collect_text_inputs(state, &args[1..], stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("sed: {error}\n")),
+    };
+    let Some((from, to, global)) = parse_sed_substitution(script) else {
+        return stderr_result(1, "sed: unsupported script\n");
+    };
+    let output = if global {
+        input.replace(&from, &to)
+    } else {
+        input
+            .lines()
+            .map(|line| line.replacen(&from, &to, 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + if input.ends_with('\n') { "\n" } else { "" }
+    };
+    stdout_result(output)
+}
+
+fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(program) = args.first() else {
+        return stderr_result(1, "awk: missing program\n");
+    };
+    let input = match collect_text_inputs(state, &args[1..], stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+    };
+    let field = if program.contains("$0") {
+        Some(0)
+    } else {
+        program.split('$').nth(1).and_then(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+    };
+    let Some(field) = field else {
+        return stderr_result(1, "awk: unsupported program\n");
+    };
+    let mut stdout = String::new();
+    for line in input.lines() {
+        if field == 0 {
+            stdout.push_str(line);
+        } else if let Some(value) = line.split_whitespace().nth(field - 1) {
+            stdout.push_str(value);
+        }
+        stdout.push('\n');
+    }
+    stdout_result(stdout)
+}
+
+fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut lines = 10;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "-n" {
+            if let Some(value) = args
+                .get(index + 1)
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                lines = value;
+            }
+            index += 2;
+        } else if let Some(value) = arg
+            .strip_prefix('-')
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            lines = value;
+            index += 1;
+        } else {
+            paths.push(arg.clone());
+            index += 1;
+        }
+    }
+    let input = match collect_text_inputs(state, &paths, stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("head: {error}\n")),
+    };
+    let mut stdout = input.lines().take(lines).collect::<Vec<_>>().join("\n");
+    if !stdout.is_empty() {
+        stdout.push('\n');
+    }
+    stdout_result(stdout)
+}
+
+fn command_read(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(name) = args.first() else {
+        return CommandResult::default();
+    };
+    let value = stdin.lines().next().unwrap_or_default().to_string();
+    state.env.insert(name.clone(), value);
+    CommandResult::default()
+}
+
+fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let Some(filter) = args.first() else {
+        return stderr_result(2, "jq: missing filter\n");
+    };
+    let input = match collect_text_inputs(state, &args[1..], stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("jq: {error}\n")),
+    };
+    let Ok(value) = serde_json::from_str::<JsonValue>(&input) else {
+        return stderr_result(4, "jq: invalid JSON\n");
+    };
+    if filter == "." {
+        return stdout_result(format!("{value}\n"));
+    }
+    let Some(field) = filter.strip_prefix('.') else {
+        return stderr_result(3, "jq: unsupported filter\n");
+    };
+    let selected = value.get(field).cloned().unwrap_or(JsonValue::Null);
+    let rendered = match selected {
+        JsonValue::String(value) => value,
+        other => other.to_string(),
+    };
+    stdout_result(format!("{rendered}\n"))
+}
+
+fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut stdout = String::new();
+    let mut exit_code = 0;
+    for arg in args {
+        if state.session.inner.commands.contains(arg) {
+            stdout.push_str("/usr/bin/");
+            stdout.push_str(arg);
+            stdout.push('\n');
+        } else {
+            exit_code = 1;
+        }
+    }
+    CommandResult {
+        stdout,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn collect_text_inputs(
+    state: &ExecState<'_>,
+    paths: &[String],
+    stdin: &str,
+) -> Result<String, String> {
+    if paths.is_empty() {
+        return Ok(stdin.to_string());
+    }
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| "filesystem lock poisoned".to_string())?;
+    let mut input = String::new();
+    for path in paths {
+        let path = resolve_path(&state.cwd, path);
+        input.push_str(
+            &fs.read_file(&path)
+                .map_err(|_| format!("{path}: No such file or directory"))?,
+        );
+    }
+    Ok(input)
+}
+
+fn line_matches(line: &str, pattern: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        line.to_ascii_lowercase()
+            .contains(&pattern.to_ascii_lowercase())
+    } else {
+        line.contains(pattern)
+    }
+}
+
+fn parse_sed_substitution(script: &str) -> Option<(String, String, bool)> {
+    let mut chars = script.chars();
+    if chars.next()? != 's' {
+        return None;
+    }
+    let delimiter = chars.next()?;
+    let rest = chars.as_str();
+    let (from, rest) = rest.split_once(delimiter)?;
+    let (to, flags) = rest.split_once(delimiter)?;
+    Some((from.to_string(), to.to_string(), flags.contains('g')))
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut remaining = text;
+    if let Some(first) = parts.first()
+        && !first.is_empty()
+    {
+        let Some(stripped) = remaining.strip_prefix(first) else {
+            return false;
+        };
+        remaining = stripped;
+    }
+    for part in parts.iter().skip(1).take(parts.len().saturating_sub(2)) {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(index) = remaining.find(part) else {
+            return false;
+        };
+        remaining = &remaining[index + part.len()..];
+    }
+    if let Some(last) = parts.last()
+        && !last.is_empty()
+    {
+        return remaining.ends_with(last);
+    }
+    true
+}
+
+fn is_assignment(value: &str) -> bool {
+    value
+        .split_once('=')
+        .is_some_and(|(name, _)| is_valid_var_name(name))
+}
+
+fn is_valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     let ms = args
         .iter()
@@ -1011,16 +1639,51 @@ fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     CommandResult::default()
 }
 
-fn command_bash(state: &mut ExecState<'_>, args: &[String], stdin: String) -> CommandResult {
+fn command_bash(
+    shell_name: &str,
+    state: &mut ExecState<'_>,
+    args: &[String],
+    stdin: String,
+) -> CommandResult {
+    if args.is_empty() {
+        return CommandResult::default();
+    }
+    if args.first().is_some_and(|arg| arg == "--help") {
+        return stdout_result(format!(
+            "Usage: {shell_name} [-c command] [script] [args...]\n"
+        ));
+    }
     if args.first().is_some_and(|arg| arg == "-c") {
         if let Some(script) = args.get(1) {
             let old_stdin = std::mem::replace(&mut state.stdin, stdin);
+            let positional = args.iter().skip(3).cloned().collect::<Vec<_>>();
+            let old_positionals = set_positional_args(state, positional);
             let result = execute_control_script(state, script);
+            restore_positional_args(state, old_positionals);
             state.stdin = old_stdin;
             return result;
         }
     }
-    stderr_result(127, "bash: unsupported bash invocation\n")
+    let script_path = resolve_path(&state.cwd, &args[0]);
+    let script = match state.session.inner.fs.lock() {
+        Ok(fs) => match fs.read_file(&script_path) {
+            Ok(script) => script,
+            Err(_) => {
+                return stderr_result(
+                    127,
+                    format!("{shell_name}: {}: No such file or directory\n", args[0]),
+                );
+            }
+        },
+        Err(_) => return stderr_result(1, "bash: filesystem lock poisoned\n"),
+    };
+    let script = strip_shebang(&script);
+    let old_stdin = std::mem::replace(&mut state.stdin, stdin);
+    let old_positionals = set_positional_args(state, args[1..].to_vec());
+    let result = execute_control_script(state, script);
+    restore_positional_args(state, old_positionals);
+    state.stdin = old_stdin;
+    result
 }
 
 fn execute_executor_command(
@@ -1213,7 +1876,9 @@ fn split_unquoted(input: &str, separator: char) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut quote = None::<char>;
-    for ch in input.chars() {
+    let mut substitution_depth = 0usize;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
         match quote {
             Some(q) if ch == q => {
                 quote = None;
@@ -1224,7 +1889,16 @@ fn split_unquoted(input: &str, separator: char) -> Vec<String> {
                 quote = Some(ch);
                 current.push(ch);
             }
-            None if ch == separator => {
+            None if ch == '$' && matches!(chars.peek(), Some('(')) => {
+                substitution_depth += 1;
+                current.push(ch);
+                current.push(chars.next().expect("peeked command substitution open"));
+            }
+            None if ch == ')' && substitution_depth > 0 => {
+                substitution_depth -= 1;
+                current.push(ch);
+            }
+            None if ch == separator && substitution_depth == 0 => {
                 parts.push(current.trim().to_string());
                 current.clear();
             }
@@ -1259,6 +1933,27 @@ fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
                     .trim()
                     .to_string();
                 return (command[..byte].trim(), Some((target, append)));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    (command, None)
+}
+
+fn split_stdin_redirection(command: &str) -> (&str, Option<String>) {
+    let mut quote = None::<char>;
+    let chars = command.char_indices().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte, ch) = chars[index];
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '<' => {
+                let target = command[byte + 1..].trim().to_string();
+                return (command[..byte].trim(), Some(target));
             }
             _ => {}
         }
@@ -1339,9 +2034,78 @@ fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, Strin
         let name = chars[start + 1..end].iter().collect::<String>();
         *index = end - 1;
         env.get(&name).cloned().unwrap_or_default()
+    } else if next.is_ascii_digit() || matches!(*next, '#' | '@' | '*') {
+        *index = start + 1;
+        env.get(&next.to_string()).cloned().unwrap_or_default()
     } else {
         "$".to_string()
     }
+}
+
+fn execute_assignment_substitution(
+    state: &mut ExecState<'_>,
+    command: &str,
+    stdin: &str,
+) -> Option<CommandResult> {
+    let (name, rest) = command.split_once("=$(")?;
+    if !is_valid_var_name(name.trim()) || !rest.ends_with(')') {
+        return None;
+    }
+    let inner = &rest[..rest.len() - 1];
+    let old_stdin = std::mem::replace(&mut state.stdin, stdin.to_string());
+    let result = execute_control_script(state, inner);
+    state.stdin = old_stdin;
+    if result.exit_code == 0 {
+        state.env.insert(
+            name.trim().to_string(),
+            result.stdout.trim_end_matches('\n').to_string(),
+        );
+    }
+    Some(CommandResult {
+        stdout: String::new(),
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        exit_requested: result.exit_requested,
+    })
+}
+
+fn set_positional_args(
+    state: &mut ExecState<'_>,
+    args: Vec<String>,
+) -> Vec<(String, Option<String>)> {
+    let mut keys = vec!["#".to_string(), "@".to_string(), "*".to_string()];
+    keys.extend((0..=args.len()).map(|index| index.to_string()));
+    let old_values = keys
+        .iter()
+        .map(|key| (key.clone(), state.env.get(key).cloned()))
+        .collect::<Vec<_>>();
+    state.env.insert("#".to_string(), args.len().to_string());
+    let joined = args.join(" ");
+    state.env.insert("@".to_string(), joined.clone());
+    state.env.insert("*".to_string(), joined);
+    for (index, value) in args.into_iter().enumerate() {
+        state.env.insert((index + 1).to_string(), value);
+    }
+    old_values
+}
+
+fn restore_positional_args(state: &mut ExecState<'_>, old_values: Vec<(String, Option<String>)>) {
+    for (key, value) in old_values {
+        if let Some(value) = value {
+            state.env.insert(key, value);
+        } else {
+            state.env.remove(&key);
+        }
+    }
+}
+
+fn strip_shebang(script: &str) -> &str {
+    if let Some(rest) = script.strip_prefix("#!")
+        && let Some(index) = rest.find('\n')
+    {
+        return &rest[index + 1..];
+    }
+    script
 }
 
 fn extract_function_definitions(script: &mut String, functions: &mut BTreeMap<String, String>) {
@@ -1679,10 +2443,10 @@ mod tests {
         );
         assert_eq!(cancelled.exit_code, JUST_BASH_TIMEOUT_EXIT_CODE);
 
-        let no_host_shell = bash.exec("sh -c 'printf host'", JustBashExecOptions::new());
-        assert_eq!(no_host_shell.exit_code, 127);
-        assert_eq!(no_host_shell.stdout, "");
-        assert!(no_host_shell.stderr.contains("sh: command not found"));
+        let no_host_shell = bash.exec("sh -c 'printf portable'", JustBashExecOptions::new());
+        assert_eq!(no_host_shell.exit_code, 0);
+        assert_eq!(no_host_shell.stdout, "portable");
+        assert_eq!(no_host_shell.stderr, "");
     }
 
     #[test]
