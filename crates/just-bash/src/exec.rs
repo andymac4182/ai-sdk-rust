@@ -1062,8 +1062,21 @@ fn command_cd(state: &mut ExecState<'_>, target: Option<&str>) -> CommandResult 
 }
 
 fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    if args.is_empty() {
-        return stdout_result(stdin.to_string());
+    let mut number_lines = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-n" | "--number" => number_lines = true,
+            _ => paths.push(arg),
+        }
+    }
+    if paths.is_empty() {
+        let stdout = if number_lines {
+            number_text(stdin, 1).0
+        } else {
+            stdin.to_string()
+        };
+        return stdout_result(stdout);
     }
     let fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
@@ -1072,12 +1085,27 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_code = 0;
-    for path in args {
-        let path = resolve_path(&state.cwd, path);
-        match fs.read_file(&path) {
-            Ok(content) => stdout.push_str(&content),
-            Err(_) => {
-                stderr.push_str(&format!("cat: {path}: No such file or directory\n"));
+    let mut next_line_number = 1;
+    for path in paths {
+        let content = if path == "-" {
+            Ok(stdin.to_string())
+        } else {
+            let path = resolve_path(&state.cwd, path);
+            fs.read_file(&path)
+                .map_err(|_| format!("cat: {path}: No such file or directory\n"))
+        };
+        match content {
+            Ok(content) => {
+                if number_lines {
+                    let (numbered, next) = number_text(&content, next_line_number);
+                    stdout.push_str(&numbered);
+                    next_line_number = next;
+                } else {
+                    stdout.push_str(&content);
+                }
+            }
+            Err(error) => {
+                stderr.push_str(&error);
                 exit_code = 1;
             }
         }
@@ -1183,38 +1211,72 @@ fn command_wc(args: &[String], stdin: &str) -> CommandResult {
 }
 
 fn command_ls(state: &ExecState<'_>, args: &[String]) -> CommandResult {
-    let path = args
-        .iter()
-        .find(|arg| !arg.starts_with('-'))
-        .map(String::as_str)
-        .unwrap_or(".");
-    let path = resolve_path(&state.cwd, path);
-    match state.session.inner.fs.lock() {
-        Ok(fs) => match fs.readdir(&path) {
-            Ok(entries) => {
-                let mut stdout = entries.join("\n");
-                if !stdout.is_empty() {
+    let (options, mut paths) = parse_ls_args(args);
+    if paths.is_empty() {
+        paths.push(".".to_string());
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "ls: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    let multi = paths.len() > 1;
+    for (index, raw_path) in paths.iter().enumerate() {
+        let path = resolve_path(&state.cwd, raw_path);
+        match fs.stat(&path) {
+            Ok(stat) if stat.is_file || (options.directories_only && stat.is_directory) => {
+                stdout.push_str(&format_ls_name(raw_path, &path, &stat, &options));
+                stdout.push('\n');
+            }
+            Ok(_) => {
+                if multi || options.recursive {
+                    stdout.push_str(&path);
+                    stdout.push_str(":\n");
+                }
+                stdout.push_str(&format_ls_directory(&fs, &path, &options));
+                if options.recursive {
+                    stdout.push_str(&format_ls_recursive_children(&fs, &path, &options));
+                }
+                if multi && index + 1 < paths.len() {
                     stdout.push('\n');
                 }
-                stdout_result(stdout)
             }
-            Err(_) => stderr_result(2, format!("ls: {path}: No such file or directory\n")),
-        },
-        Err(_) => stderr_result(1, "ls: filesystem lock poisoned\n"),
+            Err(_) => {
+                stderr.push_str(&format!("ls: {path}: No such file or directory\n"));
+                exit_code = 2;
+            }
+        }
+    }
+    CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+        ..CommandResult::default()
     }
 }
 
 fn command_mkdir(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut recursive = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-p" | "--parents" => recursive = true,
+            _ if arg.starts_with('-') => {}
+            _ => paths.push(arg),
+        }
+    }
+    if paths.is_empty() {
+        return stderr_result(1, "mkdir: missing operand\n");
+    }
     let mut fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "mkdir: filesystem lock poisoned\n"),
     };
-    for path in args.iter().filter(|arg| !arg.starts_with('-')) {
-        if let Err(error) = fs.mkdir(
-            &resolve_path(&state.cwd, path),
-            MkdirOptions { recursive: true },
-        ) {
-            return stderr_result(1, format!("mkdir: {error}\n"));
+    for path in paths {
+        if let Err(error) = fs.mkdir(&resolve_path(&state.cwd, path), MkdirOptions { recursive }) {
+            return stderr_result(1, format_mkdir_error(path, &error));
         }
     }
     CommandResult::default()
@@ -1241,18 +1303,52 @@ fn command_touch(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
 }
 
 fn command_rm(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut recursive = false;
+    let mut force = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-r" | "-R" | "--recursive" => recursive = true,
+            "-f" | "--force" => force = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'r' | 'R' => recursive = true,
+                        'f' => force = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg),
+        }
+    }
+    if paths.is_empty() {
+        return if force {
+            CommandResult::default()
+        } else {
+            stderr_result(1, "rm: missing operand\n")
+        };
+    }
     let mut fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "rm: filesystem lock poisoned\n"),
     };
-    for path in args.iter().filter(|arg| !arg.starts_with('-')) {
-        if let Err(error) = fs.rm(
-            &resolve_path(&state.cwd, path),
-            RmOptions {
-                recursive: true,
-                force: false,
-            },
-        ) {
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, path);
+        match fs.stat(&resolved) {
+            Ok(stat) if stat.is_directory && !recursive => {
+                return stderr_result(1, format!("rm: cannot remove '{path}': Is a directory\n"));
+            }
+            Ok(_) => {}
+            Err(_) if force => continue,
+            Err(_) => {
+                return stderr_result(
+                    1,
+                    format!("rm: cannot remove '{path}': No such file or directory\n"),
+                );
+            }
+        }
+        if let Err(error) = fs.rm(&resolved, RmOptions { recursive, force }) {
             return stderr_result(1, format!("rm: {error}\n"));
         }
     }
@@ -1273,35 +1369,299 @@ fn command_cp(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
         })
         .collect::<Vec<_>>();
     if paths.len() < 2 {
-        return stderr_result(1, "cp: missing file operand\n");
+        return stderr_result(1, "cp: missing destination file operand\n");
     }
-    let src = resolve_path(&state.cwd, paths[0]);
-    let dest = resolve_path(&state.cwd, paths[1]);
-    match state.session.inner.fs.lock() {
-        Ok(mut fs) => match fs.cp(&src, &dest, CpOptions { recursive }) {
-            Ok(()) => CommandResult::default(),
-            Err(error) => stderr_result(1, format!("cp: {error}\n")),
-        },
-        Err(_) => stderr_result(1, "cp: filesystem lock poisoned\n"),
+    let dest_arg = paths[paths.len() - 1];
+    let dest = resolve_path(&state.cwd, dest_arg);
+    let sources = &paths[..paths.len() - 1];
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "cp: filesystem lock poisoned\n"),
+    };
+    let dest_is_dir = fs.stat(&dest).is_ok_and(|stat| stat.is_directory);
+    if sources.len() > 1 && !dest_is_dir {
+        return stderr_result(1, format!("cp: target '{dest_arg}' is not a directory\n"));
     }
+    if dest_arg.ends_with('/') && !dest_is_dir {
+        return stderr_result(
+            1,
+            format!("cp: cannot create regular file '{dest_arg}': Not a directory\n"),
+        );
+    }
+
+    for src_arg in sources {
+        let src = resolve_path(&state.cwd, src_arg);
+        let stat = match fs.stat(&src) {
+            Ok(stat) => stat,
+            Err(_) => {
+                return stderr_result(
+                    1,
+                    format!("cp: cannot stat '{src_arg}': No such file or directory\n"),
+                );
+            }
+        };
+        if stat.is_directory && !recursive {
+            return stderr_result(
+                1,
+                format!("cp: -r not specified; omitting directory '{src_arg}'\n"),
+            );
+        }
+        let target = if dest_is_dir {
+            join_directory_child(&dest, path_basename(&src))
+        } else {
+            dest.clone()
+        };
+        if let Err(error) = fs.cp(&src, &target, CpOptions { recursive }) {
+            return stderr_result(1, format!("cp: {error}\n"));
+        }
+    }
+    CommandResult::default()
 }
 
 fn command_mv(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
-    let paths = args
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .collect::<Vec<_>>();
-    if paths.len() < 2 {
-        return stderr_result(1, "mv: missing file operand\n");
+    if args.first().is_some_and(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: mv [OPTION]... SOURCE DEST\n  -f, --force\n  -n, --no-clobber\n  -v, --verbose\n",
+        );
     }
-    let src = resolve_path(&state.cwd, paths[0]);
-    let dest = resolve_path(&state.cwd, paths[1]);
-    match state.session.inner.fs.lock() {
-        Ok(mut fs) => match fs.mv(&src, &dest) {
-            Ok(()) => CommandResult::default(),
-            Err(error) => stderr_result(1, format!("mv: {error}\n")),
-        },
-        Err(_) => stderr_result(1, "mv: filesystem lock poisoned\n"),
+    let mut no_clobber = false;
+    let mut verbose = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-f" | "--force" => {}
+            "-n" | "--no-clobber" => no_clobber = true,
+            "-v" | "--verbose" => verbose = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'f' => {}
+                        'n' => no_clobber = true,
+                        'v' => verbose = true,
+                        _ => {
+                            return stderr_result(1, format!("mv: invalid option -- '{flag}'\n"));
+                        }
+                    }
+                }
+            }
+            _ => paths.push(arg),
+        }
+    }
+    if paths.len() < 2 {
+        return stderr_result(1, "mv: missing destination file operand\n");
+    }
+    let dest_arg = paths[paths.len() - 1];
+    let dest = resolve_path(&state.cwd, dest_arg);
+    let sources = &paths[..paths.len() - 1];
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "mv: filesystem lock poisoned\n"),
+    };
+    let dest_is_dir = fs.stat(&dest).is_ok_and(|stat| stat.is_directory);
+    if sources.len() > 1 && !dest_is_dir {
+        return stderr_result(1, format!("mv: target '{dest_arg}' is not a directory\n"));
+    }
+    if dest_arg.ends_with('/') && !dest_is_dir {
+        return stderr_result(1, format!("mv: target '{dest_arg}' is not a directory\n"));
+    }
+
+    let mut stdout = String::new();
+    for src_arg in sources {
+        let src = resolve_path(&state.cwd, src_arg);
+        if fs.stat(&src).is_err() {
+            return stderr_result(
+                1,
+                format!("mv: cannot stat '{src_arg}': No such file or directory\n"),
+            );
+        }
+        let target = if dest_is_dir {
+            join_directory_child(&dest, path_basename(&src))
+        } else {
+            dest.clone()
+        };
+        if no_clobber && fs.exists(&target) {
+            continue;
+        }
+        if let Err(error) = fs.mv(&src, &target) {
+            return stderr_result(1, format!("mv: {error}\n"));
+        }
+        if verbose {
+            stdout.push_str(&format!(
+                "renamed '{src_arg}' -> '{}'\n",
+                display_mv_dest(dest_arg, &target, dest_is_dir)
+            ));
+        }
+    }
+    stdout_result(stdout)
+}
+
+fn number_text(text: &str, start: usize) -> (String, usize) {
+    let mut output = String::new();
+    let mut line_number = start;
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        output.push_str(&format!("{line_number:>6}\t{content}"));
+        if line.ends_with('\n') {
+            output.push('\n');
+        }
+        line_number += 1;
+    }
+    (output, line_number)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LsOptions {
+    all: bool,
+    almost_all: bool,
+    recursive: bool,
+    classify: bool,
+    reverse: bool,
+    directories_only: bool,
+}
+
+fn parse_ls_args(args: &[String]) -> (LsOptions, Vec<String>) {
+    let mut options = LsOptions::default();
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--all" => options.all = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'a' => options.all = true,
+                        'A' => options.almost_all = true,
+                        'R' => options.recursive = true,
+                        'F' => options.classify = true,
+                        'r' => options.reverse = true,
+                        'd' => options.directories_only = true,
+                        '1' | 'l' => {}
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+    (options, paths)
+}
+
+fn format_ls_directory(fs: &VirtualFileSystem, path: &str, options: &LsOptions) -> String {
+    let mut entries = match fs.readdir_with_file_types(path) {
+        Ok(entries) => entries,
+        Err(_) => return String::new(),
+    };
+    entries.retain(|entry| options.all || options.almost_all || !entry.name.starts_with('.'));
+    if options.all {
+        entries.insert(
+            0,
+            DirentEntry {
+                name: "..".to_string(),
+                is_file: false,
+                is_directory: true,
+                is_symbolic_link: false,
+            },
+        );
+        entries.insert(
+            0,
+            DirentEntry {
+                name: ".".to_string(),
+                is_file: false,
+                is_directory: true,
+                is_symbolic_link: false,
+            },
+        );
+    }
+    if options.reverse {
+        entries.reverse();
+    }
+    let mut stdout = entries
+        .into_iter()
+        .map(|entry| format_ls_entry_name(&entry, options))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !stdout.is_empty() {
+        stdout.push('\n');
+    }
+    stdout
+}
+
+fn format_ls_recursive_children(fs: &VirtualFileSystem, path: &str, options: &LsOptions) -> String {
+    let mut entries = match fs.readdir_with_file_types(path) {
+        Ok(entries) => entries,
+        Err(_) => return String::new(),
+    };
+    entries.retain(|entry| {
+        entry.is_directory
+            && (options.all || options.almost_all || !entry.name.starts_with('.'))
+            && entry.name != "."
+            && entry.name != ".."
+    });
+    if options.reverse {
+        entries.reverse();
+    }
+    let mut stdout = String::new();
+    for entry in entries {
+        let child = join_directory_child(path, &entry.name);
+        stdout.push('\n');
+        stdout.push_str(&child);
+        stdout.push_str(":\n");
+        stdout.push_str(&format_ls_directory(fs, &child, options));
+        stdout.push_str(&format_ls_recursive_children(fs, &child, options));
+    }
+    stdout
+}
+
+fn format_ls_entry_name(entry: &DirentEntry, options: &LsOptions) -> String {
+    if options.classify && entry.is_directory {
+        format!("{}/", entry.name)
+    } else if options.classify && entry.is_symbolic_link {
+        format!("{}@", entry.name)
+    } else {
+        entry.name.clone()
+    }
+}
+
+fn format_ls_name(raw_path: &str, path: &str, stat: &FileStat, options: &LsOptions) -> String {
+    let mut name = if raw_path == "." { path } else { raw_path }.to_string();
+    if options.classify && stat.is_directory {
+        name.push('/');
+    }
+    name
+}
+
+fn format_mkdir_error(path: &str, error: &JustBashError) -> String {
+    let detail = match error.kind() {
+        JustBashErrorKind::NotFound => "No such file or directory",
+        JustBashErrorKind::AlreadyExists => "File exists",
+        JustBashErrorKind::NotDirectory => "Not a directory",
+        JustBashErrorKind::PermissionDenied => "Permission denied",
+        _ => "Cannot create directory",
+    };
+    format!("mkdir: cannot create directory '{path}': {detail}\n")
+}
+
+fn path_basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed.rsplit('/').next().unwrap_or(trimmed)
+    }
+}
+
+fn join_directory_child(directory: &str, child: &str) -> String {
+    if directory == "/" {
+        format!("/{child}")
+    } else {
+        format!("{}/{child}", directory.trim_end_matches('/'))
+    }
+}
+
+fn display_mv_dest(dest_arg: &str, target: &str, dest_is_dir: bool) -> String {
+    if dest_is_dir {
+        target.to_string()
+    } else {
+        dest_arg.to_string()
     }
 }
 

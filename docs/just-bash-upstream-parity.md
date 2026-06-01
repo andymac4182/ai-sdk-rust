@@ -35,15 +35,30 @@ Mapped Rust tests:
 | `packages/just-bash/src/commands/{find,grep,rg,sed,awk}` basic behavior | `find_grep_rg_sed_and_awk_cover_high_risk_text_search_bucket` | portable-smoke-only | Basic search/text behavior only; JB-01 rows remain pending until case-exact tests land. |
 | `packages/just-bash/src/commands/jq/jq.basic.test.ts` simple field lookup | `structured_data_jq_minimal_port_reads_virtual_input` | portable-smoke-only | Minimal structured-data smoke for virtual input; structured-data rows remain pending. |
 
+## JBC-06 Core Command Conformance Slice
+
+This slice closes exact portable upstream rows for high-volume core command behavior in the generated JB-01 ledger. Rows not listed here remain `portable-pending`, including `ls` long-format/executable/symlink classification, root default-directory assertions, binary/UTF-8 side files, and generated source rows.
+
+Mapped Rust tests:
+
+| Upstream file/case | Rust test | Status | Notes |
+| --- | --- | --- | --- |
+| `packages/just-bash/src/commands/cat/cat.test.ts` all 17 cases | `cat_upstream_command_covers_files_numbering_stdin_and_errors` | portable-verified | Verifies file reads, concatenation, `-n`, stdin, `-`, relative paths, and missing-file continuation with the virtual filesystem. |
+| `packages/just-bash/src/commands/ls/ls.test.ts` 17 selected portable cases | `ls_upstream_command_covers_hidden_multi_path_recursive_and_classify_cases` | portable-verified | Verifies hidden-file flags, multiple paths, recursion, single files, empty directories, directory classification, and reverse sorting. |
+| `packages/just-bash/src/commands/mkdir/mkdir.test.ts` 9 portable cases | `mkdir_rm_upstream_command_flags_and_errors_are_virtual` | portable-verified | Verifies `-p`/`--parents`, nonrecursive parent errors, existing paths, missing operands, relative paths, and multiple nested paths. |
+| `packages/just-bash/src/commands/rm/rm.test.ts` 14 portable cases | `mkdir_rm_upstream_command_flags_and_errors_are_virtual` | portable-verified | Verifies file removal, `-f`, recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics. |
+| `packages/just-bash/src/commands/cp/cp.test.ts` all 14 cases | `cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual` | portable-verified | Verifies file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics. |
+| `packages/just-bash/src/commands/mv/mv.test.ts` all 21 cases | `cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual` | portable-verified | Verifies file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics. |
+
 ## Pending JB Follow-Up Counts
 
-The upstream command package currently has 4,899 command-domain cases in the JB-01 generated inventory. This slice maps 83 command cases plus 6 core registry cases to named Rust tests and does not claim full command parity. After regeneration the full Just Bash ledger is `696` verified / `9,124` pending / `116` JS-only.
+The upstream command package currently has 4,899 command-domain cases in the JB-01 generated inventory. JB-05 maps 83 command cases plus 6 core registry cases to named Rust tests, and JBC-06 maps 92 additional exact core-command cases. These slices do not claim full command parity. After regeneration the full Just Bash ledger is `788` verified / `9,032` pending / `116` JS-only.
 
-The counts below are the exact current upstream command-family case counts from `docs/open-agents/just-bash-parity.md` after the JB-05 row mappings. Seed smoke coverage in this slice does not close rows outside the named verified cases.
+The counts below are the exact current upstream command-family case counts from `docs/open-agents/just-bash-parity.md` after the JB-05 and JBC-06 row mappings. Seed smoke coverage in these slices does not close rows outside the named verified cases.
 
-| Family | Exact upstream command cases | Verified by JB-05 | Pending |
+| Family | Exact upstream command cases | Verified by JB-05/JBC-06 | Pending |
 | --- | ---: | ---: | ---: |
-| High-risk named commands from this slice (`echo`, `printf`, `bash`, `env`, `pwd`, `cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`, `touch`, `find`, `grep`) | 682 | 83 | 599 |
+| High-risk named commands from this slice (`echo`, `printf`, `bash`, `env`, `pwd`, `cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`, `touch`, `find`, `grep`) | 682 | 175 | 507 |
 | Full `awk` command language suite | 643 | 0 | 643 |
 | Full `sed` command/address/error suite | 231 | 0 | 231 |
 | Full `rg` ripgrep compatibility suite, including imported tests | 590 | 0 | 590 |

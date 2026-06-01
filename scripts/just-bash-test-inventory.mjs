@@ -24,7 +24,13 @@ const expectedManifestCount = 8;
 const expectedTsFileCount = 908;
 const expectedTestFileCount = 485;
 
-const skipDirectories = new Set(['.git', 'dist', 'node_modules', 'vendor']);
+const skipDirectories = new Set([
+  '.ai-sdk-rust-conformance',
+  '.git',
+  'dist',
+  'node_modules',
+  'vendor',
+]);
 const codeFilePattern = /\.(?:[cm]?ts|tsx)$/;
 const testFilePattern = /\.(?:test|spec)(?:-d)?\.(?:[cm]?ts|tsx)$/;
 const validStatuses = new Set([
@@ -287,6 +293,60 @@ const jb06CaseGroups = [
       'just_bash_security_redacts_sandbox_paths_and_sensitive_env_values; just_bash_security_path_validation_blocks_escape_and_nul_cases',
     notes:
       'JB-06 verifies the portable path and sensitive-environment redaction seam; command-specific virtualization rows stay with their command/runtime owners.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/cat/cat.test.ts',
+    lines: [5, 15, 24, 36, 49, 58, 67, 77, 89, 96, 106, 115, 125, 133, 140, 150, 160],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::cat',
+    rustTest: 'cat_upstream_command_covers_files_numbering_stdin_and_errors',
+    notes:
+      'JBC-06 verifies portable cat file reads, concatenation, -n numbering, stdin, dash placeholder, relative paths, and missing-file behavior in the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/ls/ls.test.ts',
+    lines: [5, 29, 41, 53, 102, 114, 129, 137, 146, 159, 172, 184, 196, 213, 329, 342, 355],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::ls',
+    rustTest: 'ls_upstream_command_covers_hidden_multi_path_recursive_and_classify_cases',
+    notes:
+      'JBC-06 verifies portable ls directory listing, hidden-file flags, multiple paths, recursion, single files, empty directories, classify directories, and reverse sorting.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/mkdir/mkdir.test.ts',
+    lines: [24, 34, 41, 48, 58, 68, 77, 85, 95],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::mkdir',
+    rustTest: 'mkdir_rm_upstream_command_flags_and_errors_are_virtual',
+    notes:
+      'JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rm/rm.test.ts',
+    lines: [5, 31, 41, 49, 58, 70, 79, 92, 102, 111, 119, 127, 135, 143],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::rm',
+    rustTest: 'mkdir_rm_upstream_command_flags_and_errors_are_virtual',
+    notes:
+      'JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/cp/cp.test.ts',
+    lines: [5, 15, 24, 36, 48, 61, 73, 82, 92, 101, 113, 122, 131, 140],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::cp',
+    rustTest: 'cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual',
+    notes:
+      'JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/mv/mv.test.ts',
+    lines: [5, 15, 24, 33, 45, 58, 70, 81, 93, 105, 114, 123, 133, 146, 160, 178, 188, 197, 209, 223, 233],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::mv',
+    rustTest: 'cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual',
+    notes:
+      'JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.',
   },
   {
     files: jb06RuntimeOnlyTestFiles,

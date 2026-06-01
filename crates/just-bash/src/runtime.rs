@@ -509,6 +509,450 @@ mod tests {
     }
 
     #[test]
+    fn cat_upstream_command_covers_files_numbering_stdin_and_errors() {
+        // maps packages/just-bash/src/commands/cat/cat.test.ts
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test.txt".to_string(), "hello world".to_string()),
+                ("/with-newline.txt".to_string(), "hello world\n".to_string()),
+                ("/a.txt".to_string(), "aaa\n".to_string()),
+                ("/b.txt".to_string(), "bbb\n".to_string()),
+                ("/one.txt".to_string(), "A".to_string()),
+                ("/two.txt".to_string(), "B".to_string()),
+                ("/three.txt".to_string(), "C".to_string()),
+                (
+                    "/numbered.txt".to_string(),
+                    "line1\nline2\nline3\n".to_string(),
+                ),
+                ("/single.txt".to_string(), "a\n".to_string()),
+                ("/exists.txt".to_string(), "content".to_string()),
+                ("/empty.txt".to_string(), String::new()),
+                (
+                    "/special.txt".to_string(),
+                    "tab:\there\nnewline above".to_string(),
+                ),
+                ("/file.txt".to_string(), "from file\n".to_string()),
+                ("/line1.txt".to_string(), "line1\n".to_string()),
+                ("/home/user/file.txt".to_string(), "relative".to_string()),
+            ]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("cat /test.txt").stdout, "hello world");
+        assert_eq!(env.exec("cat /with-newline.txt").stdout, "hello world\n");
+        assert_eq!(env.exec("cat /a.txt /b.txt").stdout, "aaa\nbbb\n");
+        assert_eq!(env.exec("cat /one.txt /two.txt /three.txt").stdout, "ABC");
+        assert_eq!(
+            env.exec("cat -n /numbered.txt").stdout,
+            "     1\tline1\n     2\tline2\n     3\tline3\n"
+        );
+        assert_eq!(env.exec("cat -n /single.txt").stdout, "     1\ta\n");
+
+        let missing = env.exec("cat /missing.txt");
+        assert_eq!(missing.stdout, "");
+        assert_eq!(
+            missing.stderr,
+            "cat: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(missing.exit_code, 1);
+
+        let mixed = env.exec("cat /missing.txt /exists.txt");
+        assert_eq!(mixed.stdout, "content");
+        assert_eq!(
+            mixed.stderr,
+            "cat: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(mixed.exit_code, 1);
+
+        assert_eq!(env.exec("echo \"hello\" | cat").stdout, "hello\n");
+        assert_eq!(env.exec("cat /empty.txt").stdout, "");
+        assert_eq!(
+            env.exec("cat /special.txt").stdout,
+            "tab:\there\nnewline above"
+        );
+        assert_eq!(
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([("/home/user/file.txt".to_string(), "content".to_string())]),
+                cwd: Some("/home/user".to_string()),
+                ..BashOptions::default()
+            })
+            .exec("cat file.txt")
+            .stdout,
+            "content"
+        );
+        assert_eq!(
+            env.exec("echo -e \"a\\nb\\nc\" | cat -n").stdout,
+            "     1\ta\n     2\tb\n     3\tc\n"
+        );
+        assert_eq!(
+            env.exec("echo \"from stdin\" | cat -").stdout,
+            "from stdin\n"
+        );
+        assert_eq!(
+            env.exec("echo \"from stdin\" | cat - /file.txt").stdout,
+            "from stdin\nfrom file\n"
+        );
+        assert_eq!(
+            env.exec("echo \"from stdin\" | cat /file.txt -").stdout,
+            "from file\nfrom stdin\n"
+        );
+        assert_eq!(
+            env.exec("echo \"line2\" | cat -n /line1.txt -").stdout,
+            "     1\tline1\n     2\tline2\n"
+        );
+    }
+
+    #[test]
+    fn ls_upstream_command_covers_hidden_multi_path_recursive_and_classify_cases() {
+        // maps selected portable packages/just-bash/src/commands/ls/ls.test.ts rows
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/a.txt".to_string(), String::new()),
+                ("/dir/b.txt".to_string(), String::new()),
+                ("/hidden/.hidden".to_string(), String::new()),
+                ("/hidden/visible.txt".to_string(), String::new()),
+                ("/secret/.secret".to_string(), String::new()),
+                ("/dir1/a.txt".to_string(), String::new()),
+                ("/dir2/b.txt".to_string(), String::new()),
+                ("/tree/subdir/file.txt".to_string(), String::new()),
+                ("/tree/root.txt".to_string(), String::new()),
+                ("/file.txt".to_string(), "content".to_string()),
+                ("/glob/a.txt".to_string(), String::new()),
+                ("/glob/b.txt".to_string(), String::new()),
+                ("/glob/c.md".to_string(), String::new()),
+                ("/sorted/zebra.txt".to_string(), String::new()),
+                ("/sorted/apple.txt".to_string(), String::new()),
+                ("/sorted/mango.txt".to_string(), String::new()),
+                ("/empty/.keep".to_string(), String::new()),
+                ("/almost/.config".to_string(), String::new()),
+                ("/almost/data.txt".to_string(), String::new()),
+                ("/classify/subdir/file.txt".to_string(), String::new()),
+                ("/classify/regular.txt".to_string(), String::new()),
+                ("/reverse/aaa.txt".to_string(), String::new()),
+                ("/reverse/bbb.txt".to_string(), String::new()),
+                ("/reverse/ccc.txt".to_string(), String::new()),
+                ("/ones/x.txt".to_string(), String::new()),
+                ("/ones/y.txt".to_string(), String::new()),
+                ("/ones/z.txt".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("ls /dir").stdout, "a.txt\nb.txt\n");
+        assert_eq!(env.exec("ls /hidden").stdout, "visible.txt\n");
+        assert_eq!(
+            env.exec("ls -a /hidden").stdout,
+            ".\n..\n.hidden\nvisible.txt\n"
+        );
+        assert_eq!(env.exec("ls --all /secret").stdout, ".\n..\n.secret\n");
+        assert_eq!(
+            env.exec("ls /dir1 /dir2").stdout,
+            "/dir1:\na.txt\n\n/dir2:\nb.txt\n"
+        );
+        assert_eq!(
+            env.exec("ls -R /tree").stdout,
+            "/tree:\nroot.txt\nsubdir\n\n/tree/subdir:\nfile.txt\n"
+        );
+        let missing = env.exec("ls /nonexistent");
+        assert_eq!(missing.stdout, "");
+        assert_eq!(
+            missing.stderr,
+            "ls: /nonexistent: No such file or directory\n"
+        );
+        assert_eq!(missing.exit_code, 2);
+        assert_eq!(env.exec("ls /file.txt").stdout, "/file.txt\n");
+        assert_eq!(env.exec("ls /glob | grep txt").stdout, "a.txt\nb.txt\n");
+        assert_eq!(
+            env.exec("ls /sorted").stdout,
+            "apple.txt\nmango.txt\nzebra.txt\n"
+        );
+        assert_eq!(env.exec("rm /empty/.keep; ls /empty").stdout, "");
+        assert_eq!(env.exec("ls -A /almost").stdout, ".config\ndata.txt\n");
+        assert_eq!(
+            env.exec("ls -a /almost").stdout,
+            ".\n..\n.config\ndata.txt\n"
+        );
+        assert_eq!(env.exec("ls -F /classify").stdout, "regular.txt\nsubdir/\n");
+        assert_eq!(
+            env.exec("ls -r /reverse").stdout,
+            "ccc.txt\nbbb.txt\naaa.txt\n"
+        );
+        assert_eq!(env.exec("ls -1r /ones").stdout, "z.txt\ny.txt\nx.txt\n");
+        assert_eq!(
+            env.exec("ls -ar /almost").stdout,
+            "data.txt\n.config\n..\n.\n"
+        );
+    }
+
+    #[test]
+    fn mkdir_rm_upstream_command_flags_and_errors_are_virtual() {
+        // maps selected portable mkdir/rm upstream command rows
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/existing/file.txt".to_string(), String::new()),
+                ("/file".to_string(), "content".to_string()),
+                ("/home/user/.keep".to_string(), String::new()),
+                ("/test.txt".to_string(), "content".to_string()),
+                ("/dir/file.txt".to_string(), "content".to_string()),
+                ("/nested/sub1/file1.txt".to_string(), String::new()),
+                ("/nested/sub2/file2.txt".to_string(), String::new()),
+                ("/nested/root.txt".to_string(), String::new()),
+                ("/nested-r/sub1/file1.txt".to_string(), String::new()),
+                ("/nested-r/sub2/file2.txt".to_string(), String::new()),
+                ("/nested-r/root.txt".to_string(), String::new()),
+                ("/relative/file.txt".to_string(), "content".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("mkdir -p /a/b/c; ls /a/b").stdout, "c\n");
+        assert_eq!(
+            env.exec("mkdir -p /one/two/three/four/five; ls /one/two/three/four")
+                .stdout,
+            "five\n"
+        );
+        assert_eq!(env.exec("mkdir --parents /x/y/z; ls /x/y").stdout, "z\n");
+        let nested_without_p = env.exec("mkdir /no-parent/child");
+        assert_eq!(nested_without_p.stdout, "");
+        assert_eq!(
+            nested_without_p.stderr,
+            "mkdir: cannot create directory '/no-parent/child': No such file or directory\n"
+        );
+        assert_eq!(nested_without_p.exit_code, 1);
+        assert_eq!(env.exec("mkdir -p /existing").exit_code, 0);
+        assert_eq!(env.exec("mkdir /file").exit_code, 1);
+        assert_eq!(env.exec("mkdir").stderr, "mkdir: missing operand\n");
+
+        let relative = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/home/user/.keep".to_string(), String::new())]),
+            cwd: Some("/home/user".to_string()),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            relative.exec("mkdir projects; ls /home/user").stdout,
+            "projects\n"
+        );
+        assert_eq!(
+            env.exec("mkdir -p /multi/a /other/d; ls /multi; ls /other")
+                .stdout,
+            "a\nd\n"
+        );
+
+        assert_eq!(env.exec("rm /test.txt").exit_code, 0);
+        assert_eq!(env.exec("cat /test.txt").exit_code, 1);
+        let missing = env.exec("rm /missing.txt");
+        assert_eq!(
+            missing.stderr,
+            "rm: cannot remove '/missing.txt': No such file or directory\n"
+        );
+        assert_eq!(missing.exit_code, 1);
+        assert_eq!(env.exec("rm -f /missing.txt").exit_code, 0);
+        assert_eq!(env.exec("rm /dir").exit_code, 1);
+        assert_eq!(env.exec("rm -r /dir").exit_code, 0);
+        assert_eq!(env.exec("rm -R /nested").exit_code, 0);
+        assert_eq!(env.exec("rm -r /nested-r").exit_code, 0);
+        assert_eq!(
+            env.exec("mkdir -p /rf/dir; rm -rf /rf /nonexistent")
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.exec("mkdir -p /recursive/dir; rm --recursive /recursive")
+                .exit_code,
+            0
+        );
+        assert_eq!(env.exec("rm --force /missing").exit_code, 0);
+        assert_eq!(env.exec("rm -f").exit_code, 0);
+        assert_eq!(env.exec("rm").stderr, "rm: missing operand\n");
+        assert_eq!(env.exec("mkdir /emptydir; rm -r /emptydir").exit_code, 0);
+
+        let relative_rm = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/home/user/file.txt".to_string(), "content".to_string())]),
+            cwd: Some("/home/user".to_string()),
+            ..BashOptions::default()
+        });
+        relative_rm.exec("rm file.txt");
+        assert_eq!(relative_rm.exec("cat /home/user/file.txt").exit_code, 1);
+    }
+
+    #[test]
+    fn cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual() {
+        // maps selected portable cp/mv upstream command rows
+        let cp_env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/src.txt".to_string(), "content".to_string()),
+                ("/dst.txt".to_string(), "old content".to_string()),
+                ("/dir/.keep".to_string(), String::new()),
+                ("/a.txt".to_string(), "aaa".to_string()),
+                ("/b.txt".to_string(), "bbb".to_string()),
+                ("/multi-a.txt".to_string(), String::new()),
+                ("/multi-b.txt".to_string(), String::new()),
+                ("/srcdir/file.txt".to_string(), "content".to_string()),
+                ("/src/a/b/c.txt".to_string(), "deep".to_string()),
+                ("/src/root.txt".to_string(), "root".to_string()),
+                ("/home/user/src.txt".to_string(), "relative".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(cp_env.exec("cp /src.txt /copied.txt").exit_code, 0);
+        assert_eq!(cp_env.read_file("/copied.txt").unwrap(), "content");
+        assert_eq!(cp_env.read_file("/src.txt").unwrap(), "content");
+        assert_eq!(cp_env.exec("cp /src.txt /dst.txt").exit_code, 0);
+        assert_eq!(cp_env.read_file("/dst.txt").unwrap(), "content");
+        assert_eq!(cp_env.exec("cp /src.txt /dir/").exit_code, 0);
+        assert_eq!(cp_env.read_file("/dir/src.txt").unwrap(), "content");
+        assert_eq!(cp_env.exec("cp /a.txt /b.txt /dir").exit_code, 0);
+        assert_eq!(cp_env.read_file("/dir/a.txt").unwrap(), "aaa");
+        assert_eq!(cp_env.read_file("/dir/b.txt").unwrap(), "bbb");
+        assert!(
+            cp_env
+                .exec("cp /a.txt /b.txt /nonexistent")
+                .stderr
+                .contains("not a directory")
+        );
+        assert!(
+            cp_env
+                .exec("cp /srcdir /dstdir")
+                .stderr
+                .contains("omitting directory")
+        );
+        assert_eq!(cp_env.exec("cp -r /srcdir /dstdir").exit_code, 0);
+        assert_eq!(cp_env.read_file("/dstdir/file.txt").unwrap(), "content");
+        assert_eq!(cp_env.exec("cp -R /srcdir /dstdir2").exit_code, 0);
+        assert_eq!(cp_env.read_file("/dstdir2/file.txt").unwrap(), "content");
+        assert_eq!(cp_env.exec("cp -r /src /deep-dst").exit_code, 0);
+        assert_eq!(cp_env.read_file("/deep-dst/a/b/c.txt").unwrap(), "deep");
+        assert_eq!(cp_env.exec("cp --recursive /srcdir /dstdir3").exit_code, 0);
+        let cp_missing = cp_env.exec("cp /missing.txt /dst.txt");
+        assert_eq!(
+            cp_missing.stderr,
+            "cp: cannot stat '/missing.txt': No such file or directory\n"
+        );
+        assert_eq!(
+            cp_env.exec("cp /src.txt").stderr,
+            "cp: missing destination file operand\n"
+        );
+        let cp_relative = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/home/user/src.txt".to_string(), "content".to_string())]),
+            cwd: Some("/home/user".to_string()),
+            ..BashOptions::default()
+        });
+        cp_relative.exec("cp src.txt dst.txt");
+        assert_eq!(
+            cp_relative.read_file("/home/user/dst.txt").unwrap(),
+            "content"
+        );
+
+        let mv_env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/old.txt".to_string(), "content".to_string()),
+                ("/dir/oldname.txt".to_string(), "content".to_string()),
+                ("/file.txt".to_string(), "content".to_string()),
+                ("/dir/.keep".to_string(), String::new()),
+                ("/a.txt".to_string(), "aaa".to_string()),
+                ("/b.txt".to_string(), "bbb".to_string()),
+                ("/srcdir/file.txt".to_string(), "content".to_string()),
+                ("/src/a/b/c.txt".to_string(), "deep".to_string()),
+                ("/src/root.txt".to_string(), "root".to_string()),
+                ("/src.txt".to_string(), "new".to_string()),
+                ("/dst.txt".to_string(), "old".to_string()),
+                ("/force-src.txt".to_string(), "new".to_string()),
+                ("/force-dst.txt".to_string(), "old".to_string()),
+                ("/no-src.txt".to_string(), "new".to_string()),
+                ("/no-dst.txt".to_string(), "old".to_string()),
+                ("/no-new-src.txt".to_string(), "content".to_string()),
+                ("/verbose-old.txt".to_string(), "content".to_string()),
+                ("/fv-src.txt".to_string(), "new".to_string()),
+                ("/fv-dst.txt".to_string(), "old".to_string()),
+                ("/fn-src.txt".to_string(), "new".to_string()),
+                ("/fn-dst.txt".to_string(), "old".to_string()),
+                ("/into-src/file.txt".to_string(), "content".to_string()),
+                ("/into-dst/.keep".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(mv_env.exec("mv /old.txt /new.txt").exit_code, 0);
+        assert_eq!(mv_env.read_file("/new.txt").unwrap(), "content");
+        assert_eq!(mv_env.exec("cat /old.txt").exit_code, 1);
+        mv_env.exec("mv /dir/oldname.txt /dir/newname.txt");
+        assert_eq!(mv_env.read_file("/dir/newname.txt").unwrap(), "content");
+        mv_env.exec("mv /file.txt /dir/");
+        assert_eq!(mv_env.read_file("/dir/file.txt").unwrap(), "content");
+        mv_env.exec("mv /a.txt /b.txt /dir");
+        assert_eq!(mv_env.read_file("/dir/a.txt").unwrap(), "aaa");
+        assert_eq!(mv_env.read_file("/dir/b.txt").unwrap(), "bbb");
+        assert!(
+            mv_env
+                .exec("mv /multi-a.txt /multi-b.txt /nonexistent")
+                .stderr
+                .contains("not a directory")
+        );
+        mv_env.exec("mv /srcdir /dstdir");
+        assert_eq!(mv_env.read_file("/dstdir/file.txt").unwrap(), "content");
+        mv_env.exec("mv /src /dst");
+        assert_eq!(mv_env.read_file("/dst/a/b/c.txt").unwrap(), "deep");
+        mv_env.exec("mv /src.txt /dst.txt");
+        assert_eq!(mv_env.read_file("/dst.txt").unwrap(), "new");
+        let mv_missing = mv_env.exec("mv /missing.txt /dst.txt");
+        assert_eq!(
+            mv_missing.stderr,
+            "mv: cannot stat '/missing.txt': No such file or directory\n"
+        );
+        assert_eq!(
+            mv_env.exec("mv /force-src.txt").stderr,
+            "mv: missing destination file operand\n"
+        );
+        let mv_relative = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/home/user/old.txt".to_string(), "content".to_string())]),
+            cwd: Some("/home/user".to_string()),
+            ..BashOptions::default()
+        });
+        mv_relative.exec("mv old.txt new.txt");
+        assert_eq!(
+            mv_relative.read_file("/home/user/new.txt").unwrap(),
+            "content"
+        );
+        mv_env.exec("mv /into-src /into-dst/");
+        assert_eq!(
+            mv_env.read_file("/into-dst/into-src/file.txt").unwrap(),
+            "content"
+        );
+        mv_env.exec("mv -f /force-src.txt /force-dst.txt");
+        assert_eq!(mv_env.read_file("/force-dst.txt").unwrap(), "new");
+        mv_env.exec("mv -n /no-src.txt /no-dst.txt");
+        assert_eq!(mv_env.read_file("/no-src.txt").unwrap(), "new");
+        assert_eq!(mv_env.read_file("/no-dst.txt").unwrap(), "old");
+        mv_env.exec("mv -n /no-new-src.txt /no-new-dst.txt");
+        assert_eq!(mv_env.read_file("/no-new-dst.txt").unwrap(), "content");
+        assert_eq!(
+            mv_env
+                .exec("mv -v /verbose-old.txt /verbose-new.txt")
+                .stdout,
+            "renamed '/verbose-old.txt' -> '/verbose-new.txt'\n"
+        );
+        assert_eq!(
+            mv_env.exec("mv -fv /fv-src.txt /fv-dst.txt").stdout,
+            "renamed '/fv-src.txt' -> '/fv-dst.txt'\n"
+        );
+        mv_env.exec("mv -fn /fn-src.txt /fn-dst.txt");
+        assert_eq!(mv_env.read_file("/fn-src.txt").unwrap(), "new");
+        let help = mv_env.exec("mv --help");
+        assert!(help.stdout.contains("mv"));
+        assert!(help.stdout.contains("--force"));
+        assert!(help.stdout.contains("--no-clobber"));
+        assert!(help.stdout.contains("--verbose"));
+        assert!(
+            mv_env
+                .exec("mv -x /fn-src.txt /fn-next.txt")
+                .stderr
+                .contains("invalid option")
+        );
+    }
+
+    #[test]
     fn redirection_upstream_cases_write_append_and_read_virtual_files() {
         // maps packages/just-bash/src/commands/bash/bash.test.ts:156 redirection-heavy script behavior
         let env = bash();
