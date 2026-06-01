@@ -5356,25 +5356,35 @@ mod tests {
     fn workflow_agent_telemetry_integrations_call_globally_registered_integration_listeners() {
         let _guard = telemetry_test_guard();
         reset_telemetry_state_for_tests();
+        let test_id = "workflow-agent-global-telemetry-listeners";
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_for_global_on_start = Arc::clone(&events);
         let events_for_global_on_step_finish = Arc::clone(&events);
         let events_for_global_on_end = Arc::clone(&events);
         register_telemetry_integration(
             TelemetryIntegration::new()
-                .with_callback(TelemetryEventKind::OnStart, move |_| {
+                .with_callback(TelemetryEventKind::OnStart, move |event| {
+                    if event.function_id.as_deref() != Some(test_id) {
+                        return;
+                    }
                     events_for_global_on_start
                         .lock()
                         .expect("events lock succeeds")
                         .push("global-onStart".to_string());
                 })
-                .with_callback(TelemetryEventKind::OnStepFinish, move |_| {
+                .with_callback(TelemetryEventKind::OnStepFinish, move |event| {
+                    if event.function_id.as_deref() != Some(test_id) {
+                        return;
+                    }
                     events_for_global_on_step_finish
                         .lock()
                         .expect("events lock succeeds")
                         .push("global-onStepFinish".to_string());
                 })
-                .with_callback(TelemetryEventKind::OnEnd, move |_| {
+                .with_callback(TelemetryEventKind::OnEnd, move |event| {
+                    if event.function_id.as_deref() != Some(test_id) {
+                        return;
+                    }
                     events_for_global_on_end
                         .lock()
                         .expect("events lock succeeds")
@@ -5384,9 +5394,12 @@ mod tests {
 
         let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
         let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+        let telemetry = ai_sdk_rust::TelemetryOptions::new().with_function_id(test_id);
 
-        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
-            .expect("agent stream succeeds");
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_telemetry(telemetry),
+        ))
+        .expect("agent stream succeeds");
         reset_telemetry_state_for_tests();
 
         assert_eq!(
