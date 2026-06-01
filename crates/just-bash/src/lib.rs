@@ -14,6 +14,7 @@ mod glob;
 mod path;
 mod sanitize;
 mod session;
+mod shell;
 
 pub use encoding::{
     BufferEncoding, ByteString, FileContent, OutputPayload, bytes_to_string, content_to_bytes,
@@ -39,6 +40,7 @@ pub use path::{
 };
 pub use sanitize::{sanitize_error_message, sanitize_host_error_message};
 pub use session::{ExecOptions, VirtualSession};
+pub use shell::*;
 
 #[cfg(test)]
 mod tests;
