@@ -626,6 +626,75 @@ const jbc10CaseGroups = [
   },
 ];
 
+const jbc12SourceGroups = [
+  {
+    files: [
+      'packages/just-bash/src/transform/plugins/command-collector.ts',
+      'packages/just-bash/src/transform/serialize.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform',
+    notes:
+      'JBC-12 verifies portable Rust AST command collection and serializer round-trips over the exact mapped upstream transform rows.',
+  },
+];
+
+const jbc12CaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/case-statement.test.ts',
+    lines: [5, 17, 29, 42, 55, 68, 81, 93, 102, 114, 127, 139, 154, 166, 178, 191],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc12_syntax_case_statement_matches_upstream_patterns',
+    notes:
+      'JBC-12 verifies portable case parsing/execution for exact, wildcard, glob, multi-pattern, variable, command-substitution, optional-paren, no-match, and first-match rows.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/command-substitution.test.ts',
+    lines: [
+      5, 12, 18, 26, 32, 38, 46, 55, 63, 69, 77, 83, 89, 95, 101, 107, 113,
+      119, 125, 131, 137, 145, 153, 160, 166, 172, 178,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc12_syntax_command_substitution_and_arithmetic_rows_match_upstream',
+    notes:
+      'JBC-12 verifies portable command substitution, unquoted newline handling, assignment capture, input redirection, pipelines, and arithmetic expansion/operator rows.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/plugins/command-collector.test.ts',
+    lines: [6, 14, 24, 32, 40, 50, 64, 71],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::command-collector',
+    rustTest: 'jbc12_transform_command_collector_walks_upstream_ast_shapes',
+    notes:
+      'JBC-12 verifies sorted unique Rust AST command collection across pipelines, if/else, loops, case, functions, and command substitutions without mutating execution behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/transform.test.ts',
+    lines: [112, 119, 126, 133, 140, 147, 154, 161],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::command-collector',
+    rustTest: 'jbc12_transform_command_collector_walks_upstream_ast_shapes',
+    notes:
+      'JBC-12 maps the portable CommandCollectorPlugin AST traversal rows; plugin chaining, tee rewriting, and JS metadata API rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [
+      39, 40, 41, 42, 43, 44, 45, 49, 50, 51, 52, 58, 59, 60, 61, 62, 66,
+      67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 81, 82, 83, 84, 85, 86, 87,
+      88, 89, 90, 91, 92, 93, 94, 98, 99, 100, 101, 102, 107, 108, 135,
+      136, 137, 138, 142, 143, 144, 149, 150, 154, 155, 157, 163, 164, 166,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest: 'jbc12_transform_serialize_round_trips_core_ast_rows',
+    notes:
+      'JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -642,12 +711,20 @@ function rowOverrideFromGroup(group) {
 }
 
 function sourceOverrideFor(relativePath) {
-  const group = jb06SourceGroups.find((entry) => groupMatchesFile(entry, relativePath));
+  const group = [...jb06SourceGroups, ...jbc12SourceGroups].find((entry) =>
+    groupMatchesFile(entry, relativePath)
+  );
   return group ? rowOverrideFromGroup(group) : undefined;
 }
 
 function caseOverrideFor(testCase) {
-  const group = [...jb06CaseGroups, ...jbc07CaseGroups, ...jbc09CaseGroups, ...jbc10CaseGroups].find(
+  const group = [
+    ...jb06CaseGroups,
+    ...jbc07CaseGroups,
+    ...jbc09CaseGroups,
+    ...jbc10CaseGroups,
+    ...jbc12CaseGroups,
+  ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
       (!entry.lines || entry.lines.includes(testCase.line))

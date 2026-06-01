@@ -278,6 +278,16 @@ pub fn parse(input: &str) -> ShellResult<Script> {
     Parser::new(input)?.parse()
 }
 
+pub fn serialize(script: &Script) -> String {
+    serialize_statements(&script.statements)
+}
+
+pub fn collect_command_names(script: &Script) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    collect_statements(&script.statements, &mut names);
+    names.into_iter().collect()
+}
+
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
@@ -987,6 +997,452 @@ fn split_top_level(content: &str, separator: char) -> Vec<String> {
     items
 }
 
+fn serialize_statements(statements: &[Statement]) -> String {
+    statements
+        .iter()
+        .map(serialize_statement)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn serialize_inline_statements(statements: &[Statement]) -> String {
+    statements
+        .iter()
+        .map(serialize_statement)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn serialize_statement(statement: &Statement) -> String {
+    let mut output = serialize_pipeline(&statement.pipelines[0]);
+    for (operator, pipeline) in statement
+        .operators
+        .iter()
+        .zip(statement.pipelines.iter().skip(1))
+    {
+        output.push_str(match operator {
+            ListOperator::And => " && ",
+            ListOperator::Or => " || ",
+        });
+        output.push_str(&serialize_pipeline(pipeline));
+    }
+    if statement.background {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push('&');
+    }
+    output
+}
+
+fn serialize_pipeline(pipeline: &Pipeline) -> String {
+    let mut output = String::new();
+    if pipeline.negated {
+        output.push_str("! ");
+    }
+    for (index, command) in pipeline.commands.iter().enumerate() {
+        if index > 0 {
+            output.push_str(
+                if pipeline
+                    .pipe_stderr
+                    .get(index - 1)
+                    .copied()
+                    .unwrap_or_default()
+                {
+                    " |& "
+                } else {
+                    " | "
+                },
+            );
+        }
+        output.push_str(&serialize_command(command));
+    }
+    output
+}
+
+fn serialize_command(command: &Command) -> String {
+    match command {
+        Command::Simple(command) => serialize_simple_command(command),
+        Command::If(command) => serialize_if(command),
+        Command::For(command) => serialize_for(command),
+        Command::While(command) => serialize_loop("while", command),
+        Command::Until(command) => serialize_loop("until", command),
+        Command::Case(command) => serialize_case(command),
+        Command::FunctionDef(function) => format!(
+            "{}() {}{}",
+            function.name,
+            serialize_command(&function.body),
+            serialize_redirections(&function.redirections)
+        ),
+        Command::Subshell(body) => format!("({})", serialize_inline_statements(body)),
+        Command::Group(body) => {
+            let body = serialize_inline_statements(body);
+            if body.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{ {body}; }}")
+            }
+        }
+        Command::Arithmetic(expression) => format!("(({}))", expression.source),
+        Command::Conditional(expression) => format!("[[ {} ]]", expression),
+    }
+}
+
+fn serialize_simple_command(command: &SimpleCommand) -> String {
+    let mut parts = Vec::new();
+    parts.extend(command.assignments.iter().map(serialize_assignment));
+    if let Some(name) = &command.name {
+        parts.push(serialize_word(name));
+    }
+    parts.extend(command.args.iter().map(serialize_word));
+    parts.extend(command.redirections.iter().map(serialize_redirection));
+    parts.join(" ")
+}
+
+fn serialize_assignment(assignment: &Assignment) -> String {
+    let mut target = assignment.name.clone();
+    if let Some(index) = assignment.index {
+        target.push('[');
+        target.push_str(&index.to_string());
+        target.push(']');
+    }
+    if assignment.append {
+        target.push('+');
+    }
+    target.push('=');
+    if let Some(array) = &assignment.array {
+        target.push('(');
+        target.push_str(
+            &array
+                .iter()
+                .map(serialize_word)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        target.push(')');
+    } else if let Some(value) = &assignment.value {
+        target.push_str(&serialize_word(value));
+    }
+    target
+}
+
+fn serialize_if(command: &IfCommand) -> String {
+    let mut output = String::new();
+    for (index, clause) in command.clauses.iter().enumerate() {
+        if index == 0 {
+            output.push_str("if ");
+        } else {
+            output.push_str("; elif ");
+        }
+        output.push_str(&serialize_inline_statements(&clause.condition));
+        output.push_str("; then ");
+        output.push_str(&serialize_inline_statements(&clause.body));
+    }
+    if !command.else_body.is_empty() {
+        output.push_str("; else ");
+        output.push_str(&serialize_inline_statements(&command.else_body));
+    }
+    output.push_str("; fi");
+    output.push_str(&serialize_redirections(&command.redirections));
+    output
+}
+
+fn serialize_for(command: &ForCommand) -> String {
+    let mut output = format!("for {}", command.variable);
+    if command.words.is_empty() {
+        output.push_str("; do ");
+    } else {
+        output.push_str(" in ");
+        output.push_str(
+            &command
+                .words
+                .iter()
+                .map(serialize_word)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        output.push_str("; do ");
+    }
+    output.push_str(&serialize_inline_statements(&command.body));
+    output.push_str("; done");
+    output.push_str(&serialize_redirections(&command.redirections));
+    output
+}
+
+fn serialize_loop(keyword: &str, command: &LoopCommand) -> String {
+    let mut output = format!(
+        "{} {}; do {}; done",
+        keyword,
+        serialize_inline_statements(&command.condition),
+        serialize_inline_statements(&command.body)
+    );
+    output.push_str(&serialize_redirections(&command.redirections));
+    output
+}
+
+fn serialize_case(command: &CaseCommand) -> String {
+    let mut output = format!("case {} in", serialize_word(&command.word));
+    for item in &command.items {
+        output.push(' ');
+        output.push_str(
+            &item
+                .patterns
+                .iter()
+                .map(serialize_word)
+                .collect::<Vec<_>>()
+                .join("|"),
+        );
+        output.push_str(") ");
+        output.push_str(&serialize_inline_statements(&item.body));
+        output.push_str(" ;;");
+    }
+    output.push_str(" esac");
+    output.push_str(&serialize_redirections(&command.redirections));
+    output
+}
+
+fn serialize_redirections(redirections: &[Redirection]) -> String {
+    redirections
+        .iter()
+        .map(|redirection| format!(" {}", serialize_redirection(redirection)))
+        .collect::<String>()
+}
+
+fn serialize_redirection(redirection: &Redirection) -> String {
+    let mut output = redirection.fd.map(|fd| fd.to_string()).unwrap_or_default();
+    output.push_str(match redirection.operator {
+        RedirectionOperator::Input => "<",
+        RedirectionOperator::Output => ">",
+        RedirectionOperator::Append => ">>",
+        RedirectionOperator::DuplicateInput => "<&",
+        RedirectionOperator::DuplicateOutput => ">&",
+        RedirectionOperator::ReadWrite => "<>",
+        RedirectionOperator::Clobber => ">|",
+        RedirectionOperator::OutputBoth => "&>",
+        RedirectionOperator::AppendBoth => "&>>",
+        RedirectionOperator::HereString => "<<<",
+        RedirectionOperator::HereDoc => "<<",
+        RedirectionOperator::HereDocStripTabs => "<<-",
+    });
+    output.push(' ');
+    output.push_str(&serialize_word(&redirection.target));
+    output
+}
+
+fn serialize_word(word: &Word) -> String {
+    word.parts
+        .iter()
+        .map(serialize_word_part)
+        .collect::<String>()
+}
+
+fn serialize_word_part(part: &WordPart) -> String {
+    match part {
+        WordPart::Literal(value) => value.clone(),
+        WordPart::SingleQuoted(value) => format!("'{}'", value.replace('\'', "'\\''")),
+        WordPart::DoubleQuoted(parts) => {
+            let content = parts
+                .iter()
+                .map(serialize_double_quoted_part)
+                .collect::<String>();
+            format!("\"{content}\"")
+        }
+        WordPart::Escaped(value) => format!("\\{value}"),
+        WordPart::Parameter(parameter) => serialize_parameter(parameter),
+        WordPart::CommandSubstitution { body, legacy } => {
+            if *legacy {
+                format!("`{}`", serialize(body))
+            } else {
+                format!("$({})", serialize(body))
+            }
+        }
+        WordPart::Arithmetic(expression) => format!("$(({}))", expression.source),
+        WordPart::Brace(brace) => serialize_brace(brace),
+        WordPart::Tilde { user } => format!("~{}", user.as_deref().unwrap_or_default()),
+    }
+}
+
+fn serialize_double_quoted_part(part: &WordPart) -> String {
+    match part {
+        WordPart::Literal(value) | WordPart::Escaped(value) => value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`"),
+        WordPart::SingleQuoted(value) => value.clone(),
+        _ => serialize_word_part(part),
+    }
+}
+
+fn serialize_parameter(parameter: &ParameterExpansion) -> String {
+    match &parameter.operation {
+        Some(ParameterOperation::Length) => format!("${{#{}}}", parameter.parameter),
+        Some(ParameterOperation::DefaultValue { word, check_empty }) => format!(
+            "${{{}{}{}}}",
+            parameter.parameter,
+            if *check_empty { ":-" } else { "-" },
+            serialize_word(word)
+        ),
+        Some(ParameterOperation::AssignDefault { word, check_empty }) => format!(
+            "${{{}{}{}}}",
+            parameter.parameter,
+            if *check_empty { ":=" } else { "=" },
+            serialize_word(word)
+        ),
+        Some(ParameterOperation::UseAlternative { word, check_empty }) => format!(
+            "${{{}{}{}}}",
+            parameter.parameter,
+            if *check_empty { ":+" } else { "+" },
+            serialize_word(word)
+        ),
+        None if is_valid_name(&parameter.parameter)
+            || is_unbraced_special_parameter_name(&parameter.parameter) =>
+        {
+            format!("${}", parameter.parameter)
+        }
+        None => format!("${{{}}}", parameter.parameter),
+    }
+}
+
+fn serialize_brace(brace: &BraceExpansion) -> String {
+    if let [BraceItem::Range { start, end, step }] = brace.items.as_slice() {
+        return if let Some(step) = step {
+            format!("{{{start}..{end}..{step}}}")
+        } else {
+            format!("{{{start}..{end}}}")
+        };
+    }
+    let items = brace
+        .items
+        .iter()
+        .map(|item| match item {
+            BraceItem::Word(word) => serialize_word(word),
+            BraceItem::Range { start, end, step } => {
+                if let Some(step) = step {
+                    format!("{start}..{end}..{step}")
+                } else {
+                    format!("{start}..{end}")
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{items}}}")
+}
+
+fn is_unbraced_special_parameter_name(name: &str) -> bool {
+    matches!(name, "?" | "#" | "@" | "*" | "$" | "!" | "-")
+        || name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+            && name.chars().count() == 1
+}
+
+fn collect_statements(statements: &[Statement], names: &mut std::collections::BTreeSet<String>) {
+    for statement in statements {
+        for pipeline in &statement.pipelines {
+            for command in &pipeline.commands {
+                collect_command(command, names);
+            }
+        }
+    }
+}
+
+fn collect_command(command: &Command, names: &mut std::collections::BTreeSet<String>) {
+    match command {
+        Command::Simple(command) => {
+            if let Some(name) = command.name.as_ref().and_then(extract_literal_command_name) {
+                names.insert(name.to_string());
+            }
+            if let Some(name) = &command.name {
+                collect_word(name, names);
+            }
+            for arg in &command.args {
+                collect_word(arg, names);
+            }
+            for assignment in &command.assignments {
+                if let Some(value) = &assignment.value {
+                    collect_word(value, names);
+                }
+                if let Some(array) = &assignment.array {
+                    for word in array {
+                        collect_word(word, names);
+                    }
+                }
+            }
+        }
+        Command::If(command) => {
+            for clause in &command.clauses {
+                collect_statements(&clause.condition, names);
+                collect_statements(&clause.body, names);
+            }
+            collect_statements(&command.else_body, names);
+        }
+        Command::For(command) => {
+            for word in &command.words {
+                collect_word(word, names);
+            }
+            collect_statements(&command.body, names);
+        }
+        Command::While(command) | Command::Until(command) => {
+            collect_statements(&command.condition, names);
+            collect_statements(&command.body, names);
+        }
+        Command::Case(command) => {
+            collect_word(&command.word, names);
+            for item in &command.items {
+                collect_statements(&item.body, names);
+            }
+        }
+        Command::FunctionDef(function) => collect_command(&function.body, names),
+        Command::Subshell(body) | Command::Group(body) => collect_statements(body, names),
+        Command::Arithmetic(_) | Command::Conditional(_) => {}
+    }
+}
+
+fn collect_word(word: &Word, names: &mut std::collections::BTreeSet<String>) {
+    for part in &word.parts {
+        collect_word_part(part, names);
+    }
+}
+
+fn collect_word_part(part: &WordPart, names: &mut std::collections::BTreeSet<String>) {
+    match part {
+        WordPart::DoubleQuoted(parts) => {
+            for part in parts {
+                collect_word_part(part, names);
+            }
+        }
+        WordPart::CommandSubstitution { body, .. } => collect_statements(&body.statements, names),
+        WordPart::Parameter(parameter) => match &parameter.operation {
+            Some(ParameterOperation::DefaultValue { word, .. })
+            | Some(ParameterOperation::AssignDefault { word, .. })
+            | Some(ParameterOperation::UseAlternative { word, .. }) => collect_word(word, names),
+            Some(ParameterOperation::Length) | None => {}
+        },
+        WordPart::Brace(brace) => {
+            for item in &brace.items {
+                if let BraceItem::Word(word) = item {
+                    collect_word(word, names);
+                }
+            }
+        }
+        WordPart::Literal(_)
+        | WordPart::SingleQuoted(_)
+        | WordPart::Escaped(_)
+        | WordPart::Arithmetic(_)
+        | WordPart::Tilde { .. } => {}
+    }
+}
+
+fn extract_literal_command_name(word: &Word) -> Option<&str> {
+    match word.parts.as_slice() {
+        [WordPart::Literal(value)] => Some(value.as_str()),
+        _ => None,
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -1358,6 +1814,7 @@ impl Parser {
             return Err(self.error_previous("invalid for variable"));
         }
 
+        self.skip_separators();
         let mut words = Vec::new();
         if self.current_word_is("in") {
             self.advance();
@@ -1422,6 +1879,9 @@ impl Parser {
         let mut items = Vec::new();
         while !self.current_word_is("esac") && !matches!(self.current().kind, TokenKind::Eof) {
             let mut patterns = Vec::new();
+            if matches!(self.current().kind, TokenKind::LeftParen) {
+                self.advance();
+            }
             loop {
                 match self.advance().kind {
                     TokenKind::Word(word) => patterns.push(word),
@@ -2803,13 +3263,81 @@ fn expand_range(start: &str, end: &str, step: Option<i64>) -> Vec<String> {
 }
 
 fn pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let value = value.chars().collect::<Vec<_>>();
+    glob_match(&pattern, 0, &value, 0)
+}
+
+fn glob_match(pattern: &[char], pattern_index: usize, value: &[char], value_index: usize) -> bool {
+    if pattern_index == pattern.len() {
+        return value_index == value.len();
     }
-    if let Some((prefix, suffix)) = pattern.split_once('*') {
-        return value.starts_with(prefix) && value.ends_with(suffix);
+
+    match pattern[pattern_index] {
+        '*' => {
+            let next_pattern = pattern_index + 1;
+            if next_pattern == pattern.len() {
+                return true;
+            }
+            (value_index..=value.len())
+                .any(|next_value| glob_match(pattern, next_pattern, value, next_value))
+        }
+        '?' => {
+            value_index < value.len()
+                && glob_match(pattern, pattern_index + 1, value, value_index + 1)
+        }
+        '[' => {
+            let Some((matched, next_pattern)) =
+                match_character_class(pattern, pattern_index, value.get(value_index).copied())
+            else {
+                return value_index < value.len()
+                    && pattern[pattern_index] == value[value_index]
+                    && glob_match(pattern, pattern_index + 1, value, value_index + 1);
+            };
+            matched && glob_match(pattern, next_pattern, value, value_index + 1)
+        }
+        literal => {
+            value_index < value.len()
+                && literal == value[value_index]
+                && glob_match(pattern, pattern_index + 1, value, value_index + 1)
+        }
     }
-    pattern == value
+}
+
+fn match_character_class(
+    pattern: &[char],
+    start: usize,
+    value: Option<char>,
+) -> Option<(bool, usize)> {
+    let mut end = start + 1;
+    while end < pattern.len() && pattern[end] != ']' {
+        end += 1;
+    }
+    if end >= pattern.len() || end == start + 1 {
+        return None;
+    }
+
+    let value = value?;
+    let mut index = start + 1;
+    let negated = matches!(pattern.get(index), Some('!' | '^'));
+    if negated {
+        index += 1;
+    }
+
+    let mut matched = false;
+    while index < end {
+        let current = pattern[index];
+        if index + 2 < end && pattern[index + 1] == '-' {
+            let range_end = pattern[index + 2];
+            matched |= current <= value && value <= range_end;
+            index += 3;
+        } else {
+            matched |= current == value;
+            index += 1;
+        }
+    }
+
+    Some((if negated { !matched } else { matched }, end + 1))
 }
 
 fn shell_words(source: &str) -> Vec<String> {
@@ -3318,5 +3846,326 @@ mod tests {
             }
             _ => panic!("expected group"),
         }
+    }
+
+    #[test]
+    fn jbc12_syntax_case_statement_matches_upstream_patterns() {
+        let cases = [
+            (
+                r#"case hello in
+  hello) echo "matched hello";;
+  world) echo "matched world";;
+esac"#,
+                "matched hello\n",
+            ),
+            (
+                r#"case "anything" in
+  specific) echo "specific";;
+  *) echo "wildcard";;
+esac"#,
+                "wildcard\n",
+            ),
+            (
+                r#"case "hello.txt" in
+  *.txt) echo "text file";;
+  *.md) echo "markdown file";;
+  *) echo "other";;
+esac"#,
+                "text file\n",
+            ),
+            (
+                r#"case "yes" in
+  y|yes|Y|YES) echo "confirmed";;
+  n|no|N|NO) echo "denied";;
+  *) echo "unknown";;
+esac"#,
+                "confirmed\n",
+            ),
+            (
+                r#"case "test" in
+  test) echo "first";;
+  test) echo "second";;
+  *) echo "wildcard";;
+esac"#,
+                "first\n",
+            ),
+            (
+                r#"case "nomatch" in
+  a) echo "a";;
+  b) echo "b";;
+esac"#,
+                "",
+            ),
+            (r#"case "x" in x) echo "X";; y) echo "Y";; esac"#, "X\n"),
+            (
+                r#"case "abc" in
+  a?c) echo "matches";;
+  *) echo "no match";;
+esac"#,
+                "matches\n",
+            ),
+            (
+                r#"case "b" in
+  [abc]) echo "a, b, or c";;
+  [xyz]) echo "x, y, or z";;
+  *) echo "other";;
+esac"#,
+                "a, b, or c\n",
+            ),
+            (
+                r#"case "myfile.bak" in
+  *.bak) echo "backup file";;
+  *) echo "regular file";;
+esac"#,
+                "backup file\n",
+            ),
+            (
+                r#"case "multi" in
+  multi)
+    echo "first"
+    echo "second"
+    ;;
+  *) echo "default";;
+esac"#,
+                "first\nsecond\n",
+            ),
+            (
+                r#"case $(echo test) in
+  test) echo "matched";;
+  *) echo "no match";;
+esac"#,
+                "matched\n",
+            ),
+            (
+                r#"case "default" in
+  a) echo "a";;
+  *) echo "fallback"
+esac"#,
+                "fallback\n",
+            ),
+            (
+                r#"case "42" in
+  [0-9]) echo "single digit";;
+  [0-9][0-9]) echo "double digit";;
+  *) echo "other";;
+esac"#,
+                "double digit\n",
+            ),
+            (
+                r#"case "test" in
+  (test) echo "with paren";;
+  other) echo "no match";;
+esac"#,
+                "with paren\n",
+            ),
+        ];
+
+        for (source, expected_stdout) in cases {
+            let result = shell().exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+            assert_eq!(result.exit_code, 0, "{source}");
+        }
+
+        let result = shell()
+            .with_env([("FRUIT", "apple")])
+            .exec(r#"case $FRUIT in apple) echo "It's an apple";; orange) echo orange;; esac"#);
+        assert_eq!(result.stdout, "It's an apple\n");
+    }
+
+    #[test]
+    fn jbc12_syntax_command_substitution_and_arithmetic_rows_match_upstream() {
+        let simple_cases = [
+            ("echo $(echo hello)", "hello\n"),
+            ("X=$(echo world); echo $X", "world\n"),
+            (
+                "echo prefix-$(echo middle)-suffix",
+                "prefix-middle-suffix\n",
+            ),
+            ("echo $(echo $(echo nested))", "nested\n"),
+            ("COUNT=$(echo 42); echo $COUNT", "42\n"),
+            ("echo prefix$(echo)suffix", "prefixsuffix\n"),
+            ("echo $((1 + 2))", "3\n"),
+            ("echo $((10 - 3))", "7\n"),
+            ("echo $((4 * 5))", "20\n"),
+            ("echo $((10 / 3))", "3\n"),
+            ("echo $((10 % 3))", "1\n"),
+            ("echo $((2 ** 8))", "256\n"),
+            ("echo $(((2 + 3) * 4))", "20\n"),
+            ("echo $((-5 + 3))", "-2\n"),
+            ("echo $((2 + 3 * 4 - 1))", "13\n"),
+            ("SUM=$((10 + 20)); echo $SUM", "30\n"),
+            ("N=5; N=$((N + 1)); echo $N", "6\n"),
+        ];
+
+        for (source, expected_stdout) in simple_cases {
+            let result = shell().exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+        }
+
+        let mut file_shell = shell().with_files(ShellVirtualFileSystem::with_files([
+            ("/test.txt", "hello\nworld\n"),
+            ("/lines.txt", "a\nb\nc\n"),
+        ]));
+        assert_eq!(
+            file_shell.exec("echo $(cat /test.txt | grep world)").stdout,
+            "world\n"
+        );
+        assert_eq!(
+            file_shell.exec("echo lines: $(wc -l < /lines.txt)").stdout,
+            "lines: 3\n"
+        );
+
+        assert_eq!(
+            shell()
+                .with_files(ShellVirtualFileSystem::with_files([(
+                    "/test.txt",
+                    "file content"
+                )]))
+                .exec("echo $(cat /test.txt)")
+                .stdout,
+            "file content\n"
+        );
+        assert_eq!(
+            shell()
+                .with_files(ShellVirtualFileSystem::with_files([(
+                    "/test.txt",
+                    "line1\nline2\nline3"
+                )]))
+                .exec("echo $(cat /test.txt)")
+                .stdout,
+            "line1 line2 line3\n"
+        );
+
+        let comparison = shell().exec("echo $((5 > 3)) $((5 < 3)) $((5 == 5)) $((5 != 5))");
+        assert_eq!(comparison.stdout, "1 0 1 0\n");
+        let logical = shell().exec("echo $((1 && 1)) $((1 && 0)) $((0 || 1)) $((0 || 0))");
+        assert_eq!(logical.stdout, "1 0 1 0\n");
+        let bitwise = shell().exec("echo $((5 & 3)) $((5 | 3)) $((5 ^ 3))");
+        assert_eq!(bitwise.stdout, "1 7 6\n");
+        let shifts = shell().exec("echo $((1 << 4)) $((16 >> 2))");
+        assert_eq!(shifts.stdout, "16 4\n");
+        let mut with_env = shell().with_env([("X", "5")]);
+        assert_eq!(with_env.exec("echo $(($X + 3)) $((X + 3))").stdout, "8 8\n");
+    }
+
+    #[test]
+    fn jbc12_transform_serialize_round_trips_core_ast_rows() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            "echo hello",
+            "ls -la /tmp",
+            "x=1",
+            "VAR=value echo test",
+            "PATH+=/new",
+            "arr=(a b c)",
+            "x=",
+            "echo hello | cat",
+            "cat file | grep foo | wc -l",
+            "! grep foo file",
+            "cmd1 |& cmd2",
+            "cmd1 && cmd2",
+            "cmd1 || cmd2",
+            "cmd1; cmd2",
+            "cmd1 && cmd2 || cmd3",
+            "sleep 10 &",
+            "echo hi > file.txt",
+            "echo hi >> file.txt",
+            "cat < file.txt",
+            "cmd 2> err.log",
+            "cmd &> all.log",
+            "cmd &>> all.log",
+            "cmd 2>&1",
+            "cmd 2>&-",
+            "cat <<< hello",
+            "echo hi >| file.txt",
+            "cmd <> file.txt",
+            "echo 'hello world'",
+            r#"echo "hello world""#,
+            "echo hello\\ world",
+            "echo $HOME",
+            "echo ${HOME}",
+            "echo $(pwd)",
+            "echo `pwd`",
+            "echo $((1 + 2))",
+            "cd ~",
+            "ls ~root",
+            "ls *.txt",
+            "echo {a,b,c}",
+            "echo {1..10}",
+            "echo {1..10..2}",
+            "echo ${#var}",
+            "echo ${var:-default}",
+            "echo ${var-default}",
+            "echo ${var:=default}",
+            "echo ${var=default}",
+            "echo ${var:+alt}",
+            "echo ${var+alt}",
+            "echo $?",
+            "echo $#",
+            "echo $@",
+            "echo ${10}",
+            "if true; then echo yes; fi",
+            "if true; then echo yes; else echo no; fi",
+            "if cmd1; then echo 1; elif cmd2; then echo 2; else echo 3; fi",
+            "for i in 1 2 3; do echo $i; done",
+            "for x; do echo $x; done",
+            "while true; do echo loop; done",
+            "until false; do echo loop; done",
+            "case $x in a) echo a;; b|c) echo bc;; *) echo other;; esac",
+            "(echo sub)",
+            "{ echo group; }",
+            "myfunc() { echo hello; }",
+        ] {
+            assert_round_trip(source);
+        }
+    }
+
+    #[test]
+    fn jbc12_transform_command_collector_walks_upstream_ast_shapes() {
+        let cases = [
+            ("echo hello | cat | wc -l", vec!["cat", "echo", "wc"]),
+            (
+                r#"if true; then echo "yes"; else echo "no"; fi"#,
+                vec!["echo", "true"],
+            ),
+            ("for i in a b c; do echo $i; done", vec!["echo"]),
+            ("echo $(echo inner)", vec!["echo"]),
+            (
+                "x=a; case $x in a) echo matched;; b) printf nope;; esac",
+                vec!["echo", "printf"],
+            ),
+            ("echo a; echo b; cat /dev/null; echo c", vec!["cat", "echo"]),
+            (
+                r#"echo "a b c" | while read x y z; do echo "$x"; done"#,
+                vec!["echo", "read"],
+            ),
+            ("myfunc() { echo hello; }", vec!["echo"]),
+        ];
+
+        for (source, expected) in cases {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert_eq!(collect_command_names(&script), expected, "{source}");
+        }
+
+        let source = r#"x=5; echo $((x * 2)); echo "done""#;
+        let script = parse(source).expect("parse collector no-op script");
+        let before = serialize(&script);
+        assert_eq!(collect_command_names(&script), vec!["echo"]);
+        assert_eq!(serialize(&script), before);
+
+        let plain = shell().exec(source);
+        let after_collect = shell().exec(&before);
+        assert_eq!(after_collect.stdout, plain.stdout);
+        assert_eq!(after_collect.stderr, plain.stderr);
+        assert_eq!(after_collect.exit_code, plain.exit_code);
     }
 }
