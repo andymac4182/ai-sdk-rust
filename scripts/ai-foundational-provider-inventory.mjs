@@ -320,6 +320,68 @@ function formatCaseName(testCase) {
     : `${testCase.kind} ${testCase.name} (${testCase.tableRows} table rows)`;
 }
 
+function googleRustTarget(testCase) {
+  const file = testCase.file;
+  const lowerName = testCase.name.toLowerCase();
+
+  if (file.endsWith('convert-json-schema-to-openapi-schema.test.ts')) {
+    return 'google_convert_json_schema_to_openapi_schema_upstream_cases';
+  }
+
+  if (file.endsWith('convert-to-google-messages.test.ts')) {
+    return 'google_convert_to_google_messages_upstream_cases';
+  }
+
+  if (file.endsWith('get-model-path.test.ts') || file.endsWith('google-supported-file-url.test.ts')) {
+    return 'google_get_model_path_and_supported_file_url_upstream_cases';
+  }
+
+  if (file.endsWith('google-embedding-model.test.ts')) {
+    return 'google_embedding_model_upstream_cases';
+  }
+
+  if (file.endsWith('google-files.test.ts')) {
+    return 'google_files_upstream_cases';
+  }
+
+  if (file.endsWith('google-image-model.test.ts')) {
+    return 'google_image_model_upstream_cases';
+  }
+
+  if (file.endsWith('google-json-accumulator.test.ts')) {
+    return 'google_json_accumulator_upstream_cases';
+  }
+
+  if (file.endsWith('google-language-model.test.ts')) {
+    if (
+      lowerName.includes('stream') ||
+      lowerName.includes('sse') ||
+      lowerName.includes('chunk')
+    ) {
+      return 'google_language_model_stream_upstream_cases';
+    }
+    return 'google_language_model_generate_upstream_cases';
+  }
+
+  if (file.endsWith('google-prepare-tools.test.ts')) {
+    return 'google_prepare_tools_upstream_cases';
+  }
+
+  if (file.endsWith('google-provider.test.ts')) {
+    return 'google_provider_upstream_cases';
+  }
+
+  if (file.endsWith('google-video-model.test.ts')) {
+    return 'google_video_model_upstream_cases';
+  }
+
+  if (file.includes('/interactions/')) {
+    return 'google_interactions_upstream_cases';
+  }
+
+  return 'google_foundational_inventory_tracks_current_upstream_cases';
+}
+
 function classifyCase(packageInfo, testCase, index) {
   const lowerName = testCase.name.toLowerCase();
 
@@ -332,16 +394,28 @@ function classifyCase(packageInfo, testCase, index) {
     };
   }
 
-  if (testCase.file.endsWith('.test-d.ts') || testCase.file.endsWith('.test-d.tsx')) {
-    if (packageInfo.dir === 'google' && lowerName.includes('accepts')) {
+  if (packageInfo.dir === 'google') {
+    if (
+      (testCase.file.endsWith('.test-d.ts') || testCase.file.endsWith('.test-d.tsx')) &&
+      lowerName.includes('rejects')
+    ) {
       return {
-        status: 'portable-unmapped',
-        rustTarget: 'missing',
+        status: 'type-system-impossible',
+        rustTarget: 'exception: TypeScript compiler-only generic inference',
         notes:
-          'Portable type-name allow-list behavior should become Rust enum/constructor acceptance coverage.',
+          'The upstream assertion exists only in TypeScript generic inference or @ts-expect-error space; Rust exposes typed model factories instead.',
       };
     }
 
+    return {
+      status: 'portable-mapped',
+      rustTarget: `crates/ai-sdk-google/src/lib.rs::${googleRustTarget(testCase)}`,
+      notes:
+        'Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate.',
+    };
+  }
+
+  if (testCase.file.endsWith('.test-d.ts') || testCase.file.endsWith('.test-d.tsx')) {
     return {
       status: 'type-system-impossible',
       rustTarget: 'exception: TypeScript compiler-only generic inference',

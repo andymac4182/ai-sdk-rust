@@ -124,22 +124,21 @@ crate, while preserving explicit JavaScript-only and type-system exceptions.
 | --- | --- | --- | --- |
 | AI-01A | complete | `@ai-sdk/anthropic` in `crates/ai-sdk-anthropic` | Ported Anthropic language model, files, skills, cache control, prompt conversion, provider tools, usage conversion, error mapping, fixtures, and ignored live-provider proof; 418 portable upstream rows map to named Rust tests, 6 TypeScript-only generic-inference rows remain documented exceptions. |
 | AI-01B | active | `@ai-sdk/amazon-bedrock` in `crates/ai-sdk-amazon-bedrock` | Port Bedrock chat, Anthropic-on-Bedrock, embeddings, image, reranking, event-stream handling, SigV4/API-key fetch wrappers, tool preparation, usage conversion, settings, fixtures, and ignored live-provider proof. |
-| AI-01C | active | `@ai-sdk/google` in `crates/ai-sdk-google` | Port Gemini language, embedding, image, video, files, interactions, schema conversion, URL support, tool preparation, JSON accumulator behavior, fixtures, and ignored live-provider proof. |
+| AI-01C | verified | `@ai-sdk/google` in `crates/ai-sdk-google` | All 568 current upstream Google cases are closed: 566 portable rows map to named Rust tests in `crates/ai-sdk-google`, 2 TypeScript compile-error rows are explicit `type-system-impossible` exceptions, and an ignored live-provider proof is credential-gated on `GOOGLE_GENERATIVE_AI_API_KEY`. |
 | AI-01D | active | `@ai-sdk/google-vertex` in `crates/ai-sdk-google-vertex` | Port Vertex auth, provider base/edge variants, embedding, image, video, Anthropic-on-Vertex, MaaS, xAI-on-Vertex, fixtures, and ignored live-provider proof. |
 
 ## AI SDK Package Queue
 
 The AI SDK is the largest open surface. Current generated progress shows:
 
-- 36 of 52 package rows closed.
-- 26 of 42 portable package rows strictly verified.
-- 16 package rows in progress.
+- 38 of 52 package rows closed.
+- 28 of 42 portable package rows strictly verified.
+- 14 package rows in progress.
 - 0 package rows not started.
 
 In-progress packages:
 
-`@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`,
-`@ai-sdk/google-vertex`, `@ai-sdk/xai`, `@ai-sdk/alibaba`,
+`@ai-sdk/amazon-bedrock`, `@ai-sdk/google-vertex`, `@ai-sdk/xai`, `@ai-sdk/alibaba`,
 `@ai-sdk/black-forest-labs`, `@ai-sdk/cohere`, `@ai-sdk/fal`,
 `@ai-sdk/fireworks`, `@ai-sdk/groq`, `@ai-sdk/klingai`, `@ai-sdk/luma`,
 `@ai-sdk/prodia`, `@ai-sdk/replicate`, `@ai-sdk/togetherai`.
@@ -147,7 +146,7 @@ In-progress packages:
 Not-started packages:
 
 None. All AI SDK provider package rows are now at least in-progress, but
-16 package rows still require row-level closure before AI SDK parity is done.
+14 package rows still require row-level closure before AI SDK parity is done.
 
 ## Merge-Back Checklist
 

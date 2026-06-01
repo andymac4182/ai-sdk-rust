@@ -8,7 +8,6 @@ black-forest-labs	80	Initial provider crate exists with deterministic image requ
 cohere	35	Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current upstream case parity remain explicitly inventoried.
 fal	65	Image and video media generation landed with request/response, queue polling, warning, download, and error metadata fixtures; speech and transcription remain for AI-04.
 fireworks	45	OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image workflows, polling, editing, binary result handling, and live proof remain explicitly inventoried.
-google	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01C.
 google-vertex	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01D.
 groq	35	Initial OpenAI-compatible chat wrapper exists; transcription, browser-search tool, Groq-specific message and usage conversion, streaming edge parity, and live proof remain explicitly inventoried.
 klingai	75	Video generation landed with auth/header, task polling, warning, response metadata, and error metadata fixtures; JWT edge fixtures and live validation remain.
