@@ -7,6 +7,7 @@
 
 mod encoding;
 mod error;
+mod exec;
 mod file_reader;
 mod fs;
 mod glob;
@@ -18,6 +19,12 @@ pub use encoding::{
     BufferEncoding, ByteString, FileContent, OutputPayload, bytes_to_string, content_to_bytes,
 };
 pub use error::{JustBashError, JustBashErrorKind, JustBashResult};
+pub use exec::{
+    JUST_BASH_BACKEND, JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH, JUST_BASH_DEFAULT_TIMEOUT_MS,
+    JUST_BASH_TIMEOUT_EXIT_CODE, JustBashCancelToken, JustBashExecMetadata, JustBashExecOptions,
+    JustBashExecResult, JustBashExecutor, JustBashExecutorTool, JustBashSession,
+    JustBashSessionOptions,
+};
 pub use file_reader::{
     ReadFileContent, ReadFilesOptions, ReadFilesResult, read_and_concat, read_files,
 };
