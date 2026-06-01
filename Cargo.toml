@@ -20,6 +20,8 @@ members = [
     "crates/ai-sdk-bytedance",
     "crates/ai-sdk-deepgram",
     "crates/ai-sdk-deepseek",
+    "crates/ai-sdk-elevenlabs",
+    "crates/ai-sdk-gladia",
     "crates/ai-sdk-hume",
     "crates/ai-sdk-lmnt",
     "crates/ai-sdk-luma",

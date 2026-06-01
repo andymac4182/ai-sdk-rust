@@ -3,12 +3,12 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 55.5%
-- Portable package average: 44.9%
-- Closed package rows: 21 / 52
-- Strict portable verified rows: 11 / 42
-- In-progress rows: 20
-- Not-started rows: 11
+- Average estimated completion: 64.5%
+- Portable package average: 56.1%
+- Closed package rows: 28 / 52
+- Strict portable verified rows: 18 / 42
+- In-progress rows: 15
+- Not-started rows: 9
 
 ## 100% Closed
 
@@ -20,9 +20,16 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/openai-compatible` | 100% | Verified | provider base package |
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
+| `@ai-sdk/deepgram` | 100% | Verified | provider package |
 | `@ai-sdk/deepseek` | 100% | Verified | provider package |
+| `@ai-sdk/elevenlabs` | 100% | Verified | provider package |
+| `@ai-sdk/gladia` | 100% | Verified | provider package |
+| `@ai-sdk/hume` | 100% | Verified | provider package |
+| `@ai-sdk/lmnt` | 100% | Verified | provider package |
 | `@ai-sdk/mistral` | 100% | Verified | provider package |
 | `@ai-sdk/perplexity` | 100% | Verified | provider package |
+| `@ai-sdk/revai` | 100% | Verified | provider package |
+| `@ai-sdk/voyage` | 100% | Verified | provider package |
 | `@ai-sdk/otel` | 100% | Verified | telemetry package |
 | `@ai-sdk/test-server` | 100% | Verified | testing support package |
 | `@ai-sdk/devtools` | 100% | JavaScript-only | JavaScript devtools package |
@@ -49,17 +56,12 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
 | `@ai-sdk/bytedance` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/cerebras` | 60% | In progress | provider package | Initial provider wrapper exists; deterministic upstream provider inventory is mapped, with live-provider validation... |
-| `@ai-sdk/deepgram` | 50% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/deepinfra` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/huggingface` | 55% | In progress | provider package | Initial provider wrapper exists; SSE streaming, warning propagation, and broader package behavior remain. |
-| `@ai-sdk/hume` | 45% | In progress | provider package | Initial provider crate exists; deterministic upstream speech/error parity is mapped, with live-provider validation... |
-| `@ai-sdk/lmnt` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/luma` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/moonshotai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
-| `@ai-sdk/revai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/togetherai` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/vercel` | 40% | In progress | provider package | Construction wrapper exists; live validation and full package test parity remain. |
-| `@ai-sdk/voyage` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 
 ## Not Started
 
@@ -68,10 +70,8 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/xai` | 0% | Not started | provider package |
 | `@ai-sdk/alibaba` | 0% | Not started | provider package |
 | `@ai-sdk/cohere` | 0% | Not started | provider package |
-| `@ai-sdk/elevenlabs` | 0% | Not started | provider package |
 | `@ai-sdk/fal` | 0% | Not started | provider package |
 | `@ai-sdk/fireworks` | 0% | Not started | provider package |
-| `@ai-sdk/gladia` | 0% | Not started | provider package |
 | `@ai-sdk/groq` | 0% | Not started | provider package |
 | `@ai-sdk/klingai` | 0% | Not started | provider package |
 | `@ai-sdk/prodia` | 0% | Not started | provider package |
