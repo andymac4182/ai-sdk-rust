@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 97.5%
-- Portable package average: 96.9%
-- Closed package rows: 50 / 52
-- Strict portable verified rows: 40 / 42
-- In-progress rows: 2
+- Average estimated completion: 98.8%
+- Portable package average: 98.5%
+- Closed package rows: 51 / 52
+- Strict portable verified rows: 41 / 42
+- In-progress rows: 1
 - Not-started rows: 0
 
 ## 100% Closed
@@ -38,6 +38,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/fal` | 100% | Verified | provider package |
 | `@ai-sdk/fireworks` | 100% | Verified | provider package |
 | `@ai-sdk/gladia` | 100% | Verified | provider package |
+| `@ai-sdk/groq` | 100% | Verified | provider package |
 | `@ai-sdk/huggingface` | 100% | Verified | provider package |
 | `@ai-sdk/hume` | 100% | Verified | provider package |
 | `@ai-sdk/klingai` | 100% | Verified | provider package |
@@ -70,7 +71,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, shared server/custom tool, chat, and image provider wrapper exists; files, video, xAI-specific tool... |
-| `@ai-sdk/groq` | 35% | In progress | provider package | OpenAI-compatible chat plus transcription request/response behavior exists; browser-search tool, Groq-specific message... |
 
 ## Not Started
 

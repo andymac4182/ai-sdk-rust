@@ -3586,7 +3586,16 @@ fn openai_compatible_response_content(
         content.push(LanguageModelContent::Text(LanguageModelText::new(text)));
     }
 
-    if let Some(reasoning) = message.get("reasoning_content").and_then(JsonValue::as_str)
+    if let Some(reasoning) = message
+        .get("reasoning_content")
+        .or_else(|| {
+            if provider_name == "groq" {
+                message.get("reasoning")
+            } else {
+                None
+            }
+        })
+        .and_then(JsonValue::as_str)
         && !reasoning.is_empty()
     {
         content.push(LanguageModelContent::Reasoning(
@@ -4044,7 +4053,10 @@ fn openai_compatible_stream_result_from_response(
                     ));
                 }
 
-                if let Some(event_usage) = value.get("usage") {
+                if let Some(event_usage) = value
+                    .get("usage")
+                    .or_else(|| value.get("x_groq").and_then(|groq| groq.get("usage")))
+                {
                     usage = Some(event_usage.clone());
                 }
 
