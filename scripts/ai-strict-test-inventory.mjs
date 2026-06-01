@@ -47,7 +47,7 @@ const UPSTREAM_REPO = 'vercel/ai';
 const UPSTREAM_HEAD = '43e84c8e39e540aa23e25986031183227a77d531';
 const UPSTREAM_COMMIT_DATE = '2026-06-01T20:12:00Z';
 const INVENTORY_DATE = '2026-06-02';
-const FETCH_COMMAND = 'npx opensrc fetch github:vercel/ai';
+const FETCH_COMMAND = 'npx opensrc fetch https://github.com/vercel/ai';
 
 const TEST_FILE_PATTERN =
   /\.(?:test|spec)(?:-d)?\.(?:[cm]?[tj]sx?|mts|cts)$/;
@@ -616,6 +616,7 @@ function parseFoundationalMappings(
       continue;
     }
 
+    const locationKey = `${location[1]}:${location[2]}`;
     const entry = {
       source,
       status,
@@ -624,8 +625,9 @@ function parseFoundationalMappings(
         ? extractRustTestNames(values['Rust test / exception'])
         : [],
       notes: values.Notes,
+      locationKey,
     };
-    mappings.byLocation.set(`${location[1]}:${location[2]}`, entry);
+    mappings.byLocation.set(locationKey, entry);
     if (caseName) {
       const key = `${location[1]}|${normalizeNameKey(caseName)}`;
       const queue = mappings.byName.get(key) ?? [];
@@ -666,6 +668,33 @@ function parseInventoryCaseName(upstreamCaseCell) {
     .replace(/^(?:it|test)(?:\.[A-Za-z0-9_$]+)*\s+/, '')
     .replace(/\s+\(\d+ table rows\)$/, '')
     .trim();
+}
+
+function consumeExactNameFallback(mappings, testCase, entry) {
+  const key = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
+  const queue = mappings.byName.get(key);
+  if (!queue?.length) {
+    return;
+  }
+  const index = queue.indexOf(entry);
+  if (index !== -1) {
+    queue.splice(index, 1);
+  }
+}
+
+function shiftNameFallback(mappings, testCase, currentCaseLocations) {
+  const key = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
+  const queue = mappings.byName.get(key);
+  if (!queue?.length) {
+    return null;
+  }
+  const index = queue.findIndex(
+    entry => !entry.locationKey || !currentCaseLocations.has(entry.locationKey),
+  );
+  if (index === -1) {
+    return null;
+  }
+  return queue.splice(index, 1)[0];
 }
 
 function parseAi02Mappings(
@@ -1786,28 +1815,37 @@ function classifyCase(
   ai02Mappings,
   providerUtilsMappings,
   rustTests,
+  currentCaseLocations,
 ) {
   const locationKey = `${testCase.file}:${testCase.line}`;
   const foundational = foundationalMappings.byLocation.get(locationKey);
   if (foundational) {
+    consumeExactNameFallback(foundationalMappings, testCase, foundational);
     return foundational;
   }
 
-  const foundationalKey = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
-  const foundationalQueue = foundationalMappings.byName.get(foundationalKey);
-  if (foundationalQueue?.length) {
-    return foundationalQueue.shift();
+  const foundationalByName = shiftNameFallback(
+    foundationalMappings,
+    testCase,
+    currentCaseLocations,
+  );
+  if (foundationalByName) {
+    return foundationalByName;
   }
 
   const aiCore = aiCoreMappings.byLocation.get(locationKey);
   if (aiCore) {
+    consumeExactNameFallback(aiCoreMappings, testCase, aiCore);
     return aiCore;
   }
 
-  const aiCoreKey = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
-  const aiCoreQueue = aiCoreMappings.byName.get(aiCoreKey);
-  if (aiCoreQueue?.length) {
-    return aiCoreQueue.shift();
+  const aiCoreByName = shiftNameFallback(
+    aiCoreMappings,
+    testCase,
+    currentCaseLocations,
+  );
+  if (aiCoreByName) {
+    return aiCoreByName;
   }
 
   const ai02Key = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
@@ -1883,55 +1921,57 @@ function buildInventory(args) {
     const testFiles = walkFiles(item.root)
       .filter(file => TEST_FILE_PATTERN.test(file))
       .sort();
+    const extractedCases = testFiles.flatMap(file => extractTestCases(file, args.upstreamRoot));
+    const currentCaseLocations = new Set(
+      extractedCases.map(testCase => `${testCase.file}:${testCase.line}`),
+    );
     const cases = [];
 
-    for (const file of testFiles) {
-      const extracted = extractTestCases(file, args.upstreamRoot);
-      for (const testCase of extracted) {
-        const classification = classifyCase(
-          testCase,
-          item,
-          foundationalMappings,
-          aiCoreMappings,
-          ai02Mappings,
-          providerUtilsMappings,
-          rustTests,
+    for (const testCase of extractedCases) {
+      const classification = classifyCase(
+        testCase,
+        item,
+        foundationalMappings,
+        aiCoreMappings,
+        ai02Mappings,
+        providerUtilsMappings,
+        rustTests,
+        currentCaseLocations,
+      );
+      if (!VALID_STATUSES.has(classification.status)) {
+        validationErrors.push(
+          `${testCase.file}:${testCase.line}: invalid status ${classification.status}`,
         );
-        if (!VALID_STATUSES.has(classification.status)) {
+      }
+      if (classification.status === 'portable-mapped') {
+        if (classification.rustTests.length === 0) {
           validationErrors.push(
-            `${testCase.file}:${testCase.line}: invalid status ${classification.status}`,
+            `${testCase.file}:${testCase.line}: portable-mapped row has no named Rust test`,
           );
         }
-        if (classification.status === 'portable-mapped') {
-          if (classification.rustTests.length === 0) {
+        for (const rustTest of classification.rustTests) {
+          if (!rustTests.names.has(rustTest)) {
             validationErrors.push(
-              `${testCase.file}:${testCase.line}: portable-mapped row has no named Rust test`,
+              `${testCase.file}:${testCase.line}: mapped Rust test not found: ${rustTest}`,
             );
           }
-          for (const rustTest of classification.rustTests) {
-            if (!rustTests.names.has(rustTest)) {
-              validationErrors.push(
-                `${testCase.file}:${testCase.line}: mapped Rust test not found: ${rustTest}`,
-              );
-            }
-          }
         }
-        if (EXCEPTION_STATUSES.has(classification.status) && classification.notes.trim() === '') {
-          validationErrors.push(
-            `${testCase.file}:${testCase.line}: exception row requires notes`,
-          );
-        }
-
-        cases.push({
-          ...testCase,
-          id: rowId(item, cases.length),
-          status: classification.status,
-          rustTarget: classification.rustTarget,
-          rustTests: classification.rustTests,
-          notes: classification.notes,
-          mappingSource: classification.source,
-        });
       }
+      if (EXCEPTION_STATUSES.has(classification.status) && classification.notes.trim() === '') {
+        validationErrors.push(
+          `${testCase.file}:${testCase.line}: exception row requires notes`,
+        );
+      }
+
+      cases.push({
+        ...testCase,
+        id: rowId(item, cases.length),
+        status: classification.status,
+        rustTarget: classification.rustTarget,
+        rustTests: classification.rustTests,
+        notes: classification.notes,
+        mappingSource: classification.source,
+      });
     }
 
     const statusCounts = countStatuses(cases);
