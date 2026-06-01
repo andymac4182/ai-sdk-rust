@@ -4,9 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
 
 use ai_sdk_rust::{
     FinishReason, ToolLoopAgentModelSettings, UiMessageChunk,
@@ -1554,52 +1552,63 @@ impl DurableRunAgent for GatewayOpenAgent {
             .get(&context.run_id)
             .cloned()
             .ok_or_else(|| DurableRunAgentError::new("missing Gateway run scenario"))?;
-        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(ServiceExperimentalSandbox::new(
-            scenario.sandbox.connect.clone(),
-        ));
-        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
-            .with_api_key(self.settings.api_key.clone());
-        let model = provider.language_model(self.settings.model_id.clone());
-        let tool_options = OpenAgentToolsOptions::new()
-            .with_working_directory(scenario.runtime_request.sandbox.working_directory.clone())
-            .with_approval_policy(match self.settings.tool_approval {
-                AgentToolApprovalMode::Sensitive => OpenAgentToolApprovalPolicy::Sensitive,
-                AgentToolApprovalMode::Never => OpenAgentToolApprovalPolicy::Never,
-                AgentToolApprovalMode::Always => OpenAgentToolApprovalPolicy::Always,
-            });
-        let mut agent_settings = OpenAgentSettings::new(&model)
-            .with_model_id(self.settings.model_id.clone())
-            .with_custom_instructions(self.prompt_instructions(&scenario))
-            .with_model_settings(
-                ToolLoopAgentModelSettings::new()
-                    .with_max_output_tokens(self.settings.max_output_tokens)
-                    .with_temperature(0.2),
-            );
-        for tool in open_agent_tools_with_options(tool_options) {
-            agent_settings = agent_settings.with_tool(tool);
-        }
-        let agent = OpenAgent::new(agent_settings);
-        let mut call = OpenAgentCallOptions::from_prompt(
-            scenario.prompt.clone(),
-            scenario.runtime_request.sandbox.clone(),
-        )
-        .with_model(AgentModelSelection::new(self.settings.model_id.clone()));
-        call.tool_loop_options = call
-            .tool_loop_options
-            .with_experimental_sandbox(sandbox)
-            .with_max_steps(self.settings.max_steps);
-
-        let result = poll_ready(agent.generate(call))
-            .map_err(|error| {
-                DurableRunAgentError::new(format!("Gateway Open Agent failed: {error}"))
-            })?
-            .map_err(|error| {
-                DurableRunAgentError::new(format!("Gateway Open Agent failed: {error}"))
-            })?;
-        Ok(DurableRunAgentOutput::Finished {
-            chunks: chunks_from_gateway_result(&context.run_id, result),
+        let settings = self.settings.clone();
+        let run_id = context.run_id.clone();
+        let instructions = self.prompt_instructions(&scenario);
+        let chunks = run_gateway_future_to_completion(move || async move {
+            generate_gateway_result(settings, scenario, instructions)
+                .await
+                .map(|result| chunks_from_gateway_result(&run_id, result))
         })
+        .map_err(|error| DurableRunAgentError::new(format!("Gateway Open Agent failed: {error}")))?
+        .map_err(|error| {
+            DurableRunAgentError::new(format!("Gateway Open Agent failed: {error}"))
+        })?;
+        Ok(DurableRunAgentOutput::Finished { chunks })
     }
+}
+
+async fn generate_gateway_result(
+    settings: GatewayOpenAgentSettings,
+    scenario: ScriptedRunScenario,
+    instructions: String,
+) -> Result<ai_sdk_rust::GenerateTextResult, String> {
+    let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(ServiceExperimentalSandbox::new(
+        scenario.sandbox.connect.clone(),
+    ));
+    let provider = VercelAiGatewayOpenAICompatibleProvider::new().with_api_key(settings.api_key);
+    let model = provider.language_model(settings.model_id.clone());
+    let tool_options = OpenAgentToolsOptions::new()
+        .with_working_directory(scenario.runtime_request.sandbox.working_directory.clone())
+        .with_approval_policy(match settings.tool_approval {
+            AgentToolApprovalMode::Sensitive => OpenAgentToolApprovalPolicy::Sensitive,
+            AgentToolApprovalMode::Never => OpenAgentToolApprovalPolicy::Never,
+            AgentToolApprovalMode::Always => OpenAgentToolApprovalPolicy::Always,
+        });
+    let mut agent_settings = OpenAgentSettings::new(&model)
+        .with_model_id(settings.model_id.clone())
+        .with_custom_instructions(instructions)
+        .with_model_settings(
+            ToolLoopAgentModelSettings::new()
+                .with_max_output_tokens(settings.max_output_tokens)
+                .with_temperature(0.2),
+        );
+    for tool in open_agent_tools_with_options(tool_options) {
+        agent_settings = agent_settings.with_tool(tool);
+    }
+    let agent = OpenAgent::new(agent_settings);
+    let mut call =
+        OpenAgentCallOptions::from_prompt(scenario.prompt, scenario.runtime_request.sandbox)
+            .with_model(AgentModelSelection::new(settings.model_id));
+    call.tool_loop_options = call
+        .tool_loop_options
+        .with_experimental_sandbox(sandbox)
+        .with_max_steps(settings.max_steps);
+
+    agent
+        .generate(call)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1727,15 +1736,26 @@ fn chunks_from_gateway_resume(run_id: &str, resume: &DurableRunResume) -> Vec<Ui
     ]
 }
 
-fn poll_ready<T>(future: impl Future<Output = T>) -> Result<T, String> {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = Box::pin(future);
+fn run_gateway_future_to_completion<T, F, Fut>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T> + 'static,
+{
+    let thread = std::thread::Builder::new()
+        .name("open-agents-gateway-runtime".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("failed to start Gateway async runtime: {error}"))?;
+            Ok(runtime.block_on(operation()))
+        })
+        .map_err(|error| format!("failed to spawn Gateway async runtime: {error}"))?;
 
-    match Future::poll(Pin::as_mut(&mut future), &mut context) {
-        Poll::Ready(value) => Ok(value),
-        Poll::Pending => Err("future unexpectedly pending".to_string()),
-    }
+    thread
+        .join()
+        .map_err(|_| "Gateway async runtime panicked".to_string())?
 }
 
 #[derive(Debug, Clone)]
@@ -2570,6 +2590,17 @@ mod tests {
             run_sandbox.persistence_state().sandbox_name.as_deref(),
             Some(expected_name.as_str())
         );
+    }
+
+    #[test]
+    fn gateway_async_runner_waits_for_pending_generation_future() {
+        let result = run_gateway_future_to_completion(|| async {
+            tokio::task::yield_now().await;
+            "gateway async complete"
+        })
+        .unwrap();
+
+        assert_eq!(result, "gateway async complete");
     }
 
     fn current_timestamp() -> String {

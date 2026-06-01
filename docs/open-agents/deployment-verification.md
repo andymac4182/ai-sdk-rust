@@ -11,7 +11,8 @@ configuration validation, health checks, graceful shutdown, state and sandbox
 selection, local Slack event fixtures, a testable signed Slack HTTP route,
 optional Slack Web API base URL override, durable run resume and block-action
 approval handling, finish-action reporting, real sandbox/model error reporting,
-a real Vercel AI Gateway runtime mode, and an ignored live Slack smoke test.
+a real Vercel AI Gateway runtime mode, deterministic Gateway async completion
+coverage, and an ignored live Slack smoke test.
 
 Keep this document honest as OA-01 lands the full upstream inventory: add exact
 gate commands and mapped upstream test names there rather than guessing from
@@ -68,6 +69,7 @@ scripts/open-agents-local-e2e.sh --matrix
 scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
 scripts/open-agents-local-e2e.sh --emulator
+cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future
 cargo test -p open-agents-service
 ```
 
@@ -155,7 +157,8 @@ cargo test -p open-agents-service
 
 Those tests cover URL verification, app mention handling, waiting run resume by
 answer action, cancel action, in-memory persistence, health readiness, config
-validation, and the ignored live Slack probe gate.
+validation, Gateway async Pending-to-completion behavior, and the ignored live
+Slack probe gate.
 
 ## Emulator-Backed Path
 
@@ -340,11 +343,14 @@ Ignored AI Gateway smoke:
 export AI_GATEWAY_API_KEY=...
 scripts/open-agents-local-e2e.sh --live-gateway
 
+cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future
 cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture
 ```
 
-The wrapper also runs the lower-level `open-agents-runtime` Gateway smoke. Both
-tests are skipped unless `AI_GATEWAY_API_KEY` or
+The deterministic focused test does not need credentials and proves the service
+Gateway runner waits for async completion instead of failing on an initial
+Pending state. The wrapper also runs the lower-level `open-agents-runtime`
+Gateway smoke. Live smoke tests are skipped unless `AI_GATEWAY_API_KEY` or
 `AI_SDK_RUST_AI_GATEWAY_API_KEY` is configured.
 
 ## Slack App Configuration
@@ -403,10 +409,10 @@ path through a real Slack app once live outbound assertions are available.
 | Flow | Local coverage today | Command or evidence | Gap before durable runtime E2E |
 | --- | --- | --- | --- |
 | URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Live Slack app proof still TODO |
-| App mention | Covered through the signed service route and emulator-backed local service path | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live Slack-to-Gateway proof still TODO |
+| App mention | Covered through the signed service route and emulator-backed local service path; Gateway mode has a credential-gated signed-event smoke | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture` | Live deployed Slack app proof still TODO |
 | DM | `open-agents-slack` covers DM routing | `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator-backed DM scenario still TODO |
 | Thread routing | Emulator-backed app mention thread replay plus parser/router tests; active waiting runs resume instead of duplicating | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service threaded_message_resumes_waiting_run_without_starting_duplicate` | Broader DM/thread matrix still TODO |
-| Durable run completion | Covered locally through the service route with a scripted durable runtime; Gateway runtime is selectable when AI Gateway credentials are present | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live Slack-to-Gateway proof still TODO |
+| Durable run completion | Covered locally through the service route with a scripted durable runtime; Gateway mode waits for async model completion and is credential-gated for live Gateway | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future`; `cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture` | Live deployed Slack app proof still TODO |
 | Waiting, answer, approval, cancel | Emulator-backed question and approval prompts plus direct signed block action payloads; service answer/approval/cancel tests | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_approval_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
 | Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |

@@ -159,12 +159,15 @@ generation returns a non-empty video list.
 Open Agents Gateway runtime smoke:
 
 ```sh
+cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future
 AI_GATEWAY_API_KEY=... scripts/open-agents-local-e2e.sh --live-gateway
 AI_GATEWAY_API_KEY=... cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture
 ```
 
-Expected behavior: the Open Agent produces a non-fixture Gateway response through
-the runtime path.
+Expected behavior: the no-credentials regression proves the service Gateway
+runner waits across an async Pending state before completion. With credentials,
+the Open Agent produces a non-fixture Gateway response through the signed Slack
+event service path.
 
 Skip semantics: all Gateway live tests are `#[ignore]`. When run with
 `-- --ignored` and no key is found, tests log a `skipping live Gateway ...`
