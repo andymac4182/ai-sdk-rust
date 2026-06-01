@@ -197,8 +197,18 @@ pub fn vercel(model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel 
 }
 
 fn vercel_api_key(explicit_api_key: Option<&String>) -> Option<String> {
+    vercel_api_key_with_env(explicit_api_key, |name| env::var(name))
+}
+
+fn vercel_api_key_with_env<F>(
+    explicit_api_key: Option<&String>,
+    mut env_lookup: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Result<String, env::VarError>,
+{
     non_empty_optional_setting(explicit_api_key.cloned())
-        .or_else(|| non_empty_optional_setting(env::var("VERCEL_API_KEY").ok()))
+        .or_else(|| non_empty_optional_setting(env_lookup("VERCEL_API_KEY").ok()))
 }
 
 fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
@@ -356,6 +366,27 @@ mod tests {
     }
 
     #[test]
+    fn vercel_provider_uses_vercel_api_key_environment_when_api_key_omitted() {
+        let explicit_api_key = "explicit-key".to_string();
+
+        assert_eq!(
+            super::vercel_api_key_with_env(None, env_lookup(&[("VERCEL_API_KEY", "env-key")])),
+            Some("env-key".to_string())
+        );
+        assert_eq!(
+            super::vercel_api_key_with_env(
+                Some(&explicit_api_key),
+                env_lookup(&[("VERCEL_API_KEY", "env-key")]),
+            ),
+            Some("explicit-key".to_string())
+        );
+        assert_eq!(
+            super::vercel_api_key_with_env(None, env_lookup(&[("VERCEL_API_KEY", "")])),
+            None
+        );
+    }
+
+    #[test]
     fn vercel_provider_reports_unsupported_model_families() {
         let provider = VercelProvider::new();
 
@@ -422,6 +453,17 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn env_lookup<'a>(
+        values: &'a [(&'a str, &'a str)],
+    ) -> impl FnMut(&str) -> Result<String, std::env::VarError> + 'a {
+        move |name| {
+            values
+                .iter()
+                .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+                .ok_or(std::env::VarError::NotPresent)
         }
     }
 }

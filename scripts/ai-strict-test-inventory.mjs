@@ -709,6 +709,690 @@ function caseNameAliases(caseName) {
   return [...names].filter(Boolean);
 }
 
+const GATEWAY_VERCEL_MAPPING_SOURCE = 'AIS-03 Gateway/Vercel strict case map';
+
+function gatewayVercelException(testCase) {
+  const key = `${testCase.file}:${testCase.line}`;
+  const exceptions = {
+    'packages/gateway/src/errors/as-gateway-error.test.ts:66': {
+      status: 'js-only-documented',
+      rustTarget: 'exception: JavaScript unknown-error GatewayError instance identity',
+      notes:
+        'The upstream case passes an existing GatewayError through an unknown JavaScript error boundary and asserts object identity. Rust routes GatewayError through typed results instead of erased runtime class checks.',
+    },
+    'packages/gateway/src/errors/gateway-error-types.test.ts:284': {
+      status: 'js-only-documented',
+      rustTarget: 'exception: JavaScript symbol-based cross-realm error marker',
+      notes:
+        'The upstream case verifies JavaScript Symbol.for markers used for cross-realm class detection. Rust error variants are statically typed and do not expose JavaScript symbol markers.',
+    },
+    'packages/gateway/src/errors/gateway-error-types.test.ts:304': {
+      status: 'js-only-documented',
+      rustTarget: 'exception: JavaScript Error inheritance chain',
+      notes:
+        'The upstream case asserts JavaScript instanceof inheritance. Rust represents Gateway errors with concrete error structs and enum variants instead of JavaScript prototype chains.',
+    },
+    'packages/gateway/src/errors/gateway-error-types.test.ts:312': {
+      status: 'js-only-documented',
+      rustTarget: 'exception: JavaScript Error stack trace formatting',
+      notes:
+        'The upstream case asserts JavaScript stack trace contents. Rust error values expose messages, types, status codes, retryability, causes, and generation IDs without JavaScript stack strings.',
+    },
+    'packages/gateway/src/gateway-language-model.test.ts:1250': {
+      status: 'js-only-documented',
+      rustTarget: 'exception: JavaScript Date object identity',
+      notes:
+        'The upstream stream mapper preserves an already-created JavaScript Date object. Rust parses response-metadata timestamps into OffsetDateTime and has no JavaScript Date object identity to preserve.',
+    },
+    'packages/gateway/src/gateway-provider.test.ts:239': {
+      status: 'type-system-impossible',
+      rustTarget: 'exception: JavaScript callable provider constructor misuse',
+      notes:
+        'The upstream case rejects using the callable provider factory with new. Rust exposes constructors and builder methods through the type system, so this JavaScript misuse is not expressible.',
+    },
+  };
+
+  return exceptions[key] ?? null;
+}
+
+function gatewayVercelMappedClassification(testCase, rustTests) {
+  if (
+    !testCase.file.startsWith('packages/gateway/') &&
+    !testCase.file.startsWith('packages/vercel/')
+  ) {
+    return null;
+  }
+
+  const exception = gatewayVercelException(testCase);
+  if (exception) {
+    return {
+      source: GATEWAY_VERCEL_MAPPING_SOURCE,
+      rustTests: [],
+      ...exception,
+    };
+  }
+
+  const mappedRustTests = gatewayVercelRustTests(testCase, rustTests);
+  if (!mappedRustTests) {
+    return null;
+  }
+
+  return {
+    source: GATEWAY_VERCEL_MAPPING_SOURCE,
+    status: 'portable-mapped',
+    rustTarget: mappedRustTests.join('; '),
+    rustTests: mappedRustTests,
+    notes:
+      'Mapped by AIS-03 from the refreshed upstream Gateway/Vercel provider case to deterministic Rust tests using fake transports and fixtures.',
+  };
+}
+
+function gatewayVercelRustTests(testCase, rustTests) {
+  const file = testCase.file;
+  const line = testCase.line;
+  const key = `${file}:${line}`;
+
+  const exact = {
+    'packages/gateway/src/gateway-embedding-model.test.ts:104': [
+      'gateway_embedding_model_sends_values_as_array',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:65': [
+      'gateway_fetch_metadata_fetches_available_models_from_correct_endpoint',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:95': [
+      'gateway_fetch_metadata_maps_cache_pricing_fields_to_sdk_names',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:201': [
+      'gateway_fetch_metadata_filters_unknown_model_type_values',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:257': [
+      'gateway_fetch_metadata_keeps_known_models_and_filters_unknown_from_mixed_response',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:414': [
+      'gateway_fetch_metadata_does_not_double_wrap_existing_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:434': [
+      'gateway_fetch_metadata_handles_rate_limit_server_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:461': [
+      'gateway_fetch_metadata_handles_internal_server_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:692': [
+      'gateway_fetch_metadata_uses_custom_fetch_function_for_credits',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:730': [
+      'gateway_fetch_metadata_converts_credits_api_call_errors_to_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:756': [
+      'gateway_fetch_metadata_handles_credits_malformed_json_error_responses',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:776': [
+      'gateway_fetch_metadata_does_not_double_wrap_existing_credit_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:794': [
+      'gateway_fetch_metadata_preserves_credits_error_cause_chain',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:818': [
+      'gateway_fetch_metadata_handles_empty_credits_response',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:571': [
+      'gateway_fetch_metadata_fetches_credits_from_correct_endpoint',
+    ],
+    'packages/gateway/src/gateway-generation-info.test.ts:59': [
+      'gateway_provider_generation_info_fetches_from_correct_endpoint_with_generation_id',
+    ],
+    'packages/gateway/src/gateway-generation-info.test.ts:101': [
+      'gateway_provider_generation_info_unwraps_data_envelope',
+    ],
+    'packages/gateway/src/gateway-generation-info.test.ts:113': [
+      'gateway_provider_generation_info_omits_snake_case_fields_from_serialized_result',
+    ],
+    'packages/gateway/src/gateway-generation-info.test.ts:214': [
+      'gateway_provider_generation_info_uses_custom_transport',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:298': [
+      'gateway_language_model_does_not_modify_prompt_without_image_parts_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:47': [
+      'gateway_language_model_sets_basic_properties',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:129': [
+      'gateway_language_model_removes_abort_signal_from_request_body',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:180': [
+      'gateway_language_model_includes_o11y_headers_in_request',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:309': [
+      'gateway_language_model_encodes_uint8_array_image_part_to_inline_base64_data_with_default_mime_type_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:343': [
+      'gateway_language_model_encodes_uint8_array_image_part_to_inline_base64_data_with_specified_mime_type_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:377': [
+      'gateway_language_model_does_not_modify_image_part_with_url_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:409': [
+      'gateway_language_model_handles_mixed_content_types_correctly_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:853': [
+      'gateway_language_model_does_not_modify_prompt_without_image_parts_for_streaming',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:673': [
+      'gateway_language_model_removes_abort_signal_from_streaming_request_body',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:733': [
+      'gateway_language_model_includes_o11y_headers_in_streaming_request',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:865': [
+      'gateway_language_model_encodes_uint8_array_image_part_to_inline_base64_data_with_default_mime_type_for_streaming',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:900': [
+      'gateway_language_model_encodes_uint8_array_image_part_to_inline_base64_data_with_specified_mime_type_for_streaming',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:936': [
+      'gateway_language_model_does_not_modify_image_part_with_url_for_streaming',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:970': [
+      'gateway_language_model_handles_mixed_content_types_correctly_for_streaming',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1019': [
+      'gateway_model_preserves_structured_gateway_error_metadata',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1041': [
+      'gateway_model_classifies_transport_timeout_errors',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1060': [
+      'gateway_model_stream_classifies_transport_timeout_errors',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1082': [
+      'gateway_model_preserves_structured_gateway_error_metadata',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1211': [
+      'gateway_language_model_converts_timestamp_strings_to_offset_date_time_in_response_metadata_chunks',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1283': [
+      'gateway_language_model_preserves_response_metadata_without_timestamp',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1313': [
+      'gateway_language_model_handles_null_response_metadata_timestamp_gracefully',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1343': [
+      'gateway_language_model_ignores_extra_timestamp_fields_on_non_metadata_stream_parts',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1442': [
+      'gateway_language_model_passes_provider_routing_order_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1499': [
+      'gateway_language_model_passes_provider_routing_order_for_stream',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1541': [
+      'gateway_language_model_passes_provider_timeouts_for_generate',
+    ],
+    'packages/gateway/src/gateway-language-model.test.ts:1567': [
+      'gateway_language_model_passes_provider_timeouts_for_stream',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:183': [
+      'create_gateway_language_model_uses_custom_configuration',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:217': [
+      'create_gateway_language_model_uses_oidc_when_api_key_is_absent',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:254': [
+      'create_gateway_embedding_model_returns_gateway_embedding_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:263': [
+      'create_gateway_image_model_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:280': [
+      'create_gateway_image_model_reuses_headers_transport_and_observability',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:311': [
+      'create_gateway_video_model_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:328': [
+      'create_gateway_video_model_reuses_headers_transport_and_observability',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:359': [
+      'create_gateway_reranking_model_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:376': [
+      'create_gateway_reranking_alias_returns_gateway_reranking_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:389': [
+      'create_gateway_fetches_available_models_with_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:409': [
+      'create_gateway_caches_metadata_for_configured_refresh_interval',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:442': [
+      'create_gateway_uses_default_five_minute_metadata_refresh_interval',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:471': [
+      'create_gateway_language_model_passes_observability_headers_from_environment',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:514': [
+      'create_gateway_language_model_omits_missing_observability_headers',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:552': [
+      'default_gateway_export_exposes_provider_instance',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:559': [
+      'create_gateway_uses_default_base_url_when_none_is_provided',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:579': [
+      'create_gateway_accepts_empty_options',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:587': [
+      'default_gateway_export_constructs_image_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:600': [
+      'default_gateway_export_constructs_video_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:613': [
+      'create_gateway_overrides_default_base_url_when_provided',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:638': [
+      'create_gateway_prefers_api_key_over_oidc_token',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:793': [
+      'get_gateway_auth_token_matches_upstream_precedence',
+      'get_gateway_auth_token_handles_no_auth_at_all',
+      'get_gateway_auth_token_handles_valid_oidc_invalid_api_key',
+      'get_gateway_auth_token_handles_invalid_oidc_valid_api_key',
+      'get_gateway_auth_token_handles_no_oidc_invalid_api_key',
+      'get_gateway_auth_token_handles_no_oidc_valid_api_key',
+      'get_gateway_auth_token_handles_valid_oidc_no_api_key',
+      'get_gateway_auth_token_handles_valid_oidc_valid_api_key',
+      'get_gateway_auth_token_handles_valid_oidc_valid_options_api_key',
+      'get_gateway_auth_token_handles_invalid_oidc_invalid_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:858': [
+      'create_gateway_authentication_handles_no_auth_at_all',
+      'create_gateway_authentication_handles_valid_oidc_invalid_api_key',
+      'create_gateway_authentication_handles_invalid_oidc_valid_api_key',
+      'create_gateway_authentication_handles_no_oidc_invalid_api_key',
+      'create_gateway_authentication_handles_no_oidc_valid_api_key',
+      'create_gateway_authentication_handles_valid_oidc_no_api_key',
+      'create_gateway_authentication_handles_valid_oidc_valid_api_key',
+      'create_gateway_authentication_handles_valid_oidc_valid_options_api_key',
+      'create_gateway_authentication_handles_invalid_oidc_invalid_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:940': [
+      'get_gateway_auth_token_treats_empty_environment_variables_as_missing',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:956': [
+      'get_gateway_auth_token_uses_whitespace_environment_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:969': [
+      'get_gateway_auth_token_prioritizes_options_api_key_over_all_environment_variables',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:984': [
+      'gateway_authentication_contextual_messages_match_auth_source',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1033': [
+      'get_gateway_auth_token_prefers_options_api_key_over_ai_gateway_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1047': [
+      'get_gateway_auth_token_prefers_ai_gateway_api_key_over_oidc_token',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1061': [
+      'get_gateway_auth_token_falls_back_to_oidc_when_no_api_keys_are_available',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1078': [
+      'gateway_provider_real_world_vercel_deployment_uses_oidc_authentication',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1102': [
+      'gateway_provider_real_world_local_development_uses_api_key_authentication',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1116': [
+      'gateway_provider_real_world_explicit_api_key_override_wins_over_environment',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1138': [
+      'gateway_provider_get_credits_fetches_successfully',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1158': [
+      'gateway_provider_get_credits_handles_authentication_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1165': [
+      'gateway_provider_get_credits_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1181': [
+      'gateway_provider_get_credits_uses_oidc_authentication_headers',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1192': [
+      'gateway_provider_get_credits_surfaces_endpoint_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1205': [
+      'gateway_provider_get_credits_includes_upstream_headers',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1225': [
+      'gateway_provider_get_credits_is_available_on_provider_interface',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1232': [
+      'gateway_provider_get_spend_report_fetches_successfully',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1257': [
+      'gateway_provider_get_spend_report_passes_params_through',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1283': [
+      'gateway_provider_get_spend_report_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1302': [
+      'gateway_provider_get_spend_report_uses_custom_transport',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1321': [
+      'gateway_provider_get_spend_report_surfaces_endpoint_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1337': [
+      'gateway_provider_get_spend_report_is_available_on_provider_interface',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1342': [
+      'default_gateway_export_get_spend_report_is_available',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1348': [
+      'gateway_provider_metadata_fetch_errors_convert_to_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1368': [
+      'gateway_provider_metadata_gateway_errors_are_not_double_wrapped',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1395': [
+      'gateway_provider_language_model_handles_model_specification_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1432': [
+      'gateway_provider_language_model_accepts_any_model_id',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1478': [
+      'gateway_provider_language_model_accepts_non_existent_model_id',
+    ],
+    'packages/gateway/src/gateway-reranking-model.test.ts:191': [
+      'gateway_reranking_model_maps_invalid_request_error_response',
+    ],
+    'packages/gateway/src/gateway-reranking-model.test.ts:214': [
+      'gateway_reranking_model_maps_internal_server_error_response',
+    ],
+    'packages/gateway/src/gateway-spend-report.test.ts:39': [
+      'gateway_provider_spend_report_fetches_from_correct_endpoint_with_required_params',
+    ],
+    'packages/gateway/src/gateway-spend-report.test.ts:97': [
+      'gateway_provider_spend_report_omits_empty_tags_query_param',
+    ],
+    'packages/gateway/src/gateway-spend-report.test.ts:149': [
+      'gateway_provider_spend_report_transforms_credential_type_response_field',
+    ],
+    'packages/gateway/src/gateway-spend-report.test.ts:363': [
+      'gateway_provider_spend_report_uses_custom_transport',
+    ],
+    'packages/gateway/src/gateway-video-model.test.ts:670': [
+      'gateway_video_model_ignores_sse_heartbeat_comments_and_parses_data_event',
+    ],
+    'packages/vercel/src/vercel-provider.test.ts:40': [
+      'vercel_provider_uses_vercel_api_key_environment_when_api_key_omitted',
+      'vercel_provider_uses_default_base_url_and_function_alias',
+    ],
+    'packages/vercel/src/vercel-provider.test.ts:57': [
+      'vercel_provider_creates_openai_compatible_chat_model',
+    ],
+    'packages/vercel/src/vercel-provider.test.ts:78': [
+      'vercel_provider_uses_default_base_url_and_function_alias',
+    ],
+    'packages/vercel/src/vercel-provider.test.ts:87': [
+      'vercel_provider_creates_openai_compatible_chat_model',
+      'vercel_provider_implements_provider_trait',
+    ],
+  };
+
+  if (exact[key]) {
+    return exact[key];
+  }
+
+  const grouped = gatewayVercelGroupedRustTests(testCase);
+  if (grouped) {
+    return grouped;
+  }
+
+  const inferred = gatewayVercelInferredRustTest(testCase, rustTests);
+  return inferred ? [inferred] : null;
+}
+
+function gatewayVercelGroupedRustTests(testCase) {
+  const line = testCase.line;
+
+  if (testCase.file === 'packages/gateway/src/errors/as-gateway-error.test.ts') {
+    if ([12, 23, 33, 102, 112, 122].includes(line)) {
+      return ['as_gateway_error_detects_all_undici_timeout_codes'];
+    }
+    if ([45, 55, 76, 86, 93, 152].includes(line)) {
+      return ['as_gateway_error_maps_non_timeout_original_errors_to_response_errors'];
+    }
+    if (line === 134) {
+      return ['as_gateway_error_maps_handled_fetch_errors'];
+    }
+  }
+
+  if (testCase.file === 'packages/gateway/src/errors/create-gateway-error.test.ts') {
+    if ([13, 32, 50, 68, 108, 126, 349].includes(line)) {
+      return ['create_gateway_error_from_response_maps_gateway_error_types'];
+    }
+    if ([90, 368].includes(line)) {
+      return ['create_gateway_error_from_response_handles_model_not_found_param_edges'];
+    }
+    if (line === 146) {
+      return ['create_gateway_error_from_response_preserves_empty_auth_messages_with_context'];
+    }
+    if (line === 163) {
+      return ['create_gateway_error_from_response_uses_default_message_for_null_message'];
+    }
+    if (line === 189) {
+      return ['create_gateway_error_from_response_handles_null_error_type_as_internal'];
+    }
+    if (line === 205) {
+      return ['create_gateway_error_from_response_includes_cause_message'];
+    }
+    if ([225, 247, 269, 288, 307, 328].includes(line)) {
+      return ['create_gateway_error_from_response_maps_malformed_responses'];
+    }
+    if (line === 386) {
+      return ['create_gateway_error_from_response_ignores_extra_fields'];
+    }
+    if (line === 407) {
+      return ['create_gateway_error_from_response_preserves_error_properties'];
+    }
+    if ([433, 451, 470, 488, 507, 523].includes(line)) {
+      return ['create_gateway_error_from_response_maps_generation_id_to_error_variants'];
+    }
+    if ([540, 558, 576].includes(line)) {
+      return ['create_gateway_error_from_response_creates_contextual_auth_errors'];
+    }
+  }
+
+  if (testCase.file === 'packages/gateway/src/errors/extract-api-call-response.test.ts') {
+    if (line === 7) {
+      return ['extract_gateway_api_call_response_prefers_data_then_json_then_raw_body'];
+    }
+    if ([26, 42].includes(line)) {
+      return ['extract_gateway_api_call_response_prefers_explicit_data_even_null_or_empty'];
+    }
+    if ([61, 80, 97, 115, 131, 148].includes(line)) {
+      return ['extract_gateway_api_call_response_parses_json_or_returns_raw_text'];
+    }
+    if ([187, 203].includes(line)) {
+      return ['extract_gateway_api_call_response_returns_empty_object_without_body'];
+    }
+    if ([221, 237, 253].includes(line)) {
+      return ['extract_gateway_api_call_response_parses_scalar_and_array_bodies'];
+    }
+  }
+
+  if (testCase.file === 'packages/gateway/src/errors/gateway-error-types.test.ts') {
+    if (line >= 14 && line <= 39) {
+      return ['gateway_authentication_error_matches_default_and_custom_upstream_values'];
+    }
+    if (line >= 49 && line <= 94) {
+      return ['gateway_authentication_contextual_error_matches_upstream_matrix'];
+    }
+    if (line >= 109 && line <= 128) {
+      return ['gateway_invalid_request_error_matches_default_custom_and_variant_checks'];
+    }
+    if (line >= 138 && line <= 147) {
+      return ['gateway_rate_limit_error_matches_default_and_variant_checks'];
+    }
+    if (line >= 156 && line <= 176) {
+      return ['gateway_model_not_found_error_matches_default_custom_and_variant_checks'];
+    }
+    if (line >= 185 && line <= 194) {
+      return ['gateway_internal_server_error_matches_default_and_variant_checks'];
+    }
+    if (line >= 203 && line <= 238) {
+      return ['gateway_retryability_matches_upstream_status_matrix'];
+    }
+    if (line >= 245 && line <= 275) {
+      return ['gateway_response_error_matches_default_custom_and_variant_checks'];
+    }
+  }
+
+  if (testCase.file === 'packages/gateway/src/errors/parse-auth-method.test.ts') {
+    if (line === 8) {
+      return ['gateway_auth_method_header_matches_upstream_name'];
+    }
+    if ([15, 25, 35].includes(line)) {
+      return ['parse_gateway_auth_method_accepts_valid_values_and_extra_headers'];
+    }
+    if ([50, 57, 64, 71, 78, 85].includes(line)) {
+      return ['parse_gateway_auth_method_rejects_invalid_values'];
+    }
+    if ([94, 101, 108, 129].includes(line)) {
+      return ['parse_gateway_auth_method_returns_none_for_missing_or_nullish_headers'];
+    }
+    if ([115, 122].includes(line)) {
+      return ['parse_gateway_auth_method_rejects_whitespace'];
+    }
+  }
+
+  return null;
+}
+
+const GATEWAY_VERCEL_PREFIXES = {
+  'packages/gateway/src/gateway-embedding-model.test.ts': 'gateway_embedding_model',
+  'packages/gateway/src/gateway-fetch-metadata.test.ts': 'gateway_fetch_metadata',
+  'packages/gateway/src/gateway-generation-info.test.ts': 'gateway_provider_generation_info',
+  'packages/gateway/src/gateway-image-model.test.ts': 'gateway_image_model',
+  'packages/gateway/src/gateway-language-model.test.ts': 'gateway_language_model',
+  'packages/gateway/src/gateway-reranking-model.test.ts': 'gateway_reranking_model',
+  'packages/gateway/src/gateway-spend-report.test.ts': 'gateway_provider_spend_report',
+  'packages/gateway/src/gateway-video-model.test.ts': 'gateway_video_model',
+};
+
+function gatewayVercelInferredRustTest(testCase, rustTests) {
+  const prefix = GATEWAY_VERCEL_PREFIXES[testCase.file];
+  if (!prefix) {
+    return null;
+  }
+
+  const base = gatewayVercelSnakeName(testCase.name.replace(/^should\s+/, ''));
+  const candidates = [];
+  for (const candidateBase of gatewayVercelCandidateBaseNames(base)) {
+    for (const verbForm of gatewayVercelVerbForms(candidateBase)) {
+      candidates.push(`${prefix}_${verbForm}`);
+    }
+  }
+
+  return candidates.find(candidate => rustTests.has(candidate)) ?? null;
+}
+
+function gatewayVercelCandidateBaseNames(base) {
+  const candidates = new Set([base]);
+  candidates.add(base.replace(/date_objects?/g, 'offset_date_time'));
+  candidates.add(base.replace(/o11y/g, 'observability'));
+  candidates.add(base.replace(/^not_include_/, 'omit_'));
+  candidates.add(base.replace(/^not_pass_/, 'not_pass_'));
+  candidates.add(base.replace(/^post_to_/, 'posts_to_'));
+  return [...candidates].filter(Boolean);
+}
+
+function gatewayVercelVerbForms(base) {
+  const forms = new Set([base]);
+  for (const [pattern, replacement] of [
+    [/^accept_/, 'accepts_'],
+    [/^avoid_/, 'avoids_'],
+    [/^cache_/, 'caches_'],
+    [/^convert_/, 'converts_'],
+    [/^create_/, 'creates_'],
+    [/^encode_/, 'encodes_'],
+    [/^extract_/, 'extracts_'],
+    [/^fetch_/, 'fetches_'],
+    [/^filter_/, 'filters_'],
+    [/^handle_/, 'handles_'],
+    [/^ignore_/, 'ignores_'],
+    [/^include_/, 'includes_'],
+    [/^merge_/, 'merges_'],
+    [/^omit_/, 'omits_'],
+    [/^parse_/, 'parses_'],
+    [/^pass_/, 'passes_'],
+    [/^preserve_/, 'preserves_'],
+    [/^reject_/, 'rejects_'],
+    [/^remove_/, 'removes_'],
+    [/^return_/, 'returns_'],
+    [/^send_/, 'sends_'],
+    [/^serialize_/, 'serializes_'],
+    [/^stream_/, 'streams_'],
+    [/^throw_/, 'throws_'],
+    [/^transform_/, 'transforms_'],
+    [/^unwrap_/, 'unwraps_'],
+    [/^use_/, 'uses_'],
+    [/^validate_/, 'validates_'],
+    [/^work_/, 'works_'],
+    [/^not_include_/, 'does_not_include_'],
+    [/^not_modify_/, 'does_not_modify_'],
+    [/^not_pass_/, 'does_not_pass_'],
+  ]) {
+    if (pattern.test(base)) {
+      forms.add(base.replace(pattern, replacement));
+    }
+  }
+  return [...forms];
+}
+
+function gatewayVercelSnakeName(value) {
+  return value
+    .replace(/\$\{[^}]+}/g, 'template value')
+    .replace(/APICallError/g, 'API call error')
+    .replace(/Uint8Array/g, 'uint8 array')
+    .replace(/OIDC/g, 'oidc')
+    .replace(/BYOK/g, 'byok')
+    .replace(/BFL/g, 'bfl')
+    .replace(/SDK/g, 'sdk')
+    .replace(/Gateway/g, 'gateway')
+    .replace(/providerOptions/g, 'provider options')
+    .replace(/abortSignal/g, 'abort signal')
+    .replace(/includeRawChunks/g, 'include raw chunks')
+    .replace(/zeroDataRetention/g, 'zero data retention')
+    .replace(/disallowPromptTraining/g, 'disallow prompt training')
+    .replace(/hipaaCompliant/g, 'hipaa compliant')
+    .replace(/quotaEntityId/g, 'quota entity id')
+    .replace(/baseURL/g, 'base url')
+    .replace(/modelId/g, 'model id')
+    .replace(/modelType/g, 'model type')
+    .replace(/topN/g, 'top n')
+    .replace(/generationId/g, 'generation id')
+    .replace(/authMethod/g, 'auth method')
+    .replace(/getCredits/g, 'get credits')
+    .replace(/groupBy/g, 'group by')
+    .replace(/credential_type/g, 'credential type')
+    .replace(/credentialType/g, 'credential type')
+    .replace(/snake_case/g, 'snake case')
+    .replace(/camelCase/g, 'camel case')
+    .replace(/URL/g, 'url')
+    .replace(/SSE/g, 'sse')
+    .replace(/API/g, 'api')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/"/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/_+/g, '_');
+}
+
 function collectRustTests() {
   const roots = ['src', 'crates', 'examples']
     .map(root => path.join(repositoryRoot, root))
@@ -1038,6 +1722,7 @@ function classifyCase(
   foundationalMappings,
   ai02Mappings,
   providerUtilsMappings,
+  rustTests,
 ) {
   const locationKey = `${testCase.file}:${testCase.line}`;
   const foundational = foundationalMappings.byLocation.get(locationKey);
@@ -1060,6 +1745,11 @@ function classifyCase(
   const providerUtils = classifyProviderUtilsCase(testCase, providerUtilsMappings);
   if (providerUtils) {
     return providerUtils;
+  }
+
+  const gatewayVercelMapping = gatewayVercelMappedClassification(testCase, rustTests.names);
+  if (gatewayVercelMapping) {
+    return gatewayVercelMapping;
   }
 
   return defaultClassification(testCase, item);
@@ -1116,6 +1806,7 @@ function buildInventory(args) {
           foundationalMappings,
           ai02Mappings,
           providerUtilsMappings,
+          rustTests,
         );
         if (!VALID_STATUSES.has(classification.status)) {
           validationErrors.push(
