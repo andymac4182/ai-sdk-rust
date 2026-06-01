@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 92.7%
-- Portable package average: 91.0%
-- Closed package rows: 46 / 52
-- Strict portable verified rows: 36 / 42
-- In-progress rows: 6
+- Average estimated completion: 94.5%
+- Portable package average: 93.2%
+- Closed package rows: 47 / 52
+- Strict portable verified rows: 37 / 42
+- In-progress rows: 5
 - Not-started rows: 0
 
 ## 100% Closed
@@ -22,6 +22,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/anthropic` | 100% | Verified | provider package |
 | `@ai-sdk/amazon-bedrock` | 100% | Verified | provider package |
 | `@ai-sdk/google` | 100% | Verified | provider package |
+| `@ai-sdk/google-vertex` | 100% | Verified | provider package |
 | `@ai-sdk/alibaba` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
 | `@ai-sdk/azure` | 100% | Verified | provider package |
@@ -65,7 +66,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, chat, and image provider wrapper exists; files, video, xAI server tools, custom usage/message... |
 | `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current... |
 | `@ai-sdk/fireworks` | 45% | In progress | provider package | OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image... |

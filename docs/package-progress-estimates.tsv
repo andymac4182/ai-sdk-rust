@@ -4,7 +4,6 @@
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
 cohere	35	Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current upstream case parity remain explicitly inventoried.
 fireworks	45	OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image workflows, polling, editing, binary result handling, and live proof remain explicitly inventoried.
-google-vertex	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01D.
 groq	35	Initial OpenAI-compatible chat wrapper exists; transcription, browser-search tool, Groq-specific message and usage conversion, streaming edge parity, and live proof remain explicitly inventoried.
 togetherai	65	Provider wrapper covers chat, completion, embeddings, custom image generation, and reranking; exact per-case upstream split, abort/live behavior, and broader edge parity remain explicitly inventoried.
 xai	35	Initial Responses, chat, and image provider wrapper exists; files, video, xAI server tools, custom usage/message conversion, and full current upstream case parity remain explicitly inventoried.

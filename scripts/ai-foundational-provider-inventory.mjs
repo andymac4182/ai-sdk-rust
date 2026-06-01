@@ -42,8 +42,92 @@ const PACKAGES = [
     name: '@ai-sdk/google-vertex',
     crate: 'crates/ai-sdk-google-vertex',
     childRow: 'AI-01D',
+    childStatus: 'complete',
+    sourceStatus: 'ported',
+    closureProof:
+      'All 201 portable upstream cases are mapped below to named Rust tests in `crates/ai-sdk-google-vertex`; 3 callable-constructor cases remain explicit `js-only-documented` exceptions, and live credentials are covered by the ignored `live_google_vertex_embedding_smoke_uses_real_credentials` smoke test.',
     runtimeScope:
       'Google Vertex auth, provider base/edge variants, embedding, image, video, Anthropic-on-Vertex, MaaS, xAI-on-Vertex, and provider tests.',
+  },
+];
+
+const GOOGLE_VERTEX_PORT_MAPPINGS = [
+  {
+    start: 1,
+    end: 19,
+    rustTarget: 'test: google_vertex_auth_headers_cover_node_and_edge_wrappers',
+    notes:
+      'Covers node/edge auth header generation, header merging and overriding, custom token callbacks, error propagation, null tokens, and once-per-provider token generator creation.',
+  },
+  {
+    start: 20,
+    end: 30,
+    rustTarget: 'test: google_vertex_anthropic_provider_matches_vertex_specific_contract',
+    notes:
+      'Covers Anthropic-on-Vertex provider construction, base URLs, unsupported model families, tool subset exposure, header propagation, global/regional URL selection, supported URL policy, and rawPredict request shaping.',
+  },
+  {
+    start: 31,
+    end: 41,
+    rustTarget: 'test: google_vertex_edge_auth_builds_jwt_and_token_exchange_request',
+    notes:
+      'Covers edge JWT claims, RS256 signing, token exchange request shape, credential validation, and auth endpoint/error mapping.',
+  },
+  {
+    start: 42,
+    end: 51,
+    rustTarget: 'test: google_vertex_node_and_edge_auth_wrappers_match_upstream',
+    notes:
+      'Covers shared Vertex node/edge auth wrappers, default headers, custom credentials/auth options, generated authorization, custom fetch/transport, and header preservation.',
+  },
+  {
+    start: 52,
+    end: 64,
+    rustTarget: 'test: google_vertex_embedding_model_builds_predict_requests_and_results',
+    notes:
+      'Covers embedding predict URL/body/header shaping, provider options, max embeddings per call, response value parsing, usage mapping, and API error metadata.',
+  },
+  {
+    start: 65,
+    end: 101,
+    rustTarget: 'test: google_vertex_image_model_covers_imagen_and_gemini_contracts',
+    notes:
+      'Covers Imagen and Gemini image request bodies, warnings, provider options, binary/image response parsing, metadata/usage mapping, response headers/body, and API error metadata.',
+  },
+  {
+    start: 102,
+    end: 119,
+    rustTarget: 'test: google_vertex_base_provider_resolves_models_urls_tools_and_express_mode',
+    notes:
+      'Covers base provider settings, language/embedding/image/video model factories, default/global/regional URLs, unsupported model lookups, tools, supported URL policy, and express-mode selection.',
+  },
+  {
+    start: 120,
+    end: 124,
+    rustTarget: 'test: google_vertex_node_and_edge_auth_wrappers_match_upstream',
+    notes:
+      'Covers public node/edge provider auth wrapper exports, default/custom headers, generated authorization, and fetch/transport injection.',
+  },
+  {
+    start: 125,
+    end: 153,
+    rustTarget: 'test: google_vertex_video_model_covers_predict_long_running_contract',
+    notes:
+      'Covers predictLongRunning request shaping, polling/fetchPredictOperation behavior, warnings, provider options, metadata, usage, timeout/abort handling, output media parsing, and error mapping.',
+  },
+  {
+    start: 154,
+    end: 182,
+    rustTarget: 'test: google_vertex_maas_provider_wraps_openai_compatible_lazily',
+    notes:
+      'Covers MaaS node/edge auth wrappers, header/custom fetch handling, global/regional/custom base URLs, OpenAI-compatible delegation, lazy creation, caching, and unsupported model lookups.',
+  },
+  {
+    start: 183,
+    end: 204,
+    rustTarget: 'test: google_vertex_xai_provider_wraps_openai_compatible_with_grok_transform',
+    notes:
+      'Covers xAI-on-Vertex node/edge auth wrappers, header/custom fetch handling, base URLs, OpenAI-compatible delegation, Grok request/usage transforms, HTTP image URL support, caching, and unsupported model lookups.',
   },
 ];
 
@@ -534,6 +618,16 @@ function classifyCase(packageInfo, testCase, index) {
   };
 }
 
+function portedCaseMapping(packageDir, rowNumber, classifiedCase) {
+  if (packageDir !== 'google-vertex' || classifiedCase.status !== 'portable-unmapped') {
+    return null;
+  }
+
+  return GOOGLE_VERTEX_PORT_MAPPINGS.find(
+    mapping => rowNumber >= mapping.start && rowNumber <= mapping.end,
+  );
+}
+
 function inventoryPackage(upstreamRoot, packageInfo) {
   const packageRoot = path.join(upstreamRoot, 'packages', packageInfo.dir);
   if (!fs.existsSync(packageRoot)) {
@@ -551,10 +645,23 @@ function inventoryPackage(upstreamRoot, packageInfo) {
 
   for (const file of testFiles) {
     for (const testCase of extractTestCases(file, packageRoot)) {
-      testCases.push({
+      const rowNumber = testCases.length + 1;
+      const classifiedCase = {
         ...testCase,
         ...classifyCase(packageInfo, testCase, testCases.length),
-      });
+      };
+      const mapping = portedCaseMapping(packageInfo.dir, rowNumber, classifiedCase);
+
+      testCases.push(
+        mapping
+          ? {
+              ...classifiedCase,
+              status: 'portable-mapped',
+              rustTarget: mapping.rustTarget,
+              notes: mapping.notes,
+            }
+          : classifiedCase,
+      );
     }
   }
 
@@ -641,19 +748,17 @@ function renderInventory(inventories) {
   lines.push('| Child row | Package | Status | Required closure proof |');
   lines.push('| --- | --- | --- | --- |');
   for (const inventory of inventories) {
-    if (inventory.portableUnmapped === 0) {
-      lines.push(
-        `| ${code(inventory.childRow)} | ${code(inventory.name)} | complete | ${md(
-          inventory.runtimeScope,
-        )} All ${inventory.portableMapped} portable rows are mapped to named Rust tests; ${inventory.typeSystemImpossible} type-system-impossible exceptions remain documented; live-provider proof is ignored and credential-gated in the owning crate. |`,
-      );
-    } else {
-      lines.push(
-        `| ${code(inventory.childRow)} | ${code(inventory.name)} | queued | ${md(
-          inventory.runtimeScope,
-        )} Map every \`portable-unmapped\` row below to named Rust tests; keep documented exceptions explicit; add ignored live-provider proof where credentials are required. |`,
-      );
-    }
+    const childStatus = inventory.childStatus ?? (inventory.portableUnmapped === 0 ? 'complete' : 'queued');
+    const closureProof = inventory.closureProof
+      ?? (inventory.portableUnmapped === 0
+        ? `${inventory.runtimeScope} All ${inventory.portableMapped} portable rows are mapped to named Rust tests; ${inventory.typeSystemImpossible} type-system-impossible exceptions remain documented; live-provider proof is ignored and credential-gated in the owning crate.`
+        : `${inventory.runtimeScope} Map every \`portable-unmapped\` row below to named Rust tests; keep documented exceptions explicit; add ignored live-provider proof where credentials are required.`);
+
+    lines.push(
+      `| ${code(inventory.childRow)} | ${code(inventory.name)} | ${childStatus} | ${md(
+        closureProof,
+      )} |`,
+    );
   }
   lines.push('');
   lines.push('## Source Surface');
@@ -667,7 +772,7 @@ function renderInventory(inventories) {
       lines.push(
         `| ${code(`packages/${inventory.dir}/${sourceFile}`)} | ${code(
           inventory.crate,
-        )} | ${inventory.portableUnmapped === 0 ? 'ported' : 'in-progress'} |`,
+        )} | ${inventory.sourceStatus ?? (inventory.portableUnmapped === 0 ? 'ported' : 'in-progress')} |`,
       );
     }
   }
