@@ -1010,7 +1010,7 @@ impl VercelSandbox {
         let SandboxState::Vercel {
             source,
             sandbox_name,
-            sandbox_id: _,
+            sandbox_id,
             snapshot_id,
             expires_at: _,
         } = config.state
@@ -1021,34 +1021,39 @@ impl VercelSandbox {
             });
         };
 
-        let selected_name = sandbox_name.or(vercel_config.sandbox_name.clone());
         let current_branch = source
             .as_ref()
             .and_then(|source| source.new_branch.clone().or_else(|| source.branch.clone()));
+        let create_sandbox = |name: Option<String>| {
+            let create = VercelSandboxCreateRequest {
+                project_id: vercel_config.credentials.project_id.clone(),
+                name,
+                source: snapshot_id
+                    .clone()
+                    .map(|snapshot_id| VercelSandboxUpstreamSource::Snapshot { snapshot_id })
+                    .or_else(|| source.as_ref().map(source_to_vercel_source)),
+                ports: config.options.ports.clone(),
+                timeout: vercel_config.timeout_ms,
+                resources: vercel_config
+                    .vcpus
+                    .map(|vcpus| VercelSandboxResources { vcpus }),
+                runtime: vercel_config.runtime.clone(),
+                env: config.options.env.clone(),
+                tags: BTreeMap::new(),
+                persistent: vercel_config.persistent,
+            };
+            client.create_sandbox(&create)
+        };
+        let selected_name = sandbox_name.or(vercel_config.sandbox_name.clone());
         let (sandbox, session, routes) = match selected_name {
-            Some(name) => {
-                let (sandbox, session, routes, _) = client.get_sandbox(&name, Some(true))?;
-                (sandbox, session, routes)
-            }
-            None => {
-                let create = VercelSandboxCreateRequest {
-                    project_id: vercel_config.credentials.project_id.clone(),
-                    name: vercel_config.sandbox_name.clone(),
-                    source: snapshot_id
-                        .map(|snapshot_id| VercelSandboxUpstreamSource::Snapshot { snapshot_id })
-                        .or_else(|| source.as_ref().map(source_to_vercel_source)),
-                    ports: config.options.ports.clone(),
-                    timeout: vercel_config.timeout_ms,
-                    resources: vercel_config
-                        .vcpus
-                        .map(|vcpus| VercelSandboxResources { vcpus }),
-                    runtime: vercel_config.runtime.clone(),
-                    env: config.options.env.clone(),
-                    tags: BTreeMap::new(),
-                    persistent: vercel_config.persistent,
-                };
-                client.create_sandbox(&create)?
-            }
+            Some(name) => match client.get_sandbox(&name, Some(true)) {
+                Ok((sandbox, session, routes, _)) => (sandbox, session, routes),
+                Err(SandboxError::Api {
+                    status: Some(404), ..
+                }) if sandbox_id.is_none() => create_sandbox(Some(name))?,
+                Err(error) => return Err(error),
+            },
+            None => create_sandbox(vercel_config.sandbox_name.clone())?,
         };
         let working_directory = if session.cwd.is_empty() {
             sandbox
@@ -2003,6 +2008,50 @@ mod tests {
             requests[0].path,
             "/v2/sandboxes/oa%20name?teamId=team_123&projectId=proj_123&resume=true"
         );
+    }
+
+    #[test]
+    fn vercel_connect_creates_named_sandbox_when_missing() {
+        let server = MockVercelServer::new(vec![
+            MockResponse {
+                status: 404,
+                content_type: "application/json",
+                body: serde_json::to_vec(&serde_json::json!({
+                    "error": { "message": "not found" }
+                }))
+                .expect("json error"),
+            },
+            json_response(sandbox_response("oa-new", "sess_new")),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-new".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect named sandbox");
+
+        assert_eq!(sandbox.state().sandbox_type(), SandboxType::Vercel);
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].path,
+            "/v2/sandboxes/oa-new?teamId=team_123&projectId=proj_123&resume=true"
+        );
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/v2/sandboxes?teamId=team_123");
+        let body: Value = serde_json::from_slice(&requests[1].body).expect("request json");
+        assert_eq!(body["name"], "oa-new");
+        assert_eq!(body["projectId"], "proj_123");
     }
 
     #[test]
