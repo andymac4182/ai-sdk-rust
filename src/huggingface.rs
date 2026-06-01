@@ -22,9 +22,9 @@ use crate::language_model::{
     LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-    LanguageModelToolInputStart, LanguageModelToolResult, LanguageModelUrlSource,
-    LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolInputDelta,
+    LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
+    LanguageModelUrlSource, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -287,7 +287,8 @@ impl HuggingFaceResponsesLanguageModel {
         let post_options =
             PostJsonToApiOptions::new(format!("{}/responses", self.config.base_url), request_body)
                 .with_headers(request_headers)
-                .with_environment(RuntimeEnvironment::unknown());
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -636,9 +637,77 @@ fn huggingface_responses_request_body(
         });
     }
 
+    huggingface_prepare_tools(options, &mut body, &mut warnings);
+
     body.insert("stream".to_string(), JsonValue::Bool(stream));
 
     Ok((JsonValue::Object(body), warnings))
+}
+
+fn huggingface_prepare_tools(
+    options: &LanguageModelCallOptions,
+    body: &mut JsonObject,
+    warnings: &mut Vec<Warning>,
+) {
+    let Some(tools) = options
+        .tools
+        .as_ref()
+        .and_then(|tools| if tools.is_empty() { None } else { Some(tools) })
+    else {
+        return;
+    };
+
+    let mut huggingface_tools = Vec::new();
+    for tool in tools {
+        match tool {
+            LanguageModelTool::Function(tool) => {
+                let mut prepared = JsonObject::new();
+                prepared.insert(
+                    "type".to_string(),
+                    JsonValue::String("function".to_string()),
+                );
+                prepared.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+                if let Some(description) = &tool.description {
+                    prepared.insert(
+                        "description".to_string(),
+                        JsonValue::String(description.clone()),
+                    );
+                }
+                prepared.insert(
+                    "parameters".to_string(),
+                    JsonValue::Object(tool.input_schema.clone()),
+                );
+                huggingface_tools.push(JsonValue::Object(prepared));
+            }
+            LanguageModelTool::Provider(tool) => {
+                warnings.push(Warning::Unsupported {
+                    feature: format!("provider-defined tool {}", tool.id),
+                    details: None,
+                });
+            }
+        }
+    }
+    body.insert("tools".to_string(), JsonValue::Array(huggingface_tools));
+
+    let Some(tool_choice) = &options.tool_choice else {
+        return;
+    };
+
+    let tool_choice = match tool_choice {
+        LanguageModelToolChoice::Auto => Some(JsonValue::String("auto".to_string())),
+        LanguageModelToolChoice::Required => Some(JsonValue::String("required".to_string())),
+        LanguageModelToolChoice::None => None,
+        LanguageModelToolChoice::Tool { tool_name } => Some(json!({
+            "type": "function",
+            "function": {
+                "name": tool_name
+            }
+        })),
+    };
+
+    if let Some(tool_choice) = tool_choice {
+        body.insert("tool_choice".to_string(), tool_choice);
+    }
 }
 
 fn huggingface_responses_input(
@@ -2290,14 +2359,16 @@ mod tests {
         DEFAULT_HUGGINGFACE_BASE_URL, HuggingFaceProvider, HuggingFaceProviderSettings,
         HuggingFaceTransport, HuggingFaceTransportFuture, create_huggingface, huggingface,
     };
+    use crate::ProviderAbortController;
     use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
-        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelToolMessage, LanguageModelUserContentPart,
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFunctionTool,
+        LanguageModelMessage, LanguageModelResponseFormat, LanguageModelStreamPart,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolChoice, LanguageModelToolMessage, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
@@ -2581,6 +2652,201 @@ mod tests {
     }
 
     #[test]
+    fn huggingface_responses_prepares_tools_and_tool_choices() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: HuggingFaceTransport =
+            Arc::new(move |request| -> HuggingFaceTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_hf_tools",
+                        "model": "deepseek-ai/DeepSeek-V3-0324",
+                        "object": "response",
+                        "created_at": 1711115037,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "usage": null,
+                        "output": [],
+                        "output_text": "Test"
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport);
+        let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
+        let schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string"
+                }
+            },
+            "required": ["location"]
+        }))
+        .expect("tool schema deserializes");
+
+        let tool = LanguageModelTool::Function(
+            LanguageModelFunctionTool::new("getWeather", schema.clone())
+                .with_description("Get weather information"),
+        );
+        let _ = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(Vec::new())
+                    .with_tool(tool)
+                    .with_tool_choice(LanguageModelToolChoice::Tool {
+                        tool_name: "getWeather".to_string(),
+                    }),
+            ),
+        );
+        let simple_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object"
+        }))
+        .expect("simple schema deserializes");
+        let _ = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(Vec::new())
+                    .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                        "test",
+                        simple_schema.clone(),
+                    )))
+                    .with_tool_choice(LanguageModelToolChoice::Auto),
+            ),
+        );
+        let _ = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(Vec::new())
+                    .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                        "test",
+                        simple_schema,
+                    )))
+                    .with_tool_choice(LanguageModelToolChoice::Required),
+            ),
+        );
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned");
+        assert_eq!(requests.len(), 3);
+        let request_bodies = requests
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body parses")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            request_bodies[0].get("tools"),
+            Some(&json!([
+                {
+                    "type": "function",
+                    "name": "getWeather",
+                    "description": "Get weather information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            ]))
+        );
+        assert_eq!(
+            request_bodies[0].get("tool_choice"),
+            Some(&json!({
+                "type": "function",
+                "function": {
+                    "name": "getWeather"
+                }
+            }))
+        );
+        assert_eq!(
+            request_bodies[1].get("tool_choice"),
+            Some(&JsonValue::String("auto".to_string()))
+        );
+        assert_eq!(
+            request_bodies[2].get("tool_choice"),
+            Some(&JsonValue::String("required".to_string()))
+        );
+    }
+
+    #[test]
+    fn huggingface_responses_respects_abort_signal() {
+        let transport_calls = Arc::new(Mutex::new(0usize));
+        let transport_calls_for_transport = Arc::clone(&transport_calls);
+        let transport: HuggingFaceTransport =
+            Arc::new(move |_request| -> HuggingFaceTransportFuture {
+                *transport_calls_for_transport
+                    .lock()
+                    .expect("transport call mutex is not poisoned") += 1;
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_hf_abort",
+                        "model": "deepseek-ai/DeepSeek-V3-0324",
+                        "object": "response",
+                        "created_at": 1711115037,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "usage": null,
+                        "output": [],
+                        "output_text": "should not be returned"
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport);
+        let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(Vec::new()).with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            *transport_calls
+                .lock()
+                .expect("transport call mutex is not poisoned"),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("huggingface"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Aborted")
+        );
+    }
+
+    #[test]
     fn huggingface_responses_converts_images_tool_messages_and_content_parts() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -2757,6 +3023,115 @@ mod tests {
                 {
                     "type": "input_image",
                     "image_url": "https://example.com/image.png"
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn huggingface_responses_resolves_top_level_image_media_types() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: HuggingFaceTransport =
+            Arc::new(move |request| -> HuggingFaceTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_hf_images",
+                        "model": "deepseek-ai/DeepSeek-V3-0324",
+                        "object": "response",
+                        "created_at": 1711115037,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "usage": null,
+                        "output": [],
+                        "output_text": "Test"
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport);
+        let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
+        let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
+
+        let _ = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(
+                    crate::language_model::LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                        },
+                        "image/png",
+                    ),
+                ),
+                LanguageModelUserContentPart::File(
+                    crate::language_model::LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Bytes(png_bytes.clone()),
+                        },
+                        "image",
+                    ),
+                ),
+                LanguageModelUserContentPart::File(
+                    crate::language_model::LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image").expect("url parses"),
+                        },
+                        "image",
+                    ),
+                ),
+                LanguageModelUserContentPart::File(
+                    crate::language_model::LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Bytes(png_bytes),
+                        },
+                        "image/*",
+                    ),
+                ),
+            ])),
+        ])));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body parses");
+        assert_eq!(
+            body.get("input")
+                .and_then(JsonValue::as_array)
+                .and_then(|input| input.first())
+                .and_then(|message| message.get("content")),
+            Some(&json!([
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,iVBORw0KGgo="
+                },
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,iVBORw0KGgo="
+                },
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.com/image"
+                },
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,iVBORw0KGgo="
                 }
             ]))
         );

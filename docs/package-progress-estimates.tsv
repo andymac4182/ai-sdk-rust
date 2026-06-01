@@ -5,16 +5,8 @@
 alibaba	70	Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion, streaming, and video polling/error coverage; live Alibaba proof, one-to-one split names for aggregate mappings, and JS-only/runtime exception documentation remain.
 amazon-bedrock	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01B.
 anthropic	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01A.
-azure	55	Initial provider crate exists; provider metadata fixtures are mapped, with Azure-specific tools, broader Responses fixture matrix, SSE edge coverage, exact Azure error schema mapping, and live-provider validation still remaining.
-baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
 black-forest-labs	65	Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still credential-gated.
-bytedance	45	Initial provider crate exists; full upstream test and live-provider parity remain.
-cerebras	60	Initial provider wrapper exists; deterministic upstream provider inventory is mapped, with live-provider validation still credential-gated.
-deepinfra	45	Initial provider wrapper exists; broader package behavior and live proof remain.
 google	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01C.
 google-vertex	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01D.
-huggingface	55	Initial provider wrapper exists; SSE streaming, warning propagation, and broader package behavior remain.
 luma	45	Initial provider crate exists; full upstream test and live-provider parity remain.
-moonshotai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
 togetherai	45	Initial provider wrapper exists; broader package behavior and live proof remain.
-vercel	40	Construction wrapper exists; live validation and full package test parity remain.

@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, JsonObject, JsonValue,
-    LoadApiKeyError, LoadApiKeyOptions, ModelType, NoSuchModelError,
+    DelayOptions, FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, JsonObject,
+    JsonValue, LoadApiKeyError, LoadApiKeyOptions, ModelType, NoSuchModelError,
     OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
-    PostJsonToApiOptions, Provider, ProviderApiRequest, ProviderApiRequestBody,
-    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
-    ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment, VideoModel,
-    VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
+    PostJsonToApiOptions, Provider, ProviderAbortSignal, ProviderApiRequest,
+    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment,
+    VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
     VideoModelVideoData, Warning, combine_headers, convert_to_base64,
-    create_json_error_response_handler, create_json_response_handler, delay, get_from_api,
-    load_api_key, parse_provider_options, post_json_to_api, without_trailing_slash,
+    create_json_error_response_handler, create_json_response_handler, delay, delay_with_options,
+    get_from_api, load_api_key, parse_provider_options, post_json_to_api, without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -314,9 +314,11 @@ impl ByteDanceVideoModel {
             }
         };
         let create_url = format!("{}/contents/generations/tasks", self.base_url);
+        let abort_signal = options.abort_signal.clone();
         let create_options = PostJsonToApiOptions::new(create_url, request_body)
             .with_headers(request_headers.clone())
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(abort_signal.clone());
         let transport = Arc::clone(&self.transport);
         let create = match post_json_to_api(
             create_options,
@@ -362,7 +364,7 @@ impl ByteDanceVideoModel {
         };
 
         match self
-            .wait_for_completion(&task_id, &request_headers, &provider_options)
+            .wait_for_completion(&task_id, &request_headers, &provider_options, abort_signal)
             .await
         {
             Ok((status, headers)) => bytedance_video_result_from_response(
@@ -388,6 +390,7 @@ impl ByteDanceVideoModel {
         task_id: &str,
         headers: &BTreeMap<String, Option<String>>,
         provider_options: &ByteDanceVideoProviderOptions,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<(ByteDanceStatusResponse, Option<Headers>), String> {
         let poll_interval = provider_options
             .poll_interval_millis
@@ -402,7 +405,8 @@ impl ByteDanceVideoModel {
             let transport = Arc::clone(&self.transport);
             let get_options = GetFromApiOptions::new(status_url.clone())
                 .with_headers(headers.clone())
-                .with_environment(RuntimeEnvironment::unknown());
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone());
             let response = get_from_api(
                 get_options,
                 move |request| (transport)(request),
@@ -438,7 +442,13 @@ impl ByteDanceVideoModel {
                     }
 
                     if poll_interval > 0 {
-                        delay(Some(poll_interval as i64)).await;
+                        let mut delay_options = DelayOptions::new();
+                        if let Some(abort_signal) = abort_signal.clone() {
+                            delay_options = delay_options.with_abort_signal(abort_signal);
+                        }
+                        delay_with_options(Some(poll_interval as i64), delay_options)
+                            .await
+                            .map_err(|error| error.to_string())?;
                     } else {
                         delay(None).await;
                     }
@@ -1177,15 +1187,17 @@ mod tests {
         DEFAULT_BYTEDANCE_BASE_URL, byte_dance, create_byte_dance,
     };
     use ai_sdk_rust::{
-        FileDataContent, ModelType, Provider, ProviderApiRequest, ProviderApiRequestBody,
-        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, ProviderWithVideoModel,
-        VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelVideoData,
+        FileDataContent, ModelType, Provider, ProviderAbortController, ProviderApiRequest,
+        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
+        ProviderWithVideoModel, VideoModel, VideoModelCallOptions, VideoModelFile,
+        VideoModelVideoData,
     };
     use serde_json::json;
     use std::future::Future;
     use std::future::ready;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
     use time::OffsetDateTime;
     use url::Url;
 
@@ -1210,6 +1222,22 @@ mod tests {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures use ready transports"),
+        }
+    }
+
+    fn poll_until_ready<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => break value,
+                Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+            }
         }
     }
 
@@ -1495,6 +1523,148 @@ mod tests {
     }
 
     #[test]
+    fn bytedance_video_model_polls_until_video_is_ready() {
+        let status_polls = Arc::new(Mutex::new(0usize));
+        let status_polls_for_transport = Arc::clone(&status_polls);
+        let transport: ByteDanceTransport = Arc::new(move |request| -> ByteDanceTransportFuture {
+            let response = match (request.method, request.url.as_str()) {
+                (
+                    ProviderApiRequestMethod::Post,
+                    "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks",
+                ) => json_response(json!({
+                    "id": "poll-task"
+                })),
+                (
+                    ProviderApiRequestMethod::Get,
+                    "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/poll-task",
+                ) => {
+                    let mut polls = status_polls_for_transport
+                        .lock()
+                        .expect("status poll mutex is not poisoned");
+                    *polls += 1;
+
+                    if *polls == 1 {
+                        json_response(json!({
+                            "id": "poll-task",
+                            "status": "processing"
+                        }))
+                    } else {
+                        json_response(json!({
+                            "id": "poll-task",
+                            "model": "seedance-1-0-pro-250528",
+                            "status": "succeeded",
+                            "content": {
+                                "video_url": "https://bytedance.cdn/files/poll-output.mp4"
+                            }
+                        }))
+                    }
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"error": {"message": "unexpected request", "code": "404"}}).to_string(),
+                ),
+            };
+
+            Box::pin(ready(Ok(response)))
+        });
+        let provider =
+            create_byte_dance(ByteDanceProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "bytedance".to_string(),
+            serde_json::from_value(json!({
+                "pollIntervalMs": 1
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let result =
+            poll_until_ready(provider.video("seedance-1-0-pro-250528").do_generate(
+                VideoModelCallOptions::new(1).with_provider_options(provider_options),
+            ));
+
+        assert_eq!(
+            *status_polls
+                .lock()
+                .expect("status poll mutex is not poisoned"),
+            2
+        );
+        assert_eq!(
+            result.videos,
+            vec![VideoModelVideoData::url(
+                Url::parse("https://bytedance.cdn/files/poll-output.mp4").expect("valid URL"),
+                "video/mp4"
+            )]
+        );
+    }
+
+    #[test]
+    fn bytedance_video_model_times_out_after_poll_timeout() {
+        let transport: ByteDanceTransport = Arc::new(move |request| -> ByteDanceTransportFuture {
+            let response = match (request.method, request.url.as_str()) {
+                (
+                    ProviderApiRequestMethod::Post,
+                    "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks",
+                ) => json_response(json!({
+                    "id": "timeout-task"
+                })),
+                (
+                    ProviderApiRequestMethod::Get,
+                    "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/timeout-task",
+                ) => json_response(json!({
+                    "id": "timeout-task",
+                    "status": "processing"
+                })),
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"error": {"message": "unexpected request", "code": "404"}}).to_string(),
+                ),
+            };
+
+            Box::pin(ready(Ok(response)))
+        });
+        let provider =
+            create_byte_dance(ByteDanceProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "bytedance".to_string(),
+            serde_json::from_value(json!({
+                "pollIntervalMs": 1,
+                "pollTimeoutMs": 1
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let result =
+            poll_until_ready(provider.video("seedance-1-0-pro-250528").do_generate(
+                VideoModelCallOptions::new(1).with_provider_options(provider_options),
+            ));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("bytedance"))
+                .and_then(|provider| provider.get("taskId")),
+            Some(&json!("timeout-task"))
+        );
+        assert!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("bytedance"))
+                .and_then(|provider| provider.get("errorMessage"))
+                .and_then(|message| message.as_str())
+                .is_some_and(|message| message.contains("timed out"))
+        );
+    }
+
+    #[test]
     fn bytedance_video_model_maps_api_and_status_errors_to_metadata() {
         let transport: ByteDanceTransport = Arc::new(move |request| -> ByteDanceTransportFuture {
             let response = match (request.method, request.url.as_str()) {
@@ -1554,6 +1724,88 @@ mod tests {
                 .and_then(|provider| provider.get("errorMessage"))
                 .and_then(|message| message.as_str())
                 .is_some_and(|message| message.contains("Video generation failed"))
+        );
+    }
+
+    #[test]
+    fn bytedance_video_model_respects_abort_signal() {
+        let abort_controller = ProviderAbortController::new();
+        let abort_for_transport = abort_controller.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: ByteDanceTransport = Arc::new(move |request| -> ByteDanceTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request.clone());
+
+            let response = match (request.method, request.url.as_str()) {
+                (
+                    ProviderApiRequestMethod::Post,
+                    "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks",
+                ) => json_response(json!({
+                    "id": "abort-task"
+                })),
+                (
+                    ProviderApiRequestMethod::Get,
+                    "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/abort-task",
+                ) => {
+                    abort_for_transport.abort();
+                    json_response(json!({
+                        "id": "abort-task",
+                        "status": "processing"
+                    }))
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"error": {"message": "unexpected request", "code": "404"}}).to_string(),
+                ),
+            };
+
+            Box::pin(ready(Ok(response)))
+        });
+        let provider =
+            create_byte_dance(ByteDanceProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport)
+                .with_current_date(fixed_timestamp);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "bytedance".to_string(),
+            serde_json::from_value(json!({
+                "pollIntervalMs": 10
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let result = poll_ready(
+            provider.video("seedance-1-0-pro-250528").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_provider_options(provider_options)
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.videos.is_empty());
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("bytedance"))
+            .expect("ByteDance error metadata is present");
+        assert_eq!(metadata.get("taskId"), Some(&json!("abort-task")));
+        assert!(
+            metadata
+                .get("errorMessage")
+                .and_then(|message| message.as_str())
+                .is_some_and(|message| message.to_ascii_lowercase().contains("abort"))
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.abort_signal.is_some())
         );
     }
 

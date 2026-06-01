@@ -237,7 +237,8 @@ impl DeepInfraImageModel {
         let post_options =
             PostJsonToApiOptions::new(format!("{}/{}", self.base_url, self.model_id), request_body)
                 .with_headers(request_headers)
-                .with_environment(RuntimeEnvironment::unknown());
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -274,7 +275,8 @@ impl DeepInfraImageModel {
         let form_data = deepinfra_image_edit_form_data(&self.model_id, &options);
         let post_options = PostFormDataToApiOptions::new(self.edit_url(), form_data)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_form_data_to_api(
@@ -985,6 +987,7 @@ mod tests {
     use super::{
         DEFAULT_DEEPINFRA_BASE_URL, DeepInfraProvider, DeepInfraProviderSettings, create_deepinfra,
     };
+    use crate::ProviderAbortController;
     use crate::embed::{EmbedManyOptions, embed_many};
     use crate::file_data::FileDataContent;
     use crate::generate_text::{GenerateTextOptions, generate_text};
@@ -1539,6 +1542,59 @@ mod tests {
                 .image("black-forest-labs/FLUX-1-schnell")
                 .provider(),
             "deepinfra.image"
+        );
+    }
+
+    #[test]
+    fn deepinfra_image_model_respects_abort_signal() {
+        let transport_calls = Arc::new(Mutex::new(0usize));
+        let transport_calls_for_transport = Arc::clone(&transport_calls);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
+                *transport_calls_for_transport
+                    .lock()
+                    .expect("transport call mutex is not poisoned") += 1;
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "images": [
+                            "data:image/png;base64,should-not-be-returned"
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .image_model("black-forest-labs/FLUX-1-schnell");
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            *transport_calls
+                .lock()
+                .expect("transport call mutex is not poisoned"),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("deepinfra"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Aborted")
         );
     }
 

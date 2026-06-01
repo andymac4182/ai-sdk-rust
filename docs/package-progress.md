@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 65.9%
-- Portable package average: 57.7%
-- Closed package rows: 28 / 52
-- Strict portable verified rows: 18 / 42
-- In-progress rows: 16
+- Average estimated completion: 73.9%
+- Portable package average: 67.7%
+- Closed package rows: 36 / 52
+- Strict portable verified rows: 26 / 42
+- In-progress rows: 8
 - Not-started rows: 8
 
 ## 100% Closed
@@ -20,15 +20,23 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/openai-compatible` | 100% | Verified | provider base package |
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
+| `@ai-sdk/azure` | 100% | Verified | provider package |
+| `@ai-sdk/baseten` | 100% | Verified | provider package |
+| `@ai-sdk/bytedance` | 100% | Verified | provider package |
+| `@ai-sdk/cerebras` | 100% | Verified | provider package |
 | `@ai-sdk/deepgram` | 100% | Verified | provider package |
+| `@ai-sdk/deepinfra` | 100% | Verified | provider package |
 | `@ai-sdk/deepseek` | 100% | Verified | provider package |
 | `@ai-sdk/elevenlabs` | 100% | Verified | provider package |
 | `@ai-sdk/gladia` | 100% | Verified | provider package |
+| `@ai-sdk/huggingface` | 100% | Verified | provider package |
 | `@ai-sdk/hume` | 100% | Verified | provider package |
 | `@ai-sdk/lmnt` | 100% | Verified | provider package |
 | `@ai-sdk/mistral` | 100% | Verified | provider package |
+| `@ai-sdk/moonshotai` | 100% | Verified | provider package |
 | `@ai-sdk/perplexity` | 100% | Verified | provider package |
 | `@ai-sdk/revai` | 100% | Verified | provider package |
+| `@ai-sdk/vercel` | 100% | Verified | provider package |
 | `@ai-sdk/voyage` | 100% | Verified | provider package |
 | `@ai-sdk/otel` | 100% | Verified | telemetry package |
 | `@ai-sdk/test-server` | 100% | Verified | testing support package |
@@ -52,17 +60,9 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/google` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/alibaba` | 70% | In progress | provider package | Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion,... |
-| `@ai-sdk/azure` | 55% | In progress | provider package | Initial provider crate exists; provider metadata fixtures are mapped, with Azure-specific tools, broader Responses... |
-| `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
-| `@ai-sdk/bytedance` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
-| `@ai-sdk/cerebras` | 60% | In progress | provider package | Initial provider wrapper exists; deterministic upstream provider inventory is mapped, with live-provider validation... |
-| `@ai-sdk/deepinfra` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
-| `@ai-sdk/huggingface` | 55% | In progress | provider package | Initial provider wrapper exists; SSE streaming, warning propagation, and broader package behavior remain. |
 | `@ai-sdk/luma` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
-| `@ai-sdk/moonshotai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/togetherai` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
-| `@ai-sdk/vercel` | 40% | In progress | provider package | Construction wrapper exists; live validation and full package test parity remain. |
 
 ## Not Started
 
