@@ -44,8 +44,8 @@ const AI_04_INVENTORY_PATH = path.join(
 );
 
 const UPSTREAM_REPO = 'vercel/ai';
-const UPSTREAM_HEAD = 'ab6d66482d31afe15f4973a51c5f7cfa09c92ea6';
-const UPSTREAM_COMMIT_DATE = '2026-05-30T00:54:18Z';
+const UPSTREAM_HEAD = '43e84c8e39e540aa23e25986031183227a77d531';
+const UPSTREAM_COMMIT_DATE = '2026-06-01T20:12:00Z';
 const INVENTORY_DATE = '2026-06-02';
 const FETCH_COMMAND = 'npx opensrc fetch github:vercel/ai';
 
