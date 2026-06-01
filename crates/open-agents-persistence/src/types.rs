@@ -228,6 +228,22 @@ pub struct ChatRecord {
     pub updated_at: OffsetDateTime,
 }
 
+/// Mutable chat fields accepted by the session chat route.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
+/// Compact chat listing returned by session sidebar routes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSummaryRecord {
+    pub id: String,
+    pub title: String,
+}
+
 /// Input for creating a chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateChatInput {
@@ -274,6 +290,50 @@ pub struct CreateChatMessageInput {
     pub parts: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<OffsetDateTime>,
+}
+
+/// Status returned by an upstream-compatible scoped message upsert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsertChatMessageStatus {
+    Inserted,
+    Updated,
+    Conflict,
+}
+
+/// Result for scoped chat-message upserts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpsertChatMessageResult {
+    pub status: UpsertChatMessageStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<ChatMessageRecord>,
+}
+
+/// Result from deleting a user message and every following message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum DeleteChatMessageResult {
+    NotFound,
+    NotUserMessage,
+    Deleted { deleted_message_ids: Vec<String> },
+}
+
+/// Input for forking a chat through a selected assistant message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkChatInput {
+    pub user_id: String,
+    pub source_chat_id: String,
+    pub through_message_id: String,
+    pub forked_chat: CreateChatInput,
+}
+
+/// Result from forking a chat through a selected assistant message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum ForkChatResult {
+    Created { chat: ChatRecord },
+    MessageNotFound,
+    NotAssistantMessage,
 }
 
 /// Result of an idempotent insert.
@@ -460,6 +520,31 @@ impl SlackThreadMappingRecord {
     }
 }
 
+/// Durable public share record for a chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRecord {
+    pub id: String,
+    pub chat_id: String,
+    pub created_at: OffsetDateTime,
+}
+
+/// Input for creating a share if the chat does not already have one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateShareInput {
+    pub id: String,
+    pub chat_id: String,
+}
+
+/// Durable read marker for a user/chat pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatReadRecord {
+    pub user_id: String,
+    pub chat_id: String,
+    pub last_read_at: OffsetDateTime,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
 /// Input for creating a Slack thread mapping if absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSlackThreadMappingInput {
@@ -500,6 +585,60 @@ pub struct CreateIdempotencyRecordInput {
     pub expires_at: Option<OffsetDateTime>,
 }
 
+/// Normalize legacy web-app sandbox state payloads onto the durable Vercel
+/// `sandboxName` shape.
+pub fn normalize_legacy_sandbox_state(
+    sandbox_state: serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut state = match sandbox_state {
+        serde_json::Value::Null => return None,
+        serde_json::Value::Object(state) => state,
+        other => return Some(other),
+    };
+
+    let normalized_type = if state.get("type").and_then(serde_json::Value::as_str) == Some("hybrid")
+    {
+        Some("vercel")
+    } else {
+        state.get("type").and_then(serde_json::Value::as_str)
+    };
+
+    let sandbox_name = state
+        .get("sandboxName")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            state
+                .get("sandboxId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+
+    if normalized_type != Some("vercel") {
+        return Some(serde_json::Value::Object(state));
+    }
+    if state.get("type").and_then(serde_json::Value::as_str) == Some("vercel")
+        && sandbox_name.is_none()
+    {
+        return Some(serde_json::Value::Object(state));
+    }
+
+    state.insert(
+        "type".to_string(),
+        serde_json::Value::String("vercel".to_string()),
+    );
+    if let Some(sandbox_name) = sandbox_name {
+        state.insert(
+            "sandboxName".to_string(),
+            serde_json::Value::String(sandbox_name),
+        );
+        state.remove("sandboxId");
+    }
+    Some(serde_json::Value::Object(state))
+}
+
 /// Session repository contract.
 #[async_trait]
 pub trait SessionRepository: Send + Sync {
@@ -516,6 +655,8 @@ pub trait SessionRepository: Send + Sync {
         session_id: &str,
         update: SessionLifecycleUpdate,
     ) -> PersistenceResult<Option<SessionRecord>>;
+
+    async fn used_session_titles(&self, user_id: &str) -> PersistenceResult<Vec<String>>;
 }
 
 /// Chat repository contract.
@@ -532,6 +673,19 @@ pub trait ChatRepository: Send + Sync {
         chat_id: &str,
         assistant_activity_at: Option<OffsetDateTime>,
     ) -> PersistenceResult<Option<ChatRecord>>;
+
+    async fn update_chat(
+        &self,
+        chat_id: &str,
+        patch: ChatPatch,
+    ) -> PersistenceResult<Option<ChatRecord>>;
+
+    async fn delete_chat(&self, chat_id: &str) -> PersistenceResult<bool>;
+
+    async fn chat_summaries_by_session(
+        &self,
+        session_id: &str,
+    ) -> PersistenceResult<Vec<ChatSummaryRecord>>;
 }
 
 /// Chat message repository contract.
@@ -543,6 +697,27 @@ pub trait MessageRepository: Send + Sync {
     ) -> PersistenceResult<InsertIfAbsent<ChatMessageRecord>>;
 
     async fn list_chat_messages(&self, chat_id: &str) -> PersistenceResult<Vec<ChatMessageRecord>>;
+
+    async fn get_chat_message(
+        &self,
+        message_id: &str,
+    ) -> PersistenceResult<Option<ChatMessageRecord>>;
+
+    async fn upsert_chat_message_scoped(
+        &self,
+        message: CreateChatMessageInput,
+    ) -> PersistenceResult<UpsertChatMessageResult>;
+
+    async fn delete_chat_message_and_following(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> PersistenceResult<DeleteChatMessageResult>;
+
+    async fn fork_chat_through_message(
+        &self,
+        input: ForkChatInput,
+    ) -> PersistenceResult<ForkChatResult>;
 }
 
 /// Active run ownership contract for compare-and-set semantics.
@@ -609,6 +784,35 @@ pub trait SlackThreadMappingRepository: Send + Sync {
     ) -> PersistenceResult<Option<SlackThreadMappingRecord>>;
 }
 
+/// Public share repository contract.
+#[async_trait]
+pub trait ShareRepository: Send + Sync {
+    async fn get_share_by_chat_id(&self, chat_id: &str) -> PersistenceResult<Option<ShareRecord>>;
+
+    async fn create_share_if_absent(
+        &self,
+        share: CreateShareInput,
+    ) -> PersistenceResult<InsertIfAbsent<ShareRecord>>;
+
+    async fn delete_share_by_chat_id(&self, chat_id: &str) -> PersistenceResult<bool>;
+}
+
+/// Chat read-state repository contract.
+#[async_trait]
+pub trait ChatReadRepository: Send + Sync {
+    async fn mark_chat_read(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+    ) -> PersistenceResult<ChatReadRecord>;
+
+    async fn get_chat_read(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+    ) -> PersistenceResult<Option<ChatReadRecord>>;
+}
+
 /// Sandbox lifecycle repository contract.
 #[async_trait]
 pub trait SandboxStateRepository: Send + Sync {
@@ -667,6 +871,8 @@ pub trait RemoteAgentPersistenceStore:
     + RunRepository
     + UsageRepository
     + SlackThreadMappingRepository
+    + ShareRepository
+    + ChatReadRepository
     + SandboxStateRepository
     + IdempotencyRepository
 {
@@ -680,6 +886,8 @@ impl<T> RemoteAgentPersistenceStore for T where
         + RunRepository
         + UsageRepository
         + SlackThreadMappingRepository
+        + ShareRepository
+        + ChatReadRepository
         + SandboxStateRepository
         + IdempotencyRepository
 {

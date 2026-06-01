@@ -637,6 +637,18 @@ function sourceMapping(relative) {
 }
 
 function testMapping(relative) {
+  const verified = verifiedRustTestMapping(relative);
+  if (verified) {
+    const owner = testOwner(relative);
+    return {
+      portability: 'portable',
+      status: 'verified',
+      owner,
+      rustTestName: verified,
+      note: 'All portable upstream cases for this session/persistence row are mapped to deterministic named Rust tests; no live Slack, Vercel, or browser credentials required.',
+    };
+  }
+
   const testName = partialRustTestName(relative);
   if (testName) {
     const owner = testOwner(relative);
@@ -1021,6 +1033,76 @@ function portableReason(relative) {
     return 'Skill discovery/cache/ref behavior maps to ai-sdk-rust skill support.';
   }
   return 'Portable Open Agents behavior is assigned to the Rust owner; no named parity test exists yet.';
+}
+
+function verifiedRustTestMapping(relative) {
+  const direct = new Map([
+    [
+      'apps/web/app/api/sessions/_lib/session-context.test.ts',
+      'session_context_guard_contract',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/[chatId]/fork/route.test.ts',
+      'session_chat_fork_route_copies_messages_through_selected_assistant',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/[chatId]/messages/[messageId]/route.test.ts',
+      'session_chat_messages_route_scoped_upsert_and_delete_contract',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/[chatId]/messages/route.test.ts',
+      'session_chat_messages_route_scoped_upsert_and_delete_contract',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/[chatId]/read/route.test.ts',
+      'session_chat_read_route_marks_authenticated_owned_chat_read',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/[chatId]/route.test.ts',
+      'session_chats_route_lists_creates_updates_and_deletes_chats',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/[chatId]/share/route.test.ts',
+      'session_chat_share_route_creates_reuses_and_revokes_share',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/chats/route.test.ts',
+      'session_chats_route_lists_creates_updates_and_deletes_chats',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/code-editor/route.test.ts',
+      'session_code_editor_route_reuses_owned_process_and_rejects_unrelated_ports',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/dev-server/route.test.ts',
+      'session_dev_server_route_prefers_app_reuses_state_and_plans_dependency_installs',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/diff/_lib/diff-utils.test.ts',
+      'session_diff_route_parses_git_output_and_untracked_files',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/files/content/route.test.ts',
+      'session_files_content_route_normalizes_paths_and_classifies_sandbox_failures',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/share/route.test.ts',
+      'deprecated_session_share_route_returns_gone_guidance',
+    ],
+    [
+      'apps/web/app/api/sessions/[sessionId]/skills/route.test.ts',
+      'session_skills_route_uses_cache_until_refresh_requests_discovery',
+    ],
+    [
+      'apps/web/app/api/sessions/route.test.ts',
+      'sessions_route_enforces_trial_vercel_linking_skill_and_auto_pr_policy',
+    ],
+    [
+      'apps/web/lib/db/sessions.test.ts',
+      'db_sessions_normalizes_legacy_sandbox_state_and_deduplicates_titles; session_chat_messages_route_scoped_upsert_and_delete_contract',
+    ],
+  ]);
+  return direct.get(relative);
 }
 
 function buildInventory() {

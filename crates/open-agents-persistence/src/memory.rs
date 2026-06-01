@@ -5,12 +5,13 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 
 use crate::types::{
-    ActiveRunRepository, ChatMessageRecord, ChatRecord, ChatRepository, CreateChatInput,
-    CreateChatMessageInput, CreateIdempotencyRecordInput, CreateRunInput, CreateRunStepInput,
-    CreateSessionInput, CreateSlackThreadMappingInput, CreateUsageRecordInput, IdempotencyRecord,
-    IdempotencyRepository, InsertIfAbsent, MessageRepository, PersistenceError, PersistenceResult,
-    RunRecord, RunRepository, RunStatusUpdate, RunStepRecord, SandboxStateRepository,
-    SandboxStateUpdate, SessionRecord, SessionRepository, SlackThreadKey, SlackThreadMappingRecord,
+    ActiveRunRepository, ChatMessageRecord, ChatReadRepository, ChatRecord, ChatRepository,
+    CreateChatInput, CreateChatMessageInput, CreateIdempotencyRecordInput, CreateRunInput,
+    CreateRunStepInput, CreateSessionInput, CreateShareInput, CreateSlackThreadMappingInput,
+    CreateUsageRecordInput, IdempotencyRecord, IdempotencyRepository, InsertIfAbsent,
+    MessageRepository, PersistenceError, PersistenceResult, RunRecord, RunRepository,
+    RunStatusUpdate, RunStepRecord, SandboxStateRepository, SandboxStateUpdate, SessionRecord,
+    SessionRepository, ShareRecord, ShareRepository, SlackThreadKey, SlackThreadMappingRecord,
     SlackThreadMappingRepository, UsageRecord, UsageRepository,
 };
 
@@ -35,6 +36,9 @@ struct MemoryStoreInner {
     usage_ids_by_run: HashMap<String, Vec<String>>,
     slack_mappings: HashMap<SlackThreadKey, SlackThreadMappingRecord>,
     slack_mapping_keys_by_chat: HashMap<String, SlackThreadKey>,
+    shares: HashMap<String, ShareRecord>,
+    share_ids_by_chat: HashMap<String, String>,
+    read_markers: HashMap<(String, String), crate::types::ChatReadRecord>,
     idempotency: HashMap<(String, String), IdempotencyRecord>,
     next_sequence: u64,
 }
@@ -172,6 +176,20 @@ impl SessionRepository for MemoryPersistenceStore {
             Ok(Some(session.clone()))
         })
     }
+
+    async fn used_session_titles(&self, user_id: &str) -> PersistenceResult<Vec<String>> {
+        self.with_inner(|inner| {
+            let mut titles: Vec<_> = inner
+                .sessions
+                .values()
+                .filter(|session| session.user_id == user_id)
+                .map(|session| session.title.clone())
+                .collect();
+            titles.sort();
+            titles.dedup();
+            Ok(titles)
+        })
+    }
 }
 
 #[async_trait]
@@ -244,6 +262,69 @@ impl ChatRepository for MemoryPersistenceStore {
             Ok(Some(chat.clone()))
         })
     }
+
+    async fn update_chat(
+        &self,
+        chat_id: &str,
+        patch: crate::types::ChatPatch,
+    ) -> PersistenceResult<Option<ChatRecord>> {
+        self.with_inner(|inner| {
+            let Some(chat) = inner.chats.get_mut(chat_id) else {
+                return Ok(None);
+            };
+            if let Some(title) = patch.title {
+                chat.title = title;
+            }
+            if let Some(model_id) = patch.model_id {
+                chat.model_id = Some(model_id);
+            }
+            chat.updated_at = now_utc();
+            Ok(Some(chat.clone()))
+        })
+    }
+
+    async fn delete_chat(&self, chat_id: &str) -> PersistenceResult<bool> {
+        self.with_inner(|inner| {
+            let Some(chat) = inner.chats.remove(chat_id) else {
+                return Ok(false);
+            };
+            if let Some(chat_ids) = inner.chat_ids_by_session.get_mut(&chat.session_id) {
+                chat_ids.retain(|id| id != chat_id);
+            }
+            if let Some(message_ids) = inner.message_ids_by_chat.remove(chat_id) {
+                for message_id in message_ids {
+                    inner.messages.remove(&message_id);
+                }
+            }
+            if let Some(share_id) = inner.share_ids_by_chat.remove(chat_id) {
+                inner.shares.remove(&share_id);
+            }
+            inner
+                .read_markers
+                .retain(|key, _| key.1.as_str() != chat_id);
+            Ok(true)
+        })
+    }
+
+    async fn chat_summaries_by_session(
+        &self,
+        session_id: &str,
+    ) -> PersistenceResult<Vec<crate::types::ChatSummaryRecord>> {
+        self.with_inner(|inner| {
+            let summaries = inner
+                .chat_ids_by_session
+                .get(session_id)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .filter_map(|id| inner.chats.get(id))
+                .map(|chat| crate::types::ChatSummaryRecord {
+                    id: chat.id.clone(),
+                    title: chat.title.clone(),
+                })
+                .collect();
+            Ok(summaries)
+        })
+    }
 }
 
 #[async_trait]
@@ -305,6 +386,222 @@ impl MessageRepository for MemoryPersistenceStore {
             Ok(records)
         })
     }
+
+    async fn get_chat_message(
+        &self,
+        message_id: &str,
+    ) -> PersistenceResult<Option<ChatMessageRecord>> {
+        self.with_inner(|inner| Ok(inner.messages.get(message_id).cloned()))
+    }
+
+    async fn upsert_chat_message_scoped(
+        &self,
+        message: CreateChatMessageInput,
+    ) -> PersistenceResult<crate::types::UpsertChatMessageResult> {
+        self.with_inner(|inner| {
+            if !inner.chats.contains_key(&message.chat_id) {
+                return Err(invalid_reference("chat", message.chat_id));
+            }
+            if let Some(existing) = inner.messages.get_mut(&message.id) {
+                if existing.chat_id == message.chat_id && existing.role == message.role {
+                    existing.parts = message.parts;
+                    return Ok(crate::types::UpsertChatMessageResult {
+                        status: crate::types::UpsertChatMessageStatus::Updated,
+                        message: Some(existing.clone()),
+                    });
+                }
+                return Ok(crate::types::UpsertChatMessageResult {
+                    status: crate::types::UpsertChatMessageStatus::Conflict,
+                    message: None,
+                });
+            }
+
+            let sequence = inner.next_sequence();
+            let record = ChatMessageRecord {
+                id: message.id,
+                chat_id: message.chat_id,
+                role: message.role,
+                parts: message.parts,
+                sequence,
+                created_at: message.created_at.unwrap_or_else(now_utc),
+            };
+            inner
+                .message_ids_by_chat
+                .entry(record.chat_id.clone())
+                .or_default()
+                .push(record.id.clone());
+            inner.messages.insert(record.id.clone(), record.clone());
+
+            Ok(crate::types::UpsertChatMessageResult {
+                status: crate::types::UpsertChatMessageStatus::Inserted,
+                message: Some(record),
+            })
+        })
+    }
+
+    async fn delete_chat_message_and_following(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> PersistenceResult<crate::types::DeleteChatMessageResult> {
+        self.with_inner(|inner| {
+            let Some(message_ids) = inner.message_ids_by_chat.get(chat_id).cloned() else {
+                return Ok(crate::types::DeleteChatMessageResult::NotFound);
+            };
+            let Some(start_index) = message_ids.iter().position(|id| id == message_id) else {
+                return Ok(crate::types::DeleteChatMessageResult::NotFound);
+            };
+            let Some(target) = inner.messages.get(message_id) else {
+                return Ok(crate::types::DeleteChatMessageResult::NotFound);
+            };
+            if target.role != crate::types::MessageRole::User {
+                return Ok(crate::types::DeleteChatMessageResult::NotUserMessage);
+            }
+
+            let deleted_message_ids = message_ids[start_index..].to_vec();
+            for deleted_id in &deleted_message_ids {
+                inner.messages.remove(deleted_id);
+            }
+            if let Some(stored_ids) = inner.message_ids_by_chat.get_mut(chat_id) {
+                stored_ids.truncate(start_index);
+            }
+            let last_assistant_message_at = inner
+                .message_ids_by_chat
+                .get(chat_id)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .filter_map(|id| inner.messages.get(id))
+                .filter(|message| message.role == crate::types::MessageRole::Assistant)
+                .map(|message| message.created_at)
+                .max();
+            if let Some(chat) = inner.chats.get_mut(chat_id) {
+                chat.last_assistant_message_at = last_assistant_message_at;
+                chat.updated_at = now_utc();
+            }
+
+            Ok(crate::types::DeleteChatMessageResult::Deleted {
+                deleted_message_ids,
+            })
+        })
+    }
+
+    async fn fork_chat_through_message(
+        &self,
+        input: crate::types::ForkChatInput,
+    ) -> PersistenceResult<crate::types::ForkChatResult> {
+        self.with_inner(|inner| {
+            let Some(source_chat) = inner.chats.get(&input.source_chat_id).cloned() else {
+                return Ok(crate::types::ForkChatResult::MessageNotFound);
+            };
+            let Some(source_session) = inner.sessions.get(&source_chat.session_id) else {
+                return Err(invalid_reference("session", source_chat.session_id));
+            };
+            if source_session.user_id != input.user_id {
+                return Err(conflict("fork user must own source session"));
+            }
+            if !inner.sessions.contains_key(&input.forked_chat.session_id) {
+                return Err(invalid_reference("session", input.forked_chat.session_id));
+            }
+            if inner.chats.contains_key(&input.forked_chat.id) {
+                return Err(conflict(format!(
+                    "chat already exists: {}",
+                    input.forked_chat.id
+                )));
+            }
+
+            let message_ids = inner
+                .message_ids_by_chat
+                .get(&input.source_chat_id)
+                .cloned()
+                .unwrap_or_default();
+            let Some(through_index) = message_ids
+                .iter()
+                .position(|message_id| message_id == &input.through_message_id)
+            else {
+                return Ok(crate::types::ForkChatResult::MessageNotFound);
+            };
+            let through_message = inner
+                .messages
+                .get(&input.through_message_id)
+                .expect("message index points at an existing message");
+            if through_message.role != crate::types::MessageRole::Assistant {
+                return Ok(crate::types::ForkChatResult::NotAssistantMessage);
+            }
+            let through_message_created_at = through_message.created_at;
+
+            let timestamp = now_utc();
+            let record = ChatRecord {
+                id: input.forked_chat.id,
+                session_id: input.forked_chat.session_id,
+                title: input.forked_chat.title,
+                model_id: input.forked_chat.model_id,
+                active_run_id: None,
+                last_assistant_message_at: Some(through_message_created_at),
+                created_at: timestamp,
+                updated_at: timestamp,
+            };
+            inner
+                .chat_ids_by_session
+                .entry(record.session_id.clone())
+                .or_default()
+                .push(record.id.clone());
+            inner
+                .message_ids_by_chat
+                .entry(record.id.clone())
+                .or_default();
+            inner.chats.insert(record.id.clone(), record.clone());
+
+            let messages_to_copy = message_ids.into_iter().take(through_index + 1);
+            for (copy_index, message_id) in messages_to_copy.enumerate() {
+                let source = inner
+                    .messages
+                    .get(&message_id)
+                    .expect("message index points at an existing message")
+                    .clone();
+                let forked_message_id = format!("{}:forked:{}", record.id, copy_index + 1);
+                let forked_message = ChatMessageRecord {
+                    id: forked_message_id.clone(),
+                    chat_id: record.id.clone(),
+                    role: source.role,
+                    parts: rewrite_message_json_id(source.parts, &forked_message_id),
+                    sequence: inner.next_sequence(),
+                    created_at: source.created_at,
+                };
+                inner
+                    .message_ids_by_chat
+                    .entry(record.id.clone())
+                    .or_default()
+                    .push(forked_message.id.clone());
+                inner
+                    .messages
+                    .insert(forked_message.id.clone(), forked_message);
+            }
+
+            let read_timestamp = now_utc();
+            inner.read_markers.insert(
+                (input.user_id.clone(), record.id.clone()),
+                crate::types::ChatReadRecord {
+                    user_id: input.user_id,
+                    chat_id: record.id.clone(),
+                    last_read_at: read_timestamp,
+                    created_at: read_timestamp,
+                    updated_at: read_timestamp,
+                },
+            );
+
+            Ok(crate::types::ForkChatResult::Created { chat: record })
+        })
+    }
+}
+
+fn rewrite_message_json_id(mut parts: serde_json::Value, new_id: &str) -> serde_json::Value {
+    if let serde_json::Value::Object(object) = &mut parts {
+        object.insert(
+            "id".to_string(),
+            serde_json::Value::String(new_id.to_string()),
+        );
+    }
+    parts
 }
 
 #[async_trait]
@@ -609,6 +906,113 @@ impl SlackThreadMappingRepository for MemoryPersistenceStore {
 }
 
 #[async_trait]
+impl ShareRepository for MemoryPersistenceStore {
+    async fn get_share_by_chat_id(&self, chat_id: &str) -> PersistenceResult<Option<ShareRecord>> {
+        self.with_inner(|inner| {
+            let record = inner
+                .share_ids_by_chat
+                .get(chat_id)
+                .and_then(|share_id| inner.shares.get(share_id))
+                .cloned();
+            Ok(record)
+        })
+    }
+
+    async fn create_share_if_absent(
+        &self,
+        share: CreateShareInput,
+    ) -> PersistenceResult<InsertIfAbsent<ShareRecord>> {
+        self.with_inner(|inner| {
+            if !inner.chats.contains_key(&share.chat_id) {
+                return Err(invalid_reference("chat", share.chat_id));
+            }
+            if let Some(existing_id) = inner.share_ids_by_chat.get(&share.chat_id) {
+                let record = inner
+                    .shares
+                    .get(existing_id)
+                    .expect("share index points at an existing share")
+                    .clone();
+                return Ok(InsertIfAbsent {
+                    record,
+                    inserted: false,
+                });
+            }
+            if inner.shares.contains_key(&share.id) {
+                return Err(conflict(format!("share already exists: {}", share.id)));
+            }
+            let record = ShareRecord {
+                id: share.id,
+                chat_id: share.chat_id,
+                created_at: now_utc(),
+            };
+            inner
+                .share_ids_by_chat
+                .insert(record.chat_id.clone(), record.id.clone());
+            inner.shares.insert(record.id.clone(), record.clone());
+            Ok(InsertIfAbsent {
+                record,
+                inserted: true,
+            })
+        })
+    }
+
+    async fn delete_share_by_chat_id(&self, chat_id: &str) -> PersistenceResult<bool> {
+        self.with_inner(|inner| {
+            let Some(share_id) = inner.share_ids_by_chat.remove(chat_id) else {
+                return Ok(false);
+            };
+            Ok(inner.shares.remove(&share_id).is_some())
+        })
+    }
+}
+
+#[async_trait]
+impl ChatReadRepository for MemoryPersistenceStore {
+    async fn mark_chat_read(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+    ) -> PersistenceResult<crate::types::ChatReadRecord> {
+        self.with_inner(|inner| {
+            if !inner.chats.contains_key(chat_id) {
+                return Err(invalid_reference("chat", chat_id));
+            }
+            let key = (user_id.to_string(), chat_id.to_string());
+            let timestamp = now_utc();
+            let record = inner
+                .read_markers
+                .entry(key)
+                .and_modify(|record| {
+                    record.last_read_at = timestamp;
+                    record.updated_at = timestamp;
+                })
+                .or_insert_with(|| crate::types::ChatReadRecord {
+                    user_id: user_id.to_string(),
+                    chat_id: chat_id.to_string(),
+                    last_read_at: timestamp,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                })
+                .clone();
+            Ok(record)
+        })
+    }
+
+    async fn get_chat_read(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+    ) -> PersistenceResult<Option<crate::types::ChatReadRecord>> {
+        self.with_inner(|inner| {
+            Ok(inner
+                .read_markers
+                .get(&(user_id.to_string(), chat_id.to_string()))
+                .cloned())
+        })
+    }
+}
+
+#[async_trait]
 impl SandboxStateRepository for MemoryPersistenceStore {
     async fn update_sandbox_state(
         &self,
@@ -771,6 +1175,67 @@ mod tests {
         block_on(contract_tests::message_contract(
             &MemoryPersistenceStore::new(),
         ));
+    }
+
+    #[test]
+    fn session_context_guard_contract() {
+        block_on(contract_tests::session_context_guard_contract(
+            &MemoryPersistenceStore::new(),
+        ));
+    }
+
+    #[test]
+    fn session_chats_route_lists_creates_updates_and_deletes_chats() {
+        block_on(
+            contract_tests::session_chats_route_lists_creates_updates_and_deletes_chats(
+                &MemoryPersistenceStore::new(),
+            ),
+        );
+    }
+
+    #[test]
+    fn session_chat_messages_route_scoped_upsert_and_delete_contract() {
+        block_on(
+            contract_tests::session_chat_messages_route_scoped_upsert_and_delete_contract(
+                &MemoryPersistenceStore::new(),
+            ),
+        );
+    }
+
+    #[test]
+    fn session_chat_fork_route_copies_messages_through_selected_assistant() {
+        block_on(
+            contract_tests::session_chat_fork_route_copies_messages_through_selected_assistant(
+                &MemoryPersistenceStore::new(),
+            ),
+        );
+    }
+
+    #[test]
+    fn session_chat_read_route_marks_authenticated_owned_chat_read() {
+        block_on(
+            contract_tests::session_chat_read_route_marks_authenticated_owned_chat_read(
+                &MemoryPersistenceStore::new(),
+            ),
+        );
+    }
+
+    #[test]
+    fn session_chat_share_route_creates_reuses_and_revokes_share() {
+        block_on(
+            contract_tests::session_chat_share_route_creates_reuses_and_revokes_share(
+                &MemoryPersistenceStore::new(),
+            ),
+        );
+    }
+
+    #[test]
+    fn db_sessions_normalizes_legacy_sandbox_state_and_deduplicates_titles() {
+        block_on(
+            contract_tests::db_sessions_normalizes_legacy_sandbox_state_and_deduplicates_titles(
+                &MemoryPersistenceStore::new(),
+            ),
+        );
     }
 
     #[test]

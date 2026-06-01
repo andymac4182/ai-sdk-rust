@@ -1,12 +1,14 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::types::{
-    ActiveRunRepository, AgentType, ChatRepository, CreateChatInput, CreateChatMessageInput,
-    CreateIdempotencyRecordInput, CreateRunInput, CreateRunStepInput, CreateSessionInput,
-    CreateSlackThreadMappingInput, CreateUsageRecordInput, IdempotencyRepository, LifecycleState,
+    ActiveRunRepository, AgentType, ChatPatch, ChatReadRepository, ChatRepository, CreateChatInput,
+    CreateChatMessageInput, CreateIdempotencyRecordInput, CreateRunInput, CreateRunStepInput,
+    CreateSessionInput, CreateShareInput, CreateSlackThreadMappingInput, CreateUsageRecordInput,
+    DeleteChatMessageResult, ForkChatInput, ForkChatResult, IdempotencyRepository, LifecycleState,
     MessageRepository, MessageRole, RunRepository, RunStatus, RunStatusUpdate,
-    SandboxStateRepository, SandboxStateUpdate, SessionRepository, SlackThreadKey,
-    SlackThreadMappingRepository, UsageRepository, UsageSource,
+    SandboxStateRepository, SandboxStateUpdate, SessionRepository, ShareRepository, SlackThreadKey,
+    SlackThreadMappingRepository, UpsertChatMessageStatus, UsageRepository, UsageSource,
+    normalize_legacy_sandbox_state,
 };
 
 async fn seed_session<S>(store: &S)
@@ -181,6 +183,457 @@ where
         .expect("message list succeeds");
     let ids: Vec<_> = messages.iter().map(|message| message.id.as_str()).collect();
     assert_eq!(ids, vec!["message-1", "message-2"]);
+}
+
+pub(crate) async fn session_context_guard_contract<S>(store: &S)
+where
+    S: SessionRepository + ChatRepository,
+{
+    seed_session(store).await;
+
+    let missing_session = store
+        .get_session("missing-session")
+        .await
+        .expect("session lookup succeeds");
+    assert!(missing_session.is_none());
+
+    let session = store
+        .get_session("session-1")
+        .await
+        .expect("session lookup succeeds")
+        .expect("session exists");
+    assert_eq!(session.user_id, "user-1");
+    assert_ne!(session.user_id, "other-user");
+
+    let missing_chat = store
+        .get_chat("missing-chat")
+        .await
+        .expect("chat lookup succeeds");
+    assert!(missing_chat.is_none());
+
+    let chat = store
+        .get_chat("chat-1")
+        .await
+        .expect("chat lookup succeeds")
+        .expect("chat exists");
+    assert_eq!(chat.session_id, "session-1");
+    assert_ne!(chat.session_id, "session-2");
+}
+
+pub(crate) async fn session_chats_route_lists_creates_updates_and_deletes_chats<S>(store: &S)
+where
+    S: SessionRepository + ChatRepository,
+{
+    seed_session(store).await;
+
+    let summaries = store
+        .chat_summaries_by_session("session-1")
+        .await
+        .expect("chat summaries load");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].id, "chat-1");
+
+    let requested = store
+        .create_chat(CreateChatInput {
+            id: "chat-requested".to_string(),
+            session_id: "session-1".to_string(),
+            title: "New chat".to_string(),
+            model_id: Some("model-default".to_string()),
+        })
+        .await
+        .expect("requested chat inserts");
+    assert_eq!(requested.id, "chat-requested");
+
+    let duplicate = store
+        .create_chat(CreateChatInput::new(
+            "chat-requested",
+            "session-1",
+            "Duplicate",
+        ))
+        .await
+        .expect_err("duplicate chat id conflicts");
+    assert!(duplicate.to_string().contains("chat already exists"));
+
+    let updated = store
+        .update_chat(
+            "chat-requested",
+            ChatPatch {
+                title: Some("New title".to_string()),
+                model_id: Some("model-2".to_string()),
+            },
+        )
+        .await
+        .expect("chat update succeeds")
+        .expect("chat exists");
+    assert_eq!(updated.title, "New title");
+    assert_eq!(updated.model_id.as_deref(), Some("model-2"));
+
+    let missing_update = store
+        .update_chat(
+            "missing-chat",
+            ChatPatch {
+                title: Some("New".to_string()),
+                model_id: None,
+            },
+        )
+        .await
+        .expect("missing update is not an error");
+    assert!(missing_update.is_none());
+
+    let only_chat_delete_allowed = store
+        .chat_summaries_by_session("session-1")
+        .await
+        .expect("chat summaries load")
+        .len()
+        > 1;
+    assert!(only_chat_delete_allowed);
+    assert!(
+        store
+            .delete_chat("chat-requested")
+            .await
+            .expect("chat delete succeeds")
+    );
+    assert!(
+        store
+            .get_chat("chat-requested")
+            .await
+            .expect("chat lookup succeeds")
+            .is_none()
+    );
+}
+
+pub(crate) async fn session_chat_messages_route_scoped_upsert_and_delete_contract<S>(store: &S)
+where
+    S: SessionRepository + ChatRepository + MessageRepository,
+{
+    seed_session(store).await;
+    let base = OffsetDateTime::now_utc();
+
+    let invalid_role = CreateChatMessageInput {
+        id: "user-payload".to_string(),
+        chat_id: "chat-1".to_string(),
+        role: MessageRole::User,
+        parts: serde_json::json!({"id":"user-payload","role":"user","parts":[]}),
+        created_at: Some(base),
+    };
+    let inserted_user = store
+        .upsert_chat_message_scoped(invalid_role)
+        .await
+        .expect("user message can be stored by the persistence layer");
+    assert_eq!(inserted_user.status, UpsertChatMessageStatus::Inserted);
+
+    let assistant = CreateChatMessageInput {
+        id: "assistant-1".to_string(),
+        chat_id: "chat-1".to_string(),
+        role: MessageRole::Assistant,
+        parts: serde_json::json!({"id":"assistant-1","role":"assistant","parts":[{"type":"data-commit"}]}),
+        created_at: Some(base + Duration::seconds(1)),
+    };
+    let inserted = store
+        .upsert_chat_message_scoped(assistant.clone())
+        .await
+        .expect("assistant message inserts");
+    assert_eq!(inserted.status, UpsertChatMessageStatus::Inserted);
+
+    let updated = store
+        .upsert_chat_message_scoped(CreateChatMessageInput {
+            parts: serde_json::json!({"id":"assistant-1","role":"assistant","parts":[{"type":"data-pr"}]}),
+            ..assistant.clone()
+        })
+        .await
+        .expect("same chat and role can update");
+    assert_eq!(updated.status, UpsertChatMessageStatus::Updated);
+
+    let other_session = CreateSessionInput::new("session-2", "user-1", "Other session");
+    let other_chat = CreateChatInput::new("chat-2", "session-2", "Other chat");
+    store
+        .create_session_with_initial_chat(other_session, other_chat)
+        .await
+        .expect("second session inserts");
+    let conflict = store
+        .upsert_chat_message_scoped(CreateChatMessageInput {
+            chat_id: "chat-2".to_string(),
+            ..assistant
+        })
+        .await
+        .expect("conflicting upsert returns status");
+    assert_eq!(conflict.status, UpsertChatMessageStatus::Conflict);
+
+    let assistant_delete = store
+        .delete_chat_message_and_following("chat-1", "assistant-1")
+        .await
+        .expect("assistant delete is classified");
+    assert_eq!(assistant_delete, DeleteChatMessageResult::NotUserMessage);
+
+    let missing_delete = store
+        .delete_chat_message_and_following("chat-1", "missing")
+        .await
+        .expect("missing delete is classified");
+    assert_eq!(missing_delete, DeleteChatMessageResult::NotFound);
+
+    store
+        .create_message_if_absent(CreateChatMessageInput {
+            id: "assistant-2".to_string(),
+            chat_id: "chat-1".to_string(),
+            role: MessageRole::Assistant,
+            parts: serde_json::json!({"id":"assistant-2","role":"assistant","parts":[]}),
+            created_at: Some(base + Duration::seconds(2)),
+        })
+        .await
+        .expect("following assistant inserts");
+    let deleted = store
+        .delete_chat_message_and_following("chat-1", "user-payload")
+        .await
+        .expect("user delete succeeds");
+    assert_eq!(
+        deleted,
+        DeleteChatMessageResult::Deleted {
+            deleted_message_ids: vec![
+                "user-payload".to_string(),
+                "assistant-1".to_string(),
+                "assistant-2".to_string()
+            ],
+        }
+    );
+}
+
+pub(crate) async fn session_chat_fork_route_copies_messages_through_selected_assistant<S>(store: &S)
+where
+    S: SessionRepository + ChatRepository + MessageRepository + ChatReadRepository,
+{
+    seed_session(store).await;
+    let base = OffsetDateTime::now_utc();
+    for (id, role, seconds) in [
+        ("message-1", MessageRole::User, 1),
+        ("message-2", MessageRole::Assistant, 2),
+        ("message-3", MessageRole::Assistant, 3),
+    ] {
+        store
+            .create_message_if_absent(CreateChatMessageInput {
+                id: id.to_string(),
+                chat_id: "chat-1".to_string(),
+                role,
+                parts: serde_json::json!({"id":id,"role":format!("{role:?}"),"parts":[]}),
+                created_at: Some(base + Duration::seconds(seconds)),
+            })
+            .await
+            .expect("source message inserts");
+    }
+
+    let missing = store
+        .fork_chat_through_message(ForkChatInput {
+            user_id: "user-1".to_string(),
+            source_chat_id: "chat-1".to_string(),
+            through_message_id: "missing".to_string(),
+            forked_chat: CreateChatInput::new("fork-missing", "session-1", "Fork"),
+        })
+        .await
+        .expect("missing fork is classified");
+    assert_eq!(missing, ForkChatResult::MessageNotFound);
+
+    let user_message = store
+        .fork_chat_through_message(ForkChatInput {
+            user_id: "user-1".to_string(),
+            source_chat_id: "chat-1".to_string(),
+            through_message_id: "message-1".to_string(),
+            forked_chat: CreateChatInput::new("fork-user", "session-1", "Fork"),
+        })
+        .await
+        .expect("non-assistant fork is classified");
+    assert_eq!(user_message, ForkChatResult::NotAssistantMessage);
+
+    let created = store
+        .fork_chat_through_message(ForkChatInput {
+            user_id: "user-1".to_string(),
+            source_chat_id: "chat-1".to_string(),
+            through_message_id: "message-2".to_string(),
+            forked_chat: CreateChatInput {
+                id: "fork-chat-1".to_string(),
+                session_id: "session-1".to_string(),
+                title: "Fork of Original chat".to_string(),
+                model_id: Some("model-1".to_string()),
+            },
+        })
+        .await
+        .expect("fork succeeds");
+    let ForkChatResult::Created { chat } = created else {
+        panic!("expected created fork");
+    };
+    assert_eq!(chat.id, "fork-chat-1");
+    assert_eq!(
+        chat.last_assistant_message_at,
+        Some(base + Duration::seconds(2))
+    );
+
+    let forked_messages = store
+        .list_chat_messages("fork-chat-1")
+        .await
+        .expect("forked messages list");
+    assert_eq!(forked_messages.len(), 2);
+    assert_eq!(forked_messages[0].role, MessageRole::User);
+    assert_eq!(forked_messages[1].role, MessageRole::Assistant);
+    assert!(
+        store
+            .get_chat_read("user-1", "fork-chat-1")
+            .await
+            .expect("read marker lookup succeeds")
+            .is_some()
+    );
+}
+
+pub(crate) async fn session_chat_read_route_marks_authenticated_owned_chat_read<S>(store: &S)
+where
+    S: SessionRepository + ChatReadRepository,
+{
+    seed_session(store).await;
+    let marker = store
+        .mark_chat_read("user-1", "chat-1")
+        .await
+        .expect("read marker upserts");
+    assert_eq!(marker.user_id, "user-1");
+    assert_eq!(marker.chat_id, "chat-1");
+
+    let retry = store
+        .mark_chat_read("user-1", "chat-1")
+        .await
+        .expect("read marker retry updates");
+    assert_eq!(retry.created_at, marker.created_at);
+    assert!(retry.updated_at >= marker.updated_at);
+}
+
+pub(crate) async fn session_chat_share_route_creates_reuses_and_revokes_share<S>(store: &S)
+where
+    S: SessionRepository + ShareRepository,
+{
+    seed_session(store).await;
+    assert!(
+        store
+            .get_share_by_chat_id("chat-1")
+            .await
+            .expect("share lookup succeeds")
+            .is_none()
+    );
+
+    let created = store
+        .create_share_if_absent(CreateShareInput {
+            id: "share-new".to_string(),
+            chat_id: "chat-1".to_string(),
+        })
+        .await
+        .expect("share inserts");
+    assert!(created.inserted);
+    assert_eq!(created.record.id, "share-new");
+
+    let reused = store
+        .create_share_if_absent(CreateShareInput {
+            id: "share-other".to_string(),
+            chat_id: "chat-1".to_string(),
+        })
+        .await
+        .expect("share retry reuses existing row");
+    assert!(!reused.inserted);
+    assert_eq!(reused.record.id, "share-new");
+
+    assert!(
+        store
+            .delete_share_by_chat_id("chat-1")
+            .await
+            .expect("share delete succeeds")
+    );
+    assert!(
+        store
+            .get_share_by_chat_id("chat-1")
+            .await
+            .expect("share lookup succeeds")
+            .is_none()
+    );
+}
+
+pub(crate) async fn db_sessions_normalizes_legacy_sandbox_state_and_deduplicates_titles<S>(
+    store: &S,
+) where
+    S: SessionRepository,
+{
+    let hybrid = normalize_legacy_sandbox_state(serde_json::json!({
+        "type": "hybrid",
+        "sandboxId": "sbx-legacy-1",
+        "snapshotId": "snap-legacy-1",
+        "expiresAt": 123
+    }))
+    .expect("hybrid state normalizes");
+    assert_eq!(
+        hybrid,
+        serde_json::json!({
+            "type": "vercel",
+            "sandboxName": "sbx-legacy-1",
+            "snapshotId": "snap-legacy-1",
+            "expiresAt": 123
+        })
+    );
+
+    let session_id_state = normalize_legacy_sandbox_state(serde_json::json!({
+        "type": "vercel",
+        "sandboxId": "session_123",
+        "expiresAt": 456
+    }))
+    .expect("session id state normalizes");
+    assert_eq!(
+        session_id_state,
+        serde_json::json!({
+            "type": "vercel",
+            "sandboxName": "session_123",
+            "expiresAt": 456
+        })
+    );
+
+    let supported = serde_json::json!({
+        "type": "vercel",
+        "sandboxName": "session_current-1",
+        "expiresAt": 456
+    });
+    assert_eq!(
+        normalize_legacy_sandbox_state(supported.clone()),
+        Some(supported)
+    );
+    assert_eq!(
+        normalize_legacy_sandbox_state(serde_json::Value::Null),
+        None
+    );
+
+    store
+        .create_session_with_initial_chat(
+            CreateSessionInput::new("title-session-1", "user-title", "Rome"),
+            CreateChatInput::new("title-chat-1", "title-session-1", "Rome"),
+        )
+        .await
+        .expect("first titled session inserts");
+    store
+        .create_session_with_initial_chat(
+            CreateSessionInput::new("title-session-2", "user-title", "Rome"),
+            CreateChatInput::new("title-chat-2", "title-session-2", "Rome"),
+        )
+        .await
+        .expect("second titled session inserts");
+    store
+        .create_session_with_initial_chat(
+            CreateSessionInput::new("title-session-3", "user-title", "Paris"),
+            CreateChatInput::new("title-chat-3", "title-session-3", "Paris"),
+        )
+        .await
+        .expect("third titled session inserts");
+
+    let titles = store
+        .used_session_titles("user-title")
+        .await
+        .expect("used titles load");
+    assert_eq!(titles, vec!["Paris".to_string(), "Rome".to_string()]);
+    assert!(
+        store
+            .used_session_titles("missing-user")
+            .await
+            .expect("missing user titles load")
+            .is_empty()
+    );
 }
 
 pub(crate) async fn idempotency_contract<S>(store: &S)

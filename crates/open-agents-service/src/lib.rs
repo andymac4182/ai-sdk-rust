@@ -10,6 +10,7 @@ pub mod config;
 pub mod health;
 pub mod local_fixture;
 pub mod service;
+pub mod session_routes;
 pub mod vercel_adapter;
 
 pub use open_agents_core as core;
