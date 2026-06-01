@@ -89,7 +89,12 @@ reasoning.
 | WF-01 | `019e830b-4400-7193-834f-cca74a33063f` | T2R WF-01 Workflow Core E2E Closure |
 | WF-02 | `019e830b-441a-7503-943d-06fb626f1f44` | Audit workflow upstream drift |
 | CHAT-01 | `019e830b-44d2-7063-9030-5a3cd764a76c` | Audit Chat SDK drift |
+| CHAT-02 | `019e8320-d5ae-7a11-897f-2804b78d64a4` | T2R CHAT-02 Chat SDK Drift Closure |
 | AI-01 | `019e830b-fd70-7600-a380-3d6567ac3ec2` | Port foundational AI providers |
+| AI-01A | `019e8320-d5be-7551-9c94-fc4bf623bdb4` | T2R AI-01A Anthropic Provider |
+| AI-01B | `019e8320-d5bd-7161-9a3c-a181315d2f9a` | T2R AI-01B Amazon Bedrock Provider |
+| AI-01C | `019e8320-d593-79f1-942f-b1eac9d76531` | T2R AI-01C Google Provider |
+| AI-01D | `019e8320-d5c5-78c2-9c36-5f64142efa47` | T2R AI-01D Google Vertex Provider |
 | AI-02 | `019e830b-fd70-7600-a380-3d77ad85215a` | Port OpenAI-compatible providers |
 | AI-03 | `019e830b-feaf-7322-9ef1-37f3a740f1ed` | Port media generation providers |
 | AI-04 | `019e830c-0437-7d61-9b03-0d5715493ff7` | Port AI-04 audio providers |
@@ -109,10 +114,10 @@ crate, while preserving explicit JavaScript-only and type-system exceptions.
 
 | Child row | Status | Owner scope | Required proof |
 | --- | --- | --- | --- |
-| AI-01A | queued | `@ai-sdk/anthropic` in `crates/ai-sdk-anthropic` | Port Anthropic language model, files, skills, cache control, prompt conversion, provider tools, usage conversion, error mapping, fixtures, and ignored live-provider proof. |
-| AI-01B | queued | `@ai-sdk/amazon-bedrock` in `crates/ai-sdk-amazon-bedrock` | Port Bedrock chat, Anthropic-on-Bedrock, embeddings, image, reranking, event-stream handling, SigV4/API-key fetch wrappers, tool preparation, usage conversion, settings, fixtures, and ignored live-provider proof. |
-| AI-01C | queued | `@ai-sdk/google` in `crates/ai-sdk-google` | Port Gemini language, embedding, image, video, files, interactions, schema conversion, URL support, tool preparation, JSON accumulator behavior, fixtures, and ignored live-provider proof. |
-| AI-01D | queued | `@ai-sdk/google-vertex` in `crates/ai-sdk-google-vertex` | Port Vertex auth, provider base/edge variants, embedding, image, video, Anthropic-on-Vertex, MaaS, xAI-on-Vertex, fixtures, and ignored live-provider proof. |
+| AI-01A | active | `@ai-sdk/anthropic` in `crates/ai-sdk-anthropic` | Port Anthropic language model, files, skills, cache control, prompt conversion, provider tools, usage conversion, error mapping, fixtures, and ignored live-provider proof. |
+| AI-01B | active | `@ai-sdk/amazon-bedrock` in `crates/ai-sdk-amazon-bedrock` | Port Bedrock chat, Anthropic-on-Bedrock, embeddings, image, reranking, event-stream handling, SigV4/API-key fetch wrappers, tool preparation, usage conversion, settings, fixtures, and ignored live-provider proof. |
+| AI-01C | active | `@ai-sdk/google` in `crates/ai-sdk-google` | Port Gemini language, embedding, image, video, files, interactions, schema conversion, URL support, tool preparation, JSON accumulator behavior, fixtures, and ignored live-provider proof. |
+| AI-01D | active | `@ai-sdk/google-vertex` in `crates/ai-sdk-google-vertex` | Port Vertex auth, provider base/edge variants, embedding, image, video, Anthropic-on-Vertex, MaaS, xAI-on-Vertex, fixtures, and ignored live-provider proof. |
 
 ## AI SDK Package Queue
 
