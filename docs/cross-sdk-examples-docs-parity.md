@@ -27,7 +27,7 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | Open Agents | vercel-labs/open-agents | `24d679c7ba3d274aa73814c15673aeffcbe3c1c2` | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel-labs/open-agents/main` | 12 | 0 | npx opensrc fetch https://github.com/vercel-labs/open-agents |
 | Workflow SDK | vercel/workflow | `ae3c833acd4f44ab84db65b44eb2ba2646eaecf9` | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/workflow/main` | 311 | 20 | npx opensrc fetch https://github.com/vercel/workflow |
 | Chat SDK | vercel/chat | `ffc43fcf1f7679164be0806308bea237113c7590` | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/chat/main` | 63 | 2 | npx opensrc fetch github:vercel/chat |
-| AI SDK | vercel/ai | `ab6d66482d31afe15f4973a51c5f7cfa09c92ea6` | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` | 328 | 23 | npx opensrc fetch github:vercel/ai |
+| AI SDK | vercel/ai | `ab6d66482d31afe15f4973a51c5f7cfa09c92ea6` | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` | 371 | 23 | npx opensrc fetch github:vercel/ai |
 
 ## Disposition Legend
 
@@ -45,11 +45,11 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | Disposition | Rows |
 | --- | --- |
 | js-only-documented | 189 |
-| live-provider-handoff | 4 |
-| package-owned-handoff | 484 |
-| rust-doc-covered | 2 |
-| rust-ledger-covered | 55 |
-| upstream-docs-only | 25 |
+| live-provider-handoff | 2 |
+| package-owned-handoff | 472 |
+| rust-doc-covered | 12 |
+| rust-ledger-covered | 63 |
+| upstream-docs-only | 64 |
 
 ## Summary By Project
 
@@ -58,7 +58,7 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | Open Agents | 12 | 12 | 0 | 2 | 0 | 1 | 5 | 0 | 4 |
 | Workflow SDK | 331 | 311 | 20 | 0 | 0 | 230 | 80 | 0 | 21 |
 | Chat SDK | 65 | 63 | 2 | 0 | 55 | 0 | 10 | 0 | 0 |
-| AI SDK | 351 | 328 | 23 | 0 | 0 | 253 | 94 | 4 | 0 |
+| AI SDK | 394 | 371 | 23 | 10 | 8 | 241 | 94 | 2 | 39 |
 
 ## Remaining Package-Owned Handoffs
 
@@ -483,6 +483,11 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | Chat SDK | doc | `README.md` | README | rust-ledger-covered | docs/chat/upstream-parity.md | Chat package/adapters are tracked by the Chat SDK parity ledger; CHAT-01 owns drift. |
 | Chat SDK | example | `examples/nextjs-chat` | nextjs chat | js-only-documented | docs/chat/upstream-parity.md, docs/chat/unported.md | Upstream examples/docs are Next.js, JSX, Vitest, or live-service surfaces. |
 | Chat SDK | example | `examples/telegram-chat` | telegram chat | js-only-documented | docs/chat/upstream-parity.md, docs/chat/unported.md | Upstream examples/docs are Next.js, JSX, Vitest, or live-service surfaces. |
+| AI SDK | doc | `.changeset/README.md` | README | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `architecture/file-uploads.md` | file uploads | rust-ledger-covered | docs/upstream-parity.md | Architecture notes describe portable provider/root semantics already tracked by package ledger rows. |
+| AI SDK | doc | `architecture/message-layers.md` | message layers | rust-ledger-covered | docs/upstream-parity.md | Architecture notes describe portable provider/root semantics already tracked by package ledger rows. |
+| AI SDK | doc | `architecture/provider-abstraction.md` | provider abstraction | rust-ledger-covered | docs/upstream-parity.md | Architecture notes describe portable provider/root semantics already tracked by package ledger rows. |
+| AI SDK | doc | `architecture/stream-text-loop-control.md` | stream text loop control | rust-ledger-covered | docs/upstream-parity.md | Architecture notes describe portable provider/root semantics already tracked by package ledger rows. |
 | AI SDK | doc | `content/docs/00-introduction/index.mdx` | introduction | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
 | AI SDK | doc | `content/docs/02-foundations/01-overview.mdx` | overview | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
 | AI SDK | doc | `content/docs/02-foundations/02-providers-and-models.mdx` | providers and models | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
@@ -736,16 +741,33 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | AI SDK | doc | `content/docs/09-troubleshooting/60-jest-cannot-find-module-ai-rsc.mdx` | jest cannot find module ai rsc | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | doc | `content/docs/09-troubleshooting/70-high-memory-usage-with-images.mdx` | high memory usage with images | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
 | AI SDK | doc | `content/docs/09-troubleshooting/index.mdx` | troubleshooting | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | doc | `examples/ai-e2e-next/README.md` | README | live-provider-handoff | AI-06, CROSS-02, docs/upstream-parity.md | Live-service, devtools, or deployment behavior needs ignored/live proof or package-owned tests. |
-| AI SDK | doc | `examples/ai-functions/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
+| AI SDK | doc | `contributing/add-new-model.md` | add new model | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/add-new-provider.md` | add new provider | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/add-new-tool-to-registry.md` | add new tool to registry | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/building-new-features.md` | building new features | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/codemods.md` | codemods | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/decisions/2026-03-11-adopt-architecture-decision-records.md` | 03 11 adopt architecture decision records | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/decisions/README.md` | README | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/documentation.md` | documentation | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/naming-conventions.md` | naming conventions | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/packages.md` | packages | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/pre-release-cycle.md` | pre release cycle | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/project-philosophies.md` | project philosophies | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/provider-architecture.md` | provider architecture | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/providers.md` | providers | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/releases.md` | releases | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/testing.md` | testing | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `contributing/zod.md` | zod | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `examples/ai-e2e-next/README.md` | README | js-only-documented | docs/upstream-parity.md | Next.js, React/RSC, browser UI, and live-provider demo app shell; portable provider, agent, MCP, and stream behavior is tracked by package ledger rows. |
+| AI SDK | doc | `examples/ai-functions/README.md` | README | rust-ledger-covered | docs/upstream-parity.md, examples/kitchen_sink.rs, examples/vercel_ai_gateway_text.rs | Function script and live e2e provider smoke surfaces are covered by root/provider package rows and ignored live proofs. |
 | AI SDK | doc | `examples/angular/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
-| AI SDK | doc | `examples/express/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | doc | `examples/fastify/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | doc | `examples/hono/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | doc | `examples/mcp/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
+| AI SDK | doc | `examples/express/README.md` | README | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
+| AI SDK | doc | `examples/fastify/README.md` | README | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
+| AI SDK | doc | `examples/hono/README.md` | README | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
+| AI SDK | doc | `examples/mcp/README.md` | README | rust-ledger-covered | docs/upstream-parity.md, crates/ai-sdk-mcp/examples | Portable MCP client/server examples are covered by package-owned MCP examples; hosted service demos remain live-provider guidance. |
 | AI SDK | doc | `examples/nest/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
 | AI SDK | doc | `examples/next-agent/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
-| AI SDK | doc | `examples/next-fastapi/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
+| AI SDK | doc | `examples/next-fastapi/README.md` | README | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
 | AI SDK | doc | `examples/next-google-vertex/README.md` | README | package-owned-handoff | AI-01, docs/upstream-parity.md | Provider-specific docs/examples stay with the provider implementation bucket. |
 | AI SDK | doc | `examples/next-langchain/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | doc | `examples/next-openai-kasada-bot-protection/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
@@ -755,7 +777,7 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | AI SDK | doc | `examples/next-openai-upstash-rate-limits/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | doc | `examples/next-workflow/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | doc | `examples/next/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
-| AI SDK | doc | `examples/node-http-server/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
+| AI SDK | doc | `examples/node-http-server/README.md` | README | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
 | AI SDK | doc | `examples/nuxt-openai/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | doc | `examples/sveltekit-openai/README.md` | README | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | doc | `packages/ai/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
@@ -811,17 +833,38 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | AI SDK | doc | `packages/workflow/README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
 | AI SDK | doc | `packages/xai/README.md` | README | package-owned-handoff | AI-02, docs/upstream-parity.md | Provider-specific docs/examples stay with the provider implementation bucket. |
 | AI SDK | doc | `README.md` | README | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | example | `examples/ai-e2e-next` | ai e2e next | live-provider-handoff | AI-06, CROSS-02, docs/upstream-parity.md | Live-service, devtools, or deployment behavior needs ignored/live proof or package-owned tests. |
-| AI SDK | example | `examples/ai-functions` | ai functions | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
+| AI SDK | doc | `skills/add-function-examples/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/add-provider-package/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/assets/templates/adr-madr.md` | adr madr | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/assets/templates/adr-readme.md` | adr readme | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/assets/templates/adr-simple.md` | adr simple | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/references/adr-conventions.md` | adr conventions | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/references/examples.md` | examples | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/references/review-checklist.md` | review checklist | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/references/template-variants.md` | template variants | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/adr-skill/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/capture-api-response-test-fixture/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/develop-ai-functions-example/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/list-npm-package-content/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/major-version-mode/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/update-provider-models/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/use-ai-sdk/references/ai-gateway.md` | ai gateway | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/use-ai-sdk/references/common-errors.md` | common errors | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/use-ai-sdk/references/devtools.md` | devtools | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/use-ai-sdk/references/type-safe-agents.md` | type safe agents | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `skills/use-ai-sdk/SKILL.md` | SKILL | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | doc | `tools/konsistent-provider/README.md` | README | upstream-docs-only | n/a | Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract. |
+| AI SDK | example | `examples/ai-e2e-next` | ai e2e next | js-only-documented | docs/upstream-parity.md | Next.js, React/RSC, browser UI, and live-provider demo app shell; portable provider, agent, MCP, and stream behavior is tracked by package ledger rows. |
+| AI SDK | example | `examples/ai-functions` | ai functions | rust-ledger-covered | docs/upstream-parity.md, examples/kitchen_sink.rs, examples/vercel_ai_gateway_text.rs | Function script and live e2e provider smoke surfaces are covered by root/provider package rows and ignored live proofs. |
 | AI SDK | example | `examples/angular` | angular | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
-| AI SDK | example | `examples/express` | express | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | example | `examples/fastify` | fastify | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | example | `examples/hono` | hono | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
-| AI SDK | example | `examples/mcp` | mcp | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
+| AI SDK | example | `examples/express` | express | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
+| AI SDK | example | `examples/fastify` | fastify | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
+| AI SDK | example | `examples/hono` | hono | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
+| AI SDK | example | `examples/mcp` | mcp | rust-ledger-covered | docs/upstream-parity.md, crates/ai-sdk-mcp/examples | Portable MCP client/server examples are covered by package-owned MCP examples; hosted service demos remain live-provider guidance. |
 | AI SDK | example | `examples/nest` | nest | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
 | AI SDK | example | `examples/next` | next | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | example | `examples/next-agent` | next agent | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
-| AI SDK | example | `examples/next-fastapi` | next fastapi | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
+| AI SDK | example | `examples/next-fastapi` | next fastapi | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
 | AI SDK | example | `examples/next-google-vertex` | next google vertex | package-owned-handoff | AI-01, docs/upstream-parity.md | Provider-specific docs/examples stay with the provider implementation bucket. |
 | AI SDK | example | `examples/next-langchain` | next langchain | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | example | `examples/next-openai-kasada-bot-protection` | next openai kasada bot protection | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
@@ -830,7 +873,7 @@ imply public behavior across Open Agents, Workflow SDK, Chat SDK, and AI SDK.
 | AI SDK | example | `examples/next-openai-telemetry-sentry` | next openai telemetry sentry | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | example | `examples/next-openai-upstash-rate-limits` | next openai upstash rate limits | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | example | `examples/next-workflow` | next workflow | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
-| AI SDK | example | `examples/node-http-server` | node http server | package-owned-handoff | AI-06, docs/upstream-parity.md | Root AI SDK examples/docs parity is owned by the public API and examples bucket. |
+| AI SDK | example | `examples/node-http-server` | node http server | rust-doc-covered | examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs | Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally. |
 | AI SDK | example | `examples/nuxt-openai` | nuxt openai | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | example | `examples/sveltekit-openai` | sveltekit openai | js-only-documented | n/a | Framework, hook, RSC, browser, or TypeScript authoring surface. |
 | AI SDK | example | `packages/devtools/examples/basic` | basic | live-provider-handoff | AI-06, CROSS-02, docs/upstream-parity.md | Live-service, devtools, or deployment behavior needs ignored/live proof or package-owned tests. |

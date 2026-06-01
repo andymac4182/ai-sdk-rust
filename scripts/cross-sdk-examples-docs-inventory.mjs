@@ -67,8 +67,14 @@ const projects = [
     defaultRoot: path.join(githubRoot, 'vercel/ai/main'),
     envPath: 'AI_SDK_UPSTREAM_PATH',
     head: 'ab6d66482d31afe15f4973a51c5f7cfa09c92ea6',
-    docRoots: ['content/docs'],
-    readmeRoots: ['README.md', 'packages/*/README.md', 'examples/*/README.md'],
+    docRoots: ['content/docs', 'architecture', 'contributing', 'skills'],
+    readmeRoots: [
+      'README.md',
+      '.changeset/README.md',
+      'packages/*/README.md',
+      'examples/*/README.md',
+      'tools/*/README.md',
+    ],
     exampleRoots: ['examples/*', 'packages/devtools/examples/*'],
   },
 ];
@@ -397,6 +403,66 @@ function classifyAi(unit) {
       notes: 'Provider-specific docs/examples stay with the provider implementation bucket.',
     };
   }
+  if (relativePath.startsWith('architecture/')) {
+    return {
+      disposition: 'rust-ledger-covered',
+      evidence: 'docs/upstream-parity.md',
+      notes:
+        'Architecture notes describe portable provider/root semantics already tracked by package ledger rows.',
+    };
+  }
+  if (
+    relativePath.startsWith('contributing/') ||
+    relativePath.startsWith('skills/') ||
+    relativePath.startsWith('tools/') ||
+    relativePath.startsWith('.changeset/')
+  ) {
+    return {
+      disposition: 'upstream-docs-only',
+      evidence: 'n/a',
+      notes:
+        'Repository process, contributor workflow, package-publishing, skill, or tooling guidance; no standalone Rust public API contract.',
+    };
+  }
+  if (relativePath.startsWith('examples/ai-e2e-next')) {
+    return {
+      disposition: 'js-only-documented',
+      evidence: 'docs/upstream-parity.md',
+      notes:
+        'Next.js, React/RSC, browser UI, and live-provider demo app shell; portable provider, agent, MCP, and stream behavior is tracked by package ledger rows.',
+    };
+  }
+  if (relativePath.startsWith('examples/ai-functions')) {
+    return {
+      disposition: 'rust-ledger-covered',
+      evidence:
+        'docs/upstream-parity.md, examples/kitchen_sink.rs, examples/vercel_ai_gateway_text.rs',
+      notes:
+        'Function script and live e2e provider smoke surfaces are covered by root/provider package rows and ignored live proofs.',
+    };
+  }
+  if (relativePath.startsWith('examples/mcp')) {
+    return {
+      disposition: 'rust-ledger-covered',
+      evidence: 'docs/upstream-parity.md, crates/ai-sdk-mcp/examples',
+      notes:
+        'Portable MCP client/server examples are covered by package-owned MCP examples; hosted service demos remain live-provider guidance.',
+    };
+  }
+  if (
+    relativePath.startsWith('examples/express') ||
+    relativePath.startsWith('examples/fastify') ||
+    relativePath.startsWith('examples/hono') ||
+    relativePath.startsWith('examples/node-http-server') ||
+    relativePath.startsWith('examples/next-fastapi')
+  ) {
+    return {
+      disposition: 'rust-doc-covered',
+      evidence: 'examples/http_ui_message_server.rs, src/ui_message_stream.rs, src/stream_text.rs',
+      notes:
+        'Framework-neutral Rust server example covers streamText UI-message SSE responses, text-stream responses, custom data parts, and pipe-to-response helpers; JS/Python framework shells are not ported literally.',
+    };
+  }
   if (
     /(?:ai-sdk-ui|ai-sdk-rsc|react|rsc|svelte|vue|angular|nextjs?|nuxt|expo|tanstack|browser|client-components|server-actions|jsx)/.test(
       relativePath
@@ -413,7 +479,6 @@ function classifyAi(unit) {
     };
   }
   if (
-    relativePath.startsWith('examples/ai-e2e-next') ||
     relativePath.includes('/troubleshooting/') ||
     relativePath.includes('/vercel-deployment-guide') ||
     relativePath.includes('packages/devtools')
