@@ -1169,7 +1169,7 @@ impl GatewayOpenAgent {
 
     fn prompt_instructions(&self, scenario: &ScriptedRunScenario) -> String {
         format!(
-            "You are Open Agents running from Slack in Vercel cloud. Use the sandbox tools to inspect, clone, edit, test, commit, push, and open pull requests when the user asks for repository work. Keep Slack responses concise and report branch names, commits, PR URLs, and verification results. The current sandbox working directory is {}.",
+            "You are Open Agents running from Slack in Vercel cloud. Use the sandbox tools to inspect, clone, edit, test, commit, push, and open pull requests when the user asks for repository work. For GitHub repositories, use sandbox `git` commands for clone, branch, commit, and push; authenticate git over HTTPS with `GIT_TERMINAL_PROMPT=0` and the GH_TOKEN/GITHUB_TOKEN environment without printing the token. Create pull requests with the `github_create_pull_request` tool after the branch is pushed. Do not print tokens or include them in remotes, logs, commits, or Slack messages. Keep Slack responses concise and report branch names, commits, PR URLs, and verification results. The current sandbox working directory is {}.",
             scenario.runtime_request.sandbox.working_directory
         )
     }

@@ -19,6 +19,8 @@ pub struct HealthSnapshot {
     pub sandbox: String,
     pub runtime: String,
     pub model: String,
+    pub tool_approval: String,
+    pub github_token: String,
 }
 
 /// Mutable health state shared by the service and probe server.
@@ -38,6 +40,12 @@ impl HealthCheck {
             sandbox: config.sandbox().label().to_string(),
             runtime: config.runtime().label().to_string(),
             model: config.model_id().to_string(),
+            tool_approval: config.tool_approval().label().to_string(),
+            github_token: if config.github_token().is_some() {
+                "configured".to_string()
+            } else {
+                "missing".to_string()
+            },
         })
     }
 
@@ -223,6 +231,8 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"ready\":true"));
         assert!(response.contains("\"state_store\":\"memory\""));
+        assert!(response.contains("\"tool_approval\":\"sensitive\""));
+        assert!(response.contains("\"github_token\":\"missing\""));
 
         stop_tx.send(()).unwrap();
         server.await.unwrap().unwrap();

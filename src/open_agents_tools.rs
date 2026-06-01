@@ -20,11 +20,13 @@ const EDIT_TOOL_NAME: &str = "edit";
 const GREP_TOOL_NAME: &str = "grep";
 const GLOB_TOOL_NAME: &str = "glob";
 const BASH_TOOL_NAME: &str = "bash";
+const GITHUB_CREATE_PULL_REQUEST_TOOL_NAME: &str = "github_create_pull_request";
 const TODO_WRITE_TOOL_NAME: &str = "todo_write";
 const TASK_TOOL_NAME: &str = "task";
 const ASK_USER_QUESTION_TOOL_NAME: &str = "ask_user_question";
 const SKILL_TOOL_NAME: &str = "skill";
 const WEB_FETCH_TOOL_NAME: &str = "web_fetch";
+const DEFAULT_GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const DEFAULT_READ_LIMIT: usize = 2000;
 const DEFAULT_GLOB_LIMIT: usize = 100;
 const MAX_GREP_MATCHES: usize = 100;
@@ -119,6 +121,7 @@ pub fn open_agent_tools_with_options(options: OpenAgentToolsOptions) -> Vec<Tool
         grep_tool(options.clone()),
         glob_tool(options.clone()),
         bash_tool(options.clone()),
+        github_create_pull_request_tool(),
         task_placeholder_tool(),
         ask_user_question_tool(),
         skill_placeholder_tool(),
@@ -256,6 +259,19 @@ fn bash_tool(options: OpenAgentToolsOptions) -> Tool {
         })
 }
 
+fn github_create_pull_request_tool() -> Tool {
+    Tool::new(
+        GITHUB_CREATE_PULL_REQUEST_TOOL_NAME,
+        github_create_pull_request_schema(),
+    )
+    .with_description(
+        "Create a GitHub pull request for a branch that has already been pushed. Uses OPEN_AGENTS_GITHUB_TOKEN, GITHUB_TOKEN, or GH_TOKEN without exposing it to the model.",
+    )
+    .with_execute(|input, _execution_options| async move {
+        execute_github_create_pull_request(input).await
+    })
+}
+
 fn todo_write_tool() -> Tool {
     Tool::new(TODO_WRITE_TOOL_NAME, todo_write_schema())
         .with_description("Create and manage a structured task list for the current session.")
@@ -357,6 +373,18 @@ struct BashInput {
     command: String,
     cwd: Option<String>,
     detached: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubCreatePullRequestInput {
+    repository: String,
+    base: String,
+    head: String,
+    title: String,
+    body: String,
+    draft: Option<bool>,
+    maintainer_can_modify: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -766,6 +794,117 @@ async fn execute_bash(
     }))
 }
 
+async fn execute_github_create_pull_request(
+    input: JsonValue,
+) -> Result<JsonValue, ToolExecutionError> {
+    let input: GitHubCreatePullRequestInput = parse_input(input)?;
+    Ok(execute_github_create_pull_request_with(
+        input,
+        github_token_from_env(),
+        github_api_base_url_from_env(),
+        send_github_create_pull_request,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubPullRequestHttpResponse {
+    status: u16,
+    body: String,
+}
+
+fn execute_github_create_pull_request_with(
+    input: GitHubCreatePullRequestInput,
+    token: Option<String>,
+    api_base_url: String,
+    transport: impl FnOnce(&str, &str, &JsonValue) -> Result<GitHubPullRequestHttpResponse, String>,
+) -> JsonValue {
+    let Some(token) = token.filter(|token| !token.trim().is_empty()) else {
+        return tool_error(
+            "GitHub token is not configured. Set OPEN_AGENTS_GITHUB_TOKEN, GITHUB_TOKEN, or GH_TOKEN.",
+        );
+    };
+    let (owner, repo) = match parse_github_repository(&input.repository) {
+        Ok(repository) => repository,
+        Err(error) => return tool_error(error),
+    };
+    if !is_safe_github_ref(&input.base) || !is_safe_github_ref(&input.head) {
+        return tool_error("GitHub base and head refs must be non-empty branch refs.");
+    }
+    if input.title.trim().is_empty() {
+        return tool_error("GitHub pull request title must not be empty.");
+    }
+
+    let base_url = api_base_url.trim_end_matches('/');
+    let url = format!("{base_url}/repos/{owner}/{repo}/pulls");
+    let payload = json!({
+        "title": input.title,
+        "head": input.head,
+        "base": input.base,
+        "body": input.body,
+        "draft": input.draft.unwrap_or(false),
+        "maintainer_can_modify": input.maintainer_can_modify.unwrap_or(true)
+    });
+    let response = match transport(&url, &token, &payload) {
+        Ok(response) => response,
+        Err(error) => return tool_error(format!("GitHub pull request request failed: {error}")),
+    };
+    let parsed = serde_json::from_str::<JsonValue>(&response.body).unwrap_or_else(|_| {
+        json!({
+            "message": response.body
+        })
+    });
+    if !(200..300).contains(&response.status) {
+        let message = parsed
+            .get("message")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("GitHub API returned an error");
+        return tool_error(format!(
+            "GitHub pull request creation failed with status {}: {message}",
+            response.status
+        ));
+    }
+
+    let url = parsed
+        .get("html_url")
+        .and_then(JsonValue::as_str)
+        .or_else(|| parsed.get("url").and_then(JsonValue::as_str))
+        .unwrap_or("");
+    json!({
+        "success": true,
+        "repository": format!("{owner}/{repo}"),
+        "number": parsed.get("number").cloned().unwrap_or(JsonValue::Null),
+        "url": url,
+        "head": payload["head"],
+        "base": payload["base"],
+        "draft": payload["draft"]
+    })
+}
+
+fn send_github_create_pull_request(
+    url: &str,
+    token: &str,
+    payload: &JsonValue,
+) -> Result<GitHubPullRequestHttpResponse, String> {
+    let body = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+    let response = ureq::post(url)
+        .header("accept", "application/vnd.github+json")
+        .header("authorization", &format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("user-agent", "ai-sdk-rust-open-agents")
+        .header("x-github-api-version", "2022-11-28")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(body);
+    let mut response = response.map_err(|error| error.to_string())?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| error.to_string())?;
+    Ok(GitHubPullRequestHttpResponse { status, body })
+}
+
 async fn execute_web_fetch(
     input: JsonValue,
     options: ToolExecutionOptions,
@@ -1081,6 +1220,57 @@ fn joined_working_directory(
         (None, Some(".")) | (None, None) => None,
         (None, Some(cwd)) => Some(cwd.to_string()),
     }
+}
+
+fn github_token_from_env() -> Option<String> {
+    ["OPEN_AGENTS_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn github_api_base_url_from_env() -> String {
+    std::env::var("OPEN_AGENTS_GITHUB_API_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_GITHUB_API_BASE_URL.to_string())
+}
+
+fn parse_github_repository(value: &str) -> Result<(String, String), String> {
+    let trimmed = value.trim();
+    let repository = trimmed
+        .strip_prefix("https://github.com/")
+        .unwrap_or(trimmed);
+    let repository = repository.strip_suffix(".git").unwrap_or(repository);
+    let mut parts = repository.split('/');
+    let Some(owner) = parts.next() else {
+        return Err("GitHub repository must be owner/repo.".to_string());
+    };
+    let Some(repo) = parts.next() else {
+        return Err("GitHub repository must be owner/repo.".to_string());
+    };
+    if parts.next().is_some() || !is_github_slug(owner) || !is_github_slug(repo) {
+        return Err("GitHub repository must be owner/repo.".to_string());
+    }
+    Ok((owner.to_string(), repo.to_string()))
+}
+
+fn is_github_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn is_safe_github_ref(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && !trimmed.starts_with('-')
+        && !trimmed.contains("..")
+        && !trimmed
+            .chars()
+            .any(|ch| matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+        && !trimmed.bytes().any(|byte| byte.is_ascii_control())
 }
 
 fn parse_input<T>(input: JsonValue) -> Result<T, ToolExecutionError>
@@ -1404,6 +1594,24 @@ fn bash_schema() -> JsonSchema {
             "detached": { "type": "boolean" }
         }),
         &["command"],
+    )
+}
+
+fn github_create_pull_request_schema() -> JsonSchema {
+    object_schema(
+        json!({
+            "repository": {
+                "type": "string",
+                "description": "Repository as owner/repo or https://github.com/owner/repo"
+            },
+            "base": { "type": "string" },
+            "head": { "type": "string" },
+            "title": { "type": "string" },
+            "body": { "type": "string" },
+            "draft": { "type": "boolean" },
+            "maintainerCanModify": { "type": "boolean" }
+        }),
+        &["repository", "base", "head", "title", "body"],
     )
 }
 
@@ -1884,6 +2092,89 @@ mod tests {
             .expect("approval function exists"),
         );
         assert!(needs_approval);
+    }
+
+    #[test]
+    fn open_agent_github_create_pull_request_uses_api_without_exposing_token() {
+        let captured = std::cell::RefCell::new(None);
+        let output = execute_github_create_pull_request_with(
+            GitHubCreatePullRequestInput {
+                repository: "https://github.com/acme/widgets.git".to_string(),
+                base: "main".to_string(),
+                head: "codex/e2e-proof".to_string(),
+                title: "Open Agents E2E proof".to_string(),
+                body: "Created by the cloud agent.".to_string(),
+                draft: Some(false),
+                maintainer_can_modify: Some(false),
+            },
+            Some("gho_secret".to_string()),
+            "https://api.github.test".to_string(),
+            |url, token, payload| {
+                captured.borrow_mut().replace((
+                    url.to_string(),
+                    token.to_string(),
+                    payload.clone(),
+                ));
+                Ok(GitHubPullRequestHttpResponse {
+                    status: 201,
+                    body: serde_json::json!({
+                        "html_url": "https://github.com/acme/widgets/pull/7",
+                        "number": 7
+                    })
+                    .to_string(),
+                })
+            },
+        );
+
+        assert_eq!(output["success"], json!(true));
+        assert_eq!(output["repository"], json!("acme/widgets"));
+        assert_eq!(
+            output["url"],
+            json!("https://github.com/acme/widgets/pull/7")
+        );
+        let (url, token, payload) = captured.into_inner().expect("request captured");
+        assert_eq!(url, "https://api.github.test/repos/acme/widgets/pulls");
+        assert_eq!(token, "gho_secret");
+        assert_eq!(payload["head"], json!("codex/e2e-proof"));
+        assert_eq!(payload["maintainer_can_modify"], json!(false));
+        assert!(!output.to_string().contains("gho_secret"));
+    }
+
+    #[test]
+    fn open_agent_github_create_pull_request_reports_config_errors() {
+        let output = execute_github_create_pull_request_with(
+            GitHubCreatePullRequestInput {
+                repository: "acme/widgets".to_string(),
+                base: "main".to_string(),
+                head: "codex/e2e-proof".to_string(),
+                title: "title".to_string(),
+                body: "body".to_string(),
+                draft: None,
+                maintainer_can_modify: None,
+            },
+            None,
+            DEFAULT_GITHUB_API_BASE_URL.to_string(),
+            |_, _, _| unreachable!("missing token should not call transport"),
+        );
+        assert_eq!(output["success"], json!(false));
+        assert!(output["error"].as_str().unwrap().contains("GitHub token"));
+
+        let output = execute_github_create_pull_request_with(
+            GitHubCreatePullRequestInput {
+                repository: "https://example.com/acme/widgets".to_string(),
+                base: "main".to_string(),
+                head: "codex/e2e-proof".to_string(),
+                title: "title".to_string(),
+                body: "body".to_string(),
+                draft: None,
+                maintainer_can_modify: None,
+            },
+            Some("token".to_string()),
+            DEFAULT_GITHUB_API_BASE_URL.to_string(),
+            |_, _, _| unreachable!("invalid repository should not call transport"),
+        );
+        assert_eq!(output["success"], json!(false));
+        assert!(output["error"].as_str().unwrap().contains("owner/repo"));
     }
 
     #[test]

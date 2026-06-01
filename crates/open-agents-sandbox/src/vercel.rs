@@ -2505,6 +2505,13 @@ mod tests {
             .expect("exec live pwd");
         assert!(result.success);
         assert_eq!(result.stdout, DEFAULT_VERCEL_WORKING_DIRECTORY);
+        let toolchain = sandbox
+            .exec(SandboxExecOptions::new("command -v git && git --version"))
+            .expect("check live git toolchain");
+        assert!(
+            toolchain.success,
+            "expected live sandbox to include git: {toolchain:#?}"
+        );
         sandbox
             .write_file("open-agents-live.txt", "ok\n")
             .expect("write live file");
