@@ -38,6 +38,10 @@ const AI_05_INVENTORY_PATH = path.join(
   repositoryRoot,
   'docs/ai-05-mcp-otel-provider-inventory.md',
 );
+const AI_04_INVENTORY_PATH = path.join(
+  repositoryRoot,
+  'docs/ai-04-openai-strict-provider-closure.md',
+);
 
 const UPSTREAM_REPO = 'vercel/ai';
 const UPSTREAM_HEAD = 'ab6d66482d31afe15f4973a51c5f7cfa09c92ea6';
@@ -744,6 +748,21 @@ function mergeNamedCaseMappings(...mappingSets) {
     }
   }
   return merged;
+}
+
+function exactCaseMappingValidationErrors(mappings, requiredSource) {
+  const errors = [];
+  for (const [key, entries] of mappings) {
+    const unusedEntries = entries.filter(entry =>
+      !entry.used && (!requiredSource || entry.source === requiredSource)
+    );
+    if (unusedEntries.length === 0) {
+      continue;
+    }
+    const sources = [...new Set(unusedEntries.map(entry => entry.source))].join(', ');
+    errors.push(`${key}: unused exact-case mappings from ${sources}`);
+  }
+  return errors;
 }
 
 function caseNameAliases(caseName) {
@@ -1794,7 +1813,9 @@ function classifyCase(
   const ai02Key = `${testCase.file}|${normalizeNameKey(testCase.name)}`;
   const ai02Queue = ai02Mappings.get(ai02Key);
   if (ai02Queue?.length) {
-    return ai02Queue.shift();
+    const mapping = ai02Queue.shift();
+    mapping.used = true;
+    return mapping;
   }
 
   const providerUtils = classifyProviderUtilsCase(testCase, providerUtilsMappings);
@@ -1846,6 +1867,11 @@ function buildInventory(args) {
       AI_06_INVENTORY_PATH,
       relativePath(AI_06_INVENTORY_PATH, repositoryRoot),
       'Mapped by the AI-06 exact case map.',
+    ),
+    parseAi02Mappings(
+      AI_04_INVENTORY_PATH,
+      relativePath(AI_04_INVENTORY_PATH, repositoryRoot),
+      'Mapped by the AIS-04 exact case map.',
     ),
   );
   const rustTests = collectRustTests();
@@ -1918,6 +1944,12 @@ function buildInventory(args) {
   }
 
   validationErrors.push(...providerUtilsMappingValidationErrors(providerUtilsMappings));
+  validationErrors.push(
+    ...exactCaseMappingValidationErrors(
+      ai02Mappings,
+      relativePath(AI_04_INVENTORY_PATH, repositoryRoot),
+    ),
+  );
 
   return {
     inventories,

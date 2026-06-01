@@ -1992,9 +1992,10 @@ fn openai_compatible_chat_request_body(
 
     body.insert(
         "messages".to_string(),
-        JsonValue::Array(openai_compatible_messages_with_system_mode(
+        JsonValue::Array(openai_compatible_messages_with_provider(
             &prompt,
             openai_compatible_chat_system_message_mode(model_id, provider, &provider_options),
+            openai_compatible_provider_options_name(provider),
         )?),
     );
 
@@ -3120,9 +3121,18 @@ fn openai_compatible_messages(prompt: &[LanguageModelMessage]) -> Result<Vec<Jso
     openai_compatible_messages_with_system_mode(prompt, OpenAICompatibleSystemMessageMode::System)
 }
 
+#[cfg(test)]
 fn openai_compatible_messages_with_system_mode(
     prompt: &[LanguageModelMessage],
     system_message_mode: OpenAICompatibleSystemMessageMode,
+) -> Result<Vec<JsonValue>, String> {
+    openai_compatible_messages_with_provider(prompt, system_message_mode, "openaiCompatible")
+}
+
+fn openai_compatible_messages_with_provider(
+    prompt: &[LanguageModelMessage],
+    system_message_mode: OpenAICompatibleSystemMessageMode,
+    provider_options_name: &str,
 ) -> Result<Vec<JsonValue>, String> {
     let mut messages = Vec::new();
 
@@ -3149,7 +3159,10 @@ fn openai_compatible_messages_with_system_mode(
                 messages.push(JsonValue::Object(object));
             }
             LanguageModelMessage::User(message) => {
-                messages.push(openai_compatible_user_message(message)?);
+                messages.push(openai_compatible_user_message(
+                    message,
+                    provider_options_name,
+                )?);
             }
             LanguageModelMessage::Assistant(message) => {
                 messages.push(openai_compatible_assistant_message(message));
@@ -3172,6 +3185,7 @@ fn openai_compatible_messages_with_system_mode(
 
 fn openai_compatible_user_message(
     message: &ai_sdk_provider::language_model::LanguageModelUserMessage,
+    provider_options_name: &str,
 ) -> Result<JsonValue, String> {
     if let [ai_sdk_provider::language_model::LanguageModelUserContentPart::Text(text_part)] =
         message.content.as_slice()
@@ -3194,7 +3208,10 @@ fn openai_compatible_user_message(
             message
                 .content
                 .iter()
-                .map(openai_compatible_user_content_part)
+                .enumerate()
+                .map(|(index, part)| {
+                    openai_compatible_user_content_part(part, provider_options_name, index)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
     );
@@ -3204,6 +3221,8 @@ fn openai_compatible_user_message(
 
 fn openai_compatible_user_content_part(
     part: &ai_sdk_provider::language_model::LanguageModelUserContentPart,
+    provider_options_name: &str,
+    index: usize,
 ) -> Result<JsonValue, String> {
     match part {
         ai_sdk_provider::language_model::LanguageModelUserContentPart::Text(text) => {
@@ -3214,15 +3233,23 @@ fn openai_compatible_user_content_part(
             Ok(JsonValue::Object(object))
         }
         ai_sdk_provider::language_model::LanguageModelUserContentPart::File(file) => {
-            openai_compatible_user_file_part(file)
+            openai_compatible_user_file_part(file, provider_options_name, index)
         }
     }
 }
 
 fn openai_compatible_user_file_part(
     part: &ai_sdk_provider::language_model::LanguageModelFilePart,
+    provider_options_name: &str,
+    index: usize,
 ) -> Result<JsonValue, String> {
     match &part.data {
+        FileData::Reference { reference } if provider_options_name == "openai" => {
+            return openai_compatible_provider_reference_file_part(
+                reference,
+                provider_options_name,
+            );
+        }
         FileData::Reference { .. } => {
             return Err(openai_compatible_unsupported_functionality(
                 "file parts with provider references",
@@ -3238,41 +3265,65 @@ fn openai_compatible_user_file_part(
 
     let top_level = openai_compatible_top_level_media_type(&part.media_type);
     match top_level {
-        "image" => openai_compatible_image_part(part),
+        "image" => openai_compatible_image_part(part, provider_options_name),
         "audio" => openai_compatible_audio_part(part),
-        "application" => openai_compatible_application_part(part),
-        "text" => openai_compatible_text_part(part),
+        "application" => openai_compatible_application_part(part, provider_options_name, index),
+        "text" if provider_options_name != "openai" => openai_compatible_text_part(part),
         _ => Err(openai_compatible_unsupported_functionality(format!(
             "file part media type {}",
-            part.media_type
+            openai_compatible_resolve_full_media_type(part)
         ))),
     }
 }
 
+fn openai_compatible_provider_reference_file_part(
+    reference: &ai_sdk_provider::file_data::ProviderReference,
+    provider_options_name: &str,
+) -> Result<JsonValue, String> {
+    let file_id = reference
+        .provider_id(provider_options_name)
+        .map_err(|error| error.to_string())?;
+
+    Ok(json!({
+        "type": "file",
+        "file": {
+            "file_id": file_id
+        }
+    }))
+}
+
 fn openai_compatible_image_part(
     part: &ai_sdk_provider::language_model::LanguageModelFilePart,
+    provider_options_name: &str,
 ) -> Result<JsonValue, String> {
     let url = match &part.data {
         FileData::Url { url } => url.to_string(),
-        FileData::Data { data } => format!(
-            "data:{};base64,{}",
-            openai_compatible_resolve_full_media_type(part),
-            convert_to_base64(data)
-        ),
+        FileData::Data { data } if provider_options_name == "openai" => convert_to_base64(data),
+        FileData::Data { data } => {
+            format!(
+                "data:{};base64,{}",
+                openai_compatible_resolve_full_media_type(part),
+                convert_to_base64(data)
+            )
+        }
         FileData::Reference { .. } | FileData::Text { .. } => unreachable!(),
     };
+    let mut image_url = json!({ "url": url });
+    if provider_options_name == "openai"
+        && let Some(detail) = openai_compatible_openai_image_detail(part.provider_options.as_ref())
+        && let Some(image_url) = image_url.as_object_mut()
+    {
+        image_url.insert("detail".to_string(), JsonValue::String(detail));
+    }
     let mut object = JsonObject::new();
     object.insert(
         "type".to_string(),
         JsonValue::String("image_url".to_string()),
     );
-    object.insert(
-        "image_url".to_string(),
-        json!({
-            "url": url
-        }),
-    );
-    openai_compatible_insert_metadata(&mut object, part.provider_options.as_ref());
+    object.insert("image_url".to_string(), image_url);
+    if provider_options_name != "openai" {
+        openai_compatible_insert_metadata(&mut object, part.provider_options.as_ref());
+    }
     Ok(JsonValue::Object(object))
 }
 
@@ -3309,8 +3360,16 @@ fn openai_compatible_audio_part(
 
 fn openai_compatible_application_part(
     part: &ai_sdk_provider::language_model::LanguageModelFilePart,
+    provider_options_name: &str,
+    index: usize,
 ) -> Result<JsonValue, String> {
     let FileData::Data { data } = &part.data else {
+        let full_media_type = openai_compatible_resolve_full_media_type(part);
+        if provider_options_name == "openai" && full_media_type != "application/pdf" {
+            return Err(openai_compatible_unsupported_functionality(format!(
+                "file part media type {full_media_type}"
+            )));
+        }
         return Err(openai_compatible_unsupported_functionality(
             "PDF file parts with URLs",
         ));
@@ -3330,7 +3389,13 @@ fn openai_compatible_application_part(
             "filename": part
                 .filename
                 .clone()
-                .unwrap_or_else(|| "document.pdf".to_string()),
+                .unwrap_or_else(|| {
+                    if provider_options_name == "openai" {
+                        format!("part-{index}.pdf")
+                    } else {
+                        "document.pdf".to_string()
+                    }
+                }),
             "file_data": format!("data:application/pdf;base64,{}", convert_to_base64(data))
         }),
     );
@@ -3433,7 +3498,11 @@ fn openai_compatible_tool_call_prompt_part(
         "function".to_string(),
         json!({
             "name": tool_call.tool_name.clone(),
-            "arguments": tool_call.input.to_string()
+            "arguments": if tool_call.input.is_null() {
+                "{}".to_string()
+            } else {
+                tool_call.input.to_string()
+            }
         }),
     );
     openai_compatible_insert_metadata(&mut object, tool_call.provider_options.as_ref());
@@ -3531,6 +3600,16 @@ fn openai_compatible_insert_metadata(
     {
         object.extend(metadata.clone());
     }
+}
+
+fn openai_compatible_openai_image_detail(
+    provider_options: Option<&ProviderOptions>,
+) -> Option<String> {
+    provider_options
+        .and_then(|provider_options| provider_options.get("openai"))
+        .and_then(|openai| openai.get("imageDetail"))
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
 }
 
 fn openai_compatible_google_thought_signature(
@@ -4953,9 +5032,10 @@ mod tests {
         OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
         OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
         OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
-        openai_compatible_messages, openai_compatible_prepare_tools,
-        openai_compatible_provider_options_name, resolve_openai_compatible_provider_options_key,
-        to_openai_compatible_camel_case, warn_if_deprecated_openai_compatible_provider_options_key,
+        openai_compatible_messages, openai_compatible_messages_with_provider,
+        openai_compatible_prepare_tools, openai_compatible_provider_options_name,
+        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
+        warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent, ProviderReference};
@@ -5015,6 +5095,26 @@ mod tests {
         openai_compatible_messages(&prompt).expect_err("messages conversion fails")
     }
 
+    fn openai_messages_json(prompt: Vec<LanguageModelMessage>) -> JsonValue {
+        JsonValue::Array(
+            openai_compatible_messages_with_provider(
+                &prompt,
+                super::OpenAICompatibleSystemMessageMode::System,
+                "openai",
+            )
+            .expect("OpenAI messages convert"),
+        )
+    }
+
+    fn openai_messages_error(prompt: Vec<LanguageModelMessage>) -> String {
+        openai_compatible_messages_with_provider(
+            &prompt,
+            super::OpenAICompatibleSystemMessageMode::System,
+            "openai",
+        )
+        .expect_err("OpenAI messages conversion fails")
+    }
+
     fn openai_compatible_user_prompt(
         content: Vec<LanguageModelUserContentPart>,
     ) -> LanguageModelMessage {
@@ -5069,6 +5169,320 @@ mod tests {
             reference.to_string(),
         )]))
         .expect("provider reference is valid")
+    }
+
+    #[test]
+    fn openai_chat_converts_image_parts_with_raw_base64_and_detail() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "imageDetail": "low"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = openai_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Hello"),
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AAECAw==".to_string()),
+                    },
+                    "image/png",
+                )
+                .with_provider_options(provider_options),
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Hello" },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "AAECAw==",
+                                "detail": "low"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_chat_resolves_top_level_image_media_types() {
+        let result = openai_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                "image",
+            ),
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                "image/*",
+            ),
+            openai_compatible_url_file_prompt_part("https://example.com/x.png", "image"),
+        ])]);
+
+        assert_eq!(
+            result[0]["content"],
+            json!([
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "iVBORw0KGgo="
+                    }
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "iVBORw0KGgo="
+                    }
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/x.png"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_chat_converts_binary_pdf_file_parts() {
+        let result = openai_messages_json(vec![openai_compatible_user_prompt(vec![
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![1, 2, 3, 4, 5]),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("document.pdf"),
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": "document.pdf",
+                                "file_data": "data:application/pdf;base64,AQIDBAU="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_chat_rejects_unsupported_mime_types() {
+        let error = openai_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("AAECAw==".to_string()),
+                "application/something",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'file part media type application/something' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_chat_rejects_audio_pdf_and_top_level_application_urls() {
+        let audio_error = openai_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part("https://example.com/foo.wav", "audio/wav"),
+        ])]);
+        let pdf_error = openai_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part(
+                "https://example.com/document.pdf",
+                "application/pdf",
+            ),
+        ])]);
+        let application_error = openai_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part("https://example.com/x.pdf", "application"),
+        ])]);
+
+        assert_eq!(
+            audio_error,
+            "'audio file parts with URLs' functionality not supported"
+        );
+        assert_eq!(
+            pdf_error,
+            "'PDF file parts with URLs' functionality not supported"
+        );
+        assert_eq!(
+            application_error,
+            "'file part media type application' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_chat_converts_pdf_and_image_provider_reference_file_parts() {
+        let result = openai_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_file_prompt_part(
+                FileData::Reference {
+                    reference: openai_compatible_provider_reference("openai", "file-pdf-12345"),
+                },
+                "application/pdf",
+            ),
+            openai_compatible_file_prompt_part(
+                FileData::Reference {
+                    reference: openai_compatible_provider_reference("openai", "file-img-12345"),
+                },
+                "image/png",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "file": {
+                                "file_id": "file-pdf-12345"
+                            }
+                        },
+                        {
+                            "type": "file",
+                            "file": {
+                                "file_id": "file-img-12345"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_chat_rejects_missing_provider_reference_for_file_parts() {
+        let error = openai_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_file_prompt_part(
+                FileData::Reference {
+                    reference: openai_compatible_provider_reference("anthropic", "file-xyz"),
+                },
+                "application/pdf",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "No provider reference found for provider 'openai'. Available providers: anthropic"
+        );
+    }
+
+    #[test]
+    fn openai_chat_uses_part_index_default_filename_for_pdf_file_parts() {
+        let result = openai_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("AQIDBAU=".to_string()),
+                "application/pdf",
+            ),
+        ])]);
+
+        assert_eq!(
+            result[0]["content"][0],
+            json!({
+                "type": "file",
+                "file": {
+                    "filename": "part-0.pdf",
+                    "file_data": "data:application/pdf;base64,AQIDBAU="
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_chat_rejects_text_file_parts_as_unsupported() {
+        let error = openai_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("UGxhaW4gdGV4dA==".to_string()),
+                "text/plain",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'file part media type text/plain' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_chat_defaults_missing_tool_call_input_to_empty_object() {
+        let result = openai_messages_json(vec![openai_compatible_assistant_prompt(vec![
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "quux",
+                "thwomp",
+                JsonValue::Null,
+            )),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "quux",
+                            "function": {
+                                "name": "thwomp",
+                                "arguments": "{}"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_chat_handles_different_tool_output_types() {
+        let result = openai_messages_json(vec![openai_compatible_tool_prompt(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "text-tool",
+                "text-tool",
+                LanguageModelToolResultOutput::text("Hello world"),
+            )),
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "error-tool",
+                "error-tool",
+                LanguageModelToolResultOutput::error_text("Something went wrong"),
+            )),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "tool",
+                    "content": "Hello world",
+                    "tool_call_id": "text-tool"
+                },
+                {
+                    "role": "tool",
+                    "content": "Something went wrong",
+                    "tool_call_id": "error-tool"
+                }
+            ])
+        );
     }
 
     #[test]
@@ -11917,7 +12331,38 @@ mod tests {
                         .provider_metadata
                         .as_ref()
                         .and_then(|metadata| metadata.get("test-provider"))
-                        .is_some_and(JsonObject::is_empty)
+                .is_some_and(JsonObject::is_empty)
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_omits_raw_chunks_when_include_raw_chunks_false() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(
+            [
+                "data: {\"id\":\"chat-id\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ]
+            .join(""),
+        );
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Raw(_)))
+        );
+        assert!(matches!(
+            openai_compatible_chat_stream_finish(&result.stream),
+            finish if finish.finish_reason.unified == FinishReason::Stop
+                && finish.finish_reason.raw.as_deref() == Some("stop")
         ));
     }
 
