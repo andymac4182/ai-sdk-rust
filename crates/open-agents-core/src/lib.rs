@@ -6,7 +6,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod open_plugin;
+
 use serde::{Deserialize, Serialize};
+
+pub use open_plugin::{
+    OPEN_PLUGIN_DEFAULT_MCP_CONFIG_PATH, OPEN_PLUGIN_INVALID_OBJECT_EVENT,
+    OPEN_PLUGIN_MANIFEST_PATH, OPEN_PLUGIN_MCP_NAME_CONFLICT_EVENT, OpenPluginDiagnostic,
+    OpenPluginDiagnosticLevel, OpenPluginManifest, OpenPluginMcpConfigSource,
+    OpenPluginMcpDiscovery, OpenPluginMcpDiscoveryOptions, OpenPluginMcpHttpConfig,
+    OpenPluginMcpLoadError, OpenPluginMcpManifestAdapter, OpenPluginMcpServerConfig,
+    OpenPluginMcpStdioConfig, OpenPluginMcpTransportConfig,
+    discover_open_plugin_mcp_servers_from_manifest, load_open_plugin_mcp_servers,
+    open_plugin_mcp_tool_id,
+};
 
 /// Upstream Open Agents repository verified for the initial architecture pass.
 pub const OPEN_AGENTS_SOURCE_REPOSITORY: &str = "github.com/vercel-labs/open-agents";
