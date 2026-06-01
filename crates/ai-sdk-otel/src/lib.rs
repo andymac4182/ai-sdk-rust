@@ -605,9 +605,9 @@ pub fn get_base_telemetry_attributes(
     }
 
     if let Some(context) = context {
-        for (key, value) in context {
-            if !value.is_null() {
-                attributes.insert(format!("ai.settings.context.{key}"), value.clone());
+        for (key, value) in get_runtime_context_attributes(context) {
+            if let AttributeSpec::Value(value) = value {
+                attributes.insert(key, value);
             }
         }
     }
@@ -677,16 +677,33 @@ pub struct SupplementalAttributes {
 pub fn get_runtime_context_attributes(
     context: &TelemetryAttributes,
 ) -> Vec<(String, AttributeSpec)> {
-    context
-        .iter()
-        .filter(|(_, value)| !value.is_null())
-        .map(|(key, value)| {
-            (
-                format!("ai.settings.context.{key}"),
-                AttributeSpec::value(value.clone()),
-            )
-        })
-        .collect()
+    let mut attributes = Vec::new();
+    for (key, value) in context.iter().filter(|(_, value)| !value.is_null()) {
+        append_runtime_context_attribute(&mut attributes, key, value);
+    }
+    attributes
+}
+
+fn append_runtime_context_attribute(
+    attributes: &mut Vec<(String, AttributeSpec)>,
+    key: &str,
+    value: &JsonValue,
+) {
+    if let Some(object) = value.as_object() {
+        for (child_key, child_value) in object.iter().filter(|(_, value)| !value.is_null()) {
+            append_runtime_context_attribute(
+                attributes,
+                &format!("{key}.{child_key}"),
+                child_value,
+            );
+        }
+        return;
+    }
+
+    attributes.push((
+        format!("ai.settings.context.{key}"),
+        AttributeSpec::value(value.clone()),
+    ));
 }
 
 /// Request-header attributes with upstream key prefixes.
@@ -2188,6 +2205,8 @@ pub struct OpenTelemetryLanguageModelCallStartEvent {
     pub provider: String,
     pub model_id: String,
     pub input_messages: Option<Vec<SemConvMessage>>,
+    pub tool_definitions: Option<Vec<JsonValue>>,
+    pub tool_choice: Option<JsonValue>,
 }
 
 impl OpenTelemetryLanguageModelCallStartEvent {
@@ -2202,12 +2221,26 @@ impl OpenTelemetryLanguageModelCallStartEvent {
             provider: provider.into(),
             model_id: model_id.into(),
             input_messages: None,
+            tool_definitions: None,
+            tool_choice: None,
         }
     }
 
     /// Sets formatted input messages.
     pub fn with_input_messages(mut self, input_messages: Vec<SemConvMessage>) -> Self {
         self.input_messages = Some(input_messages);
+        self
+    }
+
+    /// Sets formatted tool definitions.
+    pub fn with_tool_definitions(mut self, tool_definitions: Vec<JsonValue>) -> Self {
+        self.tool_definitions = Some(tool_definitions);
+        self
+    }
+
+    /// Sets formatted tool choice.
+    pub fn with_tool_choice(mut self, tool_choice: JsonValue) -> Self {
+        self.tool_choice = Some(tool_choice);
         self
     }
 }
@@ -2218,6 +2251,8 @@ pub struct TelemetryTokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 /// Embedding usage values for OTel lifecycle events.
@@ -2768,6 +2803,8 @@ impl LegacyOpenTelemetry {
             base_telemetry_attributes: &state.base_telemetry_attributes,
             settings: &state.settings,
             input_messages: None,
+            tool_definitions: None,
+            tool_choice: None,
         });
         state.step_span = Some(self.tracer.start_span(operation_id, attributes));
     }
@@ -2800,6 +2837,8 @@ impl LegacyOpenTelemetry {
             base_telemetry_attributes: &base,
             settings: &settings,
             input_messages: event.input_messages.as_ref(),
+            tool_definitions: event.tool_definitions.as_ref(),
+            tool_choice: event.tool_choice.as_ref(),
         });
         if let Some(span) = self.tracer.spans.get_mut(span) {
             span.set_attributes(attributes);
@@ -2834,6 +2873,8 @@ impl LegacyOpenTelemetry {
             base_telemetry_attributes: &state.base_telemetry_attributes,
             settings: &event.settings,
             input_messages: event.input_messages.as_ref(),
+            tool_definitions: None,
+            tool_choice: None,
         });
         state.step_span = Some(self.tracer.start_span(operation_id, attributes));
     }
@@ -3846,6 +3887,15 @@ impl OpenTelemetry {
                             AttributeSpec::input(json!(input_messages))
                         }),
                 ),
+                (
+                    "gen_ai.tool.definitions".to_string(),
+                    event
+                        .tool_definitions
+                        .as_ref()
+                        .map_or(AttributeSpec::Omitted, |tool_definitions| {
+                            AttributeSpec::input(json!(tool_definitions))
+                        }),
+                ),
             ],
         );
         let span_attributes = self.span_attributes(
@@ -3885,15 +3935,41 @@ impl OpenTelemetry {
 
     /// Starts a tool execution span.
     pub fn on_tool_execution_start(&mut self, event: OpenTelemetryToolExecutionStartEvent) {
-        let Some((operation_id, runtime_context)) = self
-            .call_states
-            .get(&event.call_id)
-            .map(|state| (state.operation_id.clone(), state.runtime_context.clone()))
+        let Some((operation_id, telemetry, runtime_context)) =
+            self.call_states.get(&event.call_id).map(|state| {
+                (
+                    state.operation_id.clone(),
+                    state.telemetry.clone(),
+                    state.runtime_context.clone(),
+                )
+            })
         else {
             return;
         };
         let attributes = self.span_attributes(
-            TelemetryAttributes::from([("gen_ai.tool.name".to_string(), json!(event.tool_name))]),
+            select_attributes(
+                Some(&telemetry),
+                [
+                    (
+                        "gen_ai.tool.name".to_string(),
+                        AttributeSpec::value(json!(event.tool_name)),
+                    ),
+                    (
+                        "gen_ai.tool.call.id".to_string(),
+                        AttributeSpec::value(json!(event.tool_call_id)),
+                    ),
+                    (
+                        "gen_ai.tool.call.arguments".to_string(),
+                        event.input.map_or(AttributeSpec::Omitted, |input| {
+                            AttributeSpec::input(json!(telemetry_json_string(&input)))
+                        }),
+                    ),
+                    (
+                        "gen_ai.tool.type".to_string(),
+                        AttributeSpec::value(json!("function")),
+                    ),
+                ],
+            ),
             OpenTelemetrySpanType::Tool,
             &operation_id,
             &event.call_id,
@@ -3940,10 +4016,10 @@ impl OpenTelemetry {
         let attributes = select_attributes(
             Some(&state.telemetry),
             [(
-                "gen_ai.tool.output".to_string(),
-                event
-                    .output
-                    .map_or(AttributeSpec::Omitted, AttributeSpec::output),
+                "gen_ai.tool.call.result".to_string(),
+                event.output.map_or(AttributeSpec::Omitted, |output| {
+                    AttributeSpec::output(json!(telemetry_json_string(&output)))
+                }),
             )],
         );
 
@@ -4079,6 +4155,14 @@ fn language_model_end_attributes(
             ("gen_ai.usage.input_tokens", usage.input_tokens),
             ("gen_ai.usage.output_tokens", usage.output_tokens),
             ("gen_ai.usage.total_tokens", usage.total_tokens),
+            (
+                "gen_ai.usage.cache_read.input_tokens",
+                usage.cache_read_input_tokens,
+            ),
+            (
+                "gen_ai.usage.cache_creation.input_tokens",
+                usage.cache_creation_input_tokens,
+            ),
         ] {
             if let Some(value) = value {
                 attributes.insert(key.to_string(), json!(value));
@@ -4137,6 +4221,8 @@ struct LegacyStepStartAttributes<'a> {
     base_telemetry_attributes: &'a TelemetryAttributes,
     settings: &'a TelemetryAttributes,
     input_messages: Option<&'a Vec<SemConvMessage>>,
+    tool_definitions: Option<&'a Vec<JsonValue>>,
+    tool_choice: Option<&'a JsonValue>,
 }
 
 fn legacy_step_start_attributes(input: LegacyStepStartAttributes<'_>) -> TelemetryAttributes {
@@ -4151,6 +4237,22 @@ fn legacy_step_start_attributes(input: LegacyStepStartAttributes<'_>) -> Telemet
                     .input_messages
                     .map_or(AttributeSpec::Omitted, |messages| {
                         AttributeSpec::input(json!(telemetry_json_string(messages)))
+                    }),
+            ),
+            (
+                "ai.prompt.tools".to_string(),
+                input
+                    .tool_definitions
+                    .map_or(AttributeSpec::Omitted, |tools| {
+                        AttributeSpec::input(json!(telemetry_json_string(tools)))
+                    }),
+            ),
+            (
+                "ai.prompt.toolChoice".to_string(),
+                input
+                    .tool_choice
+                    .map_or(AttributeSpec::Omitted, |tool_choice| {
+                        AttributeSpec::input(json!(telemetry_json_string(tool_choice)))
                     }),
             ),
             (
@@ -4929,6 +5031,95 @@ mod tests {
     }
 
     #[test]
+    fn formats_model_messages_from_prompt_string_and_message_arrays() {
+        let prompt_string = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))];
+        assert_eq!(
+            serde_json::to_value(format_input_messages(&prompt_string)).expect("serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "parts": [{ "type": "text", "content": "Hello" }]
+                }
+            ])
+        );
+
+        let prompt_messages = vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hi there")),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "tc1",
+                    "weather",
+                    json!({ "city": "NYC" }),
+                )),
+            ])),
+        ];
+        assert_eq!(
+            serde_json::to_value(format_input_messages(&prompt_messages)).expect("serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "parts": [{ "type": "text", "content": "Hi there" }]
+                },
+                {
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "tool_call", "id": "tc1", "name": "weather", "arguments": { "city": "NYC" } }
+                    ]
+                }
+            ])
+        );
+
+        let tool_messages = vec![LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "tc1",
+                    "weather",
+                    LanguageModelToolResultOutput::text("Sunny"),
+                ),
+            )],
+        ))];
+        assert_eq!(
+            serde_json::to_value(format_input_messages(&tool_messages)).expect("serializes"),
+            json!([
+                {
+                    "role": "tool",
+                    "parts": [{ "type": "tool_call_response", "id": "tc1", "response": "Sunny" }]
+                }
+            ])
+        );
+
+        let combined = vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("First message")),
+            ])),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Second message")),
+            ])),
+        ];
+        assert_eq!(
+            serde_json::to_value(format_input_messages(&combined)).expect("serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "parts": [{ "type": "text", "content": "First message" }]
+                },
+                {
+                    "role": "user",
+                    "parts": [{ "type": "text", "content": "Second message" }]
+                }
+            ])
+        );
+
+        assert!(format_input_messages(&[]).is_empty());
+    }
+
+    #[test]
     fn formats_output_messages_and_finish_reasons() {
         let output = OutputMessages::new("tool-calls")
             .with_reasoning(OutputReasoning::new("Thinking"))
@@ -4972,7 +5163,10 @@ mod tests {
             ("topP".to_string(), JsonValue::Null),
         ]);
         let headers = BTreeMap::from([("x-trace".to_string(), "trace-1".to_string())]);
-        let context = TelemetryAttributes::from([("tenant".to_string(), json!("acme"))]);
+        let context = TelemetryAttributes::from([
+            ("tenant".to_string(), json!("acme")),
+            ("foo".to_string(), json!({ "bar": "baz" })),
+        ]);
 
         let base = get_base_telemetry_attributes(
             "openai.chat",
@@ -4985,6 +5179,7 @@ mod tests {
         assert_eq!(base.get("ai.model.id"), Some(&json!("gpt-4")));
         assert_eq!(base.get("ai.settings.temperature"), Some(&json!(0.7)));
         assert_eq!(base.get("ai.settings.context.tenant"), Some(&json!("acme")));
+        assert_eq!(base.get("ai.settings.context.foo.bar"), Some(&json!("baz")));
         assert_eq!(
             base.get("ai.request.headers.x-trace"),
             Some(&json!("trace-1"))
@@ -5007,7 +5202,10 @@ mod tests {
         );
         assert_eq!(
             selected,
-            TelemetryAttributes::from([("ai.settings.context.tenant".to_string(), json!("acme"))])
+            TelemetryAttributes::from([
+                ("ai.settings.context.foo.bar".to_string(), json!("baz")),
+                ("ai.settings.context.tenant".to_string(), json!("acme")),
+            ])
         );
     }
 
@@ -5201,17 +5399,28 @@ mod tests {
                 )]),
         );
         recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 1));
-        recorder.on_language_model_call_start(OpenTelemetryLanguageModelCallStartEvent::new(
-            "call-1",
-            "openai.chat",
-            "gpt-4o-mini",
-        ));
+        recorder.on_language_model_call_start(
+            OpenTelemetryLanguageModelCallStartEvent::new("call-1", "openai.chat", "gpt-4o-mini")
+                .with_tool_definitions(vec![json!({
+                    "type": "function",
+                    "name": "weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        },
+                        "required": ["city"]
+                    }
+                })]),
+        );
         recorder.on_language_model_call_end(
             OpenTelemetryLanguageModelCallEndEvent::new("call-1", "stop").with_usage(
                 TelemetryTokenUsage {
                     input_tokens: Some(7),
                     output_tokens: Some(4),
                     total_tokens: Some(11),
+                    cache_read_input_tokens: Some(2),
+                    cache_creation_input_tokens: Some(1),
                 },
             ),
         );
@@ -5248,6 +5457,27 @@ mod tests {
             tracer.spans[2].attributes.get("gen_ai.usage.total_tokens"),
             Some(&json!(11))
         );
+        assert_eq!(
+            tracer.spans[2]
+                .attributes
+                .get("gen_ai.usage.cache_read.input_tokens"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            tracer.spans[2]
+                .attributes
+                .get("gen_ai.usage.cache_creation.input_tokens"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            tracer.spans[2]
+                .attributes
+                .get("gen_ai.tool.definitions")
+                .and_then(JsonValue::as_array)
+                .and_then(|definitions| definitions.first())
+                .and_then(|definition| definition.get("name")),
+            Some(&json!("weather"))
+        );
         assert!(
             tracer
                 .spans
@@ -5273,6 +5503,7 @@ mod tests {
             input_tokens: Some(5),
             output_tokens: Some(7),
             total_tokens: Some(12),
+            ..TelemetryTokenUsage::default()
         };
 
         recorder.on_object_operation_start(
@@ -5411,9 +5642,10 @@ mod tests {
             "openai.chat",
             "gpt-4o-mini",
         ));
-        recorder.on_tool_execution_start(OpenTelemetryToolExecutionStartEvent::new(
-            "call-1", "tool-1", "weather",
-        ));
+        recorder.on_tool_execution_start(
+            OpenTelemetryToolExecutionStartEvent::new("call-1", "tool-1", "weather")
+                .with_input(json!({ "city": "Paris" })),
+        );
 
         let output = recorder.execute_tool("call-1", "tool-1", |span| {
             span.expect("tool span is active")
@@ -5437,12 +5669,24 @@ mod tests {
             Some(&json!("weather"))
         );
         assert_eq!(
+            tool_span.attributes.get("gen_ai.tool.call.id"),
+            Some(&json!("tool-1"))
+        );
+        assert_eq!(
+            tool_span.attributes.get("gen_ai.tool.call.arguments"),
+            Some(&json!("{\"city\":\"Paris\"}"))
+        );
+        assert_eq!(
+            tool_span.attributes.get("gen_ai.tool.type"),
+            Some(&json!("function"))
+        );
+        assert_eq!(
             tool_span.attributes.get("custom.executed"),
             Some(&json!(true))
         );
         assert_eq!(
-            tool_span.attributes.get("gen_ai.tool.output"),
-            Some(&json!({ "temperature": 24 }))
+            tool_span.attributes.get("gen_ai.tool.call.result"),
+            Some(&json!("{\"temperature\":24}"))
         );
     }
 
@@ -5630,7 +5874,13 @@ mod tests {
                 .with_input_messages(vec![SemConvMessage::input(
                     "user",
                     vec![json!({ "type": "text", "content": "Weather?" })],
-                )]),
+                )])
+                .with_tool_definitions(vec![json!({
+                    "type": "function",
+                    "name": "weather",
+                    "input_schema": { "type": "object" }
+                })])
+                .with_tool_choice(json!({ "type": "auto" })),
         );
         recorder.on_tool_execution_start(
             OpenTelemetryToolExecutionStartEvent::new("call-1", "tool-1", "weather")
@@ -5650,6 +5900,7 @@ mod tests {
                     input_tokens: Some(7),
                     output_tokens: Some(4),
                     total_tokens: Some(11),
+                    ..TelemetryTokenUsage::default()
                 })
                 .with_output_messages(output_messages.clone()),
         );
@@ -5660,6 +5911,7 @@ mod tests {
                     input_tokens: Some(7),
                     output_tokens: Some(4),
                     total_tokens: Some(11),
+                    ..TelemetryTokenUsage::default()
                 })
                 .with_output_messages(output_messages),
         );
@@ -5692,6 +5944,22 @@ mod tests {
             Some(&json!(11))
         );
         assert_eq!(
+            tracer.spans[1].attributes.get("ai.prompt.messages"),
+            Some(&json!(
+                "[{\"role\":\"user\",\"parts\":[{\"content\":\"Weather?\",\"type\":\"text\"}]}]"
+            ))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("ai.prompt.tools"),
+            Some(&json!(
+                "[{\"input_schema\":{\"type\":\"object\"},\"name\":\"weather\",\"type\":\"function\"}]"
+            ))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("ai.prompt.toolChoice"),
+            Some(&json!("{\"type\":\"auto\"}"))
+        );
+        assert_eq!(
             tracer.spans[2].attributes.get("ai.toolCall.args"),
             Some(&json!("{\"city\":\"Paris\"}"))
         );
@@ -5706,12 +5974,160 @@ mod tests {
     }
 
     #[test]
+    fn legacy_open_telemetry_records_error_on_active_spans_and_cleans_state() {
+        let mut recorder = LegacyOpenTelemetry::new(LegacyOpenTelemetryOptions::new());
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-1",
+            "ai.generateText",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 0));
+        recorder.on_tool_execution_start(
+            OpenTelemetryToolExecutionStartEvent::new("call-1", "tool-1", "weather")
+                .with_input(json!({ "city": "Paris" })),
+        );
+
+        recorder.on_error(OpenTelemetryErrorEvent::new(
+            "call-1",
+            RecordSpanError::exception("Error", "legacy provider failed"),
+        ));
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 3);
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert!(tracer.spans.iter().all(|span| {
+            span.status
+                == Some(SpanStatus::error(Some(
+                    "legacy provider failed".to_string(),
+                )))
+                && span.events.iter().any(|event| event.name == "exception")
+        }));
+    }
+
+    #[test]
+    fn legacy_open_telemetry_tracks_noop_concurrent_and_multistep_state() {
+        let mut recorder = LegacyOpenTelemetry::new(LegacyOpenTelemetryOptions::new());
+
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("missing-call", 0));
+        recorder.on_language_model_call_start(OpenTelemetryLanguageModelCallStartEvent::new(
+            "missing-call",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_language_model_call_end(OpenTelemetryLanguageModelCallEndEvent::new(
+            "missing-call",
+            "stop",
+        ));
+        recorder.on_tool_execution_start(OpenTelemetryToolExecutionStartEvent::new(
+            "missing-call",
+            "tool-missing",
+            "weather",
+        ));
+        recorder.on_tool_execution_end(OpenTelemetryToolExecutionEndEvent::new(
+            "missing-call",
+            "tool-missing",
+        ));
+        recorder.on_end(OpenTelemetryEndEvent::new("missing-call", "stop"));
+        recorder.on_error(OpenTelemetryErrorEvent::new(
+            "missing-call",
+            RecordSpanError::exception("Error", "ignored"),
+        ));
+        assert!(recorder.tracer().spans.is_empty());
+
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-1",
+            "ai.streamText",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-2",
+            "ai.generateText",
+            "anthropic.messages",
+            "claude-3",
+        ));
+        recorder.on_tool_execution_start(OpenTelemetryToolExecutionStartEvent::new(
+            "call-1", "tool-0", "ignored",
+        ));
+        assert_eq!(recorder.tracer().spans.len(), 2);
+
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 0));
+        recorder.on_tool_execution_start(
+            OpenTelemetryToolExecutionStartEvent::new("call-1", "tool-1", "weather")
+                .with_input(json!({ "city": "Paris" })),
+        );
+        recorder.on_tool_execution_start(
+            OpenTelemetryToolExecutionStartEvent::new("call-1", "tool-2", "time")
+                .with_input(json!({ "zone": "UTC" })),
+        );
+        recorder.on_tool_execution_end(
+            OpenTelemetryToolExecutionEndEvent::new("call-1", "tool-1")
+                .with_output(json!({ "temperature": 24 })),
+        );
+        assert!(!recorder.execute_tool("call-1", "tool-1", |span| span.is_some()));
+        recorder.on_tool_execution_end(
+            OpenTelemetryToolExecutionEndEvent::new("call-1", "tool-2")
+                .with_error(RecordSpanError::exception("Error", "tool failed")),
+        );
+        recorder.on_step_finish("call-1");
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 1));
+        recorder.on_step_finish("call-1");
+        recorder.on_end(OpenTelemetryEndEvent::new("call-1", "stop"));
+
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-2", 0));
+        recorder.on_step_finish("call-2");
+        recorder.on_end(OpenTelemetryEndEvent::new("call-2", "stop"));
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        let names = tracer
+            .spans
+            .iter()
+            .map(|span| span.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "ai.streamText",
+                "ai.generateText",
+                "ai.streamText.doStream",
+                "ai.toolCall",
+                "ai.toolCall",
+                "ai.streamText.doStream",
+                "ai.generateText.doGenerate",
+            ]
+        );
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[3].attributes.get("ai.toolCall.id"),
+            Some(&json!("tool-1"))
+        );
+        assert_eq!(
+            tracer.spans[4].attributes.get("ai.toolCall.id"),
+            Some(&json!("tool-2"))
+        );
+        assert_eq!(
+            tracer.spans[4].status,
+            Some(SpanStatus::error(Some("tool failed".to_string())))
+        );
+        assert!(
+            tracer.spans[4]
+                .events
+                .iter()
+                .any(|event| event.name == "exception")
+        );
+    }
+
+    #[test]
     fn legacy_open_telemetry_records_object_embedding_and_rerank_spans() {
         let mut recorder = LegacyOpenTelemetry::new(LegacyOpenTelemetryOptions::new());
         let usage = TelemetryTokenUsage {
             input_tokens: Some(5),
             output_tokens: Some(7),
             total_tokens: Some(12),
+            ..TelemetryTokenUsage::default()
         };
 
         recorder.on_object_operation_start(

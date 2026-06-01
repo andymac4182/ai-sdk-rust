@@ -40,6 +40,7 @@ pub use oauth::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use url::Url;
 
 /// Latest MCP protocol version advertised by upstream `@ai-sdk/mcp`.
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -1619,6 +1620,10 @@ impl McpClientInner {
     }
 
     fn on_request_message(&mut self, request: JsonRpcRequest) -> McpClientResult<()> {
+        if request.method == "ping" {
+            return self.send_response(JsonRpcResponse::success(request.id, json!({})));
+        }
+
         if request.method != "elicitation/create" {
             return self.send_response(JsonRpcResponse::error(
                 request.id,
@@ -2273,7 +2278,8 @@ impl McpHttpTransport {
 
         if !(200..300).contains(&status) {
             return Err(InboundSseAttemptError::Fatal(McpClientError::new(format!(
-                "MCP HTTP Transport Error: GET SSE failed: {status} {status_text}"
+                "MCP HTTP Transport Error: GET SSE failed: {status} {status_text} for {}",
+                self.url
             ))));
         }
 
@@ -2368,8 +2374,10 @@ impl McpHttpTransport {
         }
 
         if !(200..300).contains(&status) {
-            let mut message =
-                format!("MCP HTTP Transport Error: POSTing to endpoint (HTTP {status}): {body}");
+            let mut message = format!(
+                "MCP HTTP Transport Error: POSTing to endpoint (HTTP {status}) {}: {body}",
+                self.url
+            );
             if status == 404 {
                 message.push_str(
                     ". This server does not support HTTP transport. Try using `sse` transport instead",
@@ -2959,14 +2967,14 @@ fn resolve_sse_endpoint(connection_url: &str, endpoint: &str) -> McpClientResult
 }
 
 fn http_origin(url: &str) -> Option<String> {
-    let scheme_end = url.find("://")?;
-    let scheme_authority = &url[..scheme_end + 3];
-    let rest = &url[scheme_end + 3..];
-    let authority = rest.split('/').next()?;
-    if authority.is_empty() {
-        return None;
+    let url = Url::parse(url).ok()?;
+    let host = url.host_str()?;
+    let mut origin = format!("{}://{host}", url.scheme());
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
     }
-    Some(format!("{scheme_authority}{authority}"))
+    Some(origin)
 }
 
 /// Deterministic in-process MCP transport used by tests and examples.
@@ -3405,20 +3413,20 @@ pub fn get_mcp_app_tool_meta(tool: &McpTool) -> Result<Option<McpAppToolMeta>, M
         .and_then(|meta| meta.get("ui"))
         .and_then(JsonValue::as_object)
         .cloned();
-    let resource_uri_value = ui_meta
+    let strict_resource_uri_value = ui_meta
         .as_ref()
         .and_then(|meta| meta.get("resourceUri"))
         .or_else(|| {
             tool.meta
                 .as_ref()
                 .and_then(|meta| meta.get(MCP_APP_LEGACY_RESOURCE_URI_META_KEY))
-        })
-        .or_else(|| {
-            tool.meta
-                .as_ref()
-                .and_then(|meta| meta.get(OPENAI_OUTPUT_TEMPLATE_META_KEY))
         });
-    let resource_uri = match resource_uri_value {
+    let openai_resource_uri_value = tool
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(OPENAI_OUTPUT_TEMPLATE_META_KEY))
+        .filter(|value| value.as_str().is_some_and(|uri| uri.starts_with("ui://")));
+    let resource_uri = match strict_resource_uri_value.or(openai_resource_uri_value) {
         Some(JsonValue::String(uri)) if uri.starts_with("ui://") => Some(uri.clone()),
         Some(value) => return Err(McpAppError::InvalidResourceUri(value.to_string())),
         None => None,
@@ -3642,6 +3650,9 @@ pub fn mcp_provider_metadata(
     });
     if let Some(title) = title {
         metadata.insert("title".to_string(), JsonValue::String(title));
+    }
+    if let Some(meta) = &tool.meta {
+        metadata.insert("_meta".to_string(), JsonValue::Object(meta.clone()));
     }
     if let Some(app_meta) = get_mcp_app_tool_meta(tool)? {
         if app_meta.resource_uri.is_some() {
@@ -3890,6 +3901,35 @@ mod tests {
     }
 
     #[test]
+    fn mcp_http_transport_uses_negotiated_protocol_version_header() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::empty(405),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": { "ok": true }
+            })),
+        ]);
+        let mut transport = McpHttpTransport::new(server.url());
+        transport.set_protocol_version("2025-06-18".to_string());
+        transport.start().expect("transport starts");
+
+        transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(7),
+                "tools/list",
+            )))
+            .expect("HTTP POST succeeds");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].headers.get("mcp-protocol-version"),
+            Some(&"2025-06-18".to_string())
+        );
+    }
+
+    #[test]
     fn mcp_http_transport_parses_sse_message_responses() {
         let server = LocalHttpServer::new(vec![
             LocalHttpResponse::empty(405),
@@ -3949,6 +3989,28 @@ mod tests {
             requests[2].headers.get("accept"),
             Some(&"text/event-stream".to_string())
         );
+    }
+
+    #[test]
+    fn mcp_http_transport_ignores_non_json_response_body_for_notifications() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::empty(405),
+            LocalHttpResponse::new(200, [("content-type", "text/plain")], "not json"),
+        ]);
+        let mut transport = McpHttpTransport::new(server.url());
+        transport.start().expect("transport starts");
+
+        let messages = transport
+            .send(JsonRpcMessage::Notification(JsonRpcNotification::new(
+                "notifications/initialized",
+            )))
+            .expect("non-JSON notification response is ignored");
+
+        assert!(messages.is_empty());
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].body["method"], "notifications/initialized");
     }
 
     #[test]
@@ -4151,6 +4213,24 @@ mod tests {
     }
 
     #[test]
+    fn mcp_http_transport_reports_get_sse_status_failures() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            503,
+            [("content-type", "text/plain")],
+            "unavailable",
+        )]);
+        let mut transport = McpHttpTransport::new(server.url());
+
+        let error = transport.start().expect_err("GET SSE failure is reported");
+
+        assert!(error.message.contains("GET SSE failed: 503"));
+        assert!(error.message.contains(&server.url()));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+    }
+
+    #[test]
     fn mcp_http_transport_reports_http_errors_with_sse_hint() {
         let server = LocalHttpServer::new(vec![
             LocalHttpResponse::empty(405),
@@ -4167,6 +4247,8 @@ mod tests {
             .expect_err("HTTP error is reported");
 
         assert!(error.message.contains("POSTing to endpoint (HTTP 404)"));
+        assert!(error.message.contains(&server.url()));
+        assert!(error.message.contains("missing"));
         assert!(error.message.contains("Try using `sse` transport instead"));
     }
 
@@ -4465,6 +4547,7 @@ mod tests {
         ]);
         let mut transport =
             SseMcpTransport::new(format!("{}/sse", server.url())).with_header("x-mcp", "test");
+        transport.set_protocol_version("2025-06-18".to_string());
 
         transport.start().expect("SSE transport starts");
         assert_eq!(
@@ -4492,6 +4575,10 @@ mod tests {
             Some(&"text/event-stream".to_string())
         );
         assert_eq!(requests[0].headers.get("x-mcp"), Some(&"test".to_string()));
+        assert_eq!(
+            requests[0].headers.get("mcp-protocol-version"),
+            Some(&"2025-06-18".to_string())
+        );
         assert_eq!(requests[1].method, "POST");
         assert_eq!(requests[1].path, "/messages");
         assert_eq!(
@@ -4499,6 +4586,10 @@ mod tests {
             Some(&"application/json".to_string())
         );
         assert_eq!(requests[1].headers.get("x-mcp"), Some(&"test".to_string()));
+        assert_eq!(
+            requests[1].headers.get("mcp-protocol-version"),
+            Some(&"2025-06-18".to_string())
+        );
         assert_eq!(requests[1].body["method"], "tools/list");
     }
 
@@ -4560,6 +4651,93 @@ mod tests {
                 .message
                 .contains("Endpoint origin does not match connection origin")
         );
+    }
+
+    #[test]
+    fn mcp_sse_transport_rejects_invalid_endpoint_urls() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            200,
+            [("content-type", "text/event-stream")],
+            "event: endpoint\ndata: http://[invalid\n\n",
+        )]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+
+        let error = transport.start().expect_err("invalid endpoint fails");
+
+        assert!(
+            error
+                .message
+                .contains("MCP SSE Transport Error: invalid endpoint URL"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn mcp_sse_transport_reports_invalid_message_events() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            200,
+            [("content-type", "text/event-stream")],
+            "event: endpoint\ndata: /messages\n\nevent: message\ndata: {\"foo\":\"bar\"}\n\n",
+        )]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+
+        let error = transport.start().expect_err("invalid message event fails");
+
+        assert!(
+            error
+                .message
+                .contains("MCP SSE Transport Error: Failed to parse message"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn mcp_sse_transport_rejects_get_redirects_by_default() {
+        let server = LocalHttpServer::new(Vec::new());
+        server.set_responses(vec![LocalHttpResponse::new(
+            302,
+            [("location", server.url())],
+            "",
+        )]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+
+        let error = transport
+            .start()
+            .expect_err("GET redirect response is rejected");
+
+        assert!(error.message.contains("MCP SSE Transport Error: 302"));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn mcp_sse_transport_rejects_post_redirects_by_default() {
+        let server = LocalHttpServer::new(Vec::new());
+        server.set_responses(vec![
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: /messages\n\n",
+            ),
+            LocalHttpResponse::new(302, [("location", server.url())], ""),
+        ]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+        transport.start().expect("SSE transport starts");
+
+        let error = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(1),
+                "tools/list",
+            )))
+            .expect_err("POST redirect response is rejected");
+
+        assert!(
+            error
+                .message
+                .contains("MCP SSE Transport Error: POSTing to endpoint (HTTP 302)")
+        );
+        assert_eq!(server.requests().len(), 2);
     }
 
     #[test]
@@ -5125,6 +5303,74 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stdio_transport_starts_child_with_custom_env_args_and_cwd() {
+        let cwd = std::env::temp_dir();
+        let script = r#"IFS= read -r line; printf '{"jsonrpc":"2.0","id":0,"result":{"cwd":"%s","env":"%s"}}\n' "$PWD" "$CUSTOM_ENV""#;
+        let mut env = BTreeMap::new();
+        env.insert("CUSTOM_ENV".to_string(), "custom-value".to_string());
+        let mut transport = StdioMcpTransport::new(
+            StdioConfig::new("sh")
+                .with_args(["-c", script])
+                .with_env(env)
+                .with_cwd(cwd.clone()),
+        );
+
+        transport.start().expect("stdio transport starts");
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(0),
+                "initialize",
+            )))
+            .expect("stdio response reads");
+        transport.close().expect("stdio transport closes");
+        let expected_cwd = cwd
+            .canonicalize()
+            .unwrap_or(cwd)
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([{
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "cwd": expected_cwd,
+                    "env": "custom-value"
+                }
+            }])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdio_transport_reports_already_started_and_spawn_errors() {
+        let script = r#"while IFS= read -r line; do printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"ok":true}}'; done"#;
+        let mut transport =
+            StdioMcpTransport::new(StdioConfig::new("sh").with_arg("-c").with_arg(script));
+        transport.start().expect("stdio transport starts");
+        assert_eq!(
+            transport
+                .start()
+                .expect_err("already started transport fails")
+                .message,
+            "StdioMCPTransport already started."
+        );
+        transport.close().expect("stdio transport closes");
+
+        let mut missing =
+            StdioMcpTransport::new(StdioConfig::new("__ai_sdk_missing_stdio_command__"));
+        let error = missing.start().expect_err("missing command spawn fails");
+        assert!(
+            error
+                .message
+                .contains("MCP stdio Transport Error: failed to spawn process")
+        );
+    }
+
     #[test]
     fn mcp_client_initializes_and_sends_initialized_notification() {
         let transport = MockMcpTransport::new();
@@ -5179,6 +5425,24 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_close_closes_transport_and_rejects_requests() {
+        let transport = MockMcpTransport::new();
+        let client =
+            create_mcp_client(McpClientConfig::new(transport.clone())).expect("client initializes");
+
+        client.close().expect("client closes");
+
+        assert!(transport.is_closed());
+        assert_eq!(
+            client
+                .list_tools(None)
+                .expect_err("closed client rejects requests")
+                .message,
+            "Attempted to send a request from a closed client"
+        );
+    }
+
+    #[test]
     fn mcp_client_uses_custom_client_version_when_provided() {
         let transport = MockMcpTransport::new();
         create_mcp_client(McpClientConfig::new(transport.clone()).with_version("2.5.0"))
@@ -5200,6 +5464,30 @@ mod tests {
                 .and_then(|params| params.get("clientInfo"))
                 .and_then(|client_info| client_info.get("version")),
             Some(&json!("2.5.0"))
+        );
+    }
+
+    #[test]
+    fn mcp_client_uses_default_version_when_not_provided() {
+        let transport = MockMcpTransport::new();
+        create_mcp_client(McpClientConfig::new(transport.clone())).expect("client initializes");
+
+        let initialize_request = transport
+            .sent_messages()
+            .into_iter()
+            .find_map(|message| match message {
+                JsonRpcMessage::Request(request) if request.method == "initialize" => Some(request),
+                _ => None,
+            })
+            .expect("initialize request is captured");
+
+        assert_eq!(
+            initialize_request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("clientInfo"))
+                .and_then(|client_info| client_info.get("version")),
+            Some(&json!("1.0.0"))
         );
     }
 
@@ -5256,6 +5544,23 @@ mod tests {
                 .and_then(|params| params.get("clientInfo"))
                 .and_then(|client_info| client_info.get("name")),
             Some(&json!("CustomMCPClient"))
+        );
+    }
+
+    #[test]
+    fn mcp_client_uses_deprecated_name_for_tool_metadata_when_client_name_missing() {
+        let client = create_mcp_client(
+            McpClientConfig::new(MockMcpTransport::new()).with_name("DeprecatedMCPServer"),
+        )
+        .expect("client initializes");
+
+        let tools = client.tools().expect("tools build");
+
+        assert_eq!(
+            tools["mock-tool"]
+                .metadata()
+                .and_then(|metadata| metadata.get("clientName")),
+            Some(&json!("DeprecatedMCPServer"))
         );
     }
 
@@ -5501,6 +5806,25 @@ mod tests {
                             .and_then(|result| result.get("content"))
                             .and_then(|content| content.get("name"))
                             == Some(&json!("octocat"))
+            )
+        }));
+    }
+
+    #[test]
+    fn mcp_client_responds_to_ping_requests_with_empty_result() {
+        let transport = ElicitationScenarioTransport::new(JsonRpcRequest::new(json!(99), "ping"));
+        let client =
+            create_mcp_client(McpClientConfig::new(transport.clone())).expect("client initializes");
+
+        client.list_tools(None).expect("tools list completes");
+
+        assert!(transport.sent_messages().iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Response(response)
+                    if response.id == json!(99)
+                        && response.result.as_ref() == Some(&json!({}))
+                        && response.error.is_none()
             )
         }));
     }
@@ -5791,12 +6115,18 @@ mod tests {
             .with_tool_call_result("weather-tool", result);
         let client =
             create_mcp_client(McpClientConfig::new(transport)).expect("client initializes");
-        let schemas = McpToolSchemas::from([(
-            "weather-tool".to_string(),
-            McpToolSchema::new()
-                .with_input_schema(object_schema())
-                .with_output_schema(schema),
-        )]);
+        let schemas = McpToolSchemas::from([
+            (
+                "weather-tool".to_string(),
+                McpToolSchema::new()
+                    .with_input_schema(object_schema())
+                    .with_output_schema(schema),
+            ),
+            (
+                "nonexistent-tool".to_string(),
+                McpToolSchema::new().with_input_schema(object_schema()),
+            ),
+        ]);
 
         let tools = client
             .tools_with_schemas(&schemas)
@@ -5806,6 +6136,7 @@ mod tests {
             tools.keys().map(String::as_str).collect::<Vec<_>>(),
             vec!["weather-tool"]
         );
+        assert!(!tools.contains_key("nonexistent-tool"));
         let tool = tools.get("weather-tool").expect("tool exists");
         assert_eq!(tool.output_schema(), Some(&output_json_schema));
 
@@ -6234,6 +6565,57 @@ mod tests {
     }
 
     #[test]
+    fn mcp_provider_metadata_maps_title_sources() {
+        let top_level = McpTool {
+            title: Some("Top Level Title".to_string()),
+            ..McpTool::new("top-level-title", object_schema())
+        };
+        assert_eq!(
+            mcp_provider_metadata("MyMCPClient", &top_level)
+                .expect("metadata builds")
+                .get("title"),
+            Some(&json!("Top Level Title"))
+        );
+
+        let annotation_title = McpTool {
+            annotations: Some(McpToolAnnotations {
+                title: Some("Annotation Title".to_string()),
+                ..McpToolAnnotations::default()
+            }),
+            ..McpTool::new("annotation-title", object_schema())
+        };
+        assert_eq!(
+            mcp_provider_metadata("MyMCPClient", &annotation_title)
+                .expect("metadata builds")
+                .get("title"),
+            Some(&json!("Annotation Title"))
+        );
+
+        let both_titles = McpTool {
+            title: Some("Top Level Title".to_string()),
+            annotations: Some(McpToolAnnotations {
+                title: Some("Annotation Title".to_string()),
+                ..McpToolAnnotations::default()
+            }),
+            ..McpTool::new("both-titles", object_schema())
+        };
+        assert_eq!(
+            mcp_provider_metadata("MyMCPClient", &both_titles)
+                .expect("metadata builds")
+                .get("title"),
+            Some(&json!("Top Level Title"))
+        );
+
+        let no_title = McpTool::new("no-title", object_schema());
+        assert_eq!(
+            mcp_provider_metadata("MyMCPClient", &no_title)
+                .expect("metadata builds")
+                .get("title"),
+            None
+        );
+    }
+
+    #[test]
     fn mcp_provider_metadata_includes_openai_output_template_app_metadata() {
         let mut openai_meta = JsonObject::new();
         openai_meta.insert(
@@ -6264,6 +6646,29 @@ mod tests {
                 .and_then(JsonValue::as_object)
                 .and_then(|app| app.get("mimeType")),
             Some(&json!(MCP_APP_MIME_TYPE))
+        );
+    }
+
+    #[test]
+    fn mcp_provider_metadata_includes_raw_mcp_meta() {
+        let mut meta = JsonObject::new();
+        meta.insert(
+            OPENAI_OUTPUT_TEMPLATE_META_KEY.to_string(),
+            json!("{{result}}"),
+        );
+        let tool = McpTool {
+            meta: Some(meta),
+            ..McpTool::new("tool-with-meta", object_schema())
+        };
+
+        let metadata = mcp_provider_metadata("MyMCPClient", &tool).expect("metadata builds");
+
+        assert_eq!(
+            metadata
+                .get("_meta")
+                .and_then(JsonValue::as_object)
+                .and_then(|meta| meta.get(OPENAI_OUTPUT_TEMPLATE_META_KEY)),
+            Some(&json!("{{result}}"))
         );
     }
 

@@ -818,6 +818,8 @@ fn token_usage_field(payload: &JsonValue, field: &str) -> Option<ai_sdk_otel::Te
         total_tokens: input_tokens
             .zip(output_tokens)
             .map(|(input, output)| input + output),
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
     })
 }
 

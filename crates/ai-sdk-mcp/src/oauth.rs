@@ -2243,6 +2243,40 @@ mod tests {
     }
 
     #[test]
+    fn select_resource_url_for_provider_uses_custom_validation_override() {
+        let metadata = OAuthProtectedResourceMetadata {
+            resource: "https://different.example.com/mcp".to_string(),
+            authorization_servers: None,
+            jwks_uri: None,
+            scopes_supported: None,
+            bearer_methods_supported: None,
+            resource_signing_alg_values_supported: None,
+            resource_name: None,
+            resource_documentation: None,
+            resource_policy_uri: None,
+            resource_tos_uri: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_details_types_supported: None,
+            dpop_signing_alg_values_supported: None,
+            dpop_bound_access_tokens_required: None,
+            extra: JsonObject::new(),
+        };
+        let provider = TestOAuthProvider::new().with_custom_resource_validation(
+            Url::parse("https://resource.example.com/custom").expect("URL"),
+        );
+
+        let resource = select_resource_url_for_provider(
+            "https://api.example.com/mcp/server",
+            &provider,
+            Some(&metadata),
+        )
+        .expect("custom validation succeeds")
+        .expect("custom validation returns resource");
+
+        assert_eq!(resource.as_str(), "https://resource.example.com/custom");
+    }
+
+    #[test]
     fn extract_resource_metadata_url_reads_bearer_www_authenticate_parameter() {
         let resource_url = "https://resource.example.com/.well-known/oauth-protected-resource";
         assert_eq!(
@@ -2409,6 +2443,103 @@ mod tests {
     }
 
     #[test]
+    fn discover_oauth_protected_resource_metadata_reports_status_and_parse_errors() {
+        let server = LocalOAuthServer::new(vec![
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::empty(404),
+        ]);
+
+        let missing_error = discover_oauth_protected_resource_metadata(
+            format!("{}/deep/path", server.url()),
+            OAuthProtectedResourceMetadataDiscoveryOptions::default(),
+        )
+        .expect_err("all 404 protected-resource metadata fails");
+
+        assert_eq!(
+            missing_error.message,
+            "Resource server does not implement OAuth 2.0 Protected Resource Metadata."
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].path,
+            "/.well-known/oauth-protected-resource/deep/path"
+        );
+        assert_eq!(requests[1].path, "/.well-known/oauth-protected-resource");
+
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::empty(500)]);
+        let status_error = discover_oauth_protected_resource_metadata(
+            format!("{}/deep/path", server.url()),
+            OAuthProtectedResourceMetadataDiscoveryOptions::default(),
+        )
+        .expect_err("500 protected-resource metadata fails without fallback");
+        assert!(
+            status_error
+                .message
+                .contains("HTTP 500 trying to load well-known OAuth protected resource metadata")
+        );
+        assert_eq!(server.requests().len(), 1);
+
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "resource": "not a url",
+            "authorization_servers": ["https://auth.example.com"]
+        }))]);
+        let parse_error = discover_oauth_protected_resource_metadata(
+            server.url(),
+            OAuthProtectedResourceMetadataDiscoveryOptions::default(),
+        )
+        .expect_err("invalid protected-resource metadata schema fails");
+        assert!(
+            parse_error
+                .message
+                .contains("Failed to parse OAuth protected resource metadata")
+        );
+        assert_eq!(
+            server.requests()[0].path,
+            "/.well-known/oauth-protected-resource"
+        );
+    }
+
+    #[test]
+    fn discover_oauth_protected_resource_metadata_does_not_fallback_from_root_or_pathless_urls() {
+        let pathless_server = LocalOAuthServer::new(vec![LocalOAuthResponse::empty(404)]);
+        let pathless_error = discover_oauth_protected_resource_metadata(
+            pathless_server.url(),
+            OAuthProtectedResourceMetadataDiscoveryOptions::default(),
+        )
+        .expect_err("pathless server URL does not fall back");
+
+        assert_eq!(
+            pathless_error.message,
+            "Resource server does not implement OAuth 2.0 Protected Resource Metadata."
+        );
+        let pathless_requests = pathless_server.requests();
+        assert_eq!(pathless_requests.len(), 1);
+        assert_eq!(
+            pathless_requests[0].path,
+            "/.well-known/oauth-protected-resource"
+        );
+
+        let root_server = LocalOAuthServer::new(vec![LocalOAuthResponse::empty(404)]);
+        let root_error = discover_oauth_protected_resource_metadata(
+            format!("{}/", root_server.url()),
+            OAuthProtectedResourceMetadataDiscoveryOptions::default(),
+        )
+        .expect_err("root server URL does not fall back");
+
+        assert_eq!(
+            root_error.message,
+            "Resource server does not implement OAuth 2.0 Protected Resource Metadata."
+        );
+        let root_requests = root_server.requests();
+        assert_eq!(root_requests.len(), 1);
+        assert_eq!(
+            root_requests[0].path,
+            "/.well-known/oauth-protected-resource"
+        );
+    }
+
+    #[test]
     fn discover_authorization_server_metadata_tries_urls_in_order() {
         let server = LocalOAuthServer::new(vec![
             LocalOAuthResponse::empty(404),
@@ -2483,6 +2614,52 @@ mod tests {
 
         assert!(metadata.is_none());
         assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn discover_authorization_server_metadata_reports_non_4xx_errors() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::empty(500)]);
+
+        let error = discover_authorization_server_metadata(
+            server.url(),
+            AuthorizationServerMetadataDiscoveryOptions::default(),
+        )
+        .expect_err("server error fails discovery");
+
+        assert!(
+            error
+                .message
+                .contains("HTTP 500 trying to load OAuth metadata")
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn discover_authorization_server_metadata_uses_custom_protocol_version() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "issuer": "https://auth.example.com",
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token",
+            "registration_endpoint": "https://auth.example.com/register",
+            "response_types_supported": ["code"],
+            "code_challenge_methods_supported": ["S256"]
+        }))]);
+
+        let metadata = discover_authorization_server_metadata(
+            server.url(),
+            AuthorizationServerMetadataDiscoveryOptions::default()
+                .with_protocol_version("2025-01-01"),
+        )
+        .expect("authorization metadata discovery succeeds")
+        .expect("metadata exists");
+
+        assert!(matches!(metadata, AuthorizationServerMetadata::OAuth(_)));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers.get("mcp-protocol-version"),
+            Some(&"2025-01-01".to_string())
+        );
     }
 
     #[test]
@@ -2566,6 +2743,8 @@ mod tests {
             query_param(&result.authorization_url, "code_challenge").expect("challenge query");
         assert_eq!(code_challenge.len(), 43);
         assert_ne!(code_challenge, result.code_verifier);
+        assert!(query_param(&result.authorization_url, "scope").is_none());
+        assert!(query_param(&result.authorization_url, "state").is_none());
     }
 
     #[test]
@@ -2737,6 +2916,28 @@ mod tests {
             body.get("resource").map(String::as_str),
             Some("https://api.example.com/mcp-server")
         );
+
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "access456",
+            "token_type": "Bearer"
+        }))]);
+        exchange_authorization(
+            server.url(),
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client456"),
+                "code456",
+                "verifier456",
+                "http://localhost:3000/callback",
+            )
+            .with_resource(Url::parse("https://api.example.com").expect("URL")),
+        )
+        .expect("authorization code exchanges with pathless resource");
+
+        let body = form_body(&server.requests()[0].body);
+        assert_eq!(
+            body.get("resource").map(String::as_str),
+            Some("https://api.example.com")
+        );
     }
 
     #[test]
@@ -2772,6 +2973,7 @@ mod tests {
         let body = form_body(&requests[0].body);
         assert_eq!(body.get("client_id"), None);
         assert_eq!(body.get("client_secret"), None);
+        assert_eq!(body.get("resource"), None);
     }
 
     #[test]
@@ -2825,6 +3027,7 @@ mod tests {
         let body = form_body(&requests[0].body);
         assert_eq!(body.get("client_id"), None);
         assert_eq!(body.get("client_secret"), None);
+        assert_eq!(body.get("resource"), None);
         assert_eq!(
             body.get("example_url").map(String::as_str),
             Some("https://auth.example.com")
@@ -2876,6 +3079,28 @@ mod tests {
                 .message
                 .contains("Failed to parse OAuth token response")
         );
+
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::new(
+            400,
+            [("content-type", "application/json")],
+            json!({
+                "error": "server_error",
+                "error_description": "Token exchange failed"
+            })
+            .to_string(),
+        )]);
+        let oauth_error = exchange_authorization(
+            server.url(),
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client123"),
+                "code123",
+                "verifier123",
+                "http://localhost:3000/callback",
+            ),
+        )
+        .expect_err("OAuth error response fails exchange");
+        assert_eq!(oauth_error.message, "Token exchange failed");
+        assert_eq!(oauth_error.error_code.as_deref(), Some("server_error"));
     }
 
     #[test]
@@ -2912,6 +3137,49 @@ mod tests {
         assert_eq!(
             body.get("resource").map(String::as_str),
             Some("https://mcp.example.com")
+        );
+
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "newaccess456",
+            "token_type": "Bearer",
+            "refresh_token": "newrefresh456"
+        }))]);
+        refresh_authorization(
+            server.url(),
+            RefreshAuthorizationOptions::new(
+                OAuthClientInformation::new("client456"),
+                "refresh456",
+            )
+            .with_resource(Url::parse("https://api.example.com").expect("URL")),
+        )
+        .expect("refresh succeeds with pathless resource");
+
+        let body = form_body(&server.requests()[0].body);
+        assert_eq!(
+            body.get("resource").map(String::as_str),
+            Some("https://api.example.com")
+        );
+    }
+
+    #[test]
+    fn refresh_authorization_validates_token_response_schema() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "newaccess123"
+        }))]);
+
+        let error = refresh_authorization(
+            server.url(),
+            RefreshAuthorizationOptions::new(
+                OAuthClientInformation::new("client123"),
+                "refresh123",
+            ),
+        )
+        .expect_err("invalid refresh response fails");
+
+        assert!(
+            error
+                .message
+                .contains("Failed to parse OAuth refresh token response")
         );
     }
 
@@ -2991,6 +3259,7 @@ mod tests {
         let body = form_body(&requests[0].body);
         assert_eq!(body.get("client_id"), None);
         assert_eq!(body.get("client_secret"), None);
+        assert_eq!(body.get("resource"), None);
         assert_eq!(
             body.get("example_url").map(String::as_str),
             Some("https://auth.example.com")
@@ -3078,6 +3347,45 @@ mod tests {
                 .message
                 .contains("does not support dynamic client registration")
         );
+
+        let invalid_response_server =
+            LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+                "client_secret": "secret123"
+            }))]);
+        let invalid_response_error = register_client(
+            invalid_response_server.url(),
+            RegisterClientOptions::new(OAuthClientMetadata::new(vec![
+                "http://localhost:3000/callback".to_string(),
+            ])),
+        )
+        .expect_err("invalid client registration response fails");
+        assert!(
+            invalid_response_error
+                .message
+                .contains("Failed to parse OAuth client information response")
+        );
+
+        let error_response_server = LocalOAuthServer::new(vec![LocalOAuthResponse::new(
+            400,
+            [("content-type", "application/json")],
+            json!({
+                "error": "invalid_client_metadata",
+                "error_description": "Registration failed"
+            })
+            .to_string(),
+        )]);
+        let oauth_error = register_client(
+            error_response_server.url(),
+            RegisterClientOptions::new(OAuthClientMetadata::new(vec![
+                "http://localhost:3000/callback".to_string(),
+            ])),
+        )
+        .expect_err("OAuth registration error is reported");
+        assert_eq!(oauth_error.message, "Registration failed");
+        assert_eq!(
+            oauth_error.error_code.as_deref(),
+            Some("invalid_client_metadata")
+        );
     }
 
     #[test]
@@ -3122,6 +3430,47 @@ mod tests {
         assert_eq!(requests[0].path, "/.well-known/oauth-protected-resource");
         assert_eq!(requests[1].path, "/.well-known/oauth-authorization-server");
         assert_eq!(requests[2].path, "/register");
+    }
+
+    #[test]
+    fn auth_redirect_includes_protected_resource_and_saves_state() {
+        let server = LocalOAuthServer::new(Vec::new());
+        let resource_url = format!("{}/mcp-server", server.url());
+        let server_url = format!("{resource_url}/path");
+        let authorization_server_url = format!("{}/tenant", server.url());
+        server.set_responses(vec![
+            LocalOAuthResponse::json(json!({
+                "resource": resource_url.clone(),
+                "authorization_servers": [authorization_server_url.clone()]
+            })),
+            LocalOAuthResponse::json(auth_metadata_json(&authorization_server_url)),
+        ]);
+        let mut provider = TestOAuthProvider::new()
+            .with_client_information(OAuthClientInformation::new("client123"))
+            .with_state("STATE")
+            .with_save_state();
+
+        let result = auth(&mut provider, AuthOptions::new(server_url))
+            .expect("auth redirects with protected resource");
+
+        assert_eq!(result, AuthResult::Redirect);
+        assert_eq!(provider.saved_state.as_deref(), Some("STATE"));
+        let redirect_url = provider.redirects.first().expect("redirect captured");
+        assert_eq!(redirect_url.path(), "/tenant/authorize");
+        assert_eq!(
+            query_param(redirect_url, "resource").as_deref(),
+            Some(resource_url.as_str())
+        );
+        assert_eq!(query_param(redirect_url, "state").as_deref(), Some("STATE"));
+        let requests = server.requests();
+        assert_eq!(
+            requests[0].path,
+            "/.well-known/oauth-protected-resource/mcp-server/path"
+        );
+        assert_eq!(
+            requests[1].path,
+            "/.well-known/oauth-authorization-server/tenant"
+        );
     }
 
     #[test]
@@ -3397,6 +3746,7 @@ mod tests {
         saved_code_verifier: Option<String>,
         saved_client_information: Option<OAuthClientInformationFull>,
         saved_state: Option<String>,
+        custom_resource: Option<Url>,
         invalidated: Vec<OAuthCredentialScope>,
     }
 
@@ -3420,6 +3770,7 @@ mod tests {
                 saved_code_verifier: None,
                 saved_client_information: None,
                 saved_state: None,
+                custom_resource: None,
                 invalidated: Vec::new(),
             }
         }
@@ -3446,6 +3797,21 @@ mod tests {
 
         fn with_save_client_information(mut self) -> Self {
             self.allow_save_client_information = true;
+            self
+        }
+
+        fn with_state(mut self, state: impl Into<String>) -> Self {
+            self.state = Some(state.into());
+            self
+        }
+
+        fn with_save_state(mut self) -> Self {
+            self.allow_save_state = true;
+            self
+        }
+
+        fn with_custom_resource_validation(mut self, resource: Url) -> Self {
+            self.custom_resource = Some(resource);
             self
         }
     }
@@ -3515,6 +3881,18 @@ mod tests {
 
         fn stored_state(&self) -> McpOAuthResult<Option<String>> {
             Ok(self.stored_state.clone())
+        }
+
+        fn has_custom_resource_validation(&self) -> bool {
+            self.custom_resource.is_some()
+        }
+
+        fn validate_resource_url(
+            &self,
+            _server_url: &Url,
+            _resource: Option<&str>,
+        ) -> McpOAuthResult<Option<Url>> {
+            Ok(self.custom_resource.clone())
         }
 
         fn invalidate_credentials(&mut self, scope: OAuthCredentialScope) -> McpOAuthResult<()> {
