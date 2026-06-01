@@ -1038,6 +1038,83 @@ mod tests {
     }
 
     #[test]
+    fn cohere_embedding_model_uses_default_input_type_and_exposes_raw_response() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "embeddings": {
+                            "float": [[0.1, 0.2]]
+                        },
+                        "meta": {
+                            "billed_units": {
+                                "input_tokens": 2
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_cohere_embedding_default".to_string(),
+                )])))))
+            });
+        let model = CohereProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.cohere.test/v2/")
+            .with_transport(transport)
+            .embedding_model("embed-v4.0");
+        let result =
+            poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec!["sunny".to_string()])));
+
+        assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_cohere_embedding_default")
+        );
+        assert!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref())
+                .and_then(|body| body.get("meta"))
+                .is_some()
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "embed-v4.0",
+                "embedding_types": ["float"],
+                "texts": ["sunny"],
+                "input_type": "search_query"
+            }))
+        );
+    }
+
+    #[test]
     fn cohere_provider_creates_reranking_model_with_object_warning_and_options() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -1138,6 +1215,83 @@ mod tests {
                 "top_n": 2,
                 "max_tokens_per_doc": 256,
                 "priority": 1
+            }))
+        );
+    }
+
+    #[test]
+    fn cohere_reranking_model_sends_text_documents_without_warnings() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "rerank-cohere-text",
+                        "results": [
+                            { "index": 1, "relevance_score": 0.91 },
+                            { "index": 0, "relevance_score": 0.82 }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_cohere_rerank_text".to_string(),
+                )])))))
+            });
+        let model = CohereProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.cohere.test/v2/")
+            .with_transport(transport)
+            .reranking_model("rerank-v3.5");
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    RerankingModelDocuments::Text {
+                        values: vec!["sunny day".to_string(), "rainy city".to_string()],
+                    },
+                    "rainy",
+                )
+                .with_top_n(2),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert!(result.provider_metadata.is_none());
+        assert_eq!(result.ranking[0].index, 1);
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_cohere_rerank_text")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "rerank-v3.5",
+                "query": "rainy",
+                "documents": ["sunny day", "rainy city"],
+                "top_n": 2
             }))
         );
     }

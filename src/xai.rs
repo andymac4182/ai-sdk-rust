@@ -270,7 +270,10 @@ fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{DEFAULT_XAI_BASE_URL, XaiProvider, XaiProviderSettings, create_xai, xai};
     use crate::generate_text::{GenerateTextOptions, generate_text};
-    use crate::json::JsonValue;
+    use crate::json::{JsonObject, JsonValue};
+    use crate::language_model::{
+        LanguageModelProviderTool, LanguageModelTool, LanguageModelToolChoice,
+    };
     use crate::open_responses::{OpenResponsesTransport, OpenResponsesTransportFuture};
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -404,6 +407,126 @@ mod tests {
                 "max_output_tokens": 16
             }))
         );
+    }
+
+    #[test]
+    fn xai_responses_model_prepares_server_tools_custom_tool_and_usage() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_xai_tools",
+                        "created_at": 1711115037,
+                        "model": "grok-4",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "xAI hosted tools prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "input_tokens_details": {
+                                "cached_tokens": 3
+                            },
+                            "output_tokens": 8,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 2
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = XaiProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.xai.test/v1/")
+            .with_responses_transport(transport);
+        let model = provider.responses("grok-4");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use hosted tools"))
+                .expect("prompt is valid")
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "liveSearch",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "write_sql",
+                    JsonObject::from_iter([
+                        (
+                            "description".to_string(),
+                            JsonValue::String("Write SQL statements.".to_string()),
+                        ),
+                        (
+                            "format".to_string(),
+                            json!({
+                                "type": "grammar",
+                                "syntax": "lark",
+                                "definition": "start: SELECT"
+                            }),
+                        ),
+                    ]),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "liveSearch".to_string(),
+                }),
+        ));
+
+        assert_eq!(result.text, "xAI hosted tools prepared");
+        assert_eq!(result.usage.input_tokens.total, Some(10));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(7));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(3));
+        assert_eq!(result.usage.output_tokens.total, Some(8));
+        assert_eq!(result.usage.output_tokens.text, Some(6));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(2));
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(request_body["model"], "grok-4");
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search"
+                },
+                {
+                    "type": "custom",
+                    "name": "write_sql",
+                    "description": "Write SQL statements.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: SELECT"
+                    }
+                }
+            ])
+        );
+        assert_eq!(request_body["tool_choice"], json!({ "type": "web_search" }));
     }
 
     #[test]

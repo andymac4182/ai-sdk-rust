@@ -2,8 +2,8 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-cohere	35	Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current upstream case parity remain explicitly inventoried.
-fireworks	45	OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image workflows, polling, editing, binary result handling, and live proof remain explicitly inventoried.
-groq	35	Initial OpenAI-compatible chat wrapper exists; transcription, browser-search tool, Groq-specific message and usage conversion, streaming edge parity, and live proof remain explicitly inventoried.
-togetherai	65	Provider wrapper covers chat, completion, embeddings, custom image generation, and reranking; exact per-case upstream split, abort/live behavior, and broader edge parity remain explicitly inventoried.
-xai	35	Initial Responses, chat, and image provider wrapper exists; files, video, xAI server tools, custom usage/message conversion, and full current upstream case parity remain explicitly inventoried.
+cohere	35	Embedding and reranking slices cover default/raw embedding plus text/object rerank behavior; chat, prompt conversion, tool prep, streaming, citations, validation edges, and live proof remain explicitly inventoried.
+fireworks	45	OpenAI-compatible chat/completion/embedding plus provider-specific image workflows now cover sync/async/edit/size/abort paths; exact error split, JS polling delay semantics, and live proof remain explicitly inventoried.
+groq	35	OpenAI-compatible chat plus transcription request/response behavior exists; browser-search tool, Groq-specific message and usage split parity, streaming edge parity, custom date injection, and live proof remain explicitly inventoried.
+togetherai	65	Provider wrapper covers chat, completion, embeddings, custom image generation, reranking, abort propagation, and exact case mapping; console warning semantics, thrown-error class identity, validation edges, and live proof remain explicitly inventoried.
+xai	35	Initial Responses, shared server/custom tool, chat, and image provider wrapper exists; files, video, xAI-specific tool ids, custom usage/message conversion, and full current upstream case parity remain explicitly inventoried.

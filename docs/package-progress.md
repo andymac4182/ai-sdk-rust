@@ -66,11 +66,11 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, chat, and image provider wrapper exists; files, video, xAI server tools, custom usage/message... |
-| `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current... |
-| `@ai-sdk/fireworks` | 45% | In progress | provider package | OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image... |
-| `@ai-sdk/groq` | 35% | In progress | provider package | Initial OpenAI-compatible chat wrapper exists; transcription, browser-search tool, Groq-specific message and usage... |
-| `@ai-sdk/togetherai` | 65% | In progress | provider package | Provider wrapper covers chat, completion, embeddings, custom image generation, and reranking; exact per-case upstream... |
+| `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, shared server/custom tool, chat, and image provider wrapper exists; files, video, xAI-specific tool... |
+| `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking slices cover default/raw embedding plus text/object rerank behavior; chat, prompt conversion,... |
+| `@ai-sdk/fireworks` | 45% | In progress | provider package | OpenAI-compatible chat/completion/embedding plus provider-specific image workflows now cover... |
+| `@ai-sdk/groq` | 35% | In progress | provider package | OpenAI-compatible chat plus transcription request/response behavior exists; browser-search tool, Groq-specific message... |
+| `@ai-sdk/togetherai` | 65% | In progress | provider package | Provider wrapper covers chat, completion, embeddings, custom image generation, reranking, abort propagation, and exact... |
 
 ## Not Started
 

@@ -150,7 +150,8 @@ impl TogetherAIImageModel {
         let request_headers = self.request_headers(options.headers.as_ref());
         let post_options = PostJsonToApiOptions::new(self.image_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal);
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -261,7 +262,8 @@ impl TogetherAIRerankingModel {
         let request_headers = self.request_headers(options.headers.as_ref());
         let post_options = PostJsonToApiOptions::new(self.reranking_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal);
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -1012,6 +1014,7 @@ mod tests {
     use crate::headers::Headers;
     use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
     use crate::json::JsonValue;
+    use crate::language_model::ProviderAbortController;
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
     use crate::provider::{Provider, ProviderOptions, ProviderWithRerankingModel};
@@ -1461,6 +1464,48 @@ mod tests {
     }
 
     #[test]
+    fn togetherai_image_model_aborts_before_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", "{}"))))
+            });
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort_with_reason("client disconnected");
+        let model = TogetherAIProvider::new()
+            .with_transport(transport)
+            .image_model("stabilityai/stable-diffusion-xl");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("aborted")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("togetherai"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .is_some()
+        );
+        assert!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn togetherai_image_model_reports_unsupported_mask_without_request() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -1716,6 +1761,53 @@ mod tests {
                 .and_then(|headers| headers.get("x-request-id"))
                 .map(String::as_str),
             Some("req_togetherai_rerank_error")
+        );
+    }
+
+    #[test]
+    fn togetherai_reranking_model_aborts_before_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", "{}"))))
+            });
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort_with_reason("client disconnected");
+        let model = TogetherAIProvider::new()
+            .with_transport(transport)
+            .reranking_model("Salesforce/Llama-Rank-v1");
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    RerankingModelDocuments::text(vec![
+                        "sunny day".to_string(),
+                        "rainy city".to_string(),
+                    ]),
+                    "rainy",
+                )
+                .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.ranking.is_empty());
+        assert!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("togetherai"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .is_some()
+        );
+        assert!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .is_none()
         );
     }
 
