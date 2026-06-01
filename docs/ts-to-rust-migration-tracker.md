@@ -71,6 +71,7 @@ is too large, but the parent row remains open until all child rows are merged.
 | AI-04 | queued | AI SDK speech, transcription, and audio providers | Port or close `@ai-sdk/elevenlabs`, `@ai-sdk/gladia`, `@ai-sdk/deepgram`, `@ai-sdk/hume`, `@ai-sdk/lmnt`, `@ai-sdk/revai`, `@ai-sdk/assemblyai`, and `@ai-sdk/voyage`. | Speech/transcription fixture tests, warning/error mapping tests, progress regeneration. |
 | AI-05 | queued | AI SDK remaining in-progress wrappers | Finish `@ai-sdk/azure`, `@ai-sdk/baseten`, `@ai-sdk/bytedance`, `@ai-sdk/cerebras`, `@ai-sdk/deepinfra`, `@ai-sdk/huggingface`, `@ai-sdk/moonshotai`, and `@ai-sdk/vercel`. | Package-owned tests for every row named in `docs/upstream-parity.md`; progress regeneration. |
 | AI-06 | queued | AI SDK public API and examples parity | Audit root `ai` ergonomics, examples, docs snippets, and high-level generate/stream/embed/object APIs against upstream. | Root crate tests, example compile checks, docs update, progress regeneration. |
+| AI-07 | queued | AI SDK Alibaba provider | Port or close `@ai-sdk/alibaba`, including chat/video provider behavior, usage conversion, cache control, and message conversion. | Package-owned Alibaba tests, explicit exceptions for non-portable rows, and progress regeneration. |
 | CROSS-01 | queued | Cross-SDK examples and docs parity | Inventory upstream examples/docs that imply public behavior across all four projects and either port them or document exclusions. | Checked-in inventory rows; `cargo test --doc` where docs are Rust; no undocumented examples that imply missing Rust behavior. |
 | CROSS-02 | queued | Live integration proof registry | Centralize ignored live tests for Slack, Vercel AI Gateway, Vercel Sandbox, provider APIs, Postgres/Redis, and emulator-based local E2E. | A docs page listing env vars and commands; ignored tests compile; local emulator tests pass without live credentials. |
 | CROSS-03 | queued | Master parity gate | Add a single command that runs the package progress generators, workflow gate, Open Agents gate, and drift checks without requiring live credentials. | New gate command passes locally and in CI-safe mode; live-only checks are skipped with clear messages. |
@@ -117,4 +118,3 @@ Every implementation thread must finish with:
    - `scripts/check-naming-conventions.sh`
    - `git diff --check`
 8. Merge to `origin/main` only after acquiring `/tmp/ai-sdk-rust-main-merge.lock`.
-
