@@ -1,9 +1,12 @@
 # ai-sdk-rust Codex Goal Runner
 
-Use this when you want Codex CLI `/goal` to pursue full portable parity with
-upstream `vercel/ai` without GNHF. The launcher creates an explicit sibling git
-worktree, starts Codex inside that worktree, and copies a compact `/goal`
-condition to the clipboard.
+Use this when you want Codex CLI `/goal` to pursue full portable parity for the
+tracked TypeScript-to-Rust migration without GNHF. The parent goal currently
+covers `vercel/ai`, `vercel/chat`, `vercel/workflow`,
+`vercel-labs/open-agents`, `vercel-labs/open-plugin-spec`, and
+`vercel-labs/just-bash`. The launcher creates an explicit sibling git worktree,
+starts Codex inside that worktree, and copies a compact `/goal` condition to
+the clipboard.
 
 ```sh
 cd /Users/andrewmcclenaghan/dev/andymac4182/ai-sdk-rust
@@ -32,10 +35,16 @@ the worktree. That makes `AI_GATEWAY_API_KEY` and
 `AI_SDK_RUST_AI_GATEWAY_API_KEY` available for integration tests without
 putting secrets in git.
 
-The goal condition tells Codex to maintain `docs/upstream-parity.md` and keep
-working until every upstream package, provider, public API, example, testable
-behavior, and portable feature is verified or explicitly documented as
-JavaScript-only.
+The goal condition tells Codex to maintain `docs/upstream-parity.md` plus the
+parent `docs/ts-to-rust-migration-tracker.md`, and to keep working until every
+upstream package, provider, public API, example, testable behavior, and portable
+feature is verified or explicitly documented as JavaScript-only.
+
+Just Bash parity is tracked in `docs/open-agents/just-bash-parity.md` and
+`docs/open-agents/just-bash-conformance.md`. Its close path requires the shared
+TypeScript/Rust conformance harness to run the same upstream cases with
+`JUST_BASH_ENGINE=typescript` and `JUST_BASH_ENGINE=rust`; the Rust engine is
+exposed to JavaScript through the `napi-rs` adapter.
 
 Package progress reporting is generated, not hand-maintained:
 

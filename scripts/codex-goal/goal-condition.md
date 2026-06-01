@@ -1,4 +1,4 @@
-Run the ai-sdk-rust full Vercel AI SDK parity goal.
+Run the ai-sdk-rust full TypeScript-to-Rust parity goal.
 
 Main checkout: `/Users/andrewmcclenaghan/dev/andymac4182/ai-sdk-rust`
 Full brief in this worktree: `scripts/codex-goal/port-ai-sdk.md`
@@ -10,10 +10,34 @@ Execute it.
 
 Goal: use the current working directory as your worktree and keep working until
 ai-sdk-rust has Rust equivalents for EVERY package, provider, library, example,
-testable behavior, and feature in upstream `vercel/ai`, except JavaScript-only
-surfaces that are explicitly documented as intentionally non-portable.
+testable behavior, and feature in upstream `vercel/ai`, `vercel/chat`,
+`vercel/workflow`, `vercel-labs/open-agents`,
+`vercel-labs/open-plugin-spec`, and `vercel-labs/just-bash`, except
+JavaScript-only surfaces that are explicitly documented as intentionally
+non-portable.
 
 Use `npx opensrc@latest path github:vercel/ai` as the upstream source of truth.
+For the parent cross-project tracker, also keep
+`docs/ts-to-rust-migration-tracker.md` current and refresh the project-specific
+upstream mirrors before claiming parity:
+
+```sh
+npx opensrc fetch https://github.com/vercel-labs/open-agents
+npx opensrc fetch https://github.com/vercel-labs/open-plugin-spec
+npx opensrc fetch https://github.com/vercel-labs/just-bash
+npx opensrc fetch https://github.com/vercel/workflow
+npx opensrc fetch github:vercel/chat
+```
+
+Just Bash is part of the goal. The Rust `crates/just-bash` engine must match
+the portable behavior of upstream TypeScript Just Bash, and Open Agents must use
+the crate-backed Just Bash path when running local bash commands without a
+sandbox. Use `docs/open-agents/just-bash-parity.md` and
+`docs/open-agents/just-bash-conformance.md` as the Just Bash ledgers. The shared
+conformance harness must be able to run the same upstream cases against both
+`JUST_BASH_ENGINE=typescript` and `JUST_BASH_ENGINE=rust`, with the Rust engine
+exposed to JavaScript through the `napi-rs` adapter.
+
 First build/update `docs/upstream-parity.md`: record upstream commit/package
 inventory, every provider package, every core/helper/library package, public
 APIs, examples, tests, and feature status. Do not mark the goal complete while

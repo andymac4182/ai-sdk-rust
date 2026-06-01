@@ -1,4 +1,4 @@
-# Codex `/goal` Brief: Full Vercel AI SDK Parity In Rust
+# Codex `/goal` Brief: Full TypeScript-To-Rust Parity In Rust
 
 You are Codex CLI running a long-lived `/goal` session for `ai-sdk-rust`.
 
@@ -47,19 +47,44 @@ copy them into tracked files, or include them in logs/commits.
 
 ## Objective
 
-Replicate the full Vercel AI SDK repository in idiomatic Rust.
+Replicate the tracked Vercel TypeScript repositories in idiomatic Rust.
 
-The goal is not "make progress". The goal is full parity with upstream
-`vercel/ai`: every package, provider, library, public API, example, testable
-behavior, and feature should have a Rust equivalent, except surfaces that are
-truly JavaScript-only and are explicitly documented as intentionally
-non-portable.
+The parent goal is not "make progress". The goal is full parity with the
+tracked upstream TypeScript projects: `vercel/ai`, `vercel/chat`,
+`vercel/workflow`, `vercel-labs/open-agents`,
+`vercel-labs/open-plugin-spec`, and `vercel-labs/just-bash`. Every package,
+provider, library, public API, example, testable behavior, and feature should
+have a Rust equivalent, except surfaces that are truly JavaScript-only and are
+explicitly documented as intentionally non-portable.
 
 Use upstream Vercel AI SDK as the source of truth for shapes and behavior:
 
 ```sh
 npx opensrc@latest path github:vercel/ai
 ```
+
+Use `docs/ts-to-rust-migration-tracker.md` as the parent cross-project tracker.
+For non-AI packages, refresh the owning upstream mirror before making parity
+claims:
+
+```sh
+npx opensrc fetch https://github.com/vercel-labs/open-agents
+npx opensrc fetch https://github.com/vercel-labs/open-plugin-spec
+npx opensrc fetch https://github.com/vercel-labs/just-bash
+npx opensrc fetch https://github.com/vercel/workflow
+npx opensrc fetch github:vercel/chat
+```
+
+Just Bash is now an explicit child of the parent goal. It is not enough for Open
+Agents to have a temporary bash adapter: `crates/just-bash` must match upstream
+TypeScript Just Bash for every portable command/test case, and Open Agents must
+route local bash execution through the crate-backed backend without silently
+falling back to host `/bin/bash`. Track this work in
+`docs/open-agents/just-bash-parity.md` and
+`docs/open-agents/just-bash-conformance.md`. The conformance path should expose
+Rust Just Bash to JavaScript through the `napi-rs` adapter and run the same
+upstream cases with `JUST_BASH_ENGINE=typescript` and
+`JUST_BASH_ENGINE=rust`.
 
 Do not decide the goal is complete until an upstream parity ledger proves there
 are no unchecked upstream packages, providers, public APIs, examples, tests, or
@@ -100,6 +125,12 @@ TypeScript package.
 ## Required Parity Ledger
 
 First action: create or update `docs/upstream-parity.md`.
+
+For the parent cross-project state, also update
+`docs/ts-to-rust-migration-tracker.md` whenever Open Agents, Open Plugin Spec,
+Just Bash, Workflow SDK, Chat SDK, or AI SDK status changes. Just Bash-specific
+rows belong in `docs/open-agents/just-bash-parity.md`, and conformance harness
+status belongs in `docs/open-agents/just-bash-conformance.md`.
 
 The ledger must include:
 
