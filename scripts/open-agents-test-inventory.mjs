@@ -652,12 +652,15 @@ function testMapping(relative) {
   const testName = partialRustTestName(relative);
   if (testName) {
     const owner = testOwner(relative);
+    const verified = verifiedTestFiles().has(relative);
     return {
       portability: 'portable',
-      status: relative.includes('/sandbox/') ? 'in-progress' : 'in-progress',
+      status: verified ? 'verified' : 'in-progress',
       owner,
       rustTestName: testName,
-      note: 'Portable upstream behavior has at least one named Rust counterpart; remaining case-level closure stays with the owning crate.',
+      note: verified
+        ? 'Portable upstream cases are mapped to named Rust tests in the owning Rust surface.'
+        : 'Portable upstream behavior has at least one named Rust counterpart; remaining case-level closure stays with the owning crate.',
     };
   }
 
@@ -734,6 +737,7 @@ function unmapped(note) {
 }
 
 function partialRustTestName(relative) {
+  const names = (...items) => items.join('; ');
   const direct = new Map([
     [
       'packages/agent/models.test.ts',
@@ -749,15 +753,49 @@ function partialRustTestName(relative) {
     ],
     [
       'packages/sandbox/git.test.ts',
-      'clone_branch_status_diff_and_commit_stay_inside_sandbox; finish_commits_dirty_repository',
+      names(
+        'package_sandbox_git_sync_stashes_local_changes_resets_to_remote_and_restores_changes',
+        'package_sandbox_git_sync_returns_without_touching_local_changes_when_remote_branch_is_missing',
+        'package_sandbox_git_sync_rolls_back_and_restores_local_changes_when_stash_restore_conflicts'
+      ),
     ],
     [
       'packages/sandbox/vercel/sandbox.test.ts',
-      'vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops; vercel_client_create_sandbox_sends_upstream_shape',
+      names(
+        'vercel_sandbox_skips_dev_server_urls_for_ports_that_are_missing_routes',
+        'vercel_sandbox_uses_first_routable_declared_port_for_host_when_port_80_is_unavailable',
+        'vercel_sandbox_does_not_render_an_undefined_host_in_environment_details',
+        'vercel_sandbox_resolves_host_from_sdk_routes_when_reconnect_did_not_pass_ports',
+        'vercel_sandbox_injects_runtime_preview_env_vars_into_command_execution',
+        'vercel_sandbox_preserves_stderr_output_from_failed_commands',
+        'vercel_sandbox_connects_by_persistent_sandbox_name_without_auto_resume_by_default',
+        'vercel_sandbox_persists_sandbox_name_in_state_for_created_sandboxes',
+        'vercel_sandbox_derives_resumed_expires_at_without_provider_stop_buffer',
+        'vercel_sandbox_refreshes_state_when_current_session_changes_from_stopped_to_running',
+        'vercel_sandbox_applies_setup_github_auth_when_creating_sandbox_and_then_clears_it',
+        'vercel_sandbox_clears_github_auth_when_reconnecting_to_sandbox',
+        'vercel_sandbox_creates_from_base_snapshot_and_clones_git_source',
+        'vercel_sandbox_creates_empty_git_repo_from_base_snapshot',
+        'vercel_sandbox_skips_git_workspace_bootstrap_from_base_snapshot_when_requested',
+        'vercel_sandbox_returns_command_id_when_quick_failure_timer_elapses_before_command_exits',
+        'vercel_sandbox_throws_when_detached_wait_fails_before_timer_elapses',
+        'vercel_sandbox_throws_with_stderr_when_command_exits_quickly_with_non_zero_code',
+        'vercel_sandbox_returns_file_content_as_string_via_sdk_read_file_to_buffer',
+        'vercel_sandbox_throws_when_file_does_not_exist',
+        'vercel_sandbox_preserves_multi_byte_utf8_content',
+        'vercel_sandbox_delegates_to_sdk_write_files_with_a_buffer',
+        'vercel_sandbox_creates_parent_directory_via_mkdir_before_writing',
+        'vercel_sandbox_handles_large_content_without_using_run_command_for_write'
+      ),
     ],
     [
       'packages/sandbox/vercel/snapshot-refresh.test.ts',
-      'vercel_client_extend_timeout_and_snapshot_parse_session_updates; live_vercel_sandbox_create_exec_read_write_list_stop_smoke',
+      names(
+        'snapshot_refresh_creates_a_new_snapshot_from_the_configured_base_snapshot',
+        'snapshot_refresh_stops_the_sandbox_and_surfaces_command_output_when_setup_fails',
+        'snapshot_refresh_stops_the_sandbox_when_snapshot_support_is_unavailable',
+        'live_vercel_sandbox_create_exec_read_write_list_stop_smoke'
+      ),
     ],
     [
       'apps/web/app/api/chat/_lib/model-selection.test.ts',
@@ -780,20 +818,63 @@ function partialRustTestName(relative) {
       'chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata; chat_route_thread_reply_resumes_waiting_run_and_starts_new_after_stale_terminal_run; cancelable_readable_stream_semantics_match_forwarding_abort_and_idempotent_cancel_cases',
     ],
     [
+      'apps/web/app/api/generate-pr/_lib/generate-pr-helpers.test.ts',
+      names(
+        'generate_pr_helpers_generate_branch_name_uses_initials_and_8_char_suffix',
+        'generate_pr_helpers_looks_like_commit_hash_detects_commit_looking_strings',
+        'generate_pr_helpers_is_permission_push_error_detects_permission_errors',
+        'generate_pr_helpers_redact_github_token_removes_token_from_authenticated_urls',
+        'generate_pr_helpers_extract_github_owner_from_remote_url_handles_https_and_ssh_remotes',
+        'generate_pr_helpers_get_conversation_context_returns_only_text_parts_with_role_labels'
+      ),
+    ],
+    [
       'apps/web/app/api/sandbox/reconnect/route.test.ts',
-      'sandbox_vercel_state_serializes_upstream_factory_shape',
+      names(
+        'sandbox_reconnect_route_recovers_failed_lifecycle_state_when_reconnect_succeeds',
+        'sandbox_reconnect_route_marks_sandbox_expired_when_probe_hits_410',
+        'sandbox_reconnect_route_drops_missing_resume_handle_when_probe_hits_404'
+      ),
     ],
     [
       'apps/web/app/api/sandbox/route.test.ts',
-      'vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops',
+      names(
+        'sandbox_route_uses_session_id_as_persistent_sandbox_name',
+        'sandbox_route_repo_sandboxes_use_setup_only_installation_token_instead_of_embedding_it',
+        'sandbox_route_rejects_repo_urls_that_only_contain_github_com_in_the_path',
+        'sandbox_route_new_vercel_sandbox_does_not_sync_linked_development_env_vars_while_commented_out',
+        'sandbox_route_commented_out_env_sync_does_not_run_during_sandbox_creation',
+        'sandbox_route_new_sandboxes_install_global_skills',
+        'sandbox_route_rejects_unsupported_sandbox_types'
+      ),
     ],
     [
       'apps/web/app/api/sandbox/snapshot/route.test.ts',
-      'vercel_client_extend_timeout_and_snapshot_parse_session_updates',
+      names(
+        'sandbox_snapshot_route_post_pauses_named_persistent_sandbox_without_writing_legacy_snapshot',
+        'sandbox_snapshot_route_put_resumes_existing_named_persistent_sandbox',
+        'sandbox_snapshot_route_put_clears_broken_persistent_sandbox_handle_after_404',
+        'sandbox_snapshot_route_put_lazily_migrates_legacy_snapshot_backed_session_on_first_resume'
+      ),
     ],
     [
       'apps/web/app/api/sandbox/status/route.test.ts',
-      'sandbox_context_round_trips_with_optional_fields',
+      names(
+        'sandbox_status_route_kicks_overdue_lifecycle_immediately',
+        'sandbox_status_route_recovers_failed_lifecycle_state_when_runtime_sandbox_is_still_active'
+      ),
+    ],
+    [
+      'apps/web/app/api/vercel/projects/[idOrName]/env/route.test.ts',
+      'vercel_projects_env_returns_not_found_and_never_proxies_decrypted_env_values_to_browser',
+    ],
+    [
+      'apps/web/app/api/vercel/repo-projects/route.test.ts',
+      names(
+        'vercel_repo_projects_returns_remembered_default_when_it_still_exists_in_live_candidates',
+        'vercel_repo_projects_auto_selects_lone_matching_live_project_without_saved_default',
+        'vercel_repo_projects_asks_client_to_reconnect_vercel_when_token_is_invalid'
+      ),
     ],
     [
       'apps/web/app/workflows/chat.test.ts',
@@ -813,11 +894,38 @@ function partialRustTestName(relative) {
     ],
     [
       'apps/web/lib/chat/auto-commit-direct.test.ts',
-      'finish_commits_dirty_repository',
+      names(
+        'auto_commit_direct_returns_early_with_no_commit_when_no_changes',
+        'auto_commit_direct_returns_error_when_staging_fails',
+        'auto_commit_direct_returns_error_when_repo_access_verification_fails',
+        'auto_commit_direct_returns_error_when_api_commit_fails',
+        'auto_commit_direct_full_success_path_returns_all_fields',
+        'auto_commit_direct_uses_fallback_commit_message_when_diff_is_empty',
+        'auto_commit_direct_truncates_generated_commit_message_to_72_chars',
+        'auto_commit_direct_returns_early_when_no_changed_files_after_staging'
+      ),
     ],
     [
       'apps/web/lib/chat/auto-pr-direct.test.ts',
-      'finish_builds_pr_command_in_dry_run_mode',
+      names(
+        'auto_pr_direct_skips_when_current_branch_is_detached',
+        'auto_pr_direct_skips_when_current_branch_matches_the_default_branch',
+        'auto_pr_direct_skips_when_repository_owner_is_not_a_safe_github_path_segment',
+        'auto_pr_direct_skips_when_current_branch_is_not_available_on_origin',
+        'auto_pr_direct_skips_when_current_branch_is_not_fully_pushed_to_origin',
+        'auto_pr_direct_syncs_an_existing_open_pull_request_instead_of_creating_a_new_one',
+        'auto_pr_direct_creates_a_new_pull_request_and_persists_pr_metadata',
+        'auto_pr_direct_returns_an_error_when_pr_content_generation_fails_unexpectedly'
+      ),
+    ],
+    [
+      'apps/web/lib/github/commit-intent.test.ts',
+      names(
+        'commit_intent_accepts_normal_repo_relative_paths',
+        'commit_intent_rejects_unsafe_paths',
+        'commit_message_attribution_adds_co_author_trailer_when_user_attribution_is_provided',
+        'commit_message_attribution_leaves_commit_message_unchanged_without_user_attribution'
+      ),
     ],
     [
       'apps/web/lib/chat-route-cleanup.test.ts',
@@ -837,23 +945,52 @@ function partialRustTestName(relative) {
     ],
     [
       'apps/web/lib/github/commit.test.ts',
-      'finish_commits_dirty_repository',
+      names(
+        'github_commit_creates_a_missing_branch_from_the_captured_sandbox_head',
+        'github_commit_rejects_existing_branches_when_the_remote_head_changed'
+      ),
     ],
     [
       'apps/web/lib/github/pr-content.test.ts',
-      'finish_builds_pr_command_in_dry_run_mode',
+      names(
+        'pr_content_resolve_context_section_returns_single_line_footer_with_chat_link_and_attribution',
+        'pr_content_resolve_context_section_falls_back_to_plain_text_attribution_without_github_account',
+        'pr_content_resolve_app_base_url_prefers_the_active_deployment_url',
+        'pr_content_append_context_section_appends_footer_after_horizontal_rule'
+      ),
     ],
     [
       'apps/web/lib/sandbox/lifecycle.test.ts',
-      'sandbox_state_serializes_and_reconnects_local_workspace',
+      names(
+        'sandbox_lifecycle_prefers_hibernate_after_when_earlier_than_expiry',
+        'sandbox_lifecycle_uses_sandbox_expiry_when_it_is_earlier',
+        'sandbox_lifecycle_falls_back_to_last_activity_when_hibernate_after_is_missing',
+        'sandbox_lifecycle_falls_back_to_updated_at_when_last_activity_is_missing'
+      ),
+    ],
+    [
+      'apps/web/lib/sandbox/lifecycle-kick.test.ts',
+      names(
+        'lifecycle_kick_claims_lifecycle_lease_before_starting_so_overlapping_kicks_only_start_one_workflow',
+        'lifecycle_kick_releases_claimed_lease_and_falls_back_inline_when_workflow_start_fails'
+      ),
     ],
     [
       'apps/web/lib/sandbox/lifecycle-evaluate.test.ts',
-      'connect_options_debug_redacts_credentials_and_env_values',
+      names(
+        'lifecycle_evaluate_skips_hibernation_whenever_any_chat_still_has_active_stream_id',
+        'lifecycle_evaluate_rechecks_for_active_stream_id_before_stopping_and_restores_active_state',
+        'lifecycle_evaluate_skips_hibernation_when_lifecycle_timing_is_refreshed_before_stopping',
+        'lifecycle_evaluate_hibernates_by_stopping_the_persistent_sandbox_session'
+      ),
     ],
     [
       'apps/web/lib/sandbox/archive-session.test.ts',
-      'sandbox_lifecycle_contract',
+      names(
+        'archive_session_clears_runtime_sandbox_state_when_archive_finalization_fails_without_snapshot',
+        'archive_session_preserves_runtime_sandbox_state_when_archive_finalization_fails_but_snapshot_exists',
+        'archive_session_refreshes_merged_pr_status_before_archiving'
+      ),
     ],
     [
       'apps/web/lib/merge-readiness-polling.test.ts',
@@ -881,6 +1018,30 @@ function partialRustTestName(relative) {
     ],
   ]);
   return direct.get(relative);
+}
+
+function verifiedTestFiles() {
+  return new Set([
+    'apps/web/app/api/generate-pr/_lib/generate-pr-helpers.test.ts',
+    'apps/web/app/api/sandbox/reconnect/route.test.ts',
+    'apps/web/app/api/sandbox/route.test.ts',
+    'apps/web/app/api/sandbox/snapshot/route.test.ts',
+    'apps/web/app/api/sandbox/status/route.test.ts',
+    'apps/web/app/api/vercel/projects/[idOrName]/env/route.test.ts',
+    'apps/web/app/api/vercel/repo-projects/route.test.ts',
+    'apps/web/lib/chat/auto-commit-direct.test.ts',
+    'apps/web/lib/chat/auto-pr-direct.test.ts',
+    'apps/web/lib/github/commit-intent.test.ts',
+    'apps/web/lib/github/commit.test.ts',
+    'apps/web/lib/github/pr-content.test.ts',
+    'apps/web/lib/sandbox/archive-session.test.ts',
+    'apps/web/lib/sandbox/lifecycle-evaluate.test.ts',
+    'apps/web/lib/sandbox/lifecycle-kick.test.ts',
+    'apps/web/lib/sandbox/lifecycle.test.ts',
+    'packages/sandbox/git.test.ts',
+    'packages/sandbox/vercel/sandbox.test.ts',
+    'packages/sandbox/vercel/snapshot-refresh.test.ts',
+  ]);
 }
 
 function isJsOnlyTest(relative) {

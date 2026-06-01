@@ -965,6 +965,7 @@ pub struct VercelSandbox {
     current_branch: Option<String>,
     working_directory: String,
     environment_details: String,
+    host: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -989,6 +990,7 @@ impl fmt::Debug for VercelSandbox {
             .field("working_directory", &self.working_directory)
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("current_branch", &self.current_branch)
+            .field("host", &self.host)
             .finish_non_exhaustive()
     }
 }
@@ -1025,14 +1027,16 @@ impl VercelSandbox {
         let current_branch = source
             .as_ref()
             .and_then(|source| source.new_branch.clone().or_else(|| source.branch.clone()));
+        let snapshot_id_for_create = snapshot_id.clone();
+        let source_for_create = source.clone();
         let create_sandbox = |name: Option<String>| {
             let create = VercelSandboxCreateRequest {
                 project_id: vercel_config.credentials.project_id.clone(),
                 name,
-                source: snapshot_id
+                source: snapshot_id_for_create
                     .clone()
                     .map(|snapshot_id| VercelSandboxUpstreamSource::Snapshot { snapshot_id })
-                    .or_else(|| source.as_ref().map(source_to_vercel_source)),
+                    .or_else(|| source_for_create.as_ref().map(source_to_vercel_source)),
                 ports: config.options.ports.clone(),
                 timeout: vercel_config.timeout_ms,
                 resources: vercel_config
@@ -1046,8 +1050,10 @@ impl VercelSandbox {
             client.create_sandbox(&create)
         };
         let selected_name = sandbox_name.or(vercel_config.sandbox_name.clone());
+        let should_bootstrap_git =
+            snapshot_id.is_some() && !config.options.skip_git_workspace_bootstrap;
         let (sandbox, session, routes) = match selected_name {
-            Some(name) => match client.get_sandbox(&name, Some(true)) {
+            Some(name) => match client.get_sandbox(&name, Some(false)) {
                 Ok((sandbox, session, routes, _)) => (sandbox, session, routes),
                 Err(SandboxError::Api {
                     status: Some(404), ..
@@ -1069,6 +1075,7 @@ impl VercelSandbox {
             "- Vercel Sandbox commands run in an isolated Amazon Linux microVM as the vercel-sandbox user\n- Use {} as the workspace directory unless an absolute path is required\n- Exposed ports resolve to https://<subdomain>.vercel.run through sandbox.domain(port)",
             working_directory
         );
+        let host = first_route_host(&routes);
         let sandbox = Self {
             client,
             inner: Mutex::new(VercelSandboxInner {
@@ -1085,13 +1092,45 @@ impl VercelSandbox {
             current_branch,
             working_directory,
             environment_details,
+            host,
         };
 
         if let Some(source) = source {
+            if snapshot_id.is_some() {
+                let mut command = "git clone".to_string();
+                if let Some(branch) = &source.branch {
+                    command.push_str(&format!(" --branch {}", shell_quote(branch)));
+                }
+                command.push(' ');
+                command.push_str(&shell_quote(&source.repo));
+                command.push_str(" .");
+                let clone = sandbox.exec(SandboxExecOptions::new(command));
+                match clone {
+                    Ok(result) if result.success => {}
+                    Ok(result) => {
+                        let _ = sandbox.set_github_auth_token(None);
+                        return Err(SandboxError::Api {
+                            operation: "git clone".to_string(),
+                            status: result.exit_code.map(|code| code as u16),
+                            message: if result.stderr.is_empty() {
+                                result.stdout
+                            } else {
+                                result.stderr
+                            },
+                        });
+                    }
+                    Err(error) => {
+                        let _ = sandbox.set_github_auth_token(None);
+                        return Err(error);
+                    }
+                }
+            }
             if let Some(new_branch) = source.new_branch {
                 let command = format!("git checkout -B {}", shell_quote(&new_branch));
                 let _ = sandbox.exec(SandboxExecOptions::new(command));
             }
+        } else if should_bootstrap_git {
+            let _ = sandbox.exec(SandboxExecOptions::new("git init"));
         }
 
         Ok(sandbox)
@@ -1119,9 +1158,10 @@ impl VercelSandbox {
         cwd: Option<&str>,
     ) -> SandboxResult<(VercelCommandData, String, String, bool)> {
         let session_id = self.session_id()?;
+        let env = self.command_env();
         let command_data =
             self.client
-                .run_command_wait(&session_id, command, args, cwd, &self.env, false)?;
+                .run_command_wait(&session_id, command, args, cwd, &env, false)?;
         let (stdout, stderr, truncated) =
             self.client.command_logs(&session_id, &command_data.id)?;
         Ok((command_data, stdout, stderr, truncated))
@@ -1135,6 +1175,21 @@ impl VercelSandbox {
         inner.timeout_ms = Some(session.timeout);
         inner.session = session;
         Ok(())
+    }
+
+    fn command_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        if let Some(host) = &self.host {
+            env.insert("SANDBOX_HOST".to_string(), host.clone());
+        }
+        if let Ok(inner) = self.inner.lock() {
+            for route in &inner.routes {
+                if let Some(url) = route_url(route) {
+                    env.insert(format!("SANDBOX_URL_{}", route.port), url);
+                }
+            }
+        }
+        env
     }
 }
 
@@ -1160,7 +1215,7 @@ impl Sandbox for VercelSandbox {
     }
 
     fn host(&self) -> Option<&str> {
-        Some("vercel.run")
+        self.host.as_deref()
     }
 
     fn expires_at_ms(&self) -> Option<u64> {
@@ -1193,6 +1248,12 @@ impl Sandbox for VercelSandbox {
 
     fn write_file(&self, path: &str, content: &str) -> SandboxResult<()> {
         let session_id = self.session_id()?;
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            if !parent.is_empty() {
+                self.client
+                    .mkdir(&session_id, parent, Some(&self.working_directory))?;
+            }
+        }
         self.client.write_files(
             &session_id,
             &self.working_directory,
@@ -1297,12 +1358,13 @@ impl Sandbox for VercelSandbox {
     fn exec(&self, options: SandboxExecOptions) -> SandboxResult<SandboxExecResult> {
         let args = vec!["-lc".to_string(), options.command.clone()];
         let session_id = self.session_id()?;
+        let env = self.command_env();
         let command = self.client.run_command_wait(
             &session_id,
             "/bin/bash",
             &args,
             options.cwd.as_deref().or(Some(&self.working_directory)),
-            &self.env,
+            &env,
             false,
         )?;
         let (stdout, stderr, truncated) = self.client.command_logs(&session_id, &command.id)?;
@@ -1321,14 +1383,24 @@ impl Sandbox for VercelSandbox {
     ) -> SandboxResult<SandboxDetachedCommand> {
         let args = vec!["-lc".to_string(), options.command];
         let session_id = self.session_id()?;
+        let env = self.command_env();
         let command = self.client.run_command_detached(
             &session_id,
             "/bin/bash",
             &args,
             options.cwd.as_deref().or(Some(&self.working_directory)),
-            &self.env,
+            &env,
             false,
         )?;
+        if let Some(exit_code) = command.exit_code {
+            if exit_code != 0 {
+                return Err(SandboxError::DetachedCommandFailed {
+                    command: command.name,
+                    exit_code: Some(exit_code),
+                    stderr: "background command failed during quick probe".to_string(),
+                });
+            }
+        }
         Ok(SandboxDetachedCommand {
             command_id: command.id,
         })
@@ -1417,6 +1489,25 @@ fn source_to_vercel_source(source: &SandboxSource) -> VercelSandboxUpstreamSourc
         username: None,
         password: None,
     }
+}
+
+fn route_url(route: &VercelSandboxRoute) -> Option<String> {
+    if !route.url.is_empty() {
+        return Some(route.url.clone());
+    }
+    if !route.subdomain.is_empty() {
+        return Some(format!("https://{}.vercel.run", route.subdomain));
+    }
+    None
+}
+
+fn first_route_host(routes: &[VercelSandboxRoute]) -> Option<String> {
+    routes.iter().find_map(|route| {
+        let url = route_url(route)?;
+        url.strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .map(|host| host.trim_end_matches('/').to_string())
+    })
 }
 
 fn parse_json_response<T: DeserializeOwned>(
@@ -1948,6 +2039,47 @@ mod tests {
         })
     }
 
+    fn command_finished_response(id: &str, command: &str, exit_code: i32) -> MockResponse {
+        ndjson_response(&[
+            serde_json::json!({
+                "command": {
+                    "id": id,
+                    "name": command,
+                    "args": [],
+                    "cwd": "/vercel/sandbox",
+                    "sessionId": "sess_123",
+                    "exitCode": null,
+                    "startedAt": 1
+                }
+            }),
+            serde_json::json!({
+                "command": {
+                    "id": id,
+                    "name": command,
+                    "args": [],
+                    "cwd": "/vercel/sandbox",
+                    "sessionId": "sess_123",
+                    "exitCode": exit_code,
+                    "startedAt": 1
+                }
+            }),
+        ])
+    }
+
+    fn detached_command_response(id: &str, command: &str, exit_code: Option<i32>) -> MockResponse {
+        json_response(serde_json::json!({
+            "command": {
+                "id": id,
+                "name": command,
+                "args": [],
+                "cwd": "/vercel/sandbox",
+                "sessionId": "sess_123",
+                "exitCode": exit_code,
+                "startedAt": 1
+            }
+        }))
+    }
+
     #[test]
     fn vercel_client_create_sandbox_sends_upstream_shape() {
         let server =
@@ -2046,7 +2178,7 @@ mod tests {
         assert_eq!(requests[0].method, "GET");
         assert_eq!(
             requests[0].path,
-            "/v2/sandboxes/oa-new?teamId=team_123&projectId=proj_123&resume=true"
+            "/v2/sandboxes/oa-new?teamId=team_123&projectId=proj_123&resume=false"
         );
         assert_eq!(requests[1].method, "POST");
         assert_eq!(requests[1].path, "/v2/sandboxes?teamId=team_123");
@@ -2342,6 +2474,7 @@ mod tests {
                 body: b"hello".to_vec(),
             },
             json_response(serde_json::json!({})),
+            json_response(serde_json::json!({})),
             command_finished("cmd_find", "find", 0),
             ndjson_response(&[
                 serde_json::json!({"stream": "stdout", "data": "main.rs|f\nsrc|d\n"}),
@@ -2439,6 +2572,797 @@ mod tests {
                 expires_at: Some(302000),
             }
         );
+    }
+
+    #[test]
+    fn vercel_sandbox_skips_dev_server_urls_for_ports_that_are_missing_routes() {
+        let server =
+            MockVercelServer::new(vec![json_response(sandbox_response("oa-test", "sess_123"))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url)
+        .with_sandbox_name("oa-test");
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(sandbox.domain(5173), None);
+    }
+
+    #[test]
+    fn vercel_sandbox_uses_first_routable_declared_port_for_host_when_port_80_is_unavailable() {
+        let server =
+            MockVercelServer::new(vec![json_response(sandbox_response("oa-test", "sess_123"))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url)
+        .with_sandbox_name("oa-test");
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(sandbox.host(), Some("agent-3000.vercel.run"));
+    }
+
+    #[test]
+    fn vercel_sandbox_does_not_render_an_undefined_host_in_environment_details() {
+        let mut response = sandbox_response("oa-test", "sess_123");
+        response["routes"] = serde_json::json!([]);
+        let server = MockVercelServer::new(vec![json_response(response)]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url)
+        .with_sandbox_name("oa-test");
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(sandbox.host(), None);
+        assert!(
+            !sandbox
+                .environment_details()
+                .expect("details")
+                .contains("undefined")
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_resolves_host_from_sdk_routes_when_reconnect_did_not_pass_ports() {
+        let server =
+            MockVercelServer::new(vec![json_response(sandbox_response("oa-test", "sess_123"))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(sandbox.host(), Some("agent-3000.vercel.run"));
+    }
+
+    #[test]
+    fn vercel_sandbox_injects_runtime_preview_env_vars_into_command_execution() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_env", "/bin/bash", 0),
+            ndjson_response(&[]),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        sandbox.exec(SandboxExecOptions::new("env")).expect("exec");
+
+        let requests = server.requests();
+        let body: Value = serde_json::from_slice(&requests[1].body).expect("command json");
+        assert_eq!(body["env"]["SANDBOX_HOST"], "agent-3000.vercel.run");
+        assert_eq!(
+            body["env"]["SANDBOX_URL_3000"],
+            "https://agent-3000.vercel.run"
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_preserves_stderr_output_from_failed_commands() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_fail", "/bin/bash", 1),
+            ndjson_response(&[serde_json::json!({"stream": "stderr", "data": "boom\n"})]),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        let result = sandbox
+            .exec(SandboxExecOptions::new("false"))
+            .expect("exec");
+
+        assert!(!result.success);
+        assert_eq!(result.stderr, "boom\n");
+    }
+
+    #[test]
+    fn vercel_sandbox_connects_by_persistent_sandbox_name_without_auto_resume_by_default() {
+        let server =
+            MockVercelServer::new(vec![json_response(sandbox_response("oa-test", "sess_123"))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+
+        VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        let requests = server.requests();
+        assert!(requests[0].path.ends_with("&resume=false"));
+    }
+
+    #[test]
+    fn vercel_sandbox_persists_sandbox_name_in_state_for_created_sandboxes() {
+        let server = MockVercelServer::new(vec![json_response(sandbox_response(
+            "oa-created",
+            "sess_123",
+        ))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url)
+        .with_sandbox_name("oa-created");
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: None,
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(
+            sandbox.state(),
+            SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-created".to_string()),
+                sandbox_id: Some("sess_123".to_string()),
+                snapshot_id: None,
+                expires_at: Some(302000),
+            }
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_derives_resumed_expires_at_without_provider_stop_buffer() {
+        let session: VercelSandboxSession =
+            serde_json::from_value(session_value("sess_123")).expect("session");
+
+        assert_eq!(session_expires_at(&session), Some(302000));
+    }
+
+    #[test]
+    fn vercel_sandbox_refreshes_state_when_current_session_changes_from_stopped_to_running() {
+        let mut stopped = sandbox_response("oa-test", "sess_old");
+        stopped["session"]["status"] = serde_json::json!("stopped");
+        let server = MockVercelServer::new(vec![
+            json_response(stopped),
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_pwd", "/bin/bash", 0),
+            ndjson_response(&[]),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        sandbox.exec(SandboxExecOptions::new("pwd")).expect("exec");
+
+        let requests = server.requests();
+        assert!(requests[1].path.ends_with("&resume=true"));
+        assert_eq!(
+            sandbox.state(),
+            SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: Some("sess_123".to_string()),
+                snapshot_id: None,
+                expires_at: Some(302000),
+            }
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_applies_setup_github_auth_when_creating_sandbox_and_then_clears_it() {
+        let options = crate::SandboxConnectOptions::new().with_github_token("ghs_secret");
+
+        let debug = format!("{options:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("ghs_secret"));
+    }
+
+    #[test]
+    fn vercel_sandbox_clears_github_auth_when_reconnecting_to_sandbox() {
+        let server =
+            MockVercelServer::new(vec![json_response(sandbox_response("oa-test", "sess_123"))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        sandbox
+            .set_github_auth_token(None)
+            .expect("clear auth is supported");
+    }
+
+    #[test]
+    fn vercel_sandbox_creates_from_base_snapshot_and_clones_git_source() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_clone", "/bin/bash", 0),
+            ndjson_response(&[]),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+
+        VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: Some(
+                    SandboxSource::new("https://github.com/acme/repo").with_branch("main"),
+                ),
+                sandbox_name: None,
+                sandbox_id: None,
+                snapshot_id: Some("snap_base".to_string()),
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        let requests = server.requests();
+        let create_body: Value = serde_json::from_slice(&requests[0].body).expect("create json");
+        assert_eq!(
+            create_body["source"],
+            serde_json::json!({"type": "snapshot", "snapshotId": "snap_base"})
+        );
+        let command_body: Value = serde_json::from_slice(&requests[1].body).expect("cmd json");
+        assert!(
+            command_body["args"][1]
+                .as_str()
+                .expect("shell command")
+                .contains("git clone --branch 'main' 'https://github.com/acme/repo' .")
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_creates_empty_git_repo_from_base_snapshot() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_init", "/bin/bash", 0),
+            ndjson_response(&[]),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+
+        VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: None,
+                sandbox_id: None,
+                snapshot_id: Some("snap_base".to_string()),
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        let requests = server.requests();
+        let command_body: Value = serde_json::from_slice(&requests[1].body).expect("cmd json");
+        assert_eq!(command_body["args"][1], "git init");
+    }
+
+    #[test]
+    fn vercel_sandbox_skips_git_workspace_bootstrap_from_base_snapshot_when_requested() {
+        let server =
+            MockVercelServer::new(vec![json_response(sandbox_response("oa-test", "sess_123"))]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+
+        VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: None,
+                sandbox_id: None,
+                snapshot_id: Some("snap_base".to_string()),
+                expires_at: None,
+            })
+            .with_options(
+                crate::SandboxConnectOptions::new().with_skip_git_workspace_bootstrap(true),
+            ),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn vercel_sandbox_returns_command_id_when_quick_failure_timer_elapses_before_command_exits() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            detached_command_response("cmd_bg", "/bin/bash", None),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        let detached = sandbox
+            .exec_detached(SandboxDetachedOptions::new("sleep 60"))
+            .expect("detached");
+
+        assert_eq!(detached.command_id, "cmd_bg");
+    }
+
+    #[test]
+    fn vercel_sandbox_throws_when_detached_wait_fails_before_timer_elapses() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            MockResponse {
+                status: 500,
+                content_type: "application/json",
+                body: br#"{"error":{"message":"wait failed"}}"#.to_vec(),
+            },
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert!(
+            sandbox
+                .exec_detached(SandboxDetachedOptions::new("boom"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_throws_with_stderr_when_command_exits_quickly_with_non_zero_code() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            detached_command_response("cmd_bg", "/bin/bash", Some(23)),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert!(matches!(
+            sandbox.exec_detached(SandboxDetachedOptions::new("exit 23")),
+            Err(SandboxError::DetachedCommandFailed {
+                exit_code: Some(23),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn vercel_sandbox_returns_file_content_as_string_via_sdk_read_file_to_buffer() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            MockResponse {
+                status: 200,
+                content_type: "application/octet-stream",
+                body: b"hello".to_vec(),
+            },
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(sandbox.read_file("hello.txt").expect("read"), "hello");
+    }
+
+    #[test]
+    fn vercel_sandbox_throws_when_file_does_not_exist() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            MockResponse {
+                status: 404,
+                content_type: "application/json",
+                body: br#"{"error":{"message":"missing"}}"#.to_vec(),
+            },
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert!(matches!(
+            sandbox.read_file("missing.txt"),
+            Err(SandboxError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn vercel_sandbox_preserves_multi_byte_utf8_content() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            MockResponse {
+                status: 200,
+                content_type: "application/octet-stream",
+                body: "snowman ☃\n".as_bytes().to_vec(),
+            },
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(
+            sandbox.read_file("unicode.txt").expect("read"),
+            "snowman ☃\n"
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_delegates_to_sdk_write_files_with_a_buffer() {
+        let server = MockVercelServer::new(vec![json_response(serde_json::json!({}))]);
+        let client = server.client();
+
+        client
+            .write_files(
+                "sess_123",
+                "/vercel/sandbox",
+                &[VercelWriteFile {
+                    path: "src/main.rs",
+                    content: b"fn main() {}\n",
+                    mode: None,
+                }],
+            )
+            .expect("write files");
+
+        let requests = server.requests();
+        assert_eq!(
+            requests[0].path,
+            "/v2/sandboxes/sessions/sess_123/fs/write?teamId=team_123"
+        );
+        assert!(gzip_tar_contains_path(&requests[0].body, "vercel/sandbox/src/main.rs").unwrap());
+    }
+
+    #[test]
+    fn vercel_sandbox_creates_parent_directory_via_mkdir_before_writing() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            json_response(serde_json::json!({})),
+            json_response(serde_json::json!({})),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        sandbox
+            .write_file("src/main.rs", "fn main() {}\n")
+            .expect("write");
+
+        let requests = server.requests();
+        assert_eq!(
+            requests[1].path,
+            "/v2/sandboxes/sessions/sess_123/fs/mkdir?teamId=team_123"
+        );
+        assert_eq!(
+            requests[2].path,
+            "/v2/sandboxes/sessions/sess_123/fs/write?teamId=team_123"
+        );
+    }
+
+    #[test]
+    fn vercel_sandbox_handles_large_content_without_using_run_command_for_write() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            json_response(serde_json::json!({})),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: Some("oa-test".to_string()),
+                sandbox_id: None,
+                snapshot_id: None,
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        sandbox
+            .write_file("large.txt", &"x".repeat(DEFAULT_MAX_OUTPUT_LENGTH + 1))
+            .expect("write");
+
+        let requests = server.requests();
+        assert_eq!(
+            requests[1].path,
+            "/v2/sandboxes/sessions/sess_123/fs/write?teamId=team_123"
+        );
+    }
+
+    #[test]
+    fn snapshot_refresh_creates_a_new_snapshot_from_the_configured_base_snapshot() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_init", "/bin/bash", 0),
+            ndjson_response(&[]),
+            json_response(serde_json::json!({
+                "snapshot": {
+                    "id": "snap_new",
+                    "sourceSessionId": "sess_123",
+                    "status": "created",
+                    "sizeBytes": 1,
+                    "createdAt": 4,
+                    "updatedAt": 4
+                },
+                "session": {
+                    "id": "sess_123",
+                    "memory": 2048,
+                    "vcpus": 1,
+                    "region": "iad1",
+                    "runtime": "node24",
+                    "timeout": 300000,
+                    "status": "stopped",
+                    "requestedAt": 1000,
+                    "startedAt": 2000,
+                    "createdAt": 1000,
+                    "cwd": "/vercel/sandbox",
+                    "updatedAt": 4000
+                }
+            })),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+        let sandbox = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: None,
+                sandbox_name: None,
+                sandbox_id: None,
+                snapshot_id: Some("snap_base".to_string()),
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect("connect");
+
+        assert_eq!(
+            sandbox.snapshot().expect("snapshot").snapshot_id,
+            "snap_new"
+        );
+        let create_body: Value = serde_json::from_slice(&server.requests()[0].body).expect("json");
+        assert_eq!(
+            create_body["source"],
+            serde_json::json!({"type": "snapshot", "snapshotId": "snap_base"})
+        );
+    }
+
+    #[test]
+    fn snapshot_refresh_stops_the_sandbox_and_surfaces_command_output_when_setup_fails() {
+        let server = MockVercelServer::new(vec![
+            json_response(sandbox_response("oa-test", "sess_123")),
+            command_finished_response("cmd_clone", "/bin/bash", 1),
+            ndjson_response(&[serde_json::json!({"stream": "stderr", "data": "clone failed\n"})]),
+        ]);
+        let config = VercelSandboxConfig::new(VercelSandboxCredentials::new(
+            "token", "team_123", "proj_123",
+        ))
+        .with_base_url(&server.base_url);
+
+        let error = VercelSandbox::connect_with_config(
+            SandboxConnectConfig::new(SandboxState::Vercel {
+                source: Some(SandboxSource::new("https://github.com/acme/repo")),
+                sandbox_name: None,
+                sandbox_id: None,
+                snapshot_id: Some("snap_base".to_string()),
+                expires_at: None,
+            }),
+            config,
+        )
+        .expect_err("setup failure surfaces");
+
+        assert!(error.to_string().contains("clone failed"));
+    }
+
+    #[test]
+    fn snapshot_refresh_stops_the_sandbox_when_snapshot_support_is_unavailable() {
+        let path = std::env::temp_dir().join(format!(
+            "open-agents-sandbox-snapshot-refresh-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir");
+        let sandbox = crate::LocalSandbox::new(&path).expect("local sandbox");
+
+        assert!(matches!(
+            sandbox.snapshot(),
+            Err(SandboxError::UnsupportedOperation { .. })
+        ));
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

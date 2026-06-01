@@ -9,6 +9,7 @@
 pub mod config;
 pub mod health;
 pub mod local_fixture;
+pub mod sandbox_lifecycle;
 pub mod service;
 pub mod session_routes;
 pub mod vercel_adapter;
@@ -25,6 +26,18 @@ pub use health::{
 pub use local_fixture::{
     FixtureError, FixtureHarness, FixtureOutbound, FixtureOutboundKind, FixtureReply, FixtureRun,
     FixtureRunStatus, SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL,
+};
+pub use sandbox_lifecycle::{
+    ArchiveRecoveryPatch, LifecycleEvaluation, LifecycleKickDecision, LifecycleTiming,
+    ReconnectProbeStatus, ReconnectRouteDecision, RouteResponse, SANDBOX_EXPIRES_BUFFER_MS,
+    SANDBOX_INACTIVITY_TIMEOUT_MS, SnapshotRouteDecision, VercelProjectSelection,
+    archive_failure_recovery_patch, evaluate_hibernation_decision, is_supported_github_repo_url,
+    is_supported_sandbox_type, lifecycle_due_at_ms, lifecycle_kick_decision,
+    persistent_sandbox_name, reconnect_route_decision, refreshed_archive_pr_status,
+    repo_sandbox_uses_setup_only_installation_token, sandbox_creation_installs_global_skills,
+    sandbox_status_decision, select_vercel_project_id, should_sync_linked_development_env_vars,
+    snapshot_post_decision, snapshot_put_decision, vercel_project_env_not_found_response,
+    vercel_repo_projects_invalid_token_response,
 };
 pub use service::{
     LocalOutbound, LocalOutboundKind, LocalRuntimeRouter, OpenAgentsService, ServiceError,

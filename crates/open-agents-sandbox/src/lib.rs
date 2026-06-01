@@ -246,6 +246,8 @@ pub struct SandboxConnectOptions {
     pub timeout_ms: Option<u64>,
     /// Ports to expose for preview URLs.
     pub ports: Vec<u16>,
+    /// Skip git initialization/bootstrap for base-snapshot preparation.
+    pub skip_git_workspace_bootstrap: bool,
 }
 
 impl fmt::Debug for SandboxConnectOptions {
@@ -259,6 +261,10 @@ impl fmt::Debug for SandboxConnectOptions {
         debug.field("git_user", &self.git_user);
         debug.field("timeout_ms", &self.timeout_ms);
         debug.field("ports", &self.ports);
+        debug.field(
+            "skip_git_workspace_bootstrap",
+            &self.skip_git_workspace_bootstrap,
+        );
         debug.finish()
     }
 }
@@ -296,6 +302,12 @@ impl SandboxConnectOptions {
     /// Sets preview ports for the sandbox.
     pub fn with_ports(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
         self.ports = ports.into_iter().collect();
+        self
+    }
+
+    /// Skips git initialization/bootstrap for base snapshot preparation.
+    pub fn with_skip_git_workspace_bootstrap(mut self, skip: bool) -> Self {
+        self.skip_git_workspace_bootstrap = skip;
         self
     }
 }
