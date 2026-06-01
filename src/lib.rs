@@ -465,9 +465,10 @@ pub use skills::{
     SkillsUploadSkillResult, agent_skill_tool, allowed_tools_for_loaded_agent_skills,
     attach_agent_skills_to_context, build_agent_skill_prompt_sections, build_agent_skills_prompt,
     build_loaded_agent_skills_prompt, discover_agent_skills, discover_agent_skills_in_directories,
-    extract_agent_skill_body, inject_agent_skill_directory, invoke_agent_skill,
-    invoke_agent_skill_slash_command, merge_agent_skills, merge_loaded_agent_skills,
-    parse_agent_skill_metadata, parse_agent_skill_slash_command, substitute_agent_skill_arguments,
+    discover_open_plugin_agent_skills, extract_agent_skill_body, inject_agent_skill_directory,
+    invoke_agent_skill, invoke_agent_skill_slash_command, merge_agent_skills,
+    merge_loaded_agent_skills, parse_agent_skill_metadata, parse_agent_skill_slash_command,
+    substitute_agent_skill_arguments,
 };
 pub use speech_model::{
     NoSpeechGeneratedError, SpeechModel, SpeechModelAudio, SpeechModelCallOptions,
