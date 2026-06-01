@@ -4739,6 +4739,82 @@ mod tests {
     }
 
     #[test]
+    fn select_telemetry_attributes_matches_upstream_selection_cases() {
+        assert!(
+            select_telemetry_attributes(
+                Some(&TelemetryOptions::new().with_enabled(false)),
+                [("key", AttributeSpec::value(json!("value")))]
+            )
+            .is_empty()
+        );
+
+        assert_eq!(
+            select_telemetry_attributes(None, [("key", AttributeSpec::value(json!("value")))]),
+            TelemetryAttributes::from([("key".to_string(), json!("value"))])
+        );
+
+        assert_eq!(
+            select_telemetry_attributes(
+                Some(&TelemetryOptions::new().with_enabled(true)),
+                [
+                    ("string", AttributeSpec::value(json!("value"))),
+                    ("number", AttributeSpec::value(json!(42))),
+                    ("boolean", AttributeSpec::value(json!(true))),
+                ]
+            ),
+            TelemetryAttributes::from([
+                ("boolean".to_string(), json!(true)),
+                ("number".to_string(), json!(42)),
+                ("string".to_string(), json!("value")),
+            ])
+        );
+
+        assert_eq!(
+            select_telemetry_attributes(
+                Some(
+                    &TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_record_inputs(true)
+                        .with_record_outputs(false)
+                ),
+                [
+                    ("input", AttributeSpec::input(json!("input value"))),
+                    ("output", AttributeSpec::output(json!("output value"))),
+                    ("other", AttributeSpec::value(json!("other value"))),
+                    ("undefined", AttributeSpec::Omitted),
+                    ("null", AttributeSpec::value(JsonValue::Null)),
+                    ("inputNull", AttributeSpec::Input(None)),
+                ]
+            ),
+            TelemetryAttributes::from([
+                ("input".to_string(), json!("input value")),
+                ("other".to_string(), json!("other value")),
+            ])
+        );
+
+        assert_eq!(
+            select_telemetry_attributes(
+                Some(
+                    &TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_record_inputs(false)
+                        .with_record_outputs(true)
+                ),
+                [
+                    ("input", AttributeSpec::input(json!("input value"))),
+                    ("output", AttributeSpec::output(json!("output value"))),
+                    ("other", AttributeSpec::value(json!("other value"))),
+                    ("outputNull", AttributeSpec::Output(None)),
+                ]
+            ),
+            TelemetryAttributes::from([
+                ("other".to_string(), json!("other value")),
+                ("output".to_string(), json!("output value")),
+            ])
+        );
+    }
+
+    #[test]
     fn assemble_operation_name_includes_function_id_when_present() {
         let attributes = assemble_operation_name(
             "ai.generateText",
@@ -5043,6 +5119,37 @@ mod tests {
 
         assert_eq!(span.status, Some(SpanStatus::error(None)));
         assert!(span.events.is_empty());
+    }
+
+    #[test]
+    fn record_error_on_span_records_exception_events_for_error_values() {
+        let mut span = MockSpan::new("test-span", TelemetryAttributes::new());
+        record_error_on_span(
+            &mut span,
+            RecordSpanError::Exception(
+                SpanException::new("Error", "Test error").with_stack("stack trace"),
+            ),
+        );
+
+        assert_eq!(
+            span.status,
+            Some(SpanStatus::error(Some("Test error".to_string())))
+        );
+        assert_eq!(span.events.len(), 1);
+        assert_eq!(span.events[0].name, "exception");
+        let attributes = span.events[0]
+            .attributes
+            .as_ref()
+            .expect("exception attributes are recorded");
+        assert_eq!(attributes.get("exception.type"), Some(&json!("Error")));
+        assert_eq!(
+            attributes.get("exception.message"),
+            Some(&json!("Test error"))
+        );
+        assert_eq!(
+            attributes.get("exception.stack"),
+            Some(&json!("stack trace"))
+        );
     }
 
     #[test]

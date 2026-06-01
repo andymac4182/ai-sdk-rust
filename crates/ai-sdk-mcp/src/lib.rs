@@ -3848,6 +3848,12 @@ mod tests {
 
         let requests = server.requests();
         assert_eq!(requests.len(), 5);
+        for request in &requests {
+            assert_eq!(
+                request.headers.get("x-custom-header"),
+                Some(&"test-value".to_string())
+            );
+        }
         assert_eq!(requests[0].method, "GET");
         assert_eq!(
             requests[0].headers.get("accept"),
@@ -4421,6 +4427,26 @@ mod tests {
     }
 
     #[test]
+    fn mcp_http_transport_rejects_get_redirects_by_default() {
+        let server = LocalHttpServer::new(Vec::new());
+        server.set_responses(vec![LocalHttpResponse::new(
+            302,
+            [("location", server.url())],
+            "",
+        )]);
+        let mut transport = McpHttpTransport::new(format!("{}/mcp", server.url()));
+
+        let error = transport
+            .start()
+            .expect_err("GET redirect response is rejected");
+
+        assert!(error.message.contains("GET SSE failed: 302"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+    }
+
+    #[test]
     fn mcp_sse_transport_connects_to_endpoint_and_posts_messages() {
         let server = LocalHttpServer::new(vec![
             LocalHttpResponse::new(
@@ -4472,6 +4498,7 @@ mod tests {
             requests[1].headers.get("content-type"),
             Some(&"application/json".to_string())
         );
+        assert_eq!(requests[1].headers.get("x-mcp"), Some(&"test".to_string()));
         assert_eq!(requests[1].body["method"], "tools/list");
     }
 

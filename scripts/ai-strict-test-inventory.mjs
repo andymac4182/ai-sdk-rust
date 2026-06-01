@@ -30,6 +30,10 @@ const AI_06_INVENTORY_PATH = path.join(
   repositoryRoot,
   'docs/ai-06-concrete-provider-mappings.md',
 );
+const AI_05_INVENTORY_PATH = path.join(
+  repositoryRoot,
+  'docs/ai-05-mcp-otel-provider-inventory.md',
+);
 
 const UPSTREAM_REPO = 'vercel/ai';
 const UPSTREAM_HEAD = 'ab6d66482d31afe15f4973a51c5f7cfa09c92ea6';
@@ -48,6 +52,16 @@ const VALID_STATUSES = new Set([
 const EXCEPTION_STATUSES = new Set([
   'js-only-documented',
   'type-system-impossible',
+]);
+const STRICT_PACKAGE_OVERRIDES = new Map([
+  [
+    'mcp',
+    {
+      kind: 'MCP transport package',
+      ledgerStatus: 'in-progress',
+      owner: 'crates/ai-sdk-mcp',
+    },
+  ],
 ]);
 
 function usage() {
@@ -473,14 +487,15 @@ function parsePackageJsonPackages(upstreamRoot, ledgerPackages) {
     const packageDir = path.basename(path.dirname(file));
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     const ledger = ledgerPackages.get(packageDir);
+    const override = STRICT_PACKAGE_OVERRIDES.get(packageDir);
     return {
       item: `packages/${packageDir}`,
       area: 'packages',
       packageDir,
       displayName: parsed.name ?? ledger?.displayName ?? packageDir,
-      kind: ledger?.kind ?? 'upstream package',
-      ledgerStatus: ledger?.ledgerStatus ?? 'not-started',
-      owner: ledger?.owner ?? 'unassigned',
+      kind: ledger?.kind ?? override?.kind ?? 'upstream package',
+      ledgerStatus: ledger?.ledgerStatus ?? override?.ledgerStatus ?? 'not-started',
+      owner: ledger?.owner ?? override?.owner ?? 'unassigned',
       root: path.dirname(file),
     };
   }).sort((left, right) => left.item.localeCompare(right.item));
@@ -591,7 +606,7 @@ function parseFoundationalMappings(docPath) {
     }
 
     const entry = {
-      source: 'docs/ai-foundational-provider-inventory.md',
+      source: relativePath(docPath, repositoryRoot),
       status,
       rustTarget: values['Rust test / exception'],
       rustTests: status === 'portable-mapped'
@@ -609,6 +624,27 @@ function parseFoundationalMappings(docPath) {
   }
 
   return mappings;
+}
+
+function mergeStrictCaseMappings(docPaths) {
+  const merged = {
+    byLocation: new Map(),
+    byName: new Map(),
+  };
+
+  for (const docPath of docPaths) {
+    const mappings = parseFoundationalMappings(docPath);
+    for (const [key, entry] of mappings.byLocation) {
+      merged.byLocation.set(key, entry);
+    }
+    for (const [key, entries] of mappings.byName) {
+      const queue = merged.byName.get(key) ?? [];
+      queue.push(...entries);
+      merged.byName.set(key, queue);
+    }
+  }
+
+  return merged;
 }
 
 function parseInventoryCaseName(upstreamCaseCell) {
@@ -1777,7 +1813,10 @@ function buildInventory(args) {
   }
 
   const ledgerPackages = parseLedgerPackages(args.ledgerPath);
-  const foundationalMappings = parseFoundationalMappings(FOUNDATIONAL_INVENTORY_PATH);
+  const foundationalMappings = mergeStrictCaseMappings([
+    FOUNDATIONAL_INVENTORY_PATH,
+    AI_05_INVENTORY_PATH,
+  ]);
   const ai02Mappings = mergeNamedCaseMappings(
     parseAi02Mappings(AI_02_INVENTORY_PATH),
     parseAi02Mappings(
