@@ -451,6 +451,18 @@ fn assert_signal_listener_fires() {
     assert_eq!(calls.get(), 1);
 }
 
+fn assert_abort_listener_order_is_synchronous() {
+    let controller = ctx().create_abort_controller();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let log_for_listener = Rc::clone(&log);
+    controller
+        .signal
+        .add_event_listener(move || log_for_listener.borrow_mut().push("abort-listener"));
+    controller.abort(None);
+    log.borrow_mut().push("after-abort");
+    assert_eq!(*log.borrow(), vec!["abort-listener", "after-abort"]);
+}
+
 fn assert_signal_remove_listener() {
     let controller = ctx().create_abort_controller();
     let calls = Rc::new(Cell::new(0));
@@ -1648,6 +1660,10 @@ parity_test!(
 parity_test!(
     abort_signal_listener_fires_when_aborted,
     assert_signal_listener_fires
+);
+parity_test!(
+    abort_signal_listener_runs_synchronously_before_after_abort,
+    assert_abort_listener_order_is_synchronous
 );
 parity_test!(
     abort_signal_remove_listener_prevents_callback,

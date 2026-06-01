@@ -1337,6 +1337,23 @@ row_test!(wf04_set_attributes_row_003, {
     assert_eq!(calls[0].2.allow_reserved_attributes, true);
     reset_attribute_globals();
 });
+row_test!(wf01_workflow_set_attributes_empty_record_noop, {
+    let _guard = SET_ATTRIBUTES_LOCK.lock().unwrap();
+    reset_attribute_globals();
+    let world = Arc::new(RecordingWorld::supported(None));
+    set_attribute_world(world.clone());
+    let attrs = BTreeMap::new();
+    let outcome = with_step_context(
+        StepContext {
+            workflow_run_id: "run_123".to_string(),
+        },
+        || experimental_set_attributes(attrs, ExperimentalSetAttributesOptions::default()),
+    )
+    .unwrap();
+    assert_eq!(outcome, ExperimentalSetAttributesOutcome::Noop);
+    assert!(world.calls.lock().unwrap().is_empty());
+    reset_attribute_globals();
+});
 row_test!(wf04_set_attributes_row_004, {
     let _guard = SET_ATTRIBUTES_LOCK.lock().unwrap();
     reset_attribute_globals();

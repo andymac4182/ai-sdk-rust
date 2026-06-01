@@ -2945,6 +2945,26 @@ mod tests {
     }
 
     #[test]
+    fn run_handle_return_value_reports_cancelled_runs() {
+        let mut world = world_with_running_run("wrun_cancelled");
+        world
+            .events_create(
+                "wrun_cancelled",
+                CreateEventRequest::new(EventKind::RunCancelled),
+                EventCreateOptions::default(),
+            )
+            .expect("cancel event");
+
+        let persisted = world.runs_get("wrun_cancelled").expect("run");
+        assert_eq!(persisted.status, RunStatus::Cancelled);
+        let error = RunHandle::new("wrun_cancelled")
+            .return_value(&world)
+            .expect_err("cancelled run");
+        assert_eq!(error.kind, WorkflowErrorKind::Runtime);
+        assert!(error.message.contains("was cancelled"));
+    }
+
+    #[test]
     fn run_wakeup_targets_pending_waits_and_queues_continuation() {
         let mut world = world_with_running_run("wrun_sleep");
         for wait_id in ["wait-a", "wait-b"] {

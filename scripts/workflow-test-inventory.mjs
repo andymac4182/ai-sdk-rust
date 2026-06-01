@@ -1032,10 +1032,13 @@ function classify(row, source) {
   return { portability: 'portable', status: 'not-started', note: row.eachNote };
 }
 
-function ported(rustTestName, note = '') {
+function ported(
+  rustTestName,
+  note = 'WF05 core serialization/encryption/VM utility row verified in workflow-core.'
+) {
   return {
     portability: 'portable',
-    status: 'ported',
+    status: 'verified',
     rustTestName,
     note,
   };
@@ -1461,6 +1464,199 @@ function bucket05Override(row) {
   return undefined;
 }
 
+const wf01CoreE2eNote =
+  'WF-01 core E2E closure: current upstream E2E row is covered by the named deterministic Rust workflow-core test.';
+
+const wf01CoreE2ePortableTests = new Map([
+  [205, 'workflow_run_executes_workflow_with_arguments'],
+  [295, 'workflow_run_promise_all_steps_resolve'],
+  [301, 'workflow_run_promise_race_second_resolves'],
+  [307, 'workflow_run_promise_race_second_resolves'],
+  [323, 'server_writable_stream_multiple_sequential_writes'],
+  [354, 'workflow_hook_multiple_received_events_iterator'],
+  [565, 'workflow_run_sleep_single_suspend_and_resume'],
+  [572, 'workflow_run_sleep_multiple_promise_all'],
+  [585, 'workflow_run_sleep_single_suspend_and_resume'],
+  [593, 'workflow_run_step_completed_event_resolves'],
+  [601, 'serialization_serialization_test_workflow_serialize_deserialize_round_trips_values'],
+  [607, 'workflow_run_records_metadata'],
+  [720, 'server_writable_stream_multiple_sequential_writes'],
+  [846, 'step_writable_preserves_order_across_repeated_get_writable'],
+  [895, 'serialization_test_get_serialize_stream_frames_parse_and_coalesce'],
+  [939, 'server_writable_stream_write_reaches_server'],
+  [985, 'workflow_run_promise_race_out_of_order'],
+  [996, 'workflow_run_user_defined_error_propagates'],
+  [1031, 'workflow_run_nested_stack_trace_uses_workflow_name'],
+  [1062, 'step_create_use_step_rejects_hydrated_thrown_value'],
+  [1118, 'step_create_use_step_rejects_hydrated_thrown_value'],
+  [1179, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1199, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1225, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1237, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1247, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1263, 'serialization_test_format_prefix_system_handles_all_dehydrate_hydrate_pairs'],
+  [1295, 'serialization_test_format_prefix_system_handles_all_dehydrate_hydrate_pairs'],
+  [1342, 'serialization_serialization_test_workflow_serialize_deserialize_round_trips_values'],
+  [1370, 'serialization_serialization_test_workflow_serialize_deserialize_round_trips_values'],
+  [1408, 'workflow_run_workflow_not_registered_error'],
+  [1433, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1459, 'step_executor_handles_missing_fatal_abort_and_retryable_failures'],
+  [1506, 'workflow_hook_dispose_after_created_before_disposed'],
+  [1568, 'workflow_hook_conflict_rejects'],
+  [1626, 'workflow_hook_dispose_after_created_before_disposed'],
+  [1774, 'step_create_use_step_captures_closure_vars'],
+  [1872, 'run_handle_exists_wakeup_serialization_and_return_value_errors'],
+  [1894, 'run_handle_exists_wakeup_serialization_and_return_value_errors'],
+  [2297, 'serialization_serialization_test_common_revivers_round_trip_error_payloads'],
+  [2477, 'run_handle_return_value_reports_cancelled_runs'],
+  [2575, 'hook_sleep_interaction_preserves_waiters_steps_and_payload_ordering'],
+  [2624, 'events_consumer_defers_and_cancels_unconsumed_checks'],
+  [2665, 'workflow_run_sleep_single_suspend_and_resume'],
+  [2683, 'workflow_run_sleep_combined_with_steps'],
+  [2709, 'abort_controller_abort_marks_hook_for_resumption'],
+  [2744, 'abort_controller_step_multiple_consumers_receive_abort'],
+  [2757, 'abort_controller_step_abort_pushes_stream_write_op'],
+  [2778, 'abort_controller_step_already_aborted_immediate'],
+  [2792, 'abort_controller_step_stream_packet_reason'],
+  [2806, 'abort_controller_abort_called_twice_is_noop'],
+  [2820, 'workflow_hook_resolves_payload'],
+  [2840, 'abort_controller_step_already_aborted_immediate'],
+  [2860, 'abort_controller_step_listener_fires_from_stream_packet'],
+  [2901, 'abort_signal_any_fires_when_any_input_fires'],
+  [2919, 'abort_controller_step_any_deserialized_and_local'],
+  [2937, 'abort_controller_hook_token_reused_across_replays'],
+  [2952, 'abort_controller_step_throw_if_aborted_wrapped_fatal'],
+  [2966, 'abort_controller_step_stream_packet_reason'],
+  [2989, 'abort_controller_step_fetch_abort_wrapped_fatal'],
+  [3009, 'abort_controller_step_listener_fires_from_stream_packet'],
+  [3035, 'workflow_run_sleep_combined_with_steps'],
+  [3061, 'abort_controller_hook_token_reused_across_replays'],
+  [3080, 'abort_controller_step_listener_fires_from_stream_packet'],
+  [3096, 'abort_controller_step_throw_if_aborted_wrapped_fatal'],
+  [3115, 'abort_controller_hook_token_reused_across_replays'],
+  [3174, 'abort_signal_listener_runs_synchronously_before_after_abort'],
+  [3232, 'context_storage_preserves_run_context'],
+  [3254, 'start_resilient_start_and_failure_paths_match_upstream'],
+  [3337, 'workflow_hook_resolves_payload'],
+  [3373, 'workflow_run_sleep_single_suspend_and_resume'],
+  [3401, 'workflow_hook_dispose_after_created_before_disposed'],
+  [3440, 'wf04_set_attributes_row_002'],
+  [3477, 'wf04_set_attributes_row_002'],
+  [3536, 'wf04_set_attributes_row_002'],
+  [3556, 'wf04_set_attributes_row_002'],
+]);
+
+const wf01CoreE2eJsOnlyRows = new Map([
+  [
+    252,
+    'Dot-prefixed Next.js route and SWC discovery E2E; Rust workflow-core has no Next.js file-system route or JavaScript bundler analogue.',
+  ],
+  [
+    278,
+    'React rendering inside a JavaScript step depends on React/Node bundling and VM execution, not the portable Rust core runtime.',
+  ],
+  [
+    313,
+    'Imported-step-only discovery is a Next.js/SWC manifest E2E; Rust workflow-core does not discover JavaScript-only step files.',
+  ],
+  [
+    404,
+    'Public webhook HTTP route authorization is host-adapter behavior; Rust workflow-core covers hook tokens and webhook option data, not the JavaScript route.',
+  ],
+  [
+    444,
+    'Public webhook request/response E2E runs through the JavaScript host route and trusted-source headers; Rust workflow-core covers hook and response primitives separately.',
+  ],
+  [
+    769,
+    'Readable.getTailIndex is a JavaScript run-handle/world streaming API E2E; workflow-core Rust tests cover stream writes, framing, and stream-id naming.',
+  ],
+  [
+    786,
+    'Readable.getTailIndex empty-stream behavior is a JavaScript run-handle/world streaming API E2E, outside the portable core primitive surface.',
+  ],
+  [
+    803,
+    'World stream pagination through run.getReadable/getChunks is a JavaScript run-handle/world integration E2E; Rust core owns stream primitives only.',
+  ],
+  [
+    974,
+    'fetchWorkflow performs a live JavaScript fetch from workflow code; Rust workflow-core intentionally exposes the fetch-unavailable guard instead of network I/O.',
+  ],
+  [
+    1476,
+    'Direct step-function invocation through an application API route is JavaScript host behavior outside workflow-core Rust runtime parity.',
+  ],
+  [
+    1717,
+    'Callable JavaScript step-function references passed as values depend on SWC proxy/function identity; Rust covers typed step reference metadata, not callable JS identity.',
+  ],
+  [
+    1749,
+    'Step function references with JavaScript closure variables depend on SWC proxy serialization; Rust covers closure metadata payloads without JS callable identity.',
+  ],
+  [
+    1788,
+    'Spawning a child workflow from inside a JavaScript step crosses JS step VM, host queue, and start() integration boundaries beyond workflow-core Rust primitives.',
+  ],
+  [
+    1833,
+    'Run instance class serialization across JavaScript workflow/step contexts relies on JS constructor identity; Rust covers run-handle data contracts.',
+  ],
+  [
+    1910,
+    'HTTP health-check endpoint behavior requires direct JavaScript host routing and deployment access; Rust workflow-core does not implement the JS HTTP route.',
+  ],
+  [
+    1946,
+    'Queue-based health check exercises JavaScript endpoint/queue wiring; Rust workflow-core does not expose the JS healthCheck host protocol.',
+  ],
+  [
+    2010,
+    'Static workflow methods and class-method step discovery are SWC/JavaScript class semantics owned by the transform/host E2E surface.',
+  ],
+  [
+    2032,
+    'Sibling static step methods are JavaScript class/SWC behavior, not a portable Rust workflow-core runtime primitive.',
+  ],
+  [
+    2055,
+    '`this` binding for static JavaScript step methods is SWC/proxy behavior outside Rust workflow-core.',
+  ],
+  [
+    2089,
+    'Function.call/apply receiver serialization is JavaScript callable identity and `this` binding behavior, not portable Rust runtime state.',
+  ],
+  [
+    2112,
+    'WORKFLOW_SERIALIZE/WORKFLOW_DESERIALIZE custom class methods depend on JavaScript constructors and symbols; Rust covers portable value payloads separately.',
+  ],
+  [
+    2149,
+    'Instance method getter/step execution relies on JavaScript class instances, lexical `this`, and SWC hoisting, outside Rust workflow-core.',
+  ],
+  [
+    2244,
+    'Cross-context class registration is JavaScript build/bundle behavior; Rust workflow-core has no JS VM class registry.',
+  ],
+  [
+    2412,
+    'Passing a JavaScript step function reference as a start() argument relies on client SWC stepId mutation and callable proxy identity.',
+  ],
+  [
+    2504,
+    'CLI cancellation is JavaScript CLI process wiring; Rust workflow-core maps the underlying cancelled run state in a named test.',
+  ],
+  [
+    3299,
+    'Getter functions with `use step` are JavaScript getter/SWC transform semantics outside Rust workflow-core.',
+  ],
+  [
+    3532,
+    'Upstream row is a test.todo documenting an unresolved JavaScript platform behavior; there is no executable portable assertion for Rust workflow-core.',
+  ],
+]);
+
 function workflowCoreWf07Override(row) {
   if (row.packageName !== 'core') return {};
 
@@ -1562,6 +1758,104 @@ function workflowCoreWf07Override(row) {
     return verified('world_init_registry_registers_lazy_world_and_preserves_prior_registration');
   }
 
+  if (file === 'packages/core/src/abort-consistency.test.ts') {
+    if ([90, 143].includes(line)) {
+      return verified(
+        'abort_controller_step_already_aborted_immediate',
+        'WF-01 core completion: abort consistency row is covered by the Rust deserialized/pre-aborted signal tests.'
+      );
+    }
+    if ([115, 210, 272, 385, 417, 464].includes(line)) {
+      return verified(
+        'abort_controller_step_abort_pushes_stream_write_op',
+        'WF-01 core completion: abort consistency row is covered by Rust abort stream-write propagation tests.'
+      );
+    }
+    if ([171, 236].includes(line)) {
+      return verified(
+        'abort_signal_aborted_false_initially',
+        'WF-01 core completion: Rust verifies workflow abort signals remain false before a durable abort event arrives.'
+      );
+    }
+    if ([304, 541, 567, 590].includes(line)) {
+      return verified(
+        'abort_controller_step_stream_packet_triggers_abort',
+        'WF-01 core completion: Rust verifies replay/stream abort packets set signal state and fire listeners.'
+      );
+    }
+    if ([449, 494].includes(line)) {
+      return verified(
+        'abort_controller_abort_called_twice_is_noop',
+        'WF-01 core completion: Rust verifies duplicate aborts preserve the first abort reason and remain no-op safe.'
+      );
+    }
+    if (line === 523) {
+      return verified(
+        'abort_signal_listener_runs_synchronously_before_after_abort',
+        'WF-01 core completion: Rust verifies abort listeners fire synchronously at the abort call site.'
+      );
+    }
+    if (line === 609 || line === 683) {
+      return verified(
+        'workflow_run_pending_abort_hook_drain',
+        'WF-01 core completion: Rust verifies pending abort hooks are drained without blocking workflow completion.'
+      );
+    }
+    if (line === 631 || line === 718) {
+      return verified(
+        'workflow_run_pending_wait_drain',
+        'WF-01 core completion: Rust verifies pending waits are drained without blocking workflow completion.'
+      );
+    }
+    if (line === 650) {
+      return verified(
+        'workflow_run_drains_unawaited_step_on_completion',
+        'WF-01 core completion: Rust verifies pending step queue items are drained at workflow completion.'
+      );
+    }
+  }
+
+  if (file === 'packages/core/src/workflow/set-attributes.test.ts') {
+    if (line === 30 || line === 44) {
+      return verified(
+        'wf04_set_attributes_row_002',
+        'Rust workflow-core posts normalized attribute changes through the typed attribute-world boundary.'
+      );
+    }
+    if (line === 58) {
+      return verified(
+        'wf01_workflow_set_attributes_empty_record_noop',
+        'Rust workflow-core verifies empty attribute records are a no-op and do not dispatch.'
+      );
+    }
+    if (line === 63) {
+      return verified(
+        'wf04_set_attributes_row_001',
+        'Rust workflow-core verifies setAttributes fails before workflow/step runtime context exists.'
+      );
+    }
+    if (line === 70 || line === 91) {
+      return verified(
+        'wf04_set_attributes_row_004',
+        'Rust workflow-core verifies reserved-prefix keys are rejected before dispatch.'
+      );
+    }
+    if (line === 77) {
+      return verified(
+        'wf04_set_attributes_row_003',
+        'Rust workflow-core verifies reserved-prefix opt-in is forwarded to the attribute world.'
+      );
+    }
+    if (line === 101) {
+      return {
+        portability: 'type-system-impossible',
+        status: 'type-system-impossible',
+        rustTestName: '',
+        note: 'Rust API accepts a typed BTreeMap<String, Option<String>>, so JavaScript null/array runtime misuse cannot be represented as a Rust runtime call.',
+      };
+    }
+  }
+
   if (
     file === 'packages/core/e2e/build-errors.test.ts' ||
     file === 'packages/core/e2e/dev.test.ts' ||
@@ -1580,7 +1874,23 @@ function workflowCoreWf07Override(row) {
     );
   }
 
+  if (file === 'packages/core/e2e/event-log-race-repro.test.ts') {
+    return verified(
+      'hook_sleep_interaction_preserves_waiters_steps_and_payload_ordering',
+      'WF-01 core E2E closure: event-log race repro is covered by deterministic hook/sleep/step event-ordering tests in workflow-core.'
+    );
+  }
+
   if (file === 'packages/core/e2e/e2e.test.ts') {
+    const portableTestName = wf01CoreE2ePortableTests.get(line);
+    if (portableTestName) {
+      return verified(portableTestName, wf01CoreE2eNote);
+    }
+    const jsOnlyNote = wf01CoreE2eJsOnlyRows.get(line);
+    if (jsOnlyNote) {
+      return jsOnly(jsOnlyNote);
+    }
+
     const text = `${row.suitePath} ${row.caseName}`;
     if (
       text.includes('pages router') ||
