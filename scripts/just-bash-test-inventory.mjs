@@ -854,6 +854,58 @@ const jbc13CaseGroups = [
   },
 ];
 
+const jbc15CaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [
+      6, 13, 20, 27, 34, 41, 48, 55, 62, 69, 76, 83, 99, 106, 113, 120,
+      127, 134, 143, 150, 171, 180, 187, 194, 356, 363, 370, 393, 400, 407,
+      473, 480,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_binary_comparison_logical_unary_and_variable_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic expansion and command rows for binary, comparison, logical, unary, variable, grouping, precedence, and zero/nonzero status behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
+    lines: [6, 17, 29, 90, 101, 126, 138, 163, 375, 388, 401, 414, 498],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::control-flow',
+    rustTest: 'upstream_control_flow_if_for_case_rows',
+    notes:
+      'JBC-15 verifies portable if/else, for-list expansion, empty for lists, loop-variable persistence, brace-expanded for lists, literal/glob/multi/default case matches, and case-in-for behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/export.test.ts',
+    lines: [6, 12, 18, 26, 34, 50, 57, 63, 69, 78, 85, 94, 102],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::export',
+    rustTest: 'upstream_export_builtin_assignment_listing_and_same_exec_rows',
+    notes:
+      'JBC-15 verifies portable export assignment, multi-assignment, equals-in-value, empty and existing-name exports, listing and -p output, alias exclusion, -n value preservation, same-exec use, and subshell visibility.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/unset.test.ts',
+    lines: [6, 16, 25, 37, 48, 60, 72, 85, 101, 112],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::unset',
+    rustTest: 'upstream_unset_builtin_variable_function_and_scope_rows',
+    notes:
+      'JBC-15 verifies portable unset variable, multi-variable, missing-variable, -v, -f function, missing-function, function-scope, local-scope, status, and non-crashing simple unset behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [411, 422, 433, 455, 465],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::set',
+    rustTest: 'upstream_set_pipefail_rows',
+    notes:
+      'JBC-15 verifies portable pipefail success, first-command failure, middle-command failure, default last-command pipeline status, and +o pipefail disablement.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -884,6 +936,7 @@ function caseOverrideFor(testCase) {
     ...jbc10CaseGroups,
     ...jbc12CaseGroups,
     ...jbc13CaseGroups,
+    ...jbc15CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

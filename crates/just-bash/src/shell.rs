@@ -2638,20 +2638,8 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 stderr: String::new(),
                 exit_code: 1,
             }),
-            "export" => {
-                for arg in args {
-                    if let Some((name, value)) = split_assignment_text(arg) {
-                        self.state.assign_var(name, value);
-                    }
-                }
-                Some(ExecOutput::default())
-            }
-            "unset" => {
-                for arg in args {
-                    self.state.unset_var(arg);
-                }
-                Some(ExecOutput::default())
-            }
+            "export" => Some(self.execute_export(args)),
+            "unset" => Some(self.execute_unset(args)),
             "local" => Some(self.execute_local(args)),
             "declare" | "typeset" => Some(self.execute_declare(args)),
             "set" => {
@@ -2699,6 +2687,52 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 self.state.declare_local(name, Some(value));
             } else {
                 self.state.declare_local(arg.clone(), None);
+            }
+        }
+        ExecOutput::default()
+    }
+
+    fn execute_export(&mut self, args: &[String]) -> ExecOutput {
+        if args.is_empty() || args == ["-p"] {
+            return ExecOutput {
+                stdout: format_export_listing(&self.state.env),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
+        let mut no_export_attribute = false;
+        for arg in args {
+            match arg.as_str() {
+                "-n" => {
+                    no_export_attribute = true;
+                }
+                "-p" => {}
+                _ if no_export_attribute && is_valid_name(arg) => {}
+                _ => {
+                    if let Some((name, value)) = split_assignment_text(arg) {
+                        self.state.assign_var(name, value);
+                    } else if is_valid_name(arg) {
+                        let value = self.state.lookup_var(arg).unwrap_or_default().to_string();
+                        self.state.env.entry(arg.clone()).or_insert(value);
+                    }
+                }
+            }
+        }
+
+        ExecOutput::default()
+    }
+
+    fn execute_unset(&mut self, args: &[String]) -> ExecOutput {
+        let mut unset_functions = false;
+        for arg in args {
+            match arg.as_str() {
+                "-f" => unset_functions = true,
+                "-v" => unset_functions = false,
+                _ if unset_functions => {
+                    self.state.functions.remove(arg);
+                }
+                _ => self.state.unset_var(arg),
             }
         }
         ExecOutput::default()
@@ -2754,7 +2788,6 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_for(&mut self, command: &ForCommand) -> ExecOutput {
-        let previous = self.state.lookup_var(&command.variable).map(str::to_string);
         let mut output = ExecOutput::default();
         let mut iterations = 0usize;
         let words = command
@@ -2771,10 +2804,6 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             self.state.assign_var(command.variable.clone(), value);
             output.append(self.execute_statements(&command.body));
-        }
-        match previous {
-            Some(value) => self.state.assign_var(command.variable.clone(), value),
-            None => self.state.unset_var(&command.variable),
         }
         output
     }
@@ -3190,6 +3219,16 @@ fn split_assignment_text(text: &str) -> Option<(String, String)> {
     let equals = text.find('=')?;
     let name = text[..equals].to_string();
     is_valid_name(&name).then(|| (name, text[equals + 1..].to_string()))
+}
+
+fn format_export_listing(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(name, value)| format!("declare -x {name}=\"{}\"\n", quote_export_value(value)))
+        .collect()
+}
+
+fn quote_export_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn parse_array_reference(parameter: &str) -> Option<(&str, ArrayIndex)> {
@@ -3761,10 +3800,125 @@ mod tests {
     }
 
     #[test]
+    fn upstream_arithmetic_binary_comparison_logical_unary_and_variable_rows() {
+        let mut shell = shell().with_env([("X", "5")]);
+
+        assert_eq!(
+            shell
+                .exec("echo $((5 + 3)) $((10 - 4)) $((6 * 7)) $((20 / 4)) $((7 / 2)) $((17 % 5))")
+                .stdout,
+            "8 6 42 5 3 2\n"
+        );
+        assert_eq!(
+            shell
+                .exec("echo $((2 ** 10)) $((1 << 8)) $((256 >> 4)) $((12 & 10)) $((12 | 10)) $((12 ^ 10))")
+                .stdout,
+            "1024 256 16 8 14 6\n"
+        );
+        assert_eq!(
+            shell
+                .exec("echo $((3 < 5)) $((5 < 3)) $((3 <= 3)) $((4 <= 3)) $((5 > 3)) $((3 > 5))")
+                .stdout,
+            "1 0 1 0 1 0\n"
+        );
+        assert_eq!(
+            shell
+                .exec(
+                    "echo $((3 >= 3)) $((2 >= 3)) $((5 == 5)) $((5 == 6)) $((5 != 6)) $((5 != 5))"
+                )
+                .stdout,
+            "1 0 1 0 1 0\n"
+        );
+        assert_eq!(
+            shell
+                .exec("echo $((1 && 1)) $((1 && 0)) $((0 && 1)) $((1 || 0)) $((0 || 1)) $((0 || 0)) $((!0)) $((!1)) $((!5))")
+                .stdout,
+            "1 0 0 1 1 0 1 0 0\n"
+        );
+        assert_eq!(
+            shell.exec("echo $((-5)) $((+5)) $((~0))").stdout,
+            "-5 5 -1\n"
+        );
+        assert_eq!(
+            shell
+                .exec("x=5; echo $((x + 3)) $(($x + 3)) $((unset_var + 5)) $((2 * (3 + 4))) $(((1 + 2) * 3 + 4)) $((2 + 3 * 4)) $((X + 1))")
+                .stdout,
+            "8 8 5 14 13 14 6\n"
+        );
+        assert_eq!(shell.exec("(( 5 )); echo $?").stdout, "0\n");
+        assert_eq!(shell.exec("(( 0 )); echo $?").stdout, "1\n");
+    }
+
+    #[test]
     fn just_bash_loops_for_iterates_list_items() {
         let result = shell().exec("for i in a b c; do echo $i; done");
         assert_eq!(result.stdout, "a\nb\nc\n");
         assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn upstream_control_flow_if_for_case_rows() {
+        let mut shell = shell();
+
+        assert_eq!(shell.exec("if true; then\n  echo yes\nfi").stdout, "yes\n");
+        assert_eq!(
+            shell
+                .exec("if false; then\n  echo yes\nfi\necho \"done\"")
+                .stdout,
+            "done\n"
+        );
+        assert_eq!(
+            shell
+                .exec("if false; then\n  echo yes\nelse\n  echo no\nfi")
+                .stdout,
+            "no\n"
+        );
+        assert_eq!(
+            shell
+                .exec("items=\"x y z\"; for i in a b c; do echo $i; done; for i in $items; do echo $i; done")
+                .stdout,
+            "a\nb\nc\nx\ny\nz\n"
+        );
+        assert_eq!(
+            shell
+                .exec("for i in; do echo $i; done; echo \"done\"; for i in 1 2 3; do :; done; echo $i; for i in {1..3}; do echo $i; done")
+                .stdout,
+            "done\n3\n1\n2\n3\n"
+        );
+        assert_eq!(
+            shell
+                .exec("x=hello; case $x in hello) echo \"matched hello\" ;; world) echo \"matched world\" ;; esac")
+                .stdout,
+            "matched hello\n"
+        );
+        assert_eq!(
+            shell
+                .exec("x=hello; case $x in h*) echo \"starts with h\" ;; *) echo default ;; esac")
+                .stdout,
+            "starts with h\n"
+        );
+        assert_eq!(
+            shell
+                .exec(
+                    "x=yes; case $x in yes|y|Y) echo affirmative ;; no|n|N) echo negative ;; esac"
+                )
+                .stdout,
+            "affirmative\n"
+        );
+        assert_eq!(
+            shell
+                .exec(
+                    "x=unknown; case $x in yes) echo yes ;; no) echo no ;; *) echo default ;; esac"
+                )
+                .stdout,
+            "default\n"
+        );
+        assert_eq!(
+            shell
+                .exec("for x in foo bar baz; do case $x in foo) echo one ;; bar) echo two ;; *) echo other ;; esac; done")
+                .stdout,
+            "one\ntwo\nother\n"
+        );
     }
 
     #[test]
@@ -3797,6 +3951,43 @@ mod tests {
     }
 
     #[test]
+    fn upstream_set_pipefail_rows() {
+        let mut interp = shell();
+
+        assert_eq!(
+            interp
+                .exec("set -o pipefail; echo hello | cat | cat; echo \"exit: $?\"")
+                .stdout,
+            "hello\nexit: 0\n"
+        );
+        assert_eq!(
+            interp
+                .exec("set -o pipefail; false | true; echo \"exit: $?\"")
+                .stdout,
+            "exit: 1\n"
+        );
+        assert_eq!(
+            interp
+                .exec("set -o pipefail; echo hello | false | cat; echo \"exit: $?\"")
+                .stdout,
+            "exit: 1\n"
+        );
+        let mut no_pipefail_shell = shell();
+        assert_eq!(
+            no_pipefail_shell
+                .exec("false | true; echo \"exit: $?\"")
+                .stdout,
+            "exit: 0\n"
+        );
+        assert_eq!(
+            interp
+                .exec("set +o pipefail; false | true; echo \"exit: $?\"")
+                .stdout,
+            "exit: 0\n"
+        );
+    }
+
+    #[test]
     fn just_bash_redirection_writes_virtual_files_without_host_shell() {
         let mut shell = shell();
         let result =
@@ -3813,6 +4004,115 @@ mod tests {
         let result =
             shell().exec("declare -a arr; arr[0]=first; arr[1]=second; echo ${arr[0]} ${arr[1]}");
         assert_eq!(result.stdout, "first second\n");
+    }
+
+    #[test]
+    fn upstream_export_builtin_assignment_listing_and_same_exec_rows() {
+        let mut shell = shell().with_env([("EXISTING", "value"), ("FOO", "bar")]);
+
+        assert_eq!(shell.exec("export FOO=bar; echo $FOO").stdout, "bar\n");
+        assert_eq!(
+            shell.exec("export FOO=bar BAZ=qux; echo $FOO $BAZ").stdout,
+            "bar qux\n"
+        );
+        assert_eq!(
+            shell
+                .exec("export URL=http://example.com?foo=bar; echo $URL")
+                .stdout,
+            "http://example.com?foo=bar\n"
+        );
+        assert_eq!(shell.exec("export EMPTY; echo X${EMPTY}X").stdout, "XX\n");
+        assert_eq!(
+            shell.exec("export EXISTING; echo $EXISTING").stdout,
+            "value\n"
+        );
+        assert_eq!(
+            shell
+                .exec("export GREETING=hello; echo $GREETING world")
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(shell.exec("export FOO=bar; (echo $FOO)").stdout, "bar\n");
+        assert_eq!(shell.exec("export -n FOO; echo \"$FOO\"").stdout, "bar\n");
+        assert_eq!(
+            shell.exec("export -n FOO BAZ; echo \"$FOO $BAZ\"").stdout,
+            "bar qux\n"
+        );
+
+        let listing = shell.exec("export").stdout;
+        assert!(listing.contains("declare -x FOO=\"bar\""));
+        assert!(listing.contains("declare -x BAZ=\"qux\""));
+
+        let p_listing = shell.exec("export -p").stdout;
+        assert!(p_listing.contains("declare -x FOO=\"bar\""));
+
+        let quoted_listing = shell.exec("export MSG=\"it's working\"; export").stdout;
+        assert!(quoted_listing.contains("declare -x MSG=\"it's working\""));
+
+        let alias_listing = shell.exec("alias ll='ls -la'; export").stdout;
+        assert!(!alias_listing.contains("BASH_ALIAS"));
+        assert!(alias_listing.contains("declare -x FOO=\"bar\""));
+    }
+
+    #[test]
+    fn upstream_unset_builtin_variable_function_and_scope_rows() {
+        let mut interp = shell().with_env([("VAR", "value"), ("A", "1"), ("B", "2"), ("C", "3")]);
+
+        assert_eq!(
+            interp
+                .exec("echo \"before: $VAR\"; unset VAR; echo \"after: $VAR\"")
+                .stdout,
+            "before: value\nafter: \n"
+        );
+        assert_eq!(
+            interp.exec("unset A B; echo \"A=$A B=$B C=$C\"").stdout,
+            "A= B= C=3\n"
+        );
+        assert_eq!(
+            interp.exec("unset NONEXISTENT; echo \"done\"").stdout,
+            "done\n"
+        );
+        assert_eq!(
+            interp
+                .with_env([("VAR", "value")])
+                .exec("unset -v VAR; echo \"VAR=$VAR\"")
+                .stdout,
+            "VAR=\n"
+        );
+        let mut status_shell = shell().with_env([("VAR", "value")]);
+        assert_eq!(status_shell.exec("unset VAR; echo $?").stdout, "0\n");
+
+        let mut function_shell = shell();
+        let function_result =
+            function_shell.exec("myfunc() { echo hello; }; myfunc; unset -f myfunc; myfunc");
+        assert_eq!(function_result.stdout, "hello\n");
+        assert!(function_result.stderr.contains("myfunc: command not found"));
+        assert_eq!(
+            function_shell
+                .exec("unset -f nonexistent_func; echo \"done\"")
+                .stdout,
+            "done\n"
+        );
+
+        let mut scoped_shell = shell().with_env([("VAR", "outer")]);
+        assert_eq!(
+            scoped_shell
+                .exec("myfunc() { unset VAR; echo \"in func: $VAR\"; }; myfunc; echo \"outside: $VAR\"")
+                .stdout,
+            "in func: \noutside: \n"
+        );
+        assert_eq!(
+            scoped_shell
+                .exec("myfunc() { local VAR=local; echo \"before: $VAR\"; unset VAR; echo \"after: $VAR\"; }; myfunc")
+                .stdout,
+            "before: local\nafter: \n"
+        );
+        assert_eq!(
+            scoped_shell
+                .exec("VAR=value; unset VAR; echo \"done\"")
+                .stdout,
+            "done\n"
+        );
     }
 
     #[test]
