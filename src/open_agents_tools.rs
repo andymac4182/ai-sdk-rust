@@ -1573,6 +1573,7 @@ mod tests {
     use std::pin::Pin;
     use std::process::Command;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1600,13 +1601,16 @@ mod tests {
 
     impl LocalSandbox {
         fn new(name: &str) -> Self {
+            static NEXT_SANDBOX_ID: AtomicU64 = AtomicU64::new(0);
+
             let unique = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system time after epoch")
                 .as_nanos();
+            let serial = NEXT_SANDBOX_ID.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
-                "ai-sdk-open-agent-tools-{name}-{}-{unique}",
-                std::process::id()
+                "ai-sdk-open-agent-tools-{name}-{}-{unique}-{serial}",
+                std::process::id(),
             ));
             std::fs::create_dir_all(&root).expect("creates temp sandbox root");
             Self {
