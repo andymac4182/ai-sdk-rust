@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 50.9%
-- Portable package average: 39.8%
+- Average estimated completion: 52.5%
+- Portable package average: 41.7%
 - Closed package rows: 18 / 54
 - Strict portable verified rows: 8 / 44
 - In-progress rows: 36
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 4583 / 7687
-- Strict inventory full portable cases unmapped: 3104
-- Displayed-row strict portable test cases mapped: 4404 / 7282
-- Displayed-row strict portable test cases unmapped: 2878
+- Strict inventory full portable cases mapped: 4642 / 7687
+- Strict inventory full portable cases unmapped: 3045
+- Displayed-row strict portable test cases mapped: 4463 / 7282
+- Displayed-row strict portable test cases unmapped: 2819
 
 ## 100% Closed
 
@@ -63,7 +63,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/deepinfra` | 0% | In progress | provider package | strict test inventory: 25 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/deepseek` | 0% | In progress | provider package | strict test inventory: 38 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/elevenlabs` | 0% | In progress | provider package | strict test inventory: 15 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/fal` | 0% | In progress | provider package | strict test inventory: 71 portable upstream cases still need named Rust tests; sample failing IDs:... |
+| `@ai-sdk/fal` | 83% | In progress | provider package | strict test inventory: 12 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/gladia` | 0% | In progress | provider package | strict test inventory: 7 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/huggingface` | 0% | In progress | provider package | strict test inventory: 37 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/hume` | 0% | In progress | provider package | strict test inventory: 9 portable upstream cases still need named Rust tests; sample failing IDs:... |
