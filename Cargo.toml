@@ -1,7 +1,11 @@
 [workspace]
 members = [
     ".",
+    "crates/ai-sdk-amazon-bedrock",
+    "crates/ai-sdk-anthropic",
     "crates/ai-sdk-gateway",
+    "crates/ai-sdk-google",
+    "crates/ai-sdk-google-vertex",
     "crates/ai-sdk-mcp",
     "crates/ai-sdk-openai-compatible",
     "crates/ai-sdk-open-responses",

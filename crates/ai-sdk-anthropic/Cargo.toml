@@ -1,0 +1,19 @@
+[package]
+name = "ai-sdk-anthropic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust port inventory for the Vercel AI SDK Anthropic provider package."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "ai_sdk_anthropic"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

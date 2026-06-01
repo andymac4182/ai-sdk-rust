@@ -99,30 +99,45 @@ reasoning.
 | CROSS-02 | `019e830c-0e17-76e3-9363-7dc7377c32c6` | Add live proof registry |
 | CROSS-03 | `019e830b-48a7-7713-a041-766f1b5efcb6` | Add master parity gate |
 
+## AI-01 Child Rows
+
+Created by the AI-01 inventory slice on 2026-06-01. These rows remain open
+until each package maps every portable row in
+`docs/ai-foundational-provider-inventory.md` to named Rust tests in the owning
+crate, while preserving explicit JavaScript-only and type-system exceptions.
+
+| Child row | Status | Owner scope | Required proof |
+| --- | --- | --- | --- |
+| AI-01A | queued | `@ai-sdk/anthropic` in `crates/ai-sdk-anthropic` | Port Anthropic language model, files, skills, cache control, prompt conversion, provider tools, usage conversion, error mapping, fixtures, and ignored live-provider proof. |
+| AI-01B | queued | `@ai-sdk/amazon-bedrock` in `crates/ai-sdk-amazon-bedrock` | Port Bedrock chat, Anthropic-on-Bedrock, embeddings, image, reranking, event-stream handling, SigV4/API-key fetch wrappers, tool preparation, usage conversion, settings, fixtures, and ignored live-provider proof. |
+| AI-01C | queued | `@ai-sdk/google` in `crates/ai-sdk-google` | Port Gemini language, embedding, image, video, files, interactions, schema conversion, URL support, tool preparation, JSON accumulator behavior, fixtures, and ignored live-provider proof. |
+| AI-01D | queued | `@ai-sdk/google-vertex` in `crates/ai-sdk-google-vertex` | Port Vertex auth, provider base/edge variants, embedding, image, video, Anthropic-on-Vertex, MaaS, xAI-on-Vertex, fixtures, and ignored live-provider proof. |
+
 ## AI SDK Package Queue
 
 The AI SDK is the largest open surface. Current generated progress shows:
 
 - 21 of 52 package rows closed.
 - 11 of 42 portable package rows strictly verified.
-- 16 package rows in progress.
-- 15 package rows not started.
+- 20 package rows in progress.
+- 11 package rows not started.
 
 In-progress packages:
 
-`@ai-sdk/azure`, `@ai-sdk/baseten`, `@ai-sdk/black-forest-labs`,
-`@ai-sdk/bytedance`, `@ai-sdk/cerebras`, `@ai-sdk/deepgram`,
-`@ai-sdk/deepinfra`, `@ai-sdk/huggingface`, `@ai-sdk/hume`,
-`@ai-sdk/lmnt`, `@ai-sdk/luma`, `@ai-sdk/moonshotai`, `@ai-sdk/revai`,
-`@ai-sdk/togetherai`, `@ai-sdk/vercel`, `@ai-sdk/voyage`.
+`@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`,
+`@ai-sdk/google-vertex`, `@ai-sdk/azure`, `@ai-sdk/baseten`,
+`@ai-sdk/black-forest-labs`, `@ai-sdk/bytedance`, `@ai-sdk/cerebras`,
+`@ai-sdk/deepgram`, `@ai-sdk/deepinfra`, `@ai-sdk/huggingface`,
+`@ai-sdk/hume`, `@ai-sdk/lmnt`, `@ai-sdk/luma`, `@ai-sdk/moonshotai`,
+`@ai-sdk/revai`, `@ai-sdk/togetherai`, `@ai-sdk/vercel`,
+`@ai-sdk/voyage`.
 
 Not-started packages:
 
-`@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`,
-`@ai-sdk/google-vertex`, `@ai-sdk/xai`, `@ai-sdk/alibaba`,
-`@ai-sdk/cohere`, `@ai-sdk/elevenlabs`, `@ai-sdk/fal`,
-`@ai-sdk/fireworks`, `@ai-sdk/gladia`, `@ai-sdk/groq`,
-`@ai-sdk/klingai`, `@ai-sdk/prodia`, `@ai-sdk/replicate`.
+`@ai-sdk/xai`, `@ai-sdk/alibaba`, `@ai-sdk/cohere`,
+`@ai-sdk/elevenlabs`, `@ai-sdk/fal`, `@ai-sdk/fireworks`,
+`@ai-sdk/gladia`, `@ai-sdk/groq`, `@ai-sdk/klingai`,
+`@ai-sdk/prodia`, `@ai-sdk/replicate`.
 
 ## Merge-Back Checklist
 

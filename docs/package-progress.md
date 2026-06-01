@@ -3,12 +3,12 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 55.1%
-- Portable package average: 44.4%
+- Average estimated completion: 55.5%
+- Portable package average: 44.9%
 - Closed package rows: 21 / 52
 - Strict portable verified rows: 11 / 42
-- In-progress rows: 16
-- Not-started rows: 15
+- In-progress rows: 20
+- Not-started rows: 11
 
 ## 100% Closed
 
@@ -40,6 +40,10 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
+| `@ai-sdk/anthropic` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
+| `@ai-sdk/amazon-bedrock` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
+| `@ai-sdk/google` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
+| `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/azure` | 55% | In progress | provider package | Initial provider crate exists; provider metadata fixtures are mapped, with Azure-specific tools, broader Responses... |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
@@ -61,10 +65,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
-| `@ai-sdk/anthropic` | 0% | Not started | provider package |
-| `@ai-sdk/amazon-bedrock` | 0% | Not started | provider package |
-| `@ai-sdk/google` | 0% | Not started | provider package |
-| `@ai-sdk/google-vertex` | 0% | Not started | provider package |
 | `@ai-sdk/xai` | 0% | Not started | provider package |
 | `@ai-sdk/alibaba` | 0% | Not started | provider package |
 | `@ai-sdk/cohere` | 0% | Not started | provider package |
