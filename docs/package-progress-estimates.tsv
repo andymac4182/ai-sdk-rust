@@ -2,6 +2,5 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-cohere	35	Embedding and reranking slices cover default/raw embedding plus text/object rerank behavior; chat, prompt conversion, tool prep, streaming, citations, validation edges, and live proof remain explicitly inventoried.
 groq	35	OpenAI-compatible chat plus transcription request/response behavior exists; browser-search tool, Groq-specific message and usage split parity, streaming edge parity, custom date injection, and live proof remain explicitly inventoried.
 xai	35	Initial Responses, shared server/custom tool, chat, and image provider wrapper exists; files, video, xAI-specific tool ids, custom usage/message conversion, and full current upstream case parity remain explicitly inventoried.

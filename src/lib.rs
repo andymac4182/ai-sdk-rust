@@ -110,8 +110,8 @@ pub use chat_transport::{
     convert_ui_messages_to_model_messages_with_tools,
 };
 pub use cohere::{
-    CohereEmbeddingModel, CohereProvider, CohereProviderSettings, CohereRerankingModel,
-    DEFAULT_COHERE_BASE_URL, cohere, create_cohere,
+    CohereChatLanguageModel, CohereEmbeddingModel, CohereProvider, CohereProviderSettings,
+    CohereRerankingModel, DEFAULT_COHERE_BASE_URL, cohere, create_cohere,
 };
 pub use completion_transport::{
     CompletionRequestOptions, CompletionStreamProtocol, CompletionTransport,
