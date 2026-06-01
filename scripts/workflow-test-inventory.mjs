@@ -2088,23 +2088,29 @@ function aiRustTestName(row) {
     return '';
   }
   if (file.endsWith('/agent/do-stream-step.test.ts')) {
-    return 'workflow_ai_upstream_do_stream_step_rows_are_owned_by_workflow_ai';
+    if (suite.startsWith('normalizeFinishReason')) {
+      return 'do_stream_step_upstream_normalize_finish_reason_matches_strings_objects_and_edges';
+    }
+    if (suite.startsWith('safeParseToolCallInput')) {
+      return 'do_stream_step_upstream_safe_parse_tool_call_input_parses_missing_and_malformed_inputs';
+    }
+    return 'do_stream_step_upstream_should_not_throw_when_streamed_tool_call_input_is_malformed_json';
   }
   if (
     file.endsWith('/agent/durable-agent.test.ts') ||
     file.endsWith('/agent/durable-agent-compat.test.ts') ||
     file.endsWith('/agent/telemetry.test.ts')
   ) {
-    return 'workflow_ai_upstream_durable_agent_rows_are_owned_by_workflow_ai';
+    return durableAgentRustTestName(row);
   }
   if (file.endsWith('/agent/stream-text-iterator.test.ts')) {
-    return 'workflow_ai_upstream_stream_text_iterator_rows_are_owned_by_workflow_ai';
+    return streamTextIteratorRustTestName(row);
   }
   if (file.endsWith('/agent/tools-to-model-tools.test.ts')) {
-    return 'workflow_ai_upstream_tools_to_model_tools_rows_are_owned_by_workflow_ai';
+    return toolsToModelToolsRustTestName(row);
   }
   if (file.endsWith('/workflow-chat-transport.test.ts')) {
-    return 'workflow_ai_upstream_workflow_chat_transport_rows_are_owned_by_workflow_ai';
+    return workflowChatTransportRustTestName(row);
   }
   if (file.endsWith('/get-error-message.test.ts')) {
     if (testCase.includes('Error instance')) {
@@ -2158,12 +2164,211 @@ function aiRustTestName(row) {
     }
   }
 
-  return 'workflow_ai_upstream_package_ai_rows_are_owned_by_workflow_ai';
+  return '';
+}
+
+function durableAgentRustTestName(row) {
+  const file = row.file;
+  const line = row.line;
+
+  if (file.endsWith('/agent/durable-agent-compat.test.ts')) {
+    const compatTests = new Map([
+      [297, 'workflow_agent_upstream_should_use_constructor_prepare_step_when_not_specified_in_stream'],
+      [318, 'workflow_agent_upstream_should_prefer_stream_prepare_step_over_constructor_prepare_step'],
+      [344, 'workflow_agent_upstream_should_call_constructor_prepare_step_on_each_step_in_multi_step'],
+      [373, 'workflow_agent_should_pass_abort_signal_to_local_tool_execution'],
+      [391, 'workflow_agent_upstream_should_complete_within_timeout'],
+      [408, 'workflow_agent_upstream_should_pass_string_instructions_to_the_model'],
+      [452, 'workflow_agent_compat_should_pass_system_message_instructions'],
+      [504, 'workflow_agent_compat_should_pass_array_of_system_message_instructions'],
+      [583, 'workflow_agent_compat_should_call_experimental_on_start_from_constructor'],
+      [607, 'workflow_agent_compat_should_call_experimental_on_start_from_stream_method'],
+      [628, 'workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order'],
+      [655, 'workflow_agent_compat_should_pass_experimental_on_start_event_information'],
+      [713, 'workflow_agent_compat_should_call_experimental_on_step_start_from_constructor'],
+      [737, 'workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method'],
+      [758, 'workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order'],
+      [785, 'workflow_agent_compat_should_pass_experimental_on_step_start_event_information'],
+      [839, 'workflow_agent_compat_should_call_on_step_finish_from_constructor'],
+      [861, 'workflow_agent_compat_should_call_on_step_finish_from_stream_method'],
+      [884, 'workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order'],
+      [911, 'workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback'],
+      [954, 'workflow_agent_compat_should_call_on_tool_execution_start_from_constructor'],
+      [985, 'workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method'],
+      [1015, 'workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order'],
+      [1049, 'workflow_agent_compat_should_pass_tool_execution_start_event_information'],
+      [1093, 'workflow_agent_compat_should_call_on_tool_execution_end_from_constructor'],
+      [1124, 'workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method'],
+      [1154, 'workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order'],
+      [1188, 'workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success'],
+      [1247, 'workflow_agent_compat_should_call_on_finish_from_constructor'],
+      [1269, 'workflow_agent_compat_should_call_on_finish_from_stream_method'],
+      [1292, 'workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order'],
+      [1319, 'workflow_agent_compat_should_pass_finish_event_information'],
+      [1360, 'workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events'],
+      [1415, 'workflow_agent_telemetry_integrations_call_globally_registered_integration_listeners'],
+      [1467, 'workflow_agent_telemetry_integrations_call_integration_listeners_alongside_agent_callbacks'],
+      [1530, 'workflow_agent_telemetry_integrations_do_not_break_streaming_when_a_listener_throws'],
+      [1578, 'workflow_agent_upstream_should_pause_when_tool_needs_approval'],
+      [1609, 'workflow_agent_upstream_should_support_needs_approval_as_a_function'],
+    ]);
+    return compatTests.get(line) ?? '';
+  }
+
+  if (file.endsWith('/agent/durable-agent.test.ts')) {
+    const durableTests = new Map([
+      [64, 'workflow_agent_upstream_should_convert_fatal_error_to_tool_error_result'],
+      [142, 'workflow_agent_upstream_should_convert_non_fatal_error_to_tool_error_result'],
+      [216, 'workflow_agent_upstream_should_successfully_execute_tools_that_return_normally'],
+      [286, 'workflow_agent_upstream_should_pass_through_language_model_tool_result_output_directly'],
+      [361, 'workflow_agent_upstream_should_pass_through_pre_formatted_text_output_directly'],
+      [423, 'workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools'],
+      [510, 'workflow_agent_upstream_should_handle_mixed_provider_executed_and_local_tools'],
+      [616, 'workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag'],
+      [689, 'workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing'],
+      [770, 'workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute'],
+      [842, 'workflow_agent_upstream_should_handle_mixed_executable_and_client_side_tools_in_same_step'],
+      [958, 'workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools'],
+      [1020, 'workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally'],
+      [1091, 'workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator'],
+      [1128, 'workflow_agent_upstream_should_use_constructor_prepare_step_when_not_specified_in_stream'],
+      [1163, 'workflow_agent_upstream_should_prefer_stream_prepare_step_over_constructor_prepare_step'],
+      [1202, 'stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages'],
+      [1248, 'stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically'],
+      [1293, 'workflow_agent_upstream_should_provide_step_information_to_prepare_step_callback'],
+      [1347, 'workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function'],
+      [1430, 'workflow_agent_upstream_should_pass_messages_to_multiple_tools_in_parallel_execution'],
+      [1527, 'workflow_agent_upstream_should_pass_updated_messages_on_subsequent_tool_call_rounds'],
+      [1652, 'workflow_agent_upstream_should_pass_generation_settings_from_constructor_to_stream_text_iterator'],
+      [1694, 'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_generation_settings'],
+      [1735, 'workflow_agent_upstream_should_use_constructor_stop_conditions_when_not_specified_in_stream'],
+      [1771, 'workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator'],
+      [1805, 'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice'],
+      [1842, 'workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified'],
+      [1898, 'workflow_agent_upstream_should_pass_on_error_callback_to_stream_text_iterator'],
+      [1934, 'workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result'],
+      [2009, 'workflow_agent_compat_should_pass_finish_event_information'],
+      [2080, 'workflow_agent_upstream_should_call_on_abort_when_abort_signal_is_already_aborted'],
+      [2117, 'workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context'],
+      [2179, 'workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context'],
+      [2241, 'workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context'],
+      [2306, 'workflow_agent_upstream_should_return_messages_and_steps_in_result'],
+      [2374, 'workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator'],
+      [2450, 'workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator'],
+      [2538, 'workflow_agent_upstream_should_pass_include_raw_chunks_to_stream_text_iterator'],
+      [2574, 'workflow_agent_upstream_should_pass_telemetry_settings_from_constructor_to_stream_text_iterator'],
+      [2614, 'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_telemetry'],
+      [2653, 'workflow_agent_upstream_should_return_undefined_ui_messages_when_collect_ui_messages_is_false'],
+      [2683, 'workflow_agent_upstream_should_return_undefined_ui_messages_when_collect_ui_messages_is_not_set'],
+      [2712, 'workflow_agent_upstream_should_pass_collect_ui_chunks_when_collect_ui_messages_is_true'],
+      [2749, 'workflow_agent_upstream_should_work_when_collect_ui_messages_is_true_and_send_finish_is_false'],
+      [2794, 'workflow_agent_upstream_should_not_write_finish_chunk_but_still_return_ui_messages_when_send_finish_is_false'],
+    ]);
+    return durableTests.get(line) ?? '';
+  }
+
+  if (file.endsWith('/agent/telemetry.test.ts')) {
+    const telemetryTests = new Map([
+      [121, 'workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events'],
+      [201, 'workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events'],
+      [246, 'workflow_agent_telemetry_integrations_include_only_configured_runtime_and_tools_context_fields'],
+      [280, 'workflow_agent_telemetry_integrations_include_only_configured_runtime_and_tools_context_fields'],
+      [320, 'workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events'],
+      [366, 'workflow_agent_telemetry_integrations_emit_execute_tool_when_an_approved_tool_resumes'],
+      [442, 'workflow_agent_telemetry_integrations_include_only_configured_runtime_and_tools_context_fields'],
+      [510, 'workflow_agent_telemetry_integrations_emit_execute_tool_when_an_approved_tool_resumes'],
+      [585, 'workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events'],
+    ]);
+    return telemetryTests.get(line) ?? '';
+  }
+
+  return '';
+}
+
+function streamTextIteratorRustTestName(row) {
+  const streamTextIteratorTests = new Map([
+    [77, 'stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation'],
+    [165, 'stream_text_iterator_upstream_should_not_add_provider_options_when_provider_metadata_is_undefined'],
+    [231, 'stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls'],
+    [335, 'stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata'],
+    [430, 'stream_text_iterator_upstream_should_preserve_openai_provider_metadata_including_item_id_now_that_reasoning_is_preserved'],
+    [506, 'stream_text_iterator_upstream_should_preserve_all_openai_metadata_fields_including_item_id'],
+    [581, 'stream_text_iterator_upstream_should_preserve_both_gemini_and_openai_metadata_in_mixed_provider_metadata'],
+    [662, 'stream_text_iterator_upstream_should_include_reasoning_parts_before_tool_call_parts'],
+    [740, 'stream_text_iterator_upstream_should_preserve_reasoning_provider_options'],
+    [818, 'stream_text_iterator_upstream_should_not_add_reasoning_parts_when_step_has_no_reasoning'],
+    [886, 'stream_text_iterator_upstream_should_apply_system_message_when_prepare_step_returns_only_system'],
+    [924, 'stream_text_iterator_upstream_should_apply_prepare_step_system_after_messages_override'],
+    [975, 'stream_text_iterator_upstream_should_replace_existing_system_message_when_messages_already_contains_one'],
+    [1023, 'stream_text_iterator_upstream_should_update_system_message_on_subsequent_steps'],
+    [1100, 'stream_text_iterator_upstream_should_preserve_malformed_tool_call_input_in_continuation'],
+  ]);
+  return streamTextIteratorTests.get(row.line) ?? '';
+}
+
+function toolsToModelToolsRustTestName(row) {
+  const caseSlug = slug(row.caseName);
+  return `tools_to_model_tools_upstream_${caseSlug}`;
+}
+
+function workflowChatTransportRustTestName(row) {
+  const chatTransportTests = new Map([
+    [25, 'workflow_chat_transport_uses_default_options_and_builds_send_request'],
+    [30, 'workflow_chat_transport_sends_messages_and_reports_chat_end'],
+    [36, 'workflow_chat_transport_accepts_and_stores_callback_functions'],
+    [52, 'workflow_chat_transport_uses_default_options_and_builds_send_request'],
+    [57, 'workflow_chat_transport_accepts_custom_max_consecutive_errors'],
+    [66, 'workflow_chat_transport_uses_custom_api_endpoint_and_builds_send_request'],
+    [137, 'workflow_chat_transport_reports_http_errors'],
+    [158, 'workflow_chat_transport_uses_custom_api_endpoint_and_builds_reconnect_request'],
+    [335, 'workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header'],
+    [379, 'workflow_chat_transport_reconnect_falls_back_to_zero_when_tail_header_is_missing'],
+    [428, 'workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header'],
+    [473, 'workflow_chat_transport_reconnect_formats_consecutive_errors'],
+    [514, 'workflow_chat_transport_calls_on_chat_send_message_callback'],
+    [562, 'workflow_chat_transport_calls_on_chat_end_callback_when_stream_ends'],
+  ]);
+  return chatTransportTests.get(row.line) ?? '';
+}
+
+function aiPortabilityOverride(row) {
+  if (
+    row.file.endsWith('/agent/durable-agent-compat.test.ts') &&
+    row.line === 264
+  ) {
+    return {
+      rustTestName: '',
+      status: 'js-only-documented',
+      portability: 'js-only-documented',
+      note:
+        'Legacy ToolLoopAgent prepareCall compatibility is a JavaScript adapter gap in upstream and is marked it.fails; Rust workflow-ai uses typed generation settings plus prepareStep instead.',
+    };
+  }
+
+  if (
+    row.file.endsWith('/workflow-chat-transport.test.ts') &&
+    (row.line === 215 || row.line === 257)
+  ) {
+    return {
+      rustTestName: '',
+      status: 'js-only-documented',
+      portability: 'js-only-documented',
+      note:
+        'Browser Fetch AbortSignal propagation is JavaScript host behavior; Rust callers own cancellation in their WorkflowChatTransportClient implementation.',
+    };
+  }
+
+  return undefined;
 }
 
 function aiInventoryOverride(row) {
   if (row.packageName !== 'ai') {
     return undefined;
+  }
+
+  const portabilityOverride = aiPortabilityOverride(row);
+  if (portabilityOverride) {
+    return portabilityOverride;
   }
 
   if (row.portability === 'type-system-impossible') {
@@ -2179,7 +2384,7 @@ function aiInventoryOverride(row) {
     rustTestName: aiRustTestName(row),
     status: 'verified',
     note:
-      'Verified by package-owned workflow-ai tests; implementation bridges to existing Rust AI SDK/chat-sdk compatible internals where appropriate.',
+      `Rust counterpart: ${aiRustTestName(row)}. Verified by package-owned workflow-ai facade tests or adjacent ai-sdk-workflow implementation tests where the facade re-exports the behavior.`,
   };
 }
 
@@ -2462,7 +2667,33 @@ function summarize(rows, testFiles) {
 }
 
 function renderInventory(rows, testFiles, overrides) {
-  const summaryRows = summarize(rows, testFiles).map((summary) => [
+  const seenOverrideKeys = new Set();
+  const effectiveRows = rows.map((row) => {
+    const overrideKey = rowKey(row);
+    const override = overrides.get(overrideKey);
+    const generatedOverride = rowOverride(row) ?? aiInventoryOverride(row);
+    if (override) {
+      seenOverrideKeys.add(rowKey(row));
+    }
+    return {
+      ...row,
+      portability: override?.portability ?? generatedOverride?.portability ?? row.portability,
+      rustOwner:
+        override?.rustOwner ??
+        row.rustOwner ??
+        rustOwners.get(row.packageName) ??
+        'unassigned',
+      rustTestName:
+        override?.rustTestName ??
+        row.rustTestName ??
+        generatedOverride?.rustTestName ??
+        implementedRustTestName(row),
+      status: override?.status ?? generatedOverride?.status ?? implementedStatus(row),
+      note: override?.notes ?? generatedOverride?.note ?? implementedNote(row),
+    };
+  });
+
+  const summaryRows = summarize(effectiveRows, testFiles).map((summary) => [
     summary.packageId,
     summary.files,
     summary.cases,
@@ -2472,14 +2703,7 @@ function renderInventory(rows, testFiles, overrides) {
     summary.typeSystem,
   ]);
 
-  const seenOverrideKeys = new Set();
-  const caseRows = rows.map((row) => {
-    const overrideKey = rowKey(row);
-    const override = overrides.get(overrideKey);
-    const generatedOverride = rowOverride(row) ?? aiInventoryOverride(row);
-    if (override) {
-      seenOverrideKeys.add(rowKey(row));
-    }
+  const caseRows = effectiveRows.map((row) => {
     return [
       row.packageName,
       row.file,
@@ -2487,17 +2711,11 @@ function renderInventory(rows, testFiles, overrides) {
       row.suitePath || '(root)',
       row.caseName,
       row.declaration,
-      override?.portability ?? row.portability,
-      override?.rustOwner ??
-        row.rustOwner ??
-        rustOwners.get(row.packageName) ??
-        'unassigned',
-      override?.rustTestName ??
-        row.rustTestName ??
-        generatedOverride?.rustTestName ??
-        implementedRustTestName(row),
-      override?.status ?? generatedOverride?.status ?? implementedStatus(row),
-      override?.notes ?? generatedOverride?.note ?? implementedNote(row),
+      row.portability,
+      row.rustOwner,
+      row.rustTestName,
+      row.status,
+      row.note,
     ];
   });
 

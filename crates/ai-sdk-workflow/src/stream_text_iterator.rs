@@ -1552,6 +1552,55 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_iterator_upstream_should_preserve_malformed_tool_call_input_in_continuation() {
+        let malformed_input = r#"{"city":"San Francisco""#;
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "call-1",
+                        "getWeather",
+                        malformed_input,
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        let first = iterator
+            .next(None)
+            .expect("first step succeeds")
+            .expect("tool-call yield");
+        assert_eq!(first.tool_calls[0].input, json!(malformed_input));
+        assert_eq!(first.tool_calls[0].invalid, Some(true));
+
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "getWeather",
+                json!({ "ok": true }),
+            )]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        let assistant = prompt
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Assistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("assistant message");
+        let LanguageModelAssistantContentPart::ToolCall(tool_call) = &assistant.content[0] else {
+            panic!("expected tool-call prompt part");
+        };
+        assert_eq!(tool_call.input, json!(malformed_input));
+    }
+
+    #[test]
     fn stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation() {
         let tool_call = LanguageModelToolCall::new("call-1", "weatherTool", r#"{"city":"NYC"}"#)
             .with_provider_metadata(provider_metadata(json!({

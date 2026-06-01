@@ -2713,6 +2713,57 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_pass_through_language_model_tool_result_output_directly() {
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!({ "raw": "value" })) })
+            .with_to_model_output(|_| async {
+                LanguageModelToolResultOutput::json(json!({
+                    "typed": "output"
+                }))
+            });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new("test-call-id", "testTool", "{}")),
+            stop_step(),
+        ]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        let tool_message = tool_message_from_prompt(&result.messages);
+        let tool_result = first_tool_result(tool_message);
+        assert_eq!(
+            tool_result.output,
+            LanguageModelToolResultOutput::json(json!({
+                "typed": "output"
+            }))
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_through_pre_formatted_text_output_directly() {
+        let tool = Tool::new("testTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!("sunny")) });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new("test-call-id", "testTool", "{}")),
+            stop_step(),
+        ]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        let tool_message = tool_message_from_prompt(&result.messages);
+        let tool_result = first_tool_result(tool_message);
+        assert_eq!(
+            tool_result.output,
+            LanguageModelToolResultOutput::text("sunny")
+        );
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools() {
         let execute_calls = Arc::new(Mutex::new(0usize));
         let execute_calls_for_tool = Arc::clone(&execute_calls);
@@ -6018,6 +6069,96 @@ mod tests {
         .expect("agent stream succeeds");
 
         assert!(result.messages.contains(&injected_message));
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_use_constructor_prepare_step_when_not_specified_in_stream() {
+        let captured_step_numbers = Arc::new(Mutex::new(Vec::new()));
+        let captured_step_numbers_for_prepare = Arc::clone(&captured_step_numbers);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_prepare_step(
+            WorkflowPrepareStepCallback::new(move |info| {
+                captured_step_numbers_for_prepare
+                    .lock()
+                    .expect("step capture lock succeeds")
+                    .push(info.step_number);
+                WorkflowPrepareStepResult::default()
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *captured_step_numbers
+                .lock()
+                .expect("step capture lock succeeds"),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_prefer_stream_prepare_step_over_constructor_prepare_step() {
+        let sources = Arc::new(Mutex::new(Vec::new()));
+        let sources_for_constructor = Arc::clone(&sources);
+        let sources_for_stream = Arc::clone(&sources);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_prepare_step(
+            WorkflowPrepareStepCallback::new(move |_| {
+                sources_for_constructor
+                    .lock()
+                    .expect("source capture lock succeeds")
+                    .push("constructor");
+                WorkflowPrepareStepResult::default()
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_prepare_step(
+                WorkflowPrepareStepCallback::new(move |_| {
+                    sources_for_stream
+                        .lock()
+                        .expect("source capture lock succeeds")
+                        .push("stream");
+                    WorkflowPrepareStepResult::default()
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *sources.lock().expect("source capture lock succeeds"),
+            vec!["stream"]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_call_constructor_prepare_step_on_each_step_in_multi_step() {
+        let captured_step_numbers = Arc::new(Mutex::new(Vec::new()));
+        let captured_step_numbers_for_prepare = Arc::clone(&captured_step_numbers);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(executable_test_tool())
+                .with_prepare_step(WorkflowPrepareStepCallback::new(move |info| {
+                    captured_step_numbers_for_prepare
+                        .lock()
+                        .expect("step capture lock succeeds")
+                        .push(info.step_number);
+                    WorkflowPrepareStepResult::default()
+                })),
+        );
+        let executor =
+            ScriptedStreamTextStepExecutor::new([executable_tool_call_step("{}"), stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *captured_step_numbers
+                .lock()
+                .expect("step capture lock succeeds"),
+            vec![0, 1]
+        );
     }
 
     #[test]
