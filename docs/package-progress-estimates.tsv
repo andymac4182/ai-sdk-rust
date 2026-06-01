@@ -2,6 +2,7 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
+alibaba	70	Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion, streaming, and video polling/error coverage; live Alibaba proof, one-to-one split names for aggregate mappings, and JS-only/runtime exception documentation remain.
 amazon-bedrock	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01B.
 anthropic	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01A.
 azure	55	Initial provider crate exists; provider metadata fixtures are mapped, with Azure-specific tools, broader Responses fixture matrix, SSE edge coverage, exact Azure error schema mapping, and live-provider validation still remaining.

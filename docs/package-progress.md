@@ -3,12 +3,12 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 64.5%
-- Portable package average: 56.1%
+- Average estimated completion: 65.9%
+- Portable package average: 57.7%
 - Closed package rows: 28 / 52
 - Strict portable verified rows: 18 / 42
-- In-progress rows: 15
-- Not-started rows: 9
+- In-progress rows: 16
+- Not-started rows: 8
 
 ## 100% Closed
 
@@ -51,6 +51,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/amazon-bedrock` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
+| `@ai-sdk/alibaba` | 70% | In progress | provider package | Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion,... |
 | `@ai-sdk/azure` | 55% | In progress | provider package | Initial provider crate exists; provider metadata fixtures are mapped, with Azure-specific tools, broader Responses... |
 | `@ai-sdk/baseten` | 35% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 | `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
@@ -68,7 +69,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
 | `@ai-sdk/xai` | 0% | Not started | provider package |
-| `@ai-sdk/alibaba` | 0% | Not started | provider package |
 | `@ai-sdk/cohere` | 0% | Not started | provider package |
 | `@ai-sdk/fal` | 0% | Not started | provider package |
 | `@ai-sdk/fireworks` | 0% | Not started | provider package |
