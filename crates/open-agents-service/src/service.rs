@@ -390,6 +390,19 @@ impl LocalRuntimeRouter {
             .map_err(ServiceError::DurableRun)
     }
 
+    /// Return persisted stream chunks for a durable run from `start_index`.
+    pub fn stream_chunks_since(
+        &self,
+        run_id: &str,
+        start_index: usize,
+    ) -> Result<Vec<UiMessageChunk>, ServiceError> {
+        self.engine
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stream_chunks_since(run_id, start_index)
+            .map_err(ServiceError::DurableRun)
+    }
+
     fn execution_for_run(&self, run_id: &str) -> Result<DurableRunExecution, ServiceError> {
         let record = self
             .durable_run(run_id)?
@@ -1213,7 +1226,8 @@ impl LocalRuntimeRouter {
             self.record_outbound(mapping, run_id, LocalOutboundKind::Progress, outbound);
         }
 
-        self.persistence
+        let inserted = self
+            .persistence
             .create_message_if_absent(CreateChatMessageInput {
                 id: message.id.clone(),
                 chat_id: mapping.chat_id.clone(),
@@ -1230,8 +1244,15 @@ impl LocalRuntimeRouter {
                 created_at: None,
             })
             .await
-            .map(|_| ())
-            .map_err(ServiceError::Persistence)
+            .map_err(ServiceError::Persistence)?
+            .inserted;
+        if inserted {
+            self.persistence
+                .touch_chat(&mapping.chat_id, Some(OffsetDateTime::now_utc()))
+                .await
+                .map_err(ServiceError::Persistence)?;
+        }
+        Ok(())
     }
 
     fn record_outbound(
@@ -2903,6 +2924,208 @@ mod tests {
                 .iter()
                 .any(|message| message.kind == LocalOutboundKind::Final)
         );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000110";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body("inspect the repo", "EvChatPostParity", thread_ts),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let runtime = server.service.local_runtime();
+        let expected_model_id = runtime.model_id.as_str();
+        let mapping = runtime
+            .mapping_for_slack_thread_id(&thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let chat = runtime
+            .persistence
+            .get_chat(&mapping.chat_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(chat.model_id.as_deref(), Some(expected_model_id));
+        assert_eq!(chat.active_run_id, None);
+        assert!(chat.last_assistant_message_at.is_some());
+
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.model_id.as_deref(), Some(expected_model_id));
+
+        let messages = runtime
+            .persistence
+            .list_chat_messages(&mapping.chat_id)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, open_agents_persistence::MessageRole::User);
+        assert_eq!(
+            messages[0].parts.pointer("/metadata/slackEventId"),
+            Some(&json!("EvChatPostParity"))
+        );
+        assert_eq!(
+            messages[1].role,
+            open_agents_persistence::MessageRole::Assistant
+        );
+        assert_eq!(
+            messages[1].parts.pointer("/metadata/runId"),
+            Some(&json!(run.id.clone()))
+        );
+        let assistant_json = serde_json::to_string(&messages[1].parts).unwrap();
+        assert!(assistant_json.contains("Fixture agent finished"));
+        assert!(assistant_json.contains("tool-bash"));
+        assert!(assistant_json.contains("output"));
+
+        let steps = runtime.persistence.list_run_steps(&run.id).await.unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].finish_reason.as_deref(), Some("finished"));
+
+        let all_chunks = runtime.stream_chunks_since(&run.id, 0).unwrap();
+        let tail_chunks = runtime.stream_chunks_since(&run.id, 1).unwrap();
+        assert!(!all_chunks.is_empty());
+        assert_eq!(tail_chunks.len(), all_chunks.len() - 1);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn chat_route_thread_reply_resumes_waiting_run_and_starts_new_after_stale_terminal_run() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000120";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let start = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "ask a question before continuing",
+                "EvReconnectWaitingStart",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+        assert_eq!(start.status, 200);
+        let runtime = server.service.local_runtime();
+        let waiting = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(waiting.status, RunStatus::Paused);
+
+        let resume = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_thread_reply_body(
+                "ship it from another surface",
+                "EvReconnectWaitingAgain",
+                "1710000000.000121",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+        assert_eq!(resume.status, 200);
+        let finished = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(finished.id, waiting.id);
+        assert_eq!(finished.status, RunStatus::Finished);
+        assert_eq!(
+            runtime.active_run_id_for_thread(&thread_id).await.unwrap(),
+            None
+        );
+
+        let new_start = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_thread_reply_body(
+                "start a fresh run after terminal state",
+                "EvReconnectFreshAfterTerminal",
+                "1710000000.000122",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+        assert_eq!(new_start.status, 200);
+        let fresh = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(fresh.status, RunStatus::Finished);
+        assert_ne!(fresh.id, finished.id);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn chat_stop_route_cancel_persists_abort_snapshot_and_clears_activity() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000130";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let start = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "ask a question before continuing",
+                "EvStopSnapshotStart",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+        assert_eq!(start.status, 200);
+        let runtime = server.service.local_runtime();
+        let waiting = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(waiting.status, RunStatus::Paused);
+
+        let cancel = post(
+            server.addr,
+            SLACK_INTERACTIONS_PATH,
+            &action_body(SLACK_ACTION_CANCEL, "cancel", thread_ts),
+            "application/x-www-form-urlencoded",
+        )
+        .await;
+
+        assert_eq!(cancel.status, 200);
+        let mapping = runtime
+            .mapping_for_slack_thread_id(&thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Canceled);
+        assert_eq!(
+            runtime.active_run_id_for_thread(&thread_id).await.unwrap(),
+            None
+        );
+        let messages = runtime
+            .persistence
+            .list_chat_messages(&mapping.chat_id)
+            .await
+            .unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.parts.pointer("/metadata/durableState")
+                    == Some(&json!("waiting_for_input")))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.parts.pointer("/metadata/durableState")
+                    == Some(&json!("canceled")))
+        );
+        let chat = runtime
+            .persistence
+            .get_chat(&mapping.chat_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(chat.last_assistant_message_at.is_some());
         server.stop().await;
     }
 

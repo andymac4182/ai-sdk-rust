@@ -183,6 +183,102 @@ pub struct OpenAgentSettings<'a, M: LanguageModel + ?Sized> {
     pub usage_hook: Option<OpenAgentUsageHook<'a>>,
 }
 
+/// Model variant record used by the chat route before starting a workflow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenAgentModelVariant {
+    pub id: String,
+    pub base_model_id: String,
+    pub provider_options: Option<JsonValue>,
+}
+
+impl OpenAgentModelVariant {
+    pub fn new(id: impl Into<String>, base_model_id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            base_model_id: base_model_id.into(),
+            provider_options: None,
+        }
+    }
+
+    pub fn with_provider_options(mut self, provider_options: JsonValue) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// Result of resolving a chat-selected model id into an agent selection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedChatModelSelection {
+    pub selection: AgentModelSelection,
+    pub warning: Option<String>,
+}
+
+/// Resolves direct model ids, configured variants, built-in OpenAI variants,
+/// and missing values into the remote-agent model selection shape.
+pub fn resolve_chat_model_selection(
+    selected_model_id: Option<&str>,
+    model_variants: &[OpenAgentModelVariant],
+    missing_variant_label: &str,
+) -> ResolvedChatModelSelection {
+    let requested_model_id = selected_model_id.unwrap_or(DEFAULT_OPEN_AGENT_MODEL_LABEL);
+    if !requested_model_id.starts_with("variant:") {
+        return ResolvedChatModelSelection {
+            selection: AgentModelSelection::new(requested_model_id),
+            warning: None,
+        };
+    }
+
+    if requested_model_id == "variant:builtin:gpt-5.4-xhigh" {
+        return ResolvedChatModelSelection {
+            selection: AgentModelSelection::new("openai/gpt-5.4").with_provider_options(json!({
+                "openai": {
+                    "reasoningEffort": "xhigh",
+                    "reasoningSummary": "auto",
+                    "store": false
+                }
+            })),
+            warning: None,
+        };
+    }
+
+    if let Some(variant) = model_variants
+        .iter()
+        .find(|variant| variant.id == requested_model_id)
+    {
+        let mut selection = AgentModelSelection::new(variant.base_model_id.clone());
+        if let Some(provider_options) = provider_options_for_variant(variant) {
+            selection = selection.with_provider_options(provider_options);
+        }
+        return ResolvedChatModelSelection {
+            selection,
+            warning: None,
+        };
+    }
+
+    ResolvedChatModelSelection {
+        selection: AgentModelSelection::new(DEFAULT_OPEN_AGENT_MODEL_LABEL),
+        warning: Some(format!(
+            "{missing_variant_label} \"{requested_model_id}\" was not found. Falling back to default model."
+        )),
+    }
+}
+
+fn provider_options_for_variant(variant: &OpenAgentModelVariant) -> Option<JsonValue> {
+    let provider = variant.base_model_id.split_once('/')?.0;
+    let mut options = variant
+        .provider_options
+        .clone()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if provider == "openai" {
+        options.insert("store".to_string(), JsonValue::Bool(false));
+    }
+    if options.is_empty() {
+        return None;
+    }
+    Some(json!({ provider: JsonValue::Object(options) }))
+}
+
 impl<'a, M: LanguageModel + ?Sized> OpenAgentSettings<'a, M> {
     /// Creates Open Agent settings for the default model.
     pub fn new(model: &'a M) -> Self {
@@ -927,7 +1023,8 @@ mod tests {
 
     use super::{
         DEFAULT_OPEN_AGENT_MODEL_LABEL, OpenAgent, OpenAgentCallOptions, OpenAgentError,
-        OpenAgentSettings, OpenAgentSkillMetadata, OpenAgentSkillOptions,
+        OpenAgentModelVariant, OpenAgentSettings, OpenAgentSkillMetadata, OpenAgentSkillOptions,
+        resolve_chat_model_selection,
     };
     use ai_sdk_rust::{
         FinishReason, GatewayProvider, GenerateTextTool, InputTokenUsage, Instructions, JsonSchema,
@@ -1168,6 +1265,73 @@ mod tests {
             provider_options["gateway"].get("order"),
             Some(&json!(["openai"]))
         );
+    }
+
+    #[test]
+    fn chat_model_selection_resolves_direct_variant_builtin_missing_and_default_cases() {
+        let direct =
+            resolve_chat_model_selection(Some("openai/gpt-5"), &[], "Selected model variant");
+        assert_eq!(direct.selection, AgentModelSelection::new("openai/gpt-5"));
+        assert_eq!(direct.warning, None);
+
+        let variants = [
+            OpenAgentModelVariant::new("variant:openai-medium", "openai/gpt-5")
+                .with_provider_options(json!({
+                    "reasoningEffort": "medium"
+                })),
+        ];
+        let variant = resolve_chat_model_selection(
+            Some("variant:openai-medium"),
+            &variants,
+            "Selected model variant",
+        );
+        assert_eq!(variant.selection.id, "openai/gpt-5");
+        assert_eq!(
+            variant.selection.provider_options,
+            Some(json!({
+                "openai": {
+                    "reasoningEffort": "medium",
+                    "store": false
+                }
+            }))
+        );
+
+        let builtin = resolve_chat_model_selection(
+            Some("variant:builtin:gpt-5.4-xhigh"),
+            &[],
+            "Selected model variant",
+        );
+        assert_eq!(builtin.selection.id, "openai/gpt-5.4");
+        assert_eq!(
+            builtin.selection.provider_options,
+            Some(json!({
+                "openai": {
+                    "reasoningEffort": "xhigh",
+                    "reasoningSummary": "auto",
+                    "store": false
+                }
+            }))
+        );
+
+        let missing =
+            resolve_chat_model_selection(Some("variant:missing"), &[], "Selected model variant");
+        assert_eq!(
+            missing.selection,
+            AgentModelSelection::new(DEFAULT_OPEN_AGENT_MODEL_LABEL)
+        );
+        assert_eq!(
+            missing.warning.as_deref(),
+            Some(
+                "Selected model variant \"variant:missing\" was not found. Falling back to default model."
+            )
+        );
+
+        let default = resolve_chat_model_selection(None, &[], "Selected model variant");
+        assert_eq!(
+            default.selection,
+            AgentModelSelection::new(DEFAULT_OPEN_AGENT_MODEL_LABEL)
+        );
+        assert_eq!(default.warning, None);
     }
 
     #[test]

@@ -749,19 +749,23 @@ function partialRustTestName(relative) {
     ],
     [
       'apps/web/app/api/chat/_lib/model-selection.test.ts',
-      'open_agent_prepare_composes_prompt_context_model_and_tools',
+      'chat_model_selection_resolves_direct_variant_builtin_missing_and_default_cases; open_agent_prepare_composes_prompt_context_model_and_tools',
+    ],
+    [
+      'apps/web/app/api/chat/_lib/persist-tool-results.test.ts',
+      'chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata; dedupe_message_reasoning_matches_openai_azure_and_immutability_cases',
     ],
     [
       'apps/web/app/api/chat/route.test.ts',
-      'app_mention_accepts_persists_run_and_records_outbound',
+      'chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata; chat_route_thread_reply_resumes_waiting_run_and_starts_new_after_stale_terminal_run; app_mention_accepts_persists_run_and_records_outbound',
     ],
     [
       'apps/web/app/api/chat/[chatId]/stop/route.test.ts',
-      'block_action_cancel_cancels_waiting_run',
+      'chat_stop_route_cancel_persists_abort_snapshot_and_clears_activity; block_action_cancel_cancels_waiting_run',
     ],
     [
       'apps/web/app/api/chat/[chatId]/stream/route.test.ts',
-      'block_action_answer_resumes_waiting_run_to_completion',
+      'chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata; chat_route_thread_reply_resumes_waiting_run_and_starts_new_after_stale_terminal_run; cancelable_readable_stream_semantics_match_forwarding_abort_and_idempotent_cancel_cases',
     ],
     [
       'apps/web/app/api/sandbox/reconnect/route.test.ts',
@@ -781,15 +785,19 @@ function partialRustTestName(relative) {
     ],
     [
       'apps/web/app/workflows/chat.test.ts',
-      'app_mention_accepts_persists_run_and_records_outbound',
+      'chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata; chat_route_thread_reply_resumes_waiting_run_and_starts_new_after_stale_terminal_run; block_action_answer_resumes_waiting_run_to_completion; block_action_cancel_cancels_waiting_run',
     ],
     [
       'apps/web/app/workflows/chat-post-finish.test.ts',
-      'finish_builds_pr_command_in_dry_run_mode',
+      'chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata; chat_stop_route_cancel_persists_abort_snapshot_and_clears_activity; finish_builds_pr_command_in_dry_run_mode; finish_commits_dirty_repository',
     ],
     [
       'apps/web/app/workflows/chat-post-finish-usage.test.ts',
-      'open_agent_generate_records_usage_from_fake_model; run_usage_contract',
+      'open_agent_generate_records_usage_from_fake_model; run_usage_contract; chat_post_route_persists_messages_activity_stream_chunks_and_model_metadata',
+    ],
+    [
+      'apps/web/lib/chat-auto-commit.test.ts',
+      'finish_commits_dirty_repository; finish_commits_and_pushes_in_dry_run_mode; finish_builds_pr_command_in_dry_run_mode',
     ],
     [
       'apps/web/lib/chat/auto-commit-direct.test.ts',
@@ -798,6 +806,22 @@ function partialRustTestName(relative) {
     [
       'apps/web/lib/chat/auto-pr-direct.test.ts',
       'finish_builds_pr_command_in_dry_run_mode',
+    ],
+    [
+      'apps/web/lib/chat-route-cleanup.test.ts',
+      'chat_route_cleanup_clears_local_state_without_stopping_active_run',
+    ],
+    [
+      'apps/web/lib/chat-streaming-state.test.ts',
+      'chat_streaming_state_matches_upstream_inflight_rendering_git_and_refresh_cases',
+    ],
+    [
+      'apps/web/lib/chat/create-cancelable-readable-stream.test.ts',
+      'cancelable_readable_stream_semantics_match_forwarding_abort_and_idempotent_cancel_cases',
+    ],
+    [
+      'apps/web/lib/chat/dedupe-message-reasoning.test.ts',
+      'dedupe_message_reasoning_matches_openai_azure_and_immutability_cases',
     ],
     [
       'apps/web/lib/github/commit.test.ts',
@@ -820,6 +844,10 @@ function partialRustTestName(relative) {
       'sandbox_lifecycle_contract',
     ],
     [
+      'apps/web/lib/merge-readiness-polling.test.ts',
+      'merge_readiness_polling_matches_pending_warmup_transient_and_blocked_cases',
+    ],
+    [
       'apps/web/lib/skills-cache.test.ts',
       'discovers_project_claude_and_global_skills_with_skip_diagnostics',
     ],
@@ -833,7 +861,7 @@ function partialRustTestName(relative) {
     ],
     [
       'apps/web/lib/workspace-status-store.test.ts',
-      'active_run_contract',
+      'workspace_status_store_tracks_latest_status_and_subscribers; active_run_contract',
     ],
     [
       'packages/shared/lib/tool-state.test.ts',

@@ -6,13 +6,27 @@
 
 #![forbid(unsafe_code)]
 
+mod chat_state;
 mod open_agent;
 
+pub use chat_state::{
+    CancelableReadableStream, CancelableStreamError, ChatRouteCleanupDependencies, ChatUiStatus,
+    GitAction, GitFinalizationState, MERGE_READINESS_TRANSIENT_MAX_POLLS,
+    MergeReadinessPollingState, NavbarGitActionState, WorkspaceStatusStore,
+    WorkspaceStatusSubscription, cleanup_chat_route_on_unmount, dedupe_message_reasoning,
+    get_git_finalization_state, get_navbar_git_action_state, has_renderable_assistant_part,
+    is_abort_like_stream_error, is_chat_in_flight,
+    should_increment_merge_readiness_transient_poll_count,
+    should_keep_collapsed_reasoning_streaming, should_poll_merge_readiness,
+    should_refresh_after_ready_transition, should_render_git_data_part,
+    should_show_thinking_indicator, should_use_chat_list_streaming_state,
+};
 pub use open_agent::{
     DEFAULT_OPEN_AGENT_MODEL_LABEL, OpenAgent, OpenAgentCallOptions, OpenAgentError,
-    OpenAgentPreparedCall, OpenAgentSettings, OpenAgentSkillMetadata, OpenAgentSkillOptions,
-    OpenAgentSystemPromptOptions, OpenAgentUsageEvent, OpenAgentUsageHook,
-    build_open_agent_system_prompt, get_open_agent_provider_options_for_model,
+    OpenAgentModelVariant, OpenAgentPreparedCall, OpenAgentSettings, OpenAgentSkillMetadata,
+    OpenAgentSkillOptions, OpenAgentSystemPromptOptions, OpenAgentUsageEvent, OpenAgentUsageHook,
+    ResolvedChatModelSelection, build_open_agent_system_prompt,
+    get_open_agent_provider_options_for_model, resolve_chat_model_selection,
 };
 pub use open_agents_core::{AgentModelSelection, RemoteAgentIdentity};
 use open_agents_sandbox::SandboxContext;
