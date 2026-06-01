@@ -67,7 +67,7 @@ pub const UPSTREAM_REPOSITORY: &str = "github.com/vercel/workflow";
 pub const UPSTREAM_REF: &str = "main";
 
 /// Remote HEAD recorded by the workflow inventory generator.
-pub const UPSTREAM_HEAD: &str = "1ee63b870afbf9754eb1022b1bb5f02d0ab042f9";
+pub const UPSTREAM_HEAD: &str = "ae3c833acd4f44ab84db65b44eb2ba2646eaecf9";
 
 /// Upstream package owned by this crate.
 pub const UPSTREAM_PACKAGE: &str = "@workflow/ai";
@@ -97,7 +97,7 @@ mod tests {
     use ai_sdk_provider::{
         FinishReason, LanguageModelFinishReason, LanguageModelStreamFinish,
         LanguageModelStreamPart, LanguageModelTextDelta, LanguageModelToolCall, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage, ProviderOptions,
     };
     use ai_sdk_provider_utils::Tool;
     use serde_json::json;
@@ -153,21 +153,57 @@ mod tests {
     }
 
     #[test]
-    fn workflow_ai_upstream_do_stream_step_rows_are_owned_by_workflow_ai() {
+    fn do_stream_step_upstream_normalize_finish_reason_matches_strings_objects_and_edges() {
+        for reason in [
+            "stop",
+            "tool-calls",
+            "length",
+            "content-filter",
+            "error",
+            "other",
+        ] {
+            assert_eq!(normalize_finish_reason(Some(&json!(reason))), reason);
+            assert_eq!(
+                normalize_finish_reason(Some(
+                    &json!({ "type": reason, "metadata": { "foo": "bar" } })
+                )),
+                reason
+            );
+        }
+
         assert_eq!(
-            normalize_finish_reason(Some(&json!("tool-calls"))),
-            "tool-calls"
+            normalize_finish_reason(Some(&json!({ "type": "unknown" }))),
+            "other"
         );
+        assert_eq!(normalize_finish_reason(Some(&json!({}))), "other");
         assert_eq!(
-            normalize_finish_reason(Some(&json!({ "type": "stop" }))),
-            "stop"
+            normalize_finish_reason(Some(&json!({ "type": null }))),
+            "other"
+        );
+        assert_eq!(normalize_finish_reason(None), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(null))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(42))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(true))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(["stop"]))), "other");
+        assert_eq!(normalize_finish_reason(Some(&json!(""))), "");
+    }
+
+    #[test]
+    fn do_stream_step_upstream_safe_parse_tool_call_input_parses_missing_and_malformed_inputs() {
+        assert_eq!(
+            safe_parse_tool_call_input(Some(r#"{"city":"San Francisco"}"#)),
+            json!({ "city": "San Francisco" })
         );
         assert_eq!(safe_parse_tool_call_input(None), json!({}));
+        assert_eq!(safe_parse_tool_call_input(Some("")), json!({}));
         assert_eq!(
             safe_parse_tool_call_input(Some(r#"{"city":"San Francisco""#)),
             json!(r#"{"city":"San Francisco""#)
         );
+    }
 
+    #[test]
+    fn do_stream_step_upstream_should_not_throw_when_streamed_tool_call_input_is_malformed_json() {
         let output = output_from_parts([
             LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
                 "call-1",
@@ -181,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_ai_upstream_stream_text_iterator_rows_are_owned_by_workflow_ai() {
+    fn workflow_ai_facade_exercises_stream_text_iterator_bridge() {
         let executor = ScriptedStreamTextStepExecutor::new([
             output_from_parts([
                 LanguageModelStreamPart::ToolCall(
@@ -232,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_ai_upstream_durable_agent_rows_are_owned_by_workflow_ai() {
+    fn workflow_ai_facade_exercises_durable_agent_bridge() {
         let agent = WorkflowAgent::new(
             WorkflowAgentOptions::new(WorkflowModelInfo::new("test", "test-model")).with_tool(
                 Tool::new("testTool", object_schema())
@@ -259,40 +295,174 @@ mod tests {
     }
 
     #[test]
-    fn workflow_ai_upstream_tools_to_model_tools_rows_are_owned_by_workflow_ai() {
-        let provider_options = serde_json::from_value(json!({
+    fn tools_to_model_tools_upstream_serializes_function_tools_with_description_and_input_schema() {
+        let model_tools = tools_to_model_tools([
+            Tool::new("weather", object_schema()).with_description("Get the weather")
+        ]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.name, "weather");
+        assert_eq!(tool.description.as_deref(), Some("Get the weather"));
+        assert_eq!(tool.input_schema, object_schema());
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_preserves_provider_tool_type_id_and_args() {
+        let args = serde_json::from_value(json!({ "maxUses": 5 })).expect("args");
+        let model_tools = tools_to_model_tools([Tool::provider_tool(
+            "webSearch",
+            "anthropic.web_search",
+            args,
+            object_schema(),
+            true,
+        )]);
+
+        assert_eq!(model_tools.len(), 1);
+        let LanguageModelTool::Provider(tool) = &model_tools[0] else {
+            panic!("expected provider tool");
+        };
+        assert_eq!(tool.name, "webSearch");
+        assert_eq!(tool.id, "anthropic.web_search");
+        assert_eq!(
+            tool.args,
+            serde_json::from_value(json!({ "maxUses": 5 })).expect("args")
+        );
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_handles_mixed_function_and_provider_tools() {
+        let model_tools = tools_to_model_tools([
+            Tool::new("weather", object_schema()),
+            Tool::provider_tool(
+                "webSearch",
+                "anthropic.web_search",
+                JsonObject::new(),
+                object_schema(),
+                true,
+            ),
+        ]);
+
+        assert_eq!(model_tools.len(), 2);
+        assert!(matches!(model_tools[0], LanguageModelTool::Function(_)));
+        assert!(matches!(model_tools[1], LanguageModelTool::Provider(_)));
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_defaults_args_to_empty_object_when_not_provided_on_provider_tool()
+     {
+        let model_tools = tools_to_model_tools([Tool::provider_tool(
+            "codeExec",
+            "anthropic.code_execution",
+            JsonObject::new(),
+            object_schema(),
+            true,
+        )]);
+
+        let LanguageModelTool::Provider(tool) = &model_tools[0] else {
+            panic!("expected provider tool");
+        };
+        assert_eq!(tool.args, JsonObject::new());
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_forwards_strict_true() {
+        let model_tools =
+            tools_to_model_tools([Tool::new("weather", object_schema()).with_strict(true)]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_forwards_strict_false() {
+        let model_tools =
+            tools_to_model_tools([Tool::new("weather", object_schema()).with_strict(false)]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.strict, Some(false));
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_omits_strict_key_when_not_set() {
+        let model_tools = tools_to_model_tools([Tool::new("weather", object_schema())]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_forwards_input_examples() {
+        let example: JsonObject =
+            serde_json::from_value(json!({ "location": "Tokyo" })).expect("example");
+        let model_tools = tools_to_model_tools([
+            Tool::new("weather", object_schema()).with_input_example(example.clone())
+        ]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(
+            tool.input_examples.as_ref().expect("examples")[0].input,
+            example
+        );
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_omits_input_examples_key_when_not_set() {
+        let model_tools = tools_to_model_tools([Tool::new("weather", object_schema())]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.input_examples, None);
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_forwards_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
             "openai": {
                 "parallelToolCalls": false
             }
         }))
         .expect("provider options");
+        let model_tools =
+            tools_to_model_tools([Tool::new("weather", object_schema())
+                .with_provider_options(provider_options.clone())]);
+
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.provider_options, Some(provider_options));
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_handles_tools_with_type_dynamic_as_function_tools() {
         let model_tools = tools_to_model_tools([
-            Tool::new("functionTool", object_schema())
-                .with_description("Get weather")
-                .with_input_example(
-                    serde_json::from_value(json!({ "city": "San Francisco" })).expect("example"),
-                )
-                .with_strict(true)
-                .with_provider_options(provider_options),
-            Tool::provider_tool(
-                "webSearch",
-                "anthropic.web_search_20250305",
-                serde_json::from_value(json!({ "maxUses": 5 })).expect("args"),
-                object_schema(),
-                true,
-            ),
-            Tool::dynamic("dynamicTool", object_schema()),
+            Tool::dynamic("dynamic", object_schema()).with_description("A dynamic tool")
         ]);
 
-        assert_eq!(model_tools.len(), 3);
-        assert!(matches!(model_tools[0], LanguageModelTool::Function(_)));
-        assert!(matches!(model_tools[1], LanguageModelTool::Provider(_)));
-        assert!(matches!(model_tools[2], LanguageModelTool::Function(_)));
+        let LanguageModelTool::Function(tool) = &model_tools[0] else {
+            panic!("expected function tool");
+        };
+        assert_eq!(tool.name, "dynamic");
+        assert_eq!(tool.description.as_deref(), Some("A dynamic tool"));
+    }
+
+    #[test]
+    fn tools_to_model_tools_upstream_returns_empty_array_for_empty_tools() {
         assert!(tools_to_model_tools(Vec::<Tool>::new()).is_empty());
     }
 
     #[test]
-    fn workflow_ai_upstream_workflow_chat_transport_rows_are_owned_by_workflow_ai() {
+    fn workflow_ai_facade_exercises_workflow_chat_transport_bridge() {
         let transport = WorkflowChatTransport::new()
             .with_api("/custom/chat")
             .with_max_consecutive_errors(5)

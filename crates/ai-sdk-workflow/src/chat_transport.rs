@@ -1037,6 +1037,27 @@ mod tests {
     }
 
     #[test]
+    fn workflow_chat_transport_reconnect_falls_back_to_zero_when_tail_header_is_missing() {
+        let transport = WorkflowChatTransport::new().with_initial_start_index(-10);
+        let mut client = ScriptedWorkflowChatClient::new([
+            WorkflowChatResponse::ok(Vec::new()),
+            WorkflowChatResponse::ok([UiMessageChunk::finish()]),
+        ]);
+
+        transport
+            .reconnect_to_stream(&mut client, ReconnectToStreamOptions::new("chat-1"))
+            .expect("reconnect completes");
+
+        assert_eq!(
+            client.requests,
+            vec![
+                WorkflowChatRequest::get("/api/chat/chat-1/stream?startIndex=-10", None),
+                WorkflowChatRequest::get("/api/chat/chat-1/stream?startIndex=0", None),
+            ]
+        );
+    }
+
+    #[test]
     fn workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header() {
         let transport = WorkflowChatTransport::new().with_initial_start_index(-10);
         let mut client = ScriptedWorkflowChatClient::new([
