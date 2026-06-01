@@ -816,7 +816,7 @@ mod tests {
         );
 
         let invalid = output
-            .parse_complete_output(r#"{ broken json"#, context)
+            .parse_complete_output(r#"{ broken json"#, context.clone())
             .expect_err("invalid parse should fail");
         assert_eq!(
             invalid.message(),
@@ -825,6 +825,17 @@ mod tests {
         assert_eq!(invalid.response(), &response);
         assert_eq!(invalid.usage(), &usage);
         assert_eq!(invalid.finish_reason(), &finish_reason);
+
+        let validation_error = output
+            .parse_complete_output(r#"{ "content": 123 }"#, context.clone())
+            .expect_err("invalid schema should fail");
+        assert_eq!(
+            validation_error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(validation_error.response(), &response);
+        assert_eq!(validation_error.usage(), &usage);
+        assert_eq!(validation_error.finish_reason(), &finish_reason);
 
         assert_eq!(
             output.parse_partial_output(Some(r#"{ "content": "partial" }"#)),
@@ -912,6 +923,28 @@ mod tests {
                 content: "test".to_string()
             }]
         );
+
+        let parse_error = output
+            .parse_complete_output(r#"{ broken json"#, context.clone())
+            .expect_err("invalid json should fail");
+        assert_eq!(
+            parse_error.message(),
+            "No object generated: could not parse the response."
+        );
+        assert_eq!(parse_error.response(), &response);
+        assert_eq!(parse_error.usage(), &usage);
+        assert_eq!(parse_error.finish_reason(), &finish_reason);
+
+        let validation_error = output
+            .parse_complete_output(r#"{ "elements": [{ "content": 123 }] }"#, context.clone())
+            .expect_err("invalid element should fail");
+        assert_eq!(
+            validation_error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(validation_error.response(), &response);
+        assert_eq!(validation_error.usage(), &usage);
+        assert_eq!(validation_error.finish_reason(), &finish_reason);
 
         let repaired = output
             .parse_partial_output(Some(
