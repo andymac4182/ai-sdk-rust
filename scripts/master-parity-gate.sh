@@ -118,6 +118,7 @@ Runs the CI-safe parity gate without live credentials:
   - verifies required AI SDK, Chat SDK, and Workflow ledger/generated files exist
   - runs the AI SDK strict upstream test inventory drift check
   - regenerates AI SDK and Chat SDK package progress into temp files and diffs them
+  - runs the Chat strict generated-inventory drift check
   - runs the Workflow generated-inventory drift check and parity gate
   - runs the Open Agents parity gate when OA-01 has landed, otherwise reports a skip
   - runs git diff --check for whitespace/status drift
@@ -144,6 +145,8 @@ require_file scripts/ai-strict-test-inventory.mjs
 require_file docs/ai-strict-test-inventory.md
 require_file scripts/workflow-test-inventory.mjs
 require_file scripts/workflow-parity-check.mjs
+require_file scripts/chat-test-inventory.mjs
+require_file docs/chat/test-inventory.md
 require_file docs/workflow-test-inventory.md
 require_file docs/workflow-upstream-parity.md
 
@@ -163,6 +166,7 @@ check_generated_progress \
   "docs/chat/package-progress.md" \
   "Chat SDK Rust Package Progress"
 
+run_step "Chat strict test inventory drift check" node scripts/chat-test-inventory.mjs --check
 run_step "Workflow generated inventory drift check" node scripts/workflow-test-inventory.mjs --check
 run_step "Workflow parity gate" node scripts/workflow-parity-check.mjs
 check_open_agents_gate

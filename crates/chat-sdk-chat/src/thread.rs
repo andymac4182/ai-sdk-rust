@@ -315,6 +315,32 @@ impl Thread {
         *buf = messages;
     }
 
+    /// 1:1 port of upstream `ThreadImpl.getParticipants()`. Fetches recent
+    /// thread messages, folds in the current handler message when present, and
+    /// returns unique non-bot authors in first-seen order.
+    pub async fn get_participants(&self) -> AdapterResult<Vec<Author>> {
+        let fetched = self
+            .adapter
+            .fetch_messages(&self.thread_id, &crate::types::FetchOptions::default())
+            .await?;
+        let mut messages = fetched.messages;
+        if let Some(current) = self.current_message.as_ref() {
+            messages.push(current.clone());
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut participants = Vec::new();
+        for message in messages {
+            if matches!(message.author.is_bot, BotStatus::Known(true)) {
+                continue;
+            }
+            if seen.insert(message.author.user_id.clone()) {
+                participants.push(message.author);
+            }
+        }
+        Ok(participants)
+    }
+
     /// Borrow the bound state adapter, if any. Returns `None` when
     /// [`Thread::new`] was used (upstream falls back to the chat
     /// singleton; not yet ported in Rust).
@@ -1125,6 +1151,7 @@ mod tests {
         post_message: Mutex<Vec<(String, String)>>,
         post_object: Mutex<Vec<(String, String, serde_json::Value)>>,
         post_object_unsupported: bool,
+        fetch_messages: Mutex<Vec<crate::message::Message>>,
         fetch_subject_calls: AtomicUsize,
         subject_result: Option<String>,
         start_typing: Mutex<Vec<(String, Option<String>)>>,
@@ -1166,6 +1193,16 @@ mod tests {
         async fn fetch_subject(&self, _thread_id: &str) -> AdapterResult<Option<String>> {
             self.fetch_subject_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.subject_result.clone())
+        }
+        async fn fetch_messages(
+            &self,
+            _thread_id: &str,
+            _options: &crate::types::FetchOptions,
+        ) -> AdapterResult<crate::types::FetchResult> {
+            Ok(crate::types::FetchResult {
+                messages: self.fetch_messages.lock().unwrap().clone(),
+                next_cursor: None,
+            })
         }
         async fn start_typing(&self, thread_id: &str, status: Option<&str>) -> AdapterResult<()> {
             self.start_typing
@@ -1840,6 +1877,80 @@ mod tests {
             },
             Vec::new(),
         )
+    }
+
+    fn participant_message(
+        id: &str,
+        user_id: &str,
+        user_name: &str,
+        is_bot: bool,
+    ) -> crate::message::Message {
+        let mut message = sample_message(id, "hello");
+        message.author = Author {
+            user_id: user_id.to_string(),
+            user_name: user_name.to_string(),
+            full_name: user_name.to_string(),
+            is_bot: BotStatus::Known(is_bot),
+            is_me: false,
+        };
+        message
+    }
+
+    #[test]
+    fn thread_get_participants_should_return_unique_non_bot_authors_from_messages() {
+        let adapter = Arc::new(RecordingAdapter {
+            fetch_messages: Mutex::new(vec![
+                participant_message("msg-1", "U1", "alice", false),
+                participant_message("msg-2", "U2", "bob", false),
+                participant_message("msg-3", "U1", "alice", false),
+            ]),
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "recording:C123:1");
+        let participants = block_on(thread.get_participants()).unwrap();
+        assert_eq!(participants.len(), 2);
+        assert_eq!(participants[0].user_id, "U1");
+        assert_eq!(participants[1].user_id, "U2");
+    }
+
+    #[test]
+    fn thread_get_participants_should_exclude_bot_messages() {
+        let adapter = Arc::new(RecordingAdapter {
+            fetch_messages: Mutex::new(vec![
+                participant_message("msg-1", "U1", "alice", false),
+                participant_message("msg-2", "B1", "bot", true),
+            ]),
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "recording:C123:1");
+        let participants = block_on(thread.get_participants()).unwrap();
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0].user_id, "U1");
+    }
+
+    #[test]
+    fn thread_get_participants_should_return_empty_array_for_thread_with_only_bot_messages() {
+        let adapter = Arc::new(RecordingAdapter {
+            fetch_messages: Mutex::new(vec![participant_message("msg-1", "B1", "bot", true)]),
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "recording:C123:1");
+        let participants = block_on(thread.get_participants()).unwrap();
+        assert!(participants.is_empty());
+    }
+
+    #[test]
+    fn thread_get_participants_should_include_current_message_author() {
+        let adapter = Arc::new(RecordingAdapter {
+            fetch_messages: Mutex::new(vec![participant_message("msg-1", "U1", "alice", false)]),
+            ..Default::default()
+        });
+        let thread = Thread::new(adapter as Arc<dyn Adapter>, "recording:C123:1")
+            .with_current_message(participant_message("msg-2", "U2", "bob", false));
+        let participants = block_on(thread.get_participants()).unwrap();
+        assert_eq!(participants.len(), 2);
+        assert_eq!(participants[0].user_id, "U1");
+        assert_eq!(participants[1].user_id, "U2");
     }
 
     #[test]

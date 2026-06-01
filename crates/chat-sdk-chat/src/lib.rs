@@ -10,6 +10,7 @@
 //! shapes* they produce are portable and will land in the `cards` and
 //! `modals` modules in later slices.
 
+pub mod ai;
 pub mod callback_url;
 pub mod cards;
 pub mod channel;

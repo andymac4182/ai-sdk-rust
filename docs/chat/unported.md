@@ -20,6 +20,13 @@ The Rust-portable cases are tracked in
 [`upstream-parity.md`](upstream-parity.md) — this file ONLY lists
 the structurally-unportable cases.
 
+The strict generated ledger is [`test-inventory.md`](test-inventory.md).
+It is regenerated with `node scripts/chat-test-inventory.mjs --write`
+and checked with `node scripts/chat-test-inventory.mjs --check`. Every
+nonportable upstream test case appears there with one of the explicit
+statuses used by this registry: `js-only-documented` or
+`type-system-impossible`.
+
 ## Top-level sections
 
 - **`chat-sdk-chat`** — JSX runtime, JS Symbol-keyed protocols,

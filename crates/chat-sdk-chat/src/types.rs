@@ -1099,6 +1099,53 @@ pub struct FetchOptions {
     pub limit: Option<u32>,
 }
 
+/// Result returned by adapter message-fetch methods. 1:1 with upstream
+/// `{ messages, nextCursor? }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FetchResult {
+    pub messages: Vec<crate::message::Message>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_cursor: Option<String>,
+}
+
+/// Summary row returned by adapter thread-listing methods. 1:1 with
+/// upstream `ThreadSummary`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    #[serde(
+        rename = "lastReplyAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_reply_at: Option<String>,
+    #[serde(
+        rename = "replyCount",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reply_count: Option<u64>,
+    #[serde(rename = "rootMessage")]
+    pub root_message: crate::message::Message,
+}
+
+/// Result returned by adapter thread-listing methods. 1:1 with upstream
+/// `{ threads, nextCursor? }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListThreadsResult {
+    pub threads: Vec<ThreadSummary>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_cursor: Option<String>,
+}
+
 /// Minimal raw-message payload used by adapters that can hand off the
 /// platform-native body opaquely. 1:1 port of upstream
 /// `interface RawMessage<TRawMessage = unknown>`.
@@ -1564,6 +1611,42 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     /// *some* descriptor back.
     async fn fetch_channel_info(&self, _channel_id: &str) -> AdapterResult<ChannelInfo> {
         Err(AdapterError::Unsupported("fetch_channel_info"))
+    }
+
+    /// Fetch messages from a thread. 1:1 with upstream optional
+    /// `fetchMessages(threadId, options?)`.
+    async fn fetch_messages(
+        &self,
+        _thread_id: &str,
+        _options: &FetchOptions,
+    ) -> AdapterResult<FetchResult> {
+        Err(AdapterError::Unsupported("fetch_messages"))
+    }
+
+    /// Fetch messages from a channel. 1:1 with upstream optional
+    /// `fetchChannelMessages(channelId, options?)`.
+    async fn fetch_channel_messages(
+        &self,
+        _channel_id: &str,
+        _options: &FetchOptions,
+    ) -> AdapterResult<FetchResult> {
+        Err(AdapterError::Unsupported("fetch_channel_messages"))
+    }
+
+    /// Fetch a thread descriptor. 1:1 with upstream optional
+    /// `fetchThread(threadId)`.
+    async fn fetch_thread(&self, _thread_id: &str) -> AdapterResult<ThreadInfo> {
+        Err(AdapterError::Unsupported("fetch_thread"))
+    }
+
+    /// List threads inside a channel. 1:1 with upstream optional
+    /// `listThreads(channelId, options?)`.
+    async fn list_threads(
+        &self,
+        _channel_id: &str,
+        _options: &ListThreadsOptions,
+    ) -> AdapterResult<ListThreadsResult> {
+        Err(AdapterError::Unsupported("list_threads"))
     }
 
     /// Optional Open-DM convenience. 1:1 with upstream optional
