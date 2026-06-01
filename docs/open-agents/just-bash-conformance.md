@@ -111,8 +111,8 @@ inventory. Strict parity closes only when every portable upstream row in
 
 | Status | Cases |
 | --- | --- |
-| portable-pending | 1629 |
-| portable-verified | 42 |
+| portable-pending | 1554 |
+| portable-verified | 117 |
 
 ## Representative Slice
 

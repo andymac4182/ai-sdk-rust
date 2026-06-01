@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1629,
-      "portable-verified": 42
+      "portable-pending": 1554,
+      "portable-verified": 117
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -70372,13 +70372,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:101:it:should copy nested directories with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70417,13 +70417,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:113:it:should copy with --recursive flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70460,13 +70460,13 @@
         "stderr": "cp: cannot stat '/missing.txt': No such file or directory\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:122:it:should error on missing source",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [
@@ -70516,13 +70516,13 @@
         "stderr": "cp: missing destination file operand\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:131:it:should error with missing destination",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [
@@ -70572,13 +70572,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:140:it:should copy with relative paths",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70617,13 +70617,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:15:it:should preserve original file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70663,13 +70663,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:24:it:should overwrite existing destination",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70709,13 +70709,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:36:it:should copy to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70756,13 +70756,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:48:it:should copy multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -70801,13 +70801,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:5:it:should copy file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [
@@ -70853,13 +70853,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:61:it:should error when copying multiple files to non-directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [
@@ -70909,13 +70909,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:73:it:should error when copying directory without -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [
@@ -70965,13 +70965,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:82:it:should copy directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [
@@ -71016,13 +71016,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/cp/cp.test.ts:92:it:should copy directory with -R",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-cp",
-        "rustTest": "pending:just-bash-command-cp",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::cp",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable cp file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -71953,13 +71953,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:24:it:should create nested directories with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72012,13 +72012,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:24:it:should create nested directories with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72061,13 +72061,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:34:it:should create deeply nested directories with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [],
@@ -72104,13 +72104,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:34:it:should create deeply nested directories with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72153,13 +72153,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:41:it:should create nested directories with --parents",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [],
@@ -72196,13 +72196,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:41:it:should create nested directories with --parents",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72245,13 +72245,13 @@
         "stderr": "mkdir: cannot create directory '/a/b/c': No such file or directory\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:48:it:should fail without -p for nested dirs",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72414,13 +72414,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:58:it:should not error if directory exists with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72475,13 +72475,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:68:it:should error if file exists at path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72529,13 +72529,13 @@
         "stderr": "mkdir: missing operand\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:77:it:should error with no arguments",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72590,13 +72590,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:85:it:should create directory with relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [],
@@ -72635,13 +72635,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:85:it:should create directory with relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72684,13 +72684,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:95:it:should create multiple nested paths with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [],
@@ -72727,13 +72727,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:95:it:should create multiple nested paths with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72776,13 +72776,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mkdir/mkdir.test.ts:95:it:should create multiple nested paths with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mkdir",
-        "rustTest": "pending:just-bash-command-mkdir",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mkdir",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mkdir parent flags, nonrecursive parent errors, existing-path handling, missing operands, relative paths, and multiple nested paths.",
         "found": true
       },
       "assertions": [
@@ -72825,13 +72825,13 @@
         "stderr": "mv: cannot stat '/missing.txt': No such file or directory\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:105:it:should error on missing source",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -72881,13 +72881,13 @@
         "stderr": "mv: missing destination file operand\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:114:it:should error with missing destination",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -72937,13 +72937,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:123:it:should move with relative paths",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -72983,13 +72983,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:133:it:should move directory into existing directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -73029,13 +73029,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:146:it:should accept -f flag (force)",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73085,13 +73085,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:15:it:should remove source after move",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -73130,13 +73130,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:15:it:should remove source after move",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73182,13 +73182,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:160:it:should skip existing file with -n flag (no-clobber)",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73239,13 +73239,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:160:it:should skip existing file with -n flag (no-clobber)",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73290,13 +73290,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:178:it:should move when destination doesn't exist with -n flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73341,13 +73341,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:188:it:should show verbose output with -v flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73398,13 +73398,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:197:it:should handle combined flags -fv",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73455,13 +73455,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:209:it:should let -n take precedence over -f",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73504,13 +73504,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:223:it:should show help with --help",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73575,13 +73575,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:233:it:should error on unknown flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73631,13 +73631,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:24:it:should rename file in same directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -73677,13 +73677,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:33:it:should move file to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -73724,13 +73724,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:45:it:should move multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -73769,13 +73769,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:5:it:should move file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73821,13 +73821,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:58:it:should error when moving multiple files to non-directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73877,13 +73877,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:70:it:should move directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -73922,13 +73922,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:70:it:should move directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [
@@ -73974,13 +73974,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:81:it:should move nested directories",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -74020,13 +74020,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/mv/mv.test.ts:93:it:should overwrite destination file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-mv",
-        "rustTest": "pending:just-bash-command-mv",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::mv",
+        "rustTest": "cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable mv file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -75981,13 +75981,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:102:it:should handle --recursive flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -76026,13 +76026,13 @@
         "stderr": null,
         "exitCode": 2
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:102:it:should handle --recursive flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76075,13 +76075,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:111:it:should handle --force flag",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76134,13 +76134,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:119:it:should not error with -f and no arguments",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76193,13 +76193,13 @@
         "stderr": "rm: missing operand\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:127:it:should error with no arguments",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76252,13 +76252,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:135:it:should remove empty directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -76295,13 +76295,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:135:it:should remove empty directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -76338,13 +76338,13 @@
         "stderr": null,
         "exitCode": 2
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:135:it:should remove empty directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76389,13 +76389,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:143:it:should remove file with relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -76434,13 +76434,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:143:it:should remove file with relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76583,13 +76583,13 @@
         "stderr": "rm: cannot remove '/missing.txt': No such file or directory\n",
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:31:it:should error on missing file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76642,13 +76642,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:41:it:should not error with -f on missing file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76703,13 +76703,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:49:it:should error when removing directory without -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76759,13 +76759,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:5:it:should remove file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76820,13 +76820,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:5:it:should remove file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76871,13 +76871,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:58:it:should remove directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76932,13 +76932,13 @@
         "stderr": null,
         "exitCode": 2
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:58:it:should remove directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -76983,13 +76983,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:70:it:should remove directory with -R",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -77028,13 +77028,13 @@
         "stderr": null,
         "exitCode": 2
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:70:it:should remove directory with -R",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -77081,13 +77081,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:79:it:should remove nested directories with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [],
@@ -77128,13 +77128,13 @@
         "stderr": null,
         "exitCode": 2
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:79:it:should remove nested directories with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [
@@ -77179,13 +77179,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/rm/rm.test.ts:92:it:should combine -rf flags",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-rm",
-        "rustTest": "pending:just-bash-command-rm",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::rm",
+        "rustTest": "mkdir_rm_upstream_command_flags_and_errors_are_virtual",
+        "notes": "JBC-06 verifies portable rm file removal, force and recursive flags, combined flags, missing operands, empty directories, relative paths, and missing-file diagnostics.",
         "found": true
       },
       "assertions": [

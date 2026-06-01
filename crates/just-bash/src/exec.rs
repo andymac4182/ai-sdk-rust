@@ -5,6 +5,7 @@
 //! executor tool bridge. It intentionally does not replace any Open Agents
 //! runtime path; JB-07 can choose where to wire this backend.
 
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{
@@ -14,6 +15,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -778,13 +780,19 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "printenv" => command_printenv(state, &tokens[1..]),
         "cd" => command_cd(state, tokens.get(1).map(String::as_str)),
         "cat" => command_cat(state, &tokens[1..], &stdin),
-        "grep" => command_grep(state, &tokens[1..], &stdin),
-        "fgrep" | "egrep" => command_grep(state, &tokens[1..], &stdin),
+        "grep" => command_grep(state, &tokens[1..], &stdin, GrepMode::Regex),
+        "fgrep" => command_grep(state, &tokens[1..], &stdin, GrepMode::Fixed),
+        "egrep" => command_grep(state, &tokens[1..], &stdin, GrepMode::Regex),
         "rg" => command_rg(state, &tokens[1..], &stdin),
         "sed" => command_sed(state, &tokens[1..], &stdin),
         "awk" => command_awk(state, &tokens[1..], &stdin),
         "head" => command_head(state, &tokens[1..], &stdin),
-        "wc" => command_wc(&tokens[1..], &stdin),
+        "tail" => command_tail(state, &tokens[1..], &stdin),
+        "wc" => command_wc(state, &tokens[1..], &stdin),
+        "sort" => command_sort(state, &tokens[1..], &stdin),
+        "uniq" => command_uniq(state, &tokens[1..], &stdin),
+        "cut" => command_cut(state, &tokens[1..], &stdin),
+        "tr" => command_tr(&tokens[1..], &stdin),
         "ls" => command_ls(state, &tokens[1..]),
         "mkdir" => command_mkdir(state, &tokens[1..]),
         "touch" => command_touch(state, &tokens[1..]),
@@ -1118,11 +1126,27 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     }
 }
 
-fn command_grep(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrepMode {
+    Regex,
+    Fixed,
+}
+
+fn command_grep(
+    state: &ExecState<'_>,
+    args: &[String],
+    stdin: &str,
+    mode: GrepMode,
+) -> CommandResult {
     let mut ignore_case = false;
     let mut invert = false;
     let mut line_number = false;
     let mut count_only = false;
+    let mut files_with_matches = false;
+    let mut recursive = false;
+    let mut word_regexp = false;
+    let mut pattern = None;
+    let mut paths = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         match arg.as_str() {
@@ -1130,6 +1154,14 @@ fn command_grep(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
             "-v" | "--invert-match" => invert = true,
             "-n" | "--line-number" => line_number = true,
             "-c" | "--count" => count_only = true,
+            "-l" | "--files-with-matches" => files_with_matches = true,
+            "-r" | "-R" | "--recursive" => recursive = true,
+            "-w" | "--word-regexp" => word_regexp = true,
+            "-e" => {
+                pattern = args.get(index + 1).cloned();
+                index += 2;
+                break;
+            }
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 for flag in arg[1..].chars() {
                     match flag {
@@ -1137,50 +1169,62 @@ fn command_grep(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
                         'v' => invert = true,
                         'n' => line_number = true,
                         'c' => count_only = true,
+                        'l' => files_with_matches = true,
+                        'r' | 'R' => recursive = true,
+                        'w' => word_regexp = true,
+                        'E' | 'F' => {}
                         _ => {}
                     }
                 }
             }
-            _ => break,
+            _ => {
+                pattern = Some(arg.clone());
+                index += 1;
+                break;
+            }
         }
         index += 1;
     }
 
-    let Some(pattern) = args.get(index) else {
+    let Some(pattern) = pattern else {
         return stderr_result(2, "grep: missing pattern\n");
     };
-    let files = &args[index + 1..];
-    let input = if files.is_empty() {
-        vec![("".to_string(), stdin.to_string())]
+    paths.extend(args[index..].iter().cloned());
+    let inputs = if paths.is_empty() {
+        vec![NamedTextInput {
+            label: String::new(),
+            text: stdin.to_string(),
+        }]
     } else {
-        let fs = match state.session.inner.fs.lock() {
-            Ok(fs) => fs,
-            Err(_) => return stderr_result(1, "grep: filesystem lock poisoned\n"),
-        };
-        let mut inputs = Vec::new();
-        for path in files {
-            let path = resolve_path(&state.cwd, path);
-            match fs.read_file(&path) {
-                Ok(content) => inputs.push((path, content)),
-                Err(_) => {
-                    return stderr_result(2, format!("grep: {path}: No such file or directory\n"));
-                }
-            }
+        match grep_inputs(state, &paths, recursive) {
+            Ok(inputs) => inputs,
+            Err(error) => return stderr_result(2, format!("grep: {error}\n")),
         }
-        inputs
+    };
+    let matcher = match LineMatcher::new(&pattern, ignore_case, word_regexp, mode) {
+        Ok(matcher) => matcher,
+        Err(error) => return stderr_result(2, format!("grep: {error}\n")),
     };
     let mut stdout = String::new();
     let mut matches = 0;
-    for (path, text) in input {
-        for (line_index, line) in text.lines().enumerate() {
-            let matched = line_matches(line, pattern, ignore_case);
+    let show_filename = paths.len() > 1 || recursive;
+    for input in inputs {
+        let mut file_matched = false;
+        let mut file_matches = 0;
+        for (line_index, line) in input.text.lines().enumerate() {
+            let matched = matcher.is_match(line);
             if matched ^ invert {
                 matches += 1;
+                file_matches += 1;
+                file_matched = true;
+                if files_with_matches {
+                    continue;
+                }
                 if count_only {
                     continue;
                 }
-                if files.len() > 1 {
-                    stdout.push_str(&path);
+                if show_filename && !input.label.is_empty() {
+                    stdout.push_str(&input.label);
                     stdout.push(':');
                 }
                 if line_number {
@@ -1191,9 +1235,16 @@ fn command_grep(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
                 stdout.push('\n');
             }
         }
-    }
-    if count_only {
-        stdout.push_str(&format!("{matches}\n"));
+        if files_with_matches && file_matched {
+            stdout.push_str(&input.label);
+            stdout.push('\n');
+        } else if count_only {
+            if show_filename && !input.label.is_empty() {
+                stdout.push_str(&input.label);
+                stdout.push(':');
+            }
+            stdout.push_str(&format!("{file_matches}\n"));
+        }
     }
     CommandResult {
         exit_code: if matches == 0 { 1 } else { 0 },
@@ -1202,12 +1253,252 @@ fn command_grep(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
     }
 }
 
-fn command_wc(args: &[String], stdin: &str) -> CommandResult {
-    if args.iter().any(|arg| arg == "-l") {
-        stdout_result(format!("{}\n", stdin.lines().count()))
-    } else {
-        stdout_result(format!("{}\n", stdin.len()))
+fn command_wc(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut show_lines = false;
+    let mut show_words = false;
+    let mut show_bytes = false;
+    let mut show_chars = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-l" | "--lines" => show_lines = true,
+            "-w" | "--words" => show_words = true,
+            "-c" | "--bytes" => show_bytes = true,
+            "-m" | "--chars" => show_chars = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'l' => show_lines = true,
+                        'w' => show_words = true,
+                        'c' => show_bytes = true,
+                        'm' => show_chars = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
     }
+    if !show_lines && !show_words && !show_bytes && !show_chars {
+        show_lines = true;
+        show_words = true;
+        show_bytes = true;
+    }
+
+    let inputs = match collect_named_text_inputs(state, &paths, stdin, "wc") {
+        Ok(inputs) => inputs,
+        Err(error) => return stderr_result(1, format!("wc: {error}\n")),
+    };
+    let mut stdout = String::new();
+    let multiple_files = paths.len() > 1;
+    let mut total = TextCounts::default();
+    for input in &inputs {
+        let counts = TextCounts::from_text(&input.text);
+        total.add(counts);
+        stdout.push_str(&format_wc_counts(
+            counts,
+            show_lines,
+            show_words,
+            show_bytes,
+            show_chars,
+            (!input.label.is_empty()).then_some(input.label.as_str()),
+        ));
+    }
+    if multiple_files {
+        stdout.push_str(&format_wc_counts(
+            total,
+            show_lines,
+            show_words,
+            show_bytes,
+            show_chars,
+            Some("total"),
+        ));
+    }
+    stdout_result(stdout)
+}
+
+#[derive(Clone, Debug)]
+struct NamedTextInput {
+    label: String,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+enum LineMatcher {
+    Fixed {
+        pattern: String,
+        ignore_case: bool,
+        word_regexp: bool,
+    },
+    Regex(Regex),
+}
+
+impl LineMatcher {
+    fn new(
+        pattern: &str,
+        ignore_case: bool,
+        word_regexp: bool,
+        mode: GrepMode,
+    ) -> Result<Self, String> {
+        if mode == GrepMode::Fixed {
+            return Ok(Self::Fixed {
+                pattern: pattern.to_string(),
+                ignore_case,
+                word_regexp,
+            });
+        }
+        let pattern = if word_regexp {
+            format!(r"\b(?:{})\b", pattern)
+        } else {
+            pattern.to_string()
+        };
+        RegexBuilder::new(&pattern)
+            .case_insensitive(ignore_case)
+            .build()
+            .map(Self::Regex)
+            .map_err(|error| error.to_string())
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Self::Regex(regex) => regex.is_match(line),
+            Self::Fixed {
+                pattern,
+                ignore_case,
+                word_regexp,
+            } => fixed_line_match(line, pattern, *ignore_case, *word_regexp),
+        }
+    }
+}
+
+fn fixed_line_match(line: &str, pattern: &str, ignore_case: bool, word_regexp: bool) -> bool {
+    let line = if ignore_case {
+        line.to_ascii_lowercase()
+    } else {
+        line.to_string()
+    };
+    let pattern = if ignore_case {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    if !word_regexp {
+        return line.contains(&pattern);
+    }
+    line.split(|ch: char| !is_word_char(ch))
+        .any(|word| word == pattern)
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn grep_inputs(
+    state: &ExecState<'_>,
+    paths: &[String],
+    recursive: bool,
+) -> Result<Vec<NamedTextInput>, String> {
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| "filesystem lock poisoned".to_string())?;
+    let mut inputs = Vec::new();
+    for path in paths {
+        let path = resolve_path(&state.cwd, path);
+        let stat = fs
+            .stat(&path)
+            .map_err(|_| format!("{path}: No such file or directory"))?;
+        if stat.is_directory {
+            if !recursive {
+                return Err(format!("{path}: Is a directory"));
+            }
+            let mut child_paths = fs
+                .get_all_paths()
+                .into_iter()
+                .filter(|candidate| candidate.starts_with(&format!("{path}/")))
+                .collect::<Vec<_>>();
+            child_paths.sort();
+            for child_path in child_paths {
+                let Ok(child_stat) = fs.stat(&child_path) else {
+                    continue;
+                };
+                if !child_stat.is_file {
+                    continue;
+                }
+                let text = fs
+                    .read_file(&child_path)
+                    .map_err(|_| format!("{child_path}: No such file or directory"))?;
+                inputs.push(NamedTextInput {
+                    label: child_path,
+                    text,
+                });
+            }
+        } else {
+            let text = fs
+                .read_file(&path)
+                .map_err(|_| format!("{path}: No such file or directory"))?;
+            inputs.push(NamedTextInput { label: path, text });
+        }
+    }
+    Ok(inputs)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TextCounts {
+    lines: usize,
+    words: usize,
+    bytes: usize,
+    chars: usize,
+}
+
+impl TextCounts {
+    fn from_text(text: &str) -> Self {
+        Self {
+            lines: text.bytes().filter(|byte| *byte == b'\n').count(),
+            words: text.split_whitespace().count(),
+            bytes: text.len(),
+            chars: text.chars().count(),
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.lines += other.lines;
+        self.words += other.words;
+        self.bytes += other.bytes;
+        self.chars += other.chars;
+    }
+}
+
+fn format_wc_counts(
+    counts: TextCounts,
+    show_lines: bool,
+    show_words: bool,
+    show_bytes: bool,
+    show_chars: bool,
+    label: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if show_lines {
+        parts.push(counts.lines.to_string());
+    }
+    if show_words {
+        parts.push(counts.words.to_string());
+    }
+    if show_bytes {
+        parts.push(counts.bytes.to_string());
+    }
+    if show_chars {
+        parts.push(counts.chars.to_string());
+    }
+    let mut output = parts.join(" ");
+    if let Some(label) = label {
+        output.push(' ');
+        output.push_str(label);
+    }
+    output.push('\n');
+    output
 }
 
 fn command_ls(state: &ExecState<'_>, args: &[String]) -> CommandResult {
@@ -1712,26 +2003,108 @@ fn command_find(state: &ExecState<'_>, args: &[String]) -> CommandResult {
 }
 
 fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let Some(pattern) = args.iter().find(|arg| !arg.starts_with('-')) else {
+    let mut show_line_numbers = true;
+    let mut ignore_case = None;
+    let mut fixed = false;
+    let mut pattern = None;
+    let mut roots = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-N" | "--no-line-number" => show_line_numbers = false,
+            "-i" | "--ignore-case" => ignore_case = Some(true),
+            "-s" | "--case-sensitive" => ignore_case = Some(false),
+            "-F" | "--fixed-strings" => fixed = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'N' => show_line_numbers = false,
+                        'i' => ignore_case = Some(true),
+                        's' => ignore_case = Some(false),
+                        'F' => fixed = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                pattern = Some(arg.clone());
+                roots.extend(
+                    args[index + 1..]
+                        .iter()
+                        .filter(|arg| !arg.starts_with('-'))
+                        .cloned(),
+                );
+                break;
+            }
+        }
+        index += 1;
+    }
+    let Some(pattern) = pattern else {
         return stderr_result(2, "rg: missing pattern\n");
     };
-    let roots = args
-        .iter()
-        .skip_while(|arg| *arg != pattern)
-        .skip(1)
-        .filter(|arg| !arg.starts_with('-'))
-        .collect::<Vec<_>>();
-    if roots.is_empty() {
-        return command_grep(state, std::slice::from_ref(pattern), stdin);
+    if roots.is_empty() && !stdin.is_empty() {
+        let ignore_case = ignore_case.unwrap_or_else(|| rg_smart_case_ignores_case(&pattern));
+        let matcher = match LineMatcher::new(
+            &pattern,
+            ignore_case,
+            false,
+            if fixed {
+                GrepMode::Fixed
+            } else {
+                GrepMode::Regex
+            },
+        ) {
+            Ok(matcher) => matcher,
+            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+        };
+        let mut stdout = String::new();
+        let mut matches = 0;
+        for (line_index, line) in stdin.lines().enumerate() {
+            if matcher.is_match(line) {
+                matches += 1;
+                if show_line_numbers {
+                    stdout.push_str(&(line_index + 1).to_string());
+                    stdout.push(':');
+                }
+                stdout.push_str(line);
+                stdout.push('\n');
+            }
+        }
+        return CommandResult {
+            exit_code: if matches == 0 { 1 } else { 0 },
+            stdout,
+            ..CommandResult::default()
+        };
     }
     let fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "rg: filesystem lock poisoned\n"),
     };
+    let search_roots = if roots.is_empty() {
+        vec![state.cwd.clone()]
+    } else {
+        roots
+            .iter()
+            .map(|root| resolve_path(&state.cwd, root))
+            .collect()
+    };
+    let ignore_case = ignore_case.unwrap_or_else(|| rg_smart_case_ignores_case(&pattern));
+    let matcher = match LineMatcher::new(
+        &pattern,
+        ignore_case,
+        false,
+        if fixed {
+            GrepMode::Fixed
+        } else {
+            GrepMode::Regex
+        },
+    ) {
+        Ok(matcher) => matcher,
+        Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+    };
     let mut stdout = String::new();
     let mut matches = 0;
-    for root in roots {
-        let root = resolve_path(&state.cwd, root);
+    for root in search_roots {
         let mut paths = fs
             .get_all_paths()
             .into_iter()
@@ -1746,13 +2119,20 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
                 continue;
             }
             if let Ok(content) = fs.read_file(&path) {
-                for line in content
-                    .lines()
-                    .filter(|line| line_matches(line, pattern, false))
-                {
+                if content.contains('\0') {
+                    continue;
+                }
+                for (line_index, line) in content.lines().enumerate() {
+                    if !matcher.is_match(line) {
+                        continue;
+                    }
                     matches += 1;
-                    stdout.push_str(&path);
+                    stdout.push_str(&relative_display_path(&state.cwd, &path));
                     stdout.push(':');
+                    if show_line_numbers {
+                        stdout.push_str(&(line_index + 1).to_string());
+                        stdout.push(':');
+                    }
                     stdout.push_str(line);
                     stdout.push('\n');
                 }
@@ -1766,59 +2146,169 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     }
 }
 
+fn rg_smart_case_ignores_case(pattern: &str) -> bool {
+    !pattern.chars().any(char::is_uppercase)
+}
+
+fn relative_display_path(cwd: &str, path: &str) -> String {
+    path.strip_prefix(cwd)
+        .and_then(|relative| relative.strip_prefix('/'))
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let Some(script) = args.first() else {
+    let mut quiet = false;
+    let mut scripts = Vec::new();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-n" => {
+                quiet = true;
+                index += 1;
+            }
+            "-e" => {
+                if let Some(script) = args.get(index + 1) {
+                    scripts.push(script.clone());
+                    index += 2;
+                } else {
+                    return stderr_result(1, "sed: option requires an argument -- e\n");
+                }
+            }
+            _ if scripts.is_empty() => {
+                scripts.push(arg.clone());
+                index += 1;
+            }
+            _ => {
+                paths.push(arg.clone());
+                index += 1;
+            }
+        }
+    }
+    if scripts.is_empty() {
         return stderr_result(1, "sed: missing script\n");
     };
-    let input = match collect_text_inputs(state, &args[1..], stdin) {
+    let input = match collect_text_inputs(state, &paths, stdin) {
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("sed: {error}\n")),
     };
-    let Some((from, to, global)) = parse_sed_substitution(script) else {
-        return stderr_result(1, "sed: unsupported script\n");
-    };
-    let output = if global {
-        input.replace(&from, &to)
-    } else {
-        input
-            .lines()
-            .map(|line| line.replacen(&from, &to, 1))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + if input.ends_with('\n') { "\n" } else { "" }
-    };
+    let mut lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let mut explicit_print = Vec::new();
+    for script in &scripts {
+        let command = match parse_sed_command(script) {
+            Ok(command) => command,
+            Err(error) => return stderr_result(1, format!("sed: {error}\n")),
+        };
+        match command {
+            SedCommand::Substitute {
+                address,
+                pattern,
+                replacement,
+                global,
+                ignore_case,
+            } => {
+                let regex = match RegexBuilder::new(&pattern)
+                    .case_insensitive(ignore_case)
+                    .build()
+                {
+                    Ok(regex) => regex,
+                    Err(error) => return stderr_result(1, format!("sed: {error}\n")),
+                };
+                let line_count = lines.len();
+                for (line_index, line) in lines.iter_mut().enumerate() {
+                    if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
+                        continue;
+                    }
+                    let replacement = replacement.replace('&', "$0");
+                    *line = if global {
+                        regex.replace_all(line, replacement.as_str()).into_owned()
+                    } else {
+                        regex.replace(line, replacement.as_str()).into_owned()
+                    };
+                }
+            }
+            SedCommand::Print(address) => {
+                for (line_index, line) in lines.iter().enumerate() {
+                    if sed_address_matches(Some(&address), line_index, line, lines.len()) {
+                        explicit_print.push(line.clone());
+                    }
+                }
+            }
+            SedCommand::Delete(address) => {
+                let line_count = lines.len();
+                lines = lines
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(line_index, line)| {
+                        (!sed_address_matches(Some(&address), line_index, &line, line_count))
+                            .then_some(line)
+                    })
+                    .collect();
+            }
+        }
+    }
+    let output_lines = if quiet { explicit_print } else { lines };
+    let output = join_lines_with_newline(&output_lines);
     stdout_result(output)
 }
 
 fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let Some(program) = args.first() else {
+    let mut separator = AwkSeparator::Whitespace;
+    let mut program = None;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-F" => {
+                if let Some(value) = args.get(index + 1) {
+                    separator = AwkSeparator::Literal(value.clone());
+                    index += 2;
+                } else {
+                    return stderr_result(1, "awk: option requires an argument -- F\n");
+                }
+            }
+            _ if arg.starts_with("-F") && arg.len() > 2 => {
+                separator = AwkSeparator::Literal(arg[2..].to_string());
+                index += 1;
+            }
+            _ if program.is_none() => {
+                program = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                paths.push(arg.clone());
+                index += 1;
+            }
+        }
+    }
+    let Some(program) = program else {
         return stderr_result(1, "awk: missing program\n");
     };
-    let input = match collect_text_inputs(state, &args[1..], stdin) {
+    let input = match collect_text_inputs(state, &paths, stdin) {
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("awk: {error}\n")),
     };
-    let field = if program.contains("$0") {
-        Some(0)
-    } else {
-        program.split('$').nth(1).and_then(|rest| {
-            rest.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-    };
-    let Some(field) = field else {
+    let Some(print_items) = parse_awk_print_items(&program) else {
         return stderr_result(1, "awk: unsupported program\n");
     };
     let mut stdout = String::new();
-    for line in input.lines() {
-        if field == 0 {
-            stdout.push_str(line);
-        } else if let Some(value) = line.split_whitespace().nth(field - 1) {
-            stdout.push_str(value);
-        }
+    for (record_index, line) in input.lines().enumerate() {
+        let fields = awk_fields(line, &separator);
+        let values = print_items
+            .iter()
+            .map(|item| match item {
+                AwkPrintItem::WholeLine => line.to_string(),
+                AwkPrintItem::Field(field) => fields
+                    .get(field.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or_default(),
+                AwkPrintItem::Nr => (record_index + 1).to_string(),
+                AwkPrintItem::Nf => fields.len().to_string(),
+            })
+            .collect::<Vec<_>>();
+        stdout.push_str(&values.join(" "));
         stdout.push('\n');
     }
     stdout_result(stdout)
@@ -1837,6 +2327,9 @@ fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
                 lines = value;
             }
             index += 2;
+        } else if let Some(value) = arg.strip_prefix("-n").and_then(|value| value.parse().ok()) {
+            lines = value;
+            index += 1;
         } else if let Some(value) = arg
             .strip_prefix('-')
             .and_then(|value| value.parse::<usize>().ok())
@@ -1848,15 +2341,688 @@ fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
             index += 1;
         }
     }
-    let input = match collect_text_inputs(state, &paths, stdin) {
+    let inputs = match collect_named_text_inputs(state, &paths, stdin, "head") {
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("head: {error}\n")),
     };
-    let mut stdout = input.lines().take(lines).collect::<Vec<_>>().join("\n");
-    if !stdout.is_empty() {
+    let mut stdout = String::new();
+    let multiple_files = paths.len() > 1;
+    for (input_index, input) in inputs.iter().enumerate() {
+        if multiple_files {
+            if input_index > 0 {
+                stdout.push('\n');
+            }
+            stdout.push_str(&format!("==> {} <==\n", input.label));
+        }
+        let selected = input
+            .text
+            .lines()
+            .take(lines)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        stdout.push_str(&join_lines_with_newline(&selected));
+    }
+    stdout_result(stdout)
+}
+
+fn command_tail(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut lines = TailLines::Last(10);
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "-n" {
+            if let Some(value) = args
+                .get(index + 1)
+                .and_then(|value| parse_tail_lines(value))
+            {
+                lines = value;
+            }
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("-n").and_then(parse_tail_lines) {
+            lines = value;
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix('-').and_then(|value| value.parse().ok()) {
+            lines = TailLines::Last(value);
+            index += 1;
+        } else {
+            paths.push(arg.clone());
+            index += 1;
+        }
+    }
+    let inputs = match collect_named_text_inputs(state, &paths, stdin, "tail") {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("tail: {error}\n")),
+    };
+    let mut stdout = String::new();
+    let multiple_files = paths.len() > 1;
+    for (input_index, input) in inputs.iter().enumerate() {
+        if multiple_files {
+            if input_index > 0 {
+                stdout.push('\n');
+            }
+            stdout.push_str(&format!("==> {} <==\n", input.label));
+        }
+        let all_lines = input
+            .text
+            .lines()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let selected = match lines {
+            TailLines::Last(count) => all_lines
+                .iter()
+                .skip(all_lines.len().saturating_sub(count))
+                .cloned()
+                .collect::<Vec<_>>(),
+            TailLines::From(start) => {
+                if start == 0 {
+                    all_lines.clone()
+                } else if start > all_lines.len() {
+                    vec![String::new()]
+                } else {
+                    all_lines
+                        .iter()
+                        .skip(start - 1)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }
+            }
+        };
+        stdout.push_str(&join_lines_with_newline(&selected));
+    }
+    stdout_result(stdout)
+}
+
+#[derive(Clone, Debug)]
+enum SedAddress {
+    Line(usize),
+    Last,
+    Range(usize, usize),
+    Pattern(String),
+}
+
+#[derive(Clone, Debug)]
+enum SedCommand {
+    Substitute {
+        address: Option<SedAddress>,
+        pattern: String,
+        replacement: String,
+        global: bool,
+        ignore_case: bool,
+    },
+    Print(SedAddress),
+    Delete(SedAddress),
+}
+
+fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
+    let script = script.trim();
+    if let Some(address) = script.strip_suffix('p').and_then(parse_sed_address) {
+        return Ok(SedCommand::Print(address));
+    }
+    if let Some(address) = script.strip_suffix('d').and_then(parse_sed_address) {
+        return Ok(SedCommand::Delete(address));
+    }
+    let (address, substitution) = split_sed_address_and_command(script);
+    let Some((pattern, replacement, flags)) = parse_sed_substitution_parts(&substitution) else {
+        return Err("unsupported script".to_string());
+    };
+    Ok(SedCommand::Substitute {
+        address,
+        pattern,
+        replacement,
+        global: flags.contains('g'),
+        ignore_case: flags.contains('i'),
+    })
+}
+
+fn split_sed_address_and_command(script: &str) -> (Option<SedAddress>, String) {
+    let trimmed = script.trim_start();
+    if trimmed.starts_with('s') {
+        return (None, trimmed.to_string());
+    }
+    if let Some((prefix, rest)) = trimmed.split_once('s')
+        && let Some(address) = parse_sed_address(prefix.trim())
+    {
+        return (
+            Some(address),
+            rest.strip_prefix('/').map_or_else(
+                || rest.to_string(),
+                |tail| {
+                    let mut command = String::from("s/");
+                    command.push_str(tail);
+                    command
+                },
+            ),
+        );
+    }
+    (None, trimmed.to_string())
+}
+
+fn parse_sed_address(value: &str) -> Option<SedAddress> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value == "$" {
+        return Some(SedAddress::Last);
+    }
+    if let Some((start, end)) = value.split_once(',') {
+        return Some(SedAddress::Range(
+            start.trim().parse().ok()?,
+            end.trim().parse().ok()?,
+        ));
+    }
+    if value.starts_with('/') && value.ends_with('/') && value.len() >= 2 {
+        return Some(SedAddress::Pattern(value[1..value.len() - 1].to_string()));
+    }
+    value.parse().ok().map(SedAddress::Line)
+}
+
+fn parse_sed_substitution_parts(script: &str) -> Option<(String, String, String)> {
+    let mut chars = script.chars();
+    if chars.next()? != 's' {
+        return None;
+    }
+    let delimiter = chars.next()?;
+    let rest = chars.as_str();
+    let (from, rest) = rest.split_once(delimiter)?;
+    let (to, flags) = rest.split_once(delimiter)?;
+    Some((from.to_string(), to.to_string(), flags.to_string()))
+}
+
+fn sed_address_matches(
+    address: Option<&SedAddress>,
+    line_index: usize,
+    line: &str,
+    line_count: usize,
+) -> bool {
+    let line_number = line_index + 1;
+    match address {
+        None => true,
+        Some(SedAddress::Line(target)) => line_number == *target,
+        Some(SedAddress::Last) => line_number == line_count,
+        Some(SedAddress::Range(start, end)) => line_number >= *start && line_number <= *end,
+        Some(SedAddress::Pattern(pattern)) => Regex::new(pattern)
+            .map(|regex| regex.is_match(line))
+            .unwrap_or(false),
+    }
+}
+
+#[derive(Clone, Debug)]
+enum AwkSeparator {
+    Whitespace,
+    Literal(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AwkPrintItem {
+    WholeLine,
+    Field(usize),
+    Nr,
+    Nf,
+}
+
+fn parse_awk_print_items(program: &str) -> Option<Vec<AwkPrintItem>> {
+    let body = program.trim().strip_prefix('{')?.strip_suffix('}')?.trim();
+    let body = body.strip_prefix("print")?.trim();
+    if body.is_empty() {
+        return Some(vec![AwkPrintItem::WholeLine]);
+    }
+    body.split(',')
+        .map(|entry| parse_awk_print_item(entry.trim()))
+        .collect()
+}
+
+fn parse_awk_print_item(value: &str) -> Option<AwkPrintItem> {
+    match value {
+        "$0" => Some(AwkPrintItem::WholeLine),
+        "NR" => Some(AwkPrintItem::Nr),
+        "NF" => Some(AwkPrintItem::Nf),
+        _ => value
+            .strip_prefix('$')
+            .and_then(|field| field.parse().ok())
+            .map(AwkPrintItem::Field),
+    }
+}
+
+fn awk_fields(line: &str, separator: &AwkSeparator) -> Vec<String> {
+    match separator {
+        AwkSeparator::Whitespace => line.split_whitespace().map(ToString::to_string).collect(),
+        AwkSeparator::Literal(separator) => {
+            line.split(separator).map(ToString::to_string).collect()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TailLines {
+    Last(usize),
+    From(usize),
+}
+
+fn parse_tail_lines(value: &str) -> Option<TailLines> {
+    value
+        .strip_prefix('+')
+        .and_then(|line| line.parse().ok().map(TailLines::From))
+        .or_else(|| value.parse().ok().map(TailLines::Last))
+}
+
+fn join_lines_with_newline(lines: &[String]) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut output = lines.join("\n");
+    output.push('\n');
+    output
+}
+
+fn command_sort(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut options = SortOptions::default();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--help" => {
+                return stdout_result(
+                    "Usage: sort [OPTION]... [FILE]...\n  -f, --ignore-case\n  -n, --numeric-sort\n  -r, --reverse\n  -u, --unique\n",
+                );
+            }
+            "--ignore-case" => options.ignore_case = true,
+            "-k" => {
+                if let Some(key) = args.get(index + 1) {
+                    options.key_field = parse_sort_key_field(key);
+                    index += 2;
+                    continue;
+                }
+            }
+            _ if arg.starts_with("-k") && arg.len() > 2 => {
+                options.key_field = parse_sort_key_field(&arg[2..]);
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'r' => options.reverse = true,
+                        'n' => options.numeric = true,
+                        'u' => options.unique = true,
+                        'f' => options.ignore_case = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_text_inputs(state, &paths, stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("sort: {error}\n")),
+    };
+    let mut lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
+    lines.sort_by(|left, right| compare_sort_lines(left, right, &options));
+    if options.unique {
+        lines.dedup_by(|left, right| {
+            sort_unique_key(left, &options) == sort_unique_key(right, &options)
+        });
+    }
+    stdout_result(join_lines_with_newline(&lines))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SortOptions {
+    reverse: bool,
+    numeric: bool,
+    unique: bool,
+    ignore_case: bool,
+    key_field: Option<usize>,
+}
+
+fn parse_sort_key_field(value: &str) -> Option<usize> {
+    value
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+fn sort_key<'a>(line: &'a str, options: &SortOptions) -> &'a str {
+    options.key_field.map_or(line, |field| {
+        line.split_whitespace()
+            .nth(field.saturating_sub(1))
+            .unwrap_or("")
+    })
+}
+
+fn compare_sort_lines(left: &str, right: &str, options: &SortOptions) -> CmpOrdering {
+    let left_key = sort_key(left, options);
+    let right_key = sort_key(right, options);
+    let ordering = if options.numeric {
+        let left_number = left_key.parse::<f64>().unwrap_or(0.0);
+        let right_number = right_key.parse::<f64>().unwrap_or(0.0);
+        left_number
+            .partial_cmp(&right_number)
+            .unwrap_or(CmpOrdering::Equal)
+    } else {
+        compare_text_keys(left_key, right_key, options.ignore_case)
+    };
+    let ordering = ordering.then_with(|| compare_text_keys(left, right, options.ignore_case));
+    if options.reverse {
+        ordering.reverse()
+    } else {
+        ordering
+    }
+}
+
+fn compare_text_keys(left: &str, right: &str, ignore_case: bool) -> CmpOrdering {
+    let left_key = left.to_ascii_lowercase();
+    let right_key = right.to_ascii_lowercase();
+    let ordering = left_key.cmp(&right_key);
+    if ordering != CmpOrdering::Equal {
+        return ordering;
+    }
+    if ignore_case {
+        return CmpOrdering::Equal;
+    }
+    match (starts_lowercase(left), starts_lowercase(right)) {
+        (true, false) => CmpOrdering::Less,
+        (false, true) => CmpOrdering::Greater,
+        _ => left.cmp(right),
+    }
+}
+
+fn starts_lowercase(value: &str) -> bool {
+    value.chars().next().is_some_and(char::is_lowercase)
+}
+
+fn sort_unique_key(line: &str, options: &SortOptions) -> String {
+    let key = sort_key(line, options);
+    if options.ignore_case {
+        key.to_ascii_lowercase()
+    } else {
+        key.to_string()
+    }
+}
+
+fn command_uniq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut count = false;
+    let mut duplicates_only = false;
+    let mut unique_only = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-c" | "--count" => count = true,
+            "-d" | "--repeated" => duplicates_only = true,
+            "-u" | "--unique" => unique_only = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'c' => count = true,
+                        'd' => duplicates_only = true,
+                        'u' => unique_only = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+    let input = match collect_text_inputs(state, &paths, stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("uniq: {error}\n")),
+    };
+    let mut stdout = String::new();
+    let mut previous: Option<String> = None;
+    let mut group_count = 0;
+    for line in input.lines().map(ToString::to_string) {
+        if previous.as_ref().is_some_and(|previous| previous == &line) {
+            group_count += 1;
+        } else {
+            emit_uniq_group(
+                &mut stdout,
+                previous.take(),
+                group_count,
+                count,
+                duplicates_only,
+                unique_only,
+            );
+            previous = Some(line);
+            group_count = 1;
+        }
+    }
+    emit_uniq_group(
+        &mut stdout,
+        previous,
+        group_count,
+        count,
+        duplicates_only,
+        unique_only,
+    );
+    stdout_result(stdout)
+}
+
+fn emit_uniq_group(
+    stdout: &mut String,
+    line: Option<String>,
+    group_count: usize,
+    count: bool,
+    duplicates_only: bool,
+    unique_only: bool,
+) {
+    let Some(line) = line else {
+        return;
+    };
+    if duplicates_only && group_count <= 1 {
+        return;
+    }
+    if unique_only && group_count != 1 {
+        return;
+    }
+    if count {
+        stdout.push_str(&format!("{group_count:4} {line}\n"));
+    } else {
+        stdout.push_str(&line);
+        stdout.push('\n');
+    }
+}
+
+fn command_cut(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut delimiter = "\t".to_string();
+    let mut fields = None;
+    let mut chars = None;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-d" => {
+                if let Some(value) = args.get(index + 1) {
+                    delimiter.clone_from(value);
+                    index += 2;
+                    continue;
+                }
+            }
+            "-f" => {
+                fields = args.get(index + 1).map(|value| parse_cut_list(value));
+                index += 2;
+                continue;
+            }
+            "-c" => {
+                chars = args.get(index + 1).map(|value| parse_cut_list(value));
+                index += 2;
+                continue;
+            }
+            _ if arg.starts_with("-d") && arg.len() > 2 => delimiter = arg[2..].to_string(),
+            _ if arg.starts_with("-f") && arg.len() > 2 => fields = Some(parse_cut_list(&arg[2..])),
+            _ if arg.starts_with("-c") && arg.len() > 2 => chars = Some(parse_cut_list(&arg[2..])),
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if fields.is_none() && chars.is_none() {
+        return stderr_result(
+            1,
+            "cut: you must specify a list of bytes, characters, or fields\n",
+        );
+    }
+    let input = match collect_text_inputs(state, &paths, stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("cut: {error}\n")),
+    };
+    let mut stdout = String::new();
+    for line in input.lines() {
+        if let Some(ranges) = &fields {
+            let parts = line.split(&delimiter).collect::<Vec<_>>();
+            let selected = selected_indexes(parts.len(), ranges)
+                .into_iter()
+                .filter_map(|index| parts.get(index).copied())
+                .collect::<Vec<_>>();
+            stdout.push_str(&selected.join(&delimiter));
+        } else if let Some(ranges) = &chars {
+            let characters = line.chars().collect::<Vec<_>>();
+            for index in selected_indexes(characters.len(), ranges) {
+                if let Some(ch) = characters.get(index) {
+                    stdout.push(*ch);
+                }
+            }
+        }
         stdout.push('\n');
     }
     stdout_result(stdout)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CutRange {
+    start: usize,
+    end: Option<usize>,
+}
+
+fn parse_cut_list(value: &str) -> Vec<CutRange> {
+    value
+        .split(',')
+        .filter_map(|entry| {
+            if let Some((start, end)) = entry.split_once('-') {
+                let start = start.parse().ok()?;
+                let end = if end.is_empty() {
+                    None
+                } else {
+                    Some(end.parse().ok()?)
+                };
+                Some(CutRange { start, end })
+            } else {
+                entry.parse().ok().map(|index| CutRange {
+                    start: index,
+                    end: Some(index),
+                })
+            }
+        })
+        .collect()
+}
+
+fn selected_indexes(len: usize, ranges: &[CutRange]) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    for range in ranges {
+        let start = range.start.saturating_sub(1);
+        let end = range.end.unwrap_or(len).min(len);
+        for index in start..end {
+            if index < len && !indexes.contains(&index) {
+                indexes.push(index);
+            }
+        }
+    }
+    indexes
+}
+
+fn command_tr(args: &[String], stdin: &str) -> CommandResult {
+    if args.is_empty() {
+        return stderr_result(1, "tr: missing operand\n");
+    }
+    let mut delete = false;
+    let mut squeeze = false;
+    let mut operands = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-d" | "--delete" => delete = true,
+            "-s" | "--squeeze-repeats" => squeeze = true,
+            _ => operands.push(arg.clone()),
+        }
+    }
+    let Some(set1) = operands.first() else {
+        return stderr_result(1, "tr: missing operand\n");
+    };
+    let set1 = expand_tr_set(set1);
+    if delete {
+        let output = stdin
+            .chars()
+            .filter(|ch| !set1.contains(ch))
+            .collect::<String>();
+        return stdout_result(output);
+    }
+    if squeeze {
+        let mut output = String::new();
+        let mut previous = None;
+        for ch in stdin.chars() {
+            if Some(ch) == previous && set1.contains(&ch) {
+                continue;
+            }
+            output.push(ch);
+            previous = Some(ch);
+        }
+        return stdout_result(output);
+    }
+    let Some(set2) = operands.get(1) else {
+        return stderr_result(1, "tr: missing operand after SET1\n");
+    };
+    let set2 = expand_tr_set(set2);
+    let mut output = String::new();
+    for ch in stdin.chars() {
+        if let Some(index) = set1.iter().position(|candidate| *candidate == ch) {
+            output.push(*set2.get(index).or_else(|| set2.last()).unwrap_or(&ch));
+        } else {
+            output.push(ch);
+        }
+    }
+    stdout_result(output)
+}
+
+fn expand_tr_set(value: &str) -> Vec<char> {
+    let chars = unescape_tr_set(value).chars().collect::<Vec<_>>();
+    let mut expanded = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if index + 2 < chars.len() && chars[index + 1] == '-' {
+            let start = chars[index] as u32;
+            let end = chars[index + 2] as u32;
+            if start <= end && end - start <= 65_536 {
+                for value in start..=end {
+                    if let Some(ch) = char::from_u32(value) {
+                        expanded.push(ch);
+                    }
+                }
+                index += 3;
+                continue;
+            }
+        }
+        expanded.push(chars[index]);
+        index += 1;
+    }
+    expanded
+}
+
+fn unescape_tr_set(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('r') => output.push('\r'),
+            Some(other) => output.push(other),
+            None => output.push('\\'),
+        }
+    }
+    output
 }
 
 fn command_read(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -1879,18 +3045,96 @@ fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     let Ok(value) = serde_json::from_str::<JsonValue>(&input) else {
         return stderr_result(4, "jq: invalid JSON\n");
     };
-    if filter == "." {
-        return stdout_result(format!("{value}\n"));
+    let selected = match eval_jq_filter(&value, filter) {
+        Ok(selected) => selected,
+        Err(error) => return stderr_result(3, format!("jq: {error}\n")),
+    };
+    let mut stdout = String::new();
+    for value in selected {
+        stdout.push_str(&render_jq_value(&value));
+        stdout.push('\n');
     }
-    let Some(field) = filter.strip_prefix('.') else {
-        return stderr_result(3, "jq: unsupported filter\n");
+    stdout_result(stdout)
+}
+
+fn eval_jq_filter(value: &JsonValue, filter: &str) -> Result<Vec<JsonValue>, String> {
+    let mut output = Vec::new();
+    for branch in filter.split(',') {
+        let mut current = vec![value.clone()];
+        for segment in branch.split('|') {
+            let selector = segment.trim();
+            let mut next = Vec::new();
+            for value in &current {
+                next.extend(eval_jq_selector(value, selector)?);
+            }
+            current = next;
+        }
+        output.extend(current);
+    }
+    Ok(output)
+}
+
+fn eval_jq_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue>, String> {
+    if selector == "." {
+        return Ok(vec![value.clone()]);
+    }
+    if selector == ".[]" {
+        return Ok(jq_iter_values(value));
+    }
+    let mut current = value.clone();
+    let mut rest = selector
+        .strip_prefix('.')
+        .ok_or_else(|| "unsupported filter".to_string())?;
+    while !rest.is_empty() {
+        if rest == "[]" {
+            return Ok(jq_iter_values(&current));
+        }
+        if let Some(index) = rest.strip_prefix('[').and_then(|tail| tail.split_once(']')) {
+            current = jq_index(&current, index.0).unwrap_or(JsonValue::Null);
+            rest = index.1.strip_prefix('.').unwrap_or(index.1);
+            continue;
+        }
+        let (field, tail) = rest
+            .split_once('.')
+            .map_or((rest, ""), |(field, tail)| (field, tail));
+        if let Some(field) = field.strip_suffix("[]") {
+            current = current.get(field).cloned().unwrap_or(JsonValue::Null);
+            return Ok(jq_iter_values(&current));
+        }
+        current = current.get(field).cloned().unwrap_or(JsonValue::Null);
+        rest = tail;
+    }
+    Ok(vec![current])
+}
+
+fn jq_iter_values(value: &JsonValue) -> Vec<JsonValue> {
+    match value {
+        JsonValue::Array(values) => values.clone(),
+        JsonValue::Object(values) => values.values().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn jq_index(value: &JsonValue, index: &str) -> Option<JsonValue> {
+    let JsonValue::Array(values) = value else {
+        return None;
     };
-    let selected = value.get(field).cloned().unwrap_or(JsonValue::Null);
-    let rendered = match selected {
-        JsonValue::String(value) => value,
-        other => other.to_string(),
+    let index = index.parse::<isize>().ok()?;
+    let index = if index < 0 {
+        values.len().checked_sub(index.unsigned_abs())?
+    } else {
+        index as usize
     };
-    stdout_result(format!("{rendered}\n"))
+    values.get(index).cloned()
+}
+
+fn render_jq_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        _ => value.to_string(),
+    }
 }
 
 fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
@@ -1910,6 +3154,41 @@ fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         exit_code,
         ..CommandResult::default()
     }
+}
+
+fn collect_named_text_inputs(
+    state: &ExecState<'_>,
+    paths: &[String],
+    stdin: &str,
+    _command: &str,
+) -> Result<Vec<NamedTextInput>, String> {
+    if paths.is_empty() {
+        return Ok(vec![NamedTextInput {
+            label: String::new(),
+            text: stdin.to_string(),
+        }]);
+    }
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| "filesystem lock poisoned".to_string())?;
+    let mut inputs = Vec::new();
+    for path in paths {
+        let path = resolve_path(&state.cwd, path);
+        let stat = fs
+            .stat(&path)
+            .map_err(|_| format!("{path}: No such file or directory"))?;
+        if stat.is_directory {
+            return Err(format!("{path}: Is a directory"));
+        }
+        let text = fs
+            .read_file(&path)
+            .map_err(|_| format!("{path}: No such file or directory"))?;
+        inputs.push(NamedTextInput { label: path, text });
+    }
+    Ok(inputs)
 }
 
 fn collect_text_inputs(
@@ -1935,27 +3214,6 @@ fn collect_text_inputs(
         );
     }
     Ok(input)
-}
-
-fn line_matches(line: &str, pattern: &str, ignore_case: bool) -> bool {
-    if ignore_case {
-        line.to_ascii_lowercase()
-            .contains(&pattern.to_ascii_lowercase())
-    } else {
-        line.contains(pattern)
-    }
-}
-
-fn parse_sed_substitution(script: &str) -> Option<(String, String, bool)> {
-    let mut chars = script.chars();
-    if chars.next()? != 's' {
-        return None;
-    }
-    let delimiter = chars.next()?;
-    let rest = chars.as_str();
-    let (from, rest) = rest.split_once(delimiter)?;
-    let (to, flags) = rest.split_once(delimiter)?;
-    Some((from.to_string(), to.to_string(), flags.contains('g')))
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {

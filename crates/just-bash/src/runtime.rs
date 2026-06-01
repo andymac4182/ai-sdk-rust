@@ -997,7 +997,11 @@ mod tests {
             "alpha\ngamma\n"
         );
         assert_eq!(env.exec("grep -c beta /repo/a.txt").stdout, "1\n");
-        assert!(env.exec("rg beta /repo").stdout.contains("repo/a.txt:beta"));
+        assert!(
+            env.exec("rg beta /repo")
+                .stdout
+                .contains("/repo/a.txt:2:beta")
+        );
         assert_eq!(
             env.exec("sed 's/beta/BETA/' /repo/a.txt").stdout,
             "alpha\nBETA\ngamma\n"
@@ -1016,6 +1020,580 @@ mod tests {
             ..BashOptions::default()
         });
 
-        assert_eq!(env.exec("jq .name /data.json").stdout, "Ada\n");
+        assert_eq!(env.exec("jq .name /data.json").stdout, "\"Ada\"\n");
+    }
+
+    #[test]
+    fn text_search_grep_rg_sed_and_awk_close_upstream_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/grep.txt".to_string(),
+                    "hello world\nfoo bar\nhello again\n".to_string(),
+                ),
+                ("/case.txt".to_string(), "Hello\nhello\nHELLO\n".to_string()),
+                ("/a.txt".to_string(), "found here\nmatch\n".to_string()),
+                ("/b.txt".to_string(), "nothing\nmatch\n".to_string()),
+                ("/c.txt".to_string(), "also found\n".to_string()),
+                ("/dir/root.txt".to_string(), "needle here\n".to_string()),
+                (
+                    "/dir/sub/file.txt".to_string(),
+                    "another needle\n".to_string(),
+                ),
+                (
+                    "/sed/file.txt".to_string(),
+                    "hello world\nhello universe\ngoodbye world\n".to_string(),
+                ),
+                (
+                    "/sed/numbers.txt".to_string(),
+                    "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+                ),
+                (
+                    "/data.txt".to_string(),
+                    "hello world\nfoo bar\n".to_string(),
+                ),
+                ("/fields.txt".to_string(), "a b c\n1 2 3\n".to_string()),
+                (
+                    "/missing-fields.txt".to_string(),
+                    "one\ntwo three\n".to_string(),
+                ),
+                ("/data.csv".to_string(), "a,b,c\n1,2,3\n".to_string()),
+                ("/colon.txt".to_string(), "a:b:c\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("grep hello /grep.txt").stdout,
+            "hello world\nhello again\n"
+        );
+        assert_eq!(env.exec("grep missing /grep.txt").exit_code, 1);
+        assert_eq!(
+            env.exec("grep -i hello /case.txt").stdout,
+            "Hello\nhello\nHELLO\n"
+        );
+        assert_eq!(
+            env.exec("grep -n hello /grep.txt").stdout,
+            "1:hello world\n3:hello again\n"
+        );
+        assert_eq!(
+            env.exec("grep -v foo /grep.txt").stdout,
+            "hello world\nhello again\n"
+        );
+        assert_eq!(env.exec("grep -c hello /grep.txt").stdout, "2\n");
+        assert_eq!(
+            env.exec("grep -l found /a.txt /b.txt /c.txt").stdout,
+            "/a.txt\n/c.txt\n"
+        );
+        assert_eq!(
+            env.exec("grep -r needle /dir").stdout,
+            "/dir/root.txt:needle here\n/dir/sub/file.txt:another needle\n"
+        );
+        assert_eq!(
+            env.exec("echo -e \"foo\\nbar\\nfoo\" | grep foo").stdout,
+            "foo\nfoo\n"
+        );
+        assert_eq!(env.exec("grep").stderr, "grep: missing pattern\n");
+        assert_eq!(env.exec("grep pattern /missing.txt").exit_code, 2);
+        assert_eq!(
+            env.exec("grep -in hello /case.txt").stdout,
+            "1:Hello\n2:hello\n3:HELLO\n"
+        );
+        assert_eq!(
+            env.exec("grep match /a.txt /b.txt").stdout,
+            "/a.txt:match\n/b.txt:match\n"
+        );
+        assert_eq!(
+            env.exec("grep \"hello world\" /grep.txt").stdout,
+            "hello world\n"
+        );
+        assert_eq!(env.exec("grep -c missing /grep.txt").stdout, "0\n");
+        assert_eq!(
+            env.exec("grep needle /dir/root.txt").stdout,
+            "needle here\n"
+        );
+        assert_eq!(
+            env.exec("grep -E \"hello|foo\" /grep.txt").stdout,
+            "hello world\nfoo bar\nhello again\n"
+        );
+
+        let rg_env = Bash::with_options(BashOptions {
+            cwd: Some("/home/user".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/home/user/file.txt".to_string(),
+                    "Hello World\nhello world\nline3\n".to_string(),
+                ),
+                ("/home/user/a.txt".to_string(), "hello\n".to_string()),
+                ("/home/user/b.txt".to_string(), "hello\n".to_string()),
+                (
+                    "/home/user/src/app.ts".to_string(),
+                    "const hello = 'world';\n".to_string(),
+                ),
+                (
+                    "/home/user/src/lib/util.ts".to_string(),
+                    "export const hello = 1;\n".to_string(),
+                ),
+                (
+                    "/home/user/binary.bin".to_string(),
+                    "hello\0world\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            rg_env.exec("rg hello src").stdout,
+            "src/app.ts:1:const hello = 'world';\nsrc/lib/util.ts:1:export const hello = 1;\n"
+        );
+        assert_eq!(rg_env.exec("rg nomatch").exit_code, 1);
+        assert_eq!(
+            rg_env.exec("rg Hello file.txt").stdout,
+            "file.txt:1:Hello World\n"
+        );
+        assert_eq!(
+            rg_env.exec("rg -i HELLO file.txt").stdout,
+            "file.txt:1:Hello World\nfile.txt:2:hello world\n"
+        );
+        assert_eq!(
+            rg_env.exec("rg -s hello file.txt").stdout,
+            "file.txt:2:hello world\n"
+        );
+        assert_eq!(rg_env.exec("rg -N hello a.txt").stdout, "a.txt:hello\n");
+        assert_eq!(
+            Bash::with_options(BashOptions {
+                cwd: Some("/home/user".to_string()),
+                files: BTreeMap::from([(
+                    "/home/user/file.txt".to_string(),
+                    "hello world\nfoo bar\n".to_string(),
+                )]),
+                ..BashOptions::default()
+            })
+            .exec("rg hello")
+            .stdout,
+            "file.txt:1:hello world\n"
+        );
+        assert_eq!(
+            Bash::with_options(BashOptions {
+                cwd: Some("/home/user".to_string()),
+                files: BTreeMap::from([
+                    ("/home/user/a.txt".to_string(), "hello\n".to_string()),
+                    ("/home/user/b.txt".to_string(), "hello\n".to_string()),
+                ]),
+                ..BashOptions::default()
+            })
+            .exec("rg hello")
+            .stdout,
+            "a.txt:1:hello\nb.txt:1:hello\n"
+        );
+
+        assert_eq!(
+            env.exec("sed 's/hello/hi/' /sed/file.txt").stdout,
+            "hi world\nhi universe\ngoodbye world\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/l/L/g' /sed/file.txt").stdout,
+            "heLLo worLd\nheLLo universe\ngoodbye worLd\n"
+        );
+        assert_eq!(env.exec("sed -n '3p' /sed/numbers.txt").stdout, "line 3\n");
+        assert_eq!(
+            env.exec("sed -n '2,4p' /sed/numbers.txt").stdout,
+            "line 2\nline 3\nline 4\n"
+        );
+        assert_eq!(
+            env.exec("sed '/hello/d' /sed/file.txt").stdout,
+            "goodbye world\n"
+        );
+        assert_eq!(
+            env.exec("sed '2d' /sed/numbers.txt").stdout,
+            "line 1\nline 3\nline 4\nline 5\n"
+        );
+        assert_eq!(
+            env.exec("echo 'foo bar' | sed 's/bar/baz/'").stdout,
+            "foo baz\n"
+        );
+        assert_eq!(
+            env.exec("echo '/path/to/file' | sed 's#/path#/newpath#'")
+                .stdout,
+            "/newpath/to/file\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[0-9]/X/' /sed/numbers.txt").stdout,
+            "line X\nline X\nline X\nline X\nline X\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/a/b/' /missing.txt").stderr,
+            "sed: /missing.txt: No such file or directory\n"
+        );
+
+        assert_eq!(
+            env.exec("awk '{print $0}' /data.txt").stdout,
+            "hello world\nfoo bar\n"
+        );
+        assert_eq!(
+            env.exec("awk '{print $1}' /data.txt").stdout,
+            "hello\nfoo\n"
+        );
+        assert_eq!(
+            env.exec("awk '{print $1, $3}' /fields.txt").stdout,
+            "a c\n1 3\n"
+        );
+        assert_eq!(
+            env.exec("awk '{print $2}' /missing-fields.txt").stdout,
+            "\nthree\n"
+        );
+        assert_eq!(
+            env.exec("awk -F',' '{print $2}' /data.csv").stdout,
+            "b\n2\n"
+        );
+        assert_eq!(env.exec("awk -F: '{print $2}' /colon.txt").stdout, "b\n");
+        assert_eq!(
+            env.exec("awk '{print NR, $0}' /data.txt").stdout,
+            "1 hello world\n2 foo bar\n"
+        );
+        assert_eq!(env.exec("awk '{print NF}' /fields.txt").stdout, "3\n3\n");
+    }
+
+    #[test]
+    fn text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/twenty.txt".to_string(),
+                    format!(
+                        "{}\n",
+                        (1..=20)
+                            .map(|n| format!("line{n}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                ),
+                ("/short.txt".to_string(), "a\nb\nc\nd\ne\n".to_string()),
+                ("/a.txt".to_string(), "aaa\n".to_string()),
+                ("/b.txt".to_string(), "bbb\n".to_string()),
+                ("/empty.txt".to_string(), "".to_string()),
+                ("/single.txt".to_string(), "only line\n".to_string()),
+                ("/no-newline.txt".to_string(), "no newline".to_string()),
+                ("/wc.txt".to_string(), "hello world\nfoo bar\n".to_string()),
+                ("/words.txt".to_string(), "one two\nthree\n".to_string()),
+                ("/hello.txt".to_string(), "hello\n".to_string()),
+                (
+                    "/spaces.txt".to_string(),
+                    "one   two    three\n".to_string(),
+                ),
+                (
+                    "/names.txt".to_string(),
+                    "Charlie\nAlice\nBob\nDavid\n".to_string(),
+                ),
+                ("/numbers.txt".to_string(), "10\n2\n1\n20\n5\n".to_string()),
+                (
+                    "/duplicates.txt".to_string(),
+                    "apple\nbanana\napple\ncherry\nbanana\n".to_string(),
+                ),
+                (
+                    "/columns.txt".to_string(),
+                    "John 25\nAlice 30\nBob 20\nDavid 35\n".to_string(),
+                ),
+                (
+                    "/case-mixed.txt".to_string(),
+                    "zebra\nalpha\nZebra\nAlpha\n".to_string(),
+                ),
+                (
+                    "/adjacent.txt".to_string(),
+                    "apple\napple\nbanana\nbanana\nbanana\ncherry\n".to_string(),
+                ),
+                ("/mixed.txt".to_string(), "a\nb\na\nc\nc\n".to_string()),
+                (
+                    "/uniq-single.txt".to_string(),
+                    "one\ntwo\nthree\n".to_string(),
+                ),
+                (
+                    "/all-same.txt".to_string(),
+                    "hello\nhello\nhello\n".to_string(),
+                ),
+                (
+                    "/passwd.txt".to_string(),
+                    "root:x:0:0:root:/root:/bin/bash\nuser:x:1000:1000:User:/home/user:/bin/zsh\n"
+                        .to_string(),
+                ),
+                (
+                    "/csv.txt".to_string(),
+                    "name,age,city\nJohn,25,NYC\nJane,30,LA\n".to_string(),
+                ),
+                (
+                    "/tabs.txt".to_string(),
+                    "col1\tcol2\tcol3\nval1\tval2\tval3\n".to_string(),
+                ),
+                (
+                    "/text.txt".to_string(),
+                    "hello world\nabcdefghij\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("head /twenty.txt").stdout,
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n"
+        );
+        assert_eq!(env.exec("head -n 3 /short.txt").stdout, "a\nb\nc\n");
+        assert_eq!(env.exec("head -n3 /short.txt").stdout, "a\nb\nc\n");
+        assert_eq!(env.exec("head -2 /short.txt").stdout, "a\nb\n");
+        assert_eq!(
+            env.exec("head /a.txt /b.txt").stdout,
+            "==> /a.txt <==\naaa\n\n==> /b.txt <==\nbbb\n"
+        );
+        assert_eq!(
+            env.exec("head /missing.txt").stderr,
+            "head: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(env.exec("head -n 10 /a.txt").stdout, "aaa\n");
+        assert_eq!(
+            env.exec("echo -e \"a\\nb\\nc\\nd\\ne\" | head -n 2").stdout,
+            "a\nb\n"
+        );
+        assert_eq!(env.exec("head /empty.txt").exit_code, 0);
+        assert_eq!(env.exec("head -n 1 /single.txt").stdout, "only line\n");
+        assert_eq!(env.exec("head -n 1 /no-newline.txt").stdout, "no newline\n");
+
+        assert_eq!(
+            env.exec("tail /twenty.txt").stdout,
+            "line11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\n"
+        );
+        assert_eq!(env.exec("tail -n 2 /short.txt").stdout, "d\ne\n");
+        assert_eq!(env.exec("tail -n2 /short.txt").stdout, "d\ne\n");
+        assert_eq!(env.exec("tail -3 /short.txt").stdout, "c\nd\ne\n");
+        assert_eq!(env.exec("tail -n +3 /short.txt").stdout, "c\nd\ne\n");
+        assert_eq!(
+            env.exec("cat /short.txt | head -n 3 | tail -n 1").stdout,
+            "c\n"
+        );
+        assert_eq!(env.exec("tail -n 10 /a.txt").stdout, "aaa\n");
+        assert_eq!(
+            env.exec("tail /a.txt /b.txt").stdout,
+            "==> /a.txt <==\naaa\n\n==> /b.txt <==\nbbb\n"
+        );
+        assert_eq!(
+            env.exec("tail /missing.txt").stderr,
+            "tail: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(
+            env.exec("echo -e \"a\\nb\\nc\\nd\\ne\" | tail -n 2").stdout,
+            "d\ne\n"
+        );
+        assert_eq!(env.exec("tail /empty.txt").exit_code, 0);
+        assert_eq!(env.exec("tail -n 1 /single.txt").stdout, "only line\n");
+        assert_eq!(env.exec("tail -n +1 /short.txt").stdout, "a\nb\nc\nd\ne\n");
+        assert_eq!(env.exec("tail -n +2 /short.txt").stdout, "b\nc\nd\ne\n");
+        assert_eq!(env.exec("tail -n +10 /a.txt").stdout, "\n");
+        assert_eq!(
+            env.exec("echo -e \"a\\nb\\nc\\nd\\ne\" | tail -n +3")
+                .stdout,
+            "c\nd\ne\n"
+        );
+
+        assert!(env.exec("wc /wc.txt").stdout.contains("2 4 20 /wc.txt"));
+        assert_eq!(env.exec("wc -l /short.txt").stdout.trim(), "5 /short.txt");
+        assert_eq!(env.exec("wc -w /words.txt").stdout.trim(), "3 /words.txt");
+        assert_eq!(env.exec("wc -c /hello.txt").stdout.trim(), "6 /hello.txt");
+        assert_eq!(env.exec("wc -m /hello.txt").stdout.trim(), "6 /hello.txt");
+        assert!(env.exec("wc /a.txt /b.txt").stdout.contains("total"));
+        assert_eq!(env.exec("echo \"hello world\" | wc -w").stdout.trim(), "2");
+        assert_eq!(env.exec("wc /missing.txt").exit_code, 1);
+        assert_eq!(env.exec("wc --lines /a.txt").stdout.trim(), "1 /a.txt");
+        assert_eq!(
+            env.exec("wc --words /words.txt").stdout.trim(),
+            "3 /words.txt"
+        );
+        assert_eq!(
+            env.exec("wc --bytes /hello.txt").stdout.trim(),
+            "6 /hello.txt"
+        );
+        assert_eq!(env.exec("wc -w /spaces.txt").stdout.trim(), "3 /spaces.txt");
+
+        assert_eq!(
+            env.exec("sort /names.txt").stdout,
+            "Alice\nBob\nCharlie\nDavid\n"
+        );
+        assert_eq!(
+            env.exec("sort -r /names.txt").stdout,
+            "David\nCharlie\nBob\nAlice\n"
+        );
+        assert_eq!(env.exec("sort -n /numbers.txt").stdout, "1\n2\n5\n10\n20\n");
+        assert_eq!(
+            env.exec("sort -rn /numbers.txt").stdout,
+            "20\n10\n5\n2\n1\n"
+        );
+        assert_eq!(
+            env.exec("sort -u /duplicates.txt").stdout,
+            "apple\nbanana\ncherry\n"
+        );
+        assert_eq!(
+            env.exec("sort -k2 -n /columns.txt").stdout,
+            "Bob 20\nJohn 25\nAlice 30\nDavid 35\n"
+        );
+        assert_eq!(env.exec("echo -e \"c\\nb\\na\" | sort").stdout, "a\nb\nc\n");
+        assert_eq!(
+            env.exec("sort /case-mixed.txt").stdout,
+            "alpha\nAlpha\nzebra\nZebra\n"
+        );
+        assert_eq!(
+            env.exec("sort /missing.txt").stderr,
+            "sort: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(env.exec("echo \"\" | sort").stdout, "\n");
+
+        assert_eq!(
+            env.exec("uniq /adjacent.txt").stdout,
+            "apple\nbanana\ncherry\n"
+        );
+        assert_eq!(
+            env.exec("uniq -c /adjacent.txt").stdout,
+            "   2 apple\n   3 banana\n   1 cherry\n"
+        );
+        assert_eq!(env.exec("uniq -d /adjacent.txt").stdout, "apple\nbanana\n");
+        assert_eq!(env.exec("uniq -u /adjacent.txt").stdout, "cherry\n");
+        assert_eq!(env.exec("uniq /mixed.txt").stdout, "a\nb\na\nc\n");
+        assert_eq!(env.exec("echo -e \"x\\nx\\ny\" | uniq").stdout, "x\ny\n");
+        assert_eq!(env.exec("sort /mixed.txt | uniq").stdout, "a\nb\nc\n");
+        assert_eq!(
+            env.exec("uniq /uniq-single.txt").stdout,
+            "one\ntwo\nthree\n"
+        );
+        assert_eq!(env.exec("uniq /all-same.txt").stdout, "hello\n");
+        assert_eq!(
+            env.exec("uniq /missing.txt").stderr,
+            "uniq: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(env.exec("echo -n \"\" | uniq").stdout, "");
+
+        assert_eq!(env.exec("cut -d: -f1 /passwd.txt").stdout, "root\nuser\n");
+        assert_eq!(
+            env.exec("cut -d: -f1,3 /passwd.txt").stdout,
+            "root:0\nuser:1000\n"
+        );
+        assert_eq!(
+            env.exec("cut -d: -f1-3 /passwd.txt").stdout,
+            "root:x:0\nuser:x:1000\n"
+        );
+        assert_eq!(
+            env.exec("cut -d, -f1,2 /csv.txt").stdout,
+            "name,age\nJohn,25\nJane,30\n"
+        );
+        assert_eq!(env.exec("cut -f2 /tabs.txt").stdout, "col2\nval2\n");
+        assert_eq!(env.exec("cut -c1-5 /text.txt").stdout, "hello\nabcde\n");
+        assert_eq!(env.exec("cut -c1,3,5 /text.txt").stdout, "hlo\nace\n");
+        assert_eq!(env.exec("echo 'a:b:c' | cut -d: -f2").stdout, "b\n");
+        assert_eq!(
+            env.exec("cut -d: -f5- /passwd.txt").stdout,
+            "root:/root:/bin/bash\nUser:/home/user:/bin/zsh\n"
+        );
+        assert_eq!(
+            env.exec("cut -f1 /missing.txt").stderr,
+            "cut: /missing.txt: No such file or directory\n"
+        );
+        assert_eq!(
+            env.exec("cut /text.txt").stderr,
+            "cut: you must specify a list of bytes, characters, or fields\n"
+        );
+
+        assert_eq!(
+            env.exec("echo 'hello world' | tr 'a-z' 'A-Z'").stdout,
+            "HELLO WORLD\n"
+        );
+        assert_eq!(
+            env.exec("echo 'HELLO WORLD' | tr 'A-Z' 'a-z'").stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec("echo 'hello world' | tr -d 'aeiou'").stdout,
+            "hll wrld\n"
+        );
+        assert_eq!(
+            env.exec("echo -e 'line1\\nline2' | tr -d '\\n'").stdout,
+            "line1line2"
+        );
+        assert_eq!(
+            env.exec("echo 'hello    world' | tr -s ' '").stdout,
+            "hello world\n"
+        );
+        assert_eq!(env.exec("echo 'abc' | tr 'abc' 'xyz'").stdout, "xyz\n");
+        assert_eq!(
+            env.exec("echo 'hello world' | tr ' ' '_'").stdout,
+            "hello_world\n"
+        );
+        assert_eq!(env.exec("echo '12345' | tr '1-5' 'a-e'").stdout, "abcde\n");
+        assert_eq!(
+            env.exec("echo 'abc123def' | tr -d '0-9'").stdout,
+            "abcdef\n"
+        );
+        assert_eq!(
+            env.exec("echo 'hello' | tr").stderr,
+            "tr: missing operand\n"
+        );
+        assert_eq!(
+            env.exec("echo 'hello' | tr 'a-z'").stderr,
+            "tr: missing operand after SET1\n"
+        );
+        assert_eq!(env.exec("echo 'aabbcc' | tr 'abc' 'x'").stdout, "xxxxxx\n");
+        assert_eq!(env.exec("echo 'abc' | tr 'a-c' 'A-C'").stdout, "ABC\n");
+    }
+
+    #[test]
+    fn structured_data_jq_basic_rows_access_and_iteration() {
+        let env = bash();
+
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq '.'").stdout,
+            "{\n  \"a\": 1\n}\n"
+        );
+        assert_eq!(
+            env.exec("echo '[1,2,3]' | jq '.'").stdout,
+            "[\n  1,\n  2,\n  3\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"name\":\"test\"}' | jq '.name'").stdout,
+            "\"test\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":{\"b\":\"nested\"}}' | jq '.a.b'")
+                .stdout,
+            "\"nested\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq '.missing'").stdout,
+            "null\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"count\":42}' | jq '.count'").stdout,
+            "42\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"active\":true}' | jq '.active'").stdout,
+            "true\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\",\"c\"]' | jq '.[0]'").stdout,
+            "\"a\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\",\"c\"]' | jq '.[-1]'").stdout,
+            "\"c\"\n"
+        );
+        assert_eq!(env.exec("echo '[1,2]' | jq '.[99]'").stdout, "null\n");
+        assert_eq!(env.exec("echo '[1,2,3]' | jq '.[]'").stdout, "1\n2\n3\n");
+        assert_eq!(
+            env.exec("echo '{\"a\":1,\"b\":2}' | jq '.[]'").stdout,
+            "1\n2\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"items\":[1,2,3]}' | jq '.items[]'")
+                .stdout,
+            "1\n2\n3\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"data\":{\"value\":42}}' | jq '.data | .value'")
+                .stdout,
+            "42\n"
+        );
     }
 }

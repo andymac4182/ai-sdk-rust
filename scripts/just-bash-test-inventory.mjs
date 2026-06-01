@@ -358,6 +358,120 @@ const jb06CaseGroups = [
   },
 ];
 
+const jbc07CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.basic.test.ts',
+    lines: [
+      5, 15, 25, 34, 43, 52, 61, 70, 79, 88, 97, 106, 133, 203, 210, 218,
+      228, 237, 249, 267,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_grep_rg_sed_and_awk_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable grep regex/fixed search basics, flags, stdin, file labels, recursive virtual search, counts, and error cases without host grep.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.basic.test.ts',
+    lines: [5, 18, 32, 46, 72, 115, 143],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_grep_rg_sed_and_awk_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable ripgrep-style current-directory search, relative paths, line numbers, no-match exit, no-line-number output, and case controls over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.test.ts',
+    lines: [34, 42, 50, 58, 66, 74, 82, 90, 100, 108],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_grep_rg_sed_and_awk_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable sed substitution, print/delete addresses, stdin, delimiters, regex replacement, and missing-file errors.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.test.ts',
+    lines: [45, 54, 63, 72, 83, 92, 116, 125],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_grep_rg_sed_and_awk_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable awk field printing, missing fields, custom field separators, NR, and NF for simple print programs.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/head/head.test.ts',
+    lines: [5, 17, 25, 33, 41, 49, 60, 69, 75, 83, 91],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable head line selection, attached -n, multi-file headers, stdin, empty input, missing files, and no-trailing-newline output.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tail/tail.test.ts',
+    lines: [5, 17, 25, 33, 41, 49, 60, 69, 75, 83, 99, 108, 117, 125, 133, 142],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable tail line selection, attached -n, multi-file headers, stdin, +N syntax, empty input, missing files, and head/tail pipelines.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/wc/wc.test.ts',
+    lines: [5, 16, 24, 32, 40, 58, 71, 85, 92, 100, 108, 124],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable wc line/word/byte/char counts, long flags, stdin, multiple-file totals, spacing, and missing-file errors.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sort/sort.test.ts',
+    lines: [17, 25, 33, 41, 49, 57, 65, 73, 81, 91],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable sort alphabetic/numeric/reverse/unique/key/stdin/case-sensitive behavior, empty input, and missing-file errors.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/uniq/uniq.test.ts',
+    lines: [16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 98],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable uniq adjacent grouping, counts, duplicate/unique filters, stdin, sort pipelines, empty input, and missing-file errors.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/cut/cut.test.ts',
+    lines: [17, 25, 33, 41, 49, 57, 65, 73, 81, 91, 101],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable cut field and character lists, delimiters, ranges, stdin, open ranges, missing-file errors, and missing selector diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tr/tr.test.ts',
+    lines: [11, 19, 27, 35, 43, 51, 59, 67, 75, 83, 91, 99, 107],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-07 verifies portable tr translation, deletion, squeezing, ranges, short SET2 handling, newline deletion, and operand diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.basic.test.ts',
+    lines: [6, 14, 23, 30, 39, 46, 53, 62, 69, 76, 85, 92, 99, 110],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_basic_rows_access_and_iteration',
+    notes:
+      'JBC-07 verifies portable jq identity pretty-printing, object and array access, missing/null handling, iteration, and simple pipe filters over JSON stdin.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -379,7 +493,7 @@ function sourceOverrideFor(relativePath) {
 }
 
 function caseOverrideFor(testCase) {
-  const group = jb06CaseGroups.find(
+  const group = [...jb06CaseGroups, ...jbc07CaseGroups].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
       (!entry.lines || entry.lines.includes(testCase.line))

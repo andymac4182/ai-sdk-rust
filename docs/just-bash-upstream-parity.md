@@ -8,11 +8,11 @@ npx opensrc fetch https://github.com/vercel-labs/just-bash
 
 Local mirror inspected at `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel-labs/just-bash/main`.
 
-## JB-05 Command Registry Slice
+## Command Behavior Slices
 
-This slice owns the portable command registry and high-risk built-ins/coreutils/text/search commands implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
+JB-05 owns the portable command registry and earlier high-risk built-ins/coreutils/text/search command smoke coverage implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
 
-This ledger does not claim upstream `fs/**`, parser/syntax, or security rows. JB-05 sits on the landed virtual filesystem/session/parser/security surfaces and only closes rows that map to the named Rust tests below.
+JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. This ledger does not claim upstream `fs/**`, parser/syntax, security rows, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test below.
 
 Mapped Rust tests:
 
@@ -34,6 +34,9 @@ Mapped Rust tests:
 | `packages/just-bash/src/commands/bash/bash.test.ts:156` redirection file operation script | `redirection_upstream_cases_write_append_and_read_virtual_files` | portable-mapped | Covers `>`, `>>`, and `<` with virtual files. |
 | `packages/just-bash/src/commands/{find,grep,rg,sed,awk}` basic behavior | `find_grep_rg_sed_and_awk_cover_high_risk_text_search_bucket` | portable-smoke-only | Basic search/text behavior only; JB-01 rows remain pending until case-exact tests land. |
 | `packages/just-bash/src/commands/jq/jq.basic.test.ts` simple field lookup | `structured_data_jq_minimal_port_reads_virtual_input` | portable-smoke-only | Minimal structured-data smoke for virtual input; structured-data rows remain pending. |
+| 20 exact rows in `packages/just-bash/src/commands/grep/grep.basic.test.ts`; 7 exact rows in `packages/just-bash/src/commands/rg/rg.basic.test.ts`; 10 exact rows in `packages/just-bash/src/commands/sed/sed.test.ts`; 8 exact rows in `packages/just-bash/src/commands/awk/awk.test.ts` | `text_search_grep_rg_sed_and_awk_close_upstream_rows` | portable-mapped | JBC-07 covers portable grep flags/stdin/files/recursive search, rg current-dir basics, sed substitution/addresses, and simple awk print-field behavior. |
+| 11 exact rows in `head.test.ts`; 16 in `tail.test.ts`; 12 in `wc.test.ts`; 10 in `sort.test.ts`; 11 in `uniq.test.ts`; 11 in `cut.test.ts`; 13 in `tr.test.ts` | `text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows` | portable-mapped | JBC-07 covers the highest-agent-value text pipeline commands over the virtual filesystem and stdin. |
+| 14 exact rows in `packages/just-bash/src/commands/jq/jq.basic.test.ts` | `structured_data_jq_basic_rows_access_and_iteration` | portable-mapped | JBC-07 covers jq identity pretty-printing, object/array access, missing/null handling, iteration, and simple pipes over JSON stdin. |
 
 ## JBC-06 Core Command Conformance Slice
 
@@ -52,18 +55,35 @@ Mapped Rust tests:
 
 ## Pending JB Follow-Up Counts
 
-The upstream command package currently has 4,899 command-domain cases in the JB-01 generated inventory. JB-05 maps 83 command cases plus 6 core registry cases to named Rust tests, and JBC-06 maps 92 additional exact core-command cases. These slices do not claim full command parity. After regeneration the full Just Bash ledger is `788` verified / `9,032` pending / `116` JS-only.
+The upstream command package currently has 4,899 command-domain cases in the
+JB-01 generated inventory. JB-05 maps 83 command cases plus 6 core registry
+cases, JBC-06 maps 92 additional exact core-command cases, and JBC-07 maps 143
+additional text/search/structured-data rows to named Rust tests. These slices
+do not claim full command parity. After regeneration the full Just Bash ledger
+is `931` verified / `8,889` pending / `116` JS-only.
 
-The counts below are the exact current upstream command-family case counts from `docs/open-agents/just-bash-parity.md` after the JB-05 and JBC-06 row mappings. Seed smoke coverage in these slices does not close rows outside the named verified cases.
+The counts below are the exact current upstream command-family case counts from
+`docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, and JBC-07 row
+mappings. Seed smoke coverage in these slices does not close rows outside the
+named verified cases.
 
-| Family | Exact upstream command cases | Verified by JB-05/JBC-06 | Pending |
+| Family | Exact upstream command cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |
-| High-risk named commands from this slice (`echo`, `printf`, `bash`, `env`, `pwd`, `cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`, `touch`, `find`, `grep`) | 682 | 175 | 507 |
-| Full `awk` command language suite | 643 | 0 | 643 |
-| Full `sed` command/address/error suite | 231 | 0 | 231 |
-| Full `rg` ripgrep compatibility suite, including imported tests | 590 | 0 | 590 |
+| Core filesystem command rows closed by JBC-06 (`cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`) | 92 | 92 | 0 |
+| `grep` basic/advanced/perl/exclude/binary/UTF-8 suite | 213 | 20 | 193 |
+| Full `awk` command language suite | 643 | 8 | 635 |
+| Full `sed` command/address/error suite | 231 | 10 | 221 |
+| Full `rg` ripgrep compatibility suite, including imported tests | 590 | 7 | 583 |
+| `head` command suite | 17 | 11 | 6 |
+| `tail` command suite | 19 | 16 | 3 |
+| `wc` command suite | 20 | 12 | 8 |
+| `sort` command suite | 57 | 10 | 47 |
+| `uniq` command suite | 15 | 11 | 4 |
+| `cut` command suite | 16 | 11 | 5 |
+| `tr` command suite | 27 | 13 | 14 |
+| `jq` command suite | 254 | 14 | 240 |
 | Archive/compression (`gzip`, `gunzip`, `zcat`, `tar`) | 210 | 0 | 210 |
-| Structured data (`jq`, `yq`, `xan`, `sqlite3`) | 821 | 0 | 821 |
+| Remaining structured data (`yq`, `xan`, `sqlite3`) | 567 | 0 | 567 |
 | Remaining command utilities outside the groups above | 1,722 | 0 | 1,722 |
 
 Do not mark these rows `verified` until each portable upstream case maps to a named Rust test or a documented non-portable exception.
