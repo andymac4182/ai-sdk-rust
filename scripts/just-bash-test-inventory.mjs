@@ -536,6 +536,96 @@ const jbc09CaseGroups = [
   },
 ];
 
+const jbc10CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.basic.test.ts',
+    lines: [59, 85, 100, 128, 156, 171, 184, 199, 215, 234, 242, 250],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_basic_rows_are_portable',
+    notes:
+      'JBC-10 verifies the remaining portable rg.basic rows for recursive virtual search, smart-case variants, binary skipping, max-depth, and diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.filtering.test.ts',
+    lines: [5, 20, 34, 46, 60, 74, 91, 105, 121, 136, 151, 166, 181, 197, 212],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_filtering_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable rg type, glob, hidden-file, and gitignore filtering over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.output.test.ts',
+    lines: [5, 18, 32, 46, 60, 73, 90, 103, 116, 131, 144, 157, 172, 189, 202, 215, 230, 245],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_output_mode_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable rg count, file-list, only-matching, context, quiet, and help output modes.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.max-count.test.ts',
+    lines: [
+      10, 22, 34, 48, 60, 72, 84, 98, 112, 127, 144, 157, 171, 185, 198,
+      210, 222, 234, 248, 262, 275, 288, 301, 321, 333, 345, 357, 370,
+      385, 397,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_max_count_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable rg -m/--max-count behavior with files, flags, context, globs, types, and regexes.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.no-filename.test.ts',
+    lines: [10, 22, 34, 46, 61, 75, 88, 105, 118, 131, 143, 155, 167, 179, 191, 207],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_no_filename_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable rg -I/--no-filename behavior for directory, file, count, match, invert, word, max-count, and file-list modes.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.ripgrep-compat.test.ts',
+    lines: [
+      20, 35, 49, 63, 79, 94, 110, 125, 138, 151, 166, 181, 196, 214,
+      228, 240, 254, 268, 283, 297, 310, 326, 340, 352, 367, 381, 395,
+      411, 422, 438, 450, 467, 482, 494, 509, 523, 536, 550, 561, 572,
+      585, 600, 614, 628, 643, 656, 672, 707, 759, 773, 787, 802, 831,
+      873, 893, 907, 923,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_ripgrep_compat_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable ripgrep-compat rg rows for search modes, filters, context, gitignore, pattern files, counts, headings, null separators, sorting, and no-filename output.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
+    lines: [
+      114, 126, 138, 152, 166, 180, 194, 207, 221, 235, 250, 279, 292,
+      305, 318, 330, 346, 357, 370, 382, 431, 458, 472, 486, 500, 516,
+      529, 544, 558, 571, 584, 597, 610, 623, 638, 651, 666, 678, 689,
+      703, 717, 731, 743, 757, 769, 783, 795, 807, 821, 833, 845,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_files_and_imported_feature_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable imported rg feature rows for --files, max-depth, filters, gitignore, hidden files, word/line/fixed/invert matching, quiet, line numbers, context, and combined flags.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_files_and_imported_feature_rows_are_portable',
+    notes:
+      'JBC-10 verifies rg preserves UTF-8 stdin matches and emits the upstream stdin source label.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -557,7 +647,7 @@ function sourceOverrideFor(relativePath) {
 }
 
 function caseOverrideFor(testCase) {
-  const group = [...jb06CaseGroups, ...jbc07CaseGroups, ...jbc09CaseGroups].find(
+  const group = [...jb06CaseGroups, ...jbc07CaseGroups, ...jbc09CaseGroups, ...jbc10CaseGroups].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
       (!entry.lines || entry.lines.includes(testCase.line))

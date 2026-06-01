@@ -1329,6 +1329,7 @@ enum LineMatcher {
         pattern: String,
         ignore_case: bool,
         word_regexp: bool,
+        line_regexp: bool,
     },
     Regex(Regex),
 }
@@ -1340,14 +1341,27 @@ impl LineMatcher {
         word_regexp: bool,
         mode: GrepMode,
     ) -> Result<Self, String> {
+        Self::new_with_line_regexp(pattern, ignore_case, word_regexp, false, mode)
+    }
+
+    fn new_with_line_regexp(
+        pattern: &str,
+        ignore_case: bool,
+        word_regexp: bool,
+        line_regexp: bool,
+        mode: GrepMode,
+    ) -> Result<Self, String> {
         if mode == GrepMode::Fixed {
             return Ok(Self::Fixed {
                 pattern: pattern.to_string(),
                 ignore_case,
                 word_regexp,
+                line_regexp,
             });
         }
-        let pattern = if word_regexp {
+        let pattern = if line_regexp {
+            format!("^(?:{})$", pattern)
+        } else if word_regexp {
             format!(r"\b(?:{})\b", pattern)
         } else {
             pattern.to_string()
@@ -1366,12 +1380,34 @@ impl LineMatcher {
                 pattern,
                 ignore_case,
                 word_regexp,
-            } => fixed_line_match(line, pattern, *ignore_case, *word_regexp),
+                line_regexp,
+            } => fixed_line_match(line, pattern, *ignore_case, *word_regexp, *line_regexp),
+        }
+    }
+
+    fn match_texts(&self, line: &str) -> Vec<String> {
+        match self {
+            Self::Regex(regex) => regex
+                .find_iter(line)
+                .map(|matched| matched.as_str().to_string())
+                .collect(),
+            Self::Fixed {
+                pattern,
+                ignore_case,
+                word_regexp,
+                line_regexp,
+            } => fixed_line_matches(line, pattern, *ignore_case, *word_regexp, *line_regexp),
         }
     }
 }
 
-fn fixed_line_match(line: &str, pattern: &str, ignore_case: bool, word_regexp: bool) -> bool {
+fn fixed_line_match(
+    line: &str,
+    pattern: &str,
+    ignore_case: bool,
+    word_regexp: bool,
+    line_regexp: bool,
+) -> bool {
     let line = if ignore_case {
         line.to_ascii_lowercase()
     } else {
@@ -1382,11 +1418,62 @@ fn fixed_line_match(line: &str, pattern: &str, ignore_case: bool, word_regexp: b
     } else {
         pattern.to_string()
     };
+    if line_regexp {
+        return line == pattern;
+    }
     if !word_regexp {
         return line.contains(&pattern);
     }
     line.split(|ch: char| !is_word_char(ch))
         .any(|word| word == pattern)
+}
+
+fn fixed_line_matches(
+    line: &str,
+    pattern: &str,
+    ignore_case: bool,
+    word_regexp: bool,
+    line_regexp: bool,
+) -> Vec<String> {
+    if !fixed_line_match(line, pattern, ignore_case, word_regexp, line_regexp) {
+        return Vec::new();
+    }
+    if line_regexp {
+        return vec![line.to_string()];
+    }
+    let haystack = if ignore_case {
+        line.to_ascii_lowercase()
+    } else {
+        line.to_string()
+    };
+    let needle = if ignore_case {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(index) = haystack[offset..].find(&needle) {
+        let start = offset + index;
+        let end = start + needle.len();
+        if !word_regexp
+            || (line[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_word_char(ch))
+                && line[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !is_word_char(ch)))
+        {
+            matches.push(line[start..end].to_string());
+        }
+        offset = end;
+    }
+    matches
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -2003,147 +2090,1080 @@ fn command_find(state: &ExecState<'_>, args: &[String]) -> CommandResult {
 }
 
 fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let mut show_line_numbers = true;
-    let mut ignore_case = None;
-    let mut fixed = false;
-    let mut pattern = None;
-    let mut roots = Vec::new();
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-N" | "--no-line-number" => show_line_numbers = false,
-            "-i" | "--ignore-case" => ignore_case = Some(true),
-            "-s" | "--case-sensitive" => ignore_case = Some(false),
-            "-F" | "--fixed-strings" => fixed = true,
-            _ if arg.starts_with('-') && arg.len() > 1 => {
-                for flag in arg[1..].chars() {
-                    match flag {
-                        'N' => show_line_numbers = false,
-                        'i' => ignore_case = Some(true),
-                        's' => ignore_case = Some(false),
-                        'F' => fixed = true,
-                        _ => {}
-                    }
-                }
-            }
-            _ => {
-                pattern = Some(arg.clone());
-                roots.extend(
-                    args[index + 1..]
-                        .iter()
-                        .filter(|arg| !arg.starts_with('-'))
-                        .cloned(),
-                );
-                break;
-            }
+    let request = match parse_rg_args(args) {
+        Ok(RgParseResult::Help) => {
+            return stdout_result(
+                "rg recursively search the current directory for lines matching a pattern\n",
+            );
         }
+        Ok(RgParseResult::TypeList) => return stdout_result(rg_type_list()),
+        Ok(RgParseResult::Search(request)) => *request,
+        Err(result) => return result,
+    };
+
+    if request.options.files {
+        return command_rg_files(state, &request);
+    }
+
+    let mut patterns = request.patterns.clone();
+    if let Err(result) = rg_load_pattern_files(state, stdin, &request.pattern_files, &mut patterns)
+    {
+        return result;
+    }
+    if patterns.is_empty() {
+        return stderr_result(2, "rg: no pattern given\n");
+    }
+
+    let ignore_case = request.options.ignore_case.unwrap_or_else(|| {
+        patterns
+            .iter()
+            .all(|pattern| rg_smart_case_ignores_case(pattern))
+    });
+    let mode = if request.options.fixed {
+        GrepMode::Fixed
+    } else {
+        GrepMode::Regex
+    };
+    let matchers = match patterns
+        .iter()
+        .map(|pattern| {
+            LineMatcher::new_with_line_regexp(
+                pattern,
+                ignore_case,
+                request.options.word_regexp,
+                request.options.line_regexp,
+                mode,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(matchers) => matchers,
+        Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+    };
+
+    let inputs = if request.roots.is_empty() && !stdin.is_empty() {
+        vec![RgInput {
+            label: "<stdin>".to_string(),
+            text: stdin.to_string(),
+            explicit_file: false,
+        }]
+    } else {
+        match rg_inputs(state, &request) {
+            Ok(inputs) => inputs,
+            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+        }
+    };
+
+    rg_render_search(&request, &matchers, &inputs)
+}
+
+#[derive(Clone, Debug)]
+struct RgRequest {
+    options: RgOptions,
+    patterns: Vec<String>,
+    pattern_files: Vec<String>,
+    roots: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RgOptions {
+    line_number: Option<bool>,
+    ignore_case: Option<bool>,
+    fixed: bool,
+    word_regexp: bool,
+    line_regexp: bool,
+    invert: bool,
+    count: bool,
+    count_matches: bool,
+    files_with_matches: bool,
+    files_without_match: bool,
+    only_matching: bool,
+    quiet: bool,
+    no_filename: bool,
+    hidden: bool,
+    no_ignore: bool,
+    text: bool,
+    files: bool,
+    null_separator: bool,
+    include_zero: bool,
+    heading: bool,
+    before_context: usize,
+    after_context: usize,
+    context_separator: String,
+    max_count: Option<usize>,
+    max_depth: Option<usize>,
+    globs: Vec<String>,
+    type_includes: Vec<String>,
+    type_excludes: Vec<String>,
+}
+
+impl Default for RgOptions {
+    fn default() -> Self {
+        Self {
+            line_number: None,
+            ignore_case: None,
+            fixed: false,
+            word_regexp: false,
+            line_regexp: false,
+            invert: false,
+            count: false,
+            count_matches: false,
+            files_with_matches: false,
+            files_without_match: false,
+            only_matching: false,
+            quiet: false,
+            no_filename: false,
+            hidden: false,
+            no_ignore: false,
+            text: false,
+            files: false,
+            null_separator: false,
+            include_zero: false,
+            heading: false,
+            before_context: 0,
+            after_context: 0,
+            context_separator: "--".to_string(),
+            max_count: None,
+            max_depth: None,
+            globs: Vec::new(),
+            type_includes: Vec::new(),
+            type_excludes: Vec::new(),
+        }
+    }
+}
+
+enum RgParseResult {
+    Help,
+    TypeList,
+    Search(Box<RgRequest>),
+}
+
+fn parse_rg_args(args: &[String]) -> Result<RgParseResult, CommandResult> {
+    let mut options = RgOptions::default();
+    let mut patterns = Vec::new();
+    let mut pattern_files = Vec::new();
+    let mut roots = Vec::new();
+    let mut parsing_roots = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if !parsing_roots && arg == "--" {
+            parsing_roots = true;
+            index += 1;
+            continue;
+        }
+        if !parsing_roots && arg.starts_with('-') && arg != "-" {
+            if let Some(action) = parse_rg_option(
+                args,
+                &mut index,
+                &mut options,
+                &mut patterns,
+                &mut pattern_files,
+            )? {
+                return Ok(action);
+            }
+            continue;
+        }
+        if options.files || !patterns.is_empty() || !pattern_files.is_empty() {
+            roots.push(arg.clone());
+        } else {
+            patterns.push(arg.clone());
+        }
+        parsing_roots = true;
         index += 1;
     }
-    let Some(pattern) = pattern else {
-        return stderr_result(2, "rg: missing pattern\n");
-    };
-    if roots.is_empty() && !stdin.is_empty() {
-        let ignore_case = ignore_case.unwrap_or_else(|| rg_smart_case_ignores_case(&pattern));
-        let matcher = match LineMatcher::new(
-            &pattern,
-            ignore_case,
-            false,
-            if fixed {
-                GrepMode::Fixed
-            } else {
-                GrepMode::Regex
-            },
-        ) {
-            Ok(matcher) => matcher,
-            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
-        };
-        let mut stdout = String::new();
-        let mut matches = 0;
-        for (line_index, line) in stdin.lines().enumerate() {
-            if matcher.is_match(line) {
-                matches += 1;
-                if show_line_numbers {
-                    stdout.push_str(&(line_index + 1).to_string());
-                    stdout.push(':');
-                }
-                stdout.push_str(line);
-                stdout.push('\n');
+
+    Ok(RgParseResult::Search(Box::new(RgRequest {
+        options,
+        patterns,
+        pattern_files,
+        roots,
+    })))
+}
+
+fn parse_rg_option(
+    args: &[String],
+    index: &mut usize,
+    options: &mut RgOptions,
+    patterns: &mut Vec<String>,
+    pattern_files: &mut Vec<String>,
+) -> Result<Option<RgParseResult>, CommandResult> {
+    let arg = &args[*index];
+    match arg.as_str() {
+        "--help" => return Ok(Some(RgParseResult::Help)),
+        "--type-list" => return Ok(Some(RgParseResult::TypeList)),
+        "--files" => options.files = true,
+        "--hidden" => options.hidden = true,
+        "--no-ignore" | "--no-ignore-vcs" | "--no-ignore-dot" => options.no_ignore = true,
+        "--ignore-case" => options.ignore_case = Some(true),
+        "--case-sensitive" => options.ignore_case = Some(false),
+        "--smart-case" => options.ignore_case = None,
+        "--fixed-strings" => options.fixed = true,
+        "--word-regexp" => options.word_regexp = true,
+        "--line-regexp" => options.line_regexp = true,
+        "--invert-match" => options.invert = true,
+        "--line-number" => options.line_number = Some(true),
+        "--no-line-number" => options.line_number = Some(false),
+        "--count" => options.count = true,
+        "--count-matches" => options.count_matches = true,
+        "--files-with-matches" => options.files_with_matches = true,
+        "--files-without-match" => options.files_without_match = true,
+        "--only-matching" => options.only_matching = true,
+        "--quiet" => options.quiet = true,
+        "--no-filename" => options.no_filename = true,
+        "--text" => options.text = true,
+        "--include-zero" => options.include_zero = true,
+        "--heading" => options.heading = true,
+        "--pcre2" => return Err(stderr_result(2, "rg: PCRE2 is not available\n")),
+        "--sort" => {
+            rg_option_value(args, index, "--sort")?;
+        }
+        "--glob" => options.globs.push(rg_option_value(args, index, "--glob")?),
+        "--type" => options
+            .type_includes
+            .push(rg_option_value(args, index, "--type")?),
+        "--type-not" => options
+            .type_excludes
+            .push(rg_option_value(args, index, "--type-not")?),
+        "--max-count" => {
+            options.max_count = Some(rg_parse_usize(&rg_option_value(
+                args,
+                index,
+                "--max-count",
+            )?));
+        }
+        "--max-depth" => {
+            options.max_depth = Some(rg_parse_usize(&rg_option_value(
+                args,
+                index,
+                "--max-depth",
+            )?));
+        }
+        "--after-context" => {
+            options.after_context =
+                rg_parse_usize(&rg_option_value(args, index, "--after-context")?);
+        }
+        "--before-context" => {
+            options.before_context =
+                rg_parse_usize(&rg_option_value(args, index, "--before-context")?);
+        }
+        "--context" => {
+            let value = rg_parse_usize(&rg_option_value(args, index, "--context")?);
+            options.before_context = value;
+            options.after_context = value;
+        }
+        "--context-separator" => {
+            options.context_separator = rg_option_value(args, index, "--context-separator")?;
+        }
+        "-P" => return Err(stderr_result(2, "rg: PCRE2 is not available\n")),
+        "-n" => options.line_number = Some(true),
+        "-N" => options.line_number = Some(false),
+        "-i" => options.ignore_case = Some(true),
+        "-s" => options.ignore_case = Some(false),
+        "-S" => options.ignore_case = None,
+        "-F" => options.fixed = true,
+        "-w" => options.word_regexp = true,
+        "-x" => options.line_regexp = true,
+        "-v" => options.invert = true,
+        "-c" => options.count = true,
+        "-l" => options.files_with_matches = true,
+        "-q" => options.quiet = true,
+        "-o" => options.only_matching = true,
+        "-I" => options.no_filename = true,
+        "-a" => options.text = true,
+        "-0" => options.null_separator = true,
+        "-L" => {}
+        "-e" => patterns.push(rg_option_value(args, index, "-e")?),
+        "-f" => pattern_files.push(rg_option_value(args, index, "-f")?),
+        "-g" => options.globs.push(rg_option_value(args, index, "-g")?),
+        "-t" => options
+            .type_includes
+            .push(rg_option_value(args, index, "-t")?),
+        "-T" => options
+            .type_excludes
+            .push(rg_option_value(args, index, "-T")?),
+        "-m" => options.max_count = Some(rg_parse_usize(&rg_option_value(args, index, "-m")?)),
+        "-d" => options.max_depth = Some(rg_parse_usize(&rg_option_value(args, index, "-d")?)),
+        "-A" => options.after_context = rg_parse_usize(&rg_option_value(args, index, "-A")?),
+        "-B" => options.before_context = rg_parse_usize(&rg_option_value(args, index, "-B")?),
+        "-C" => {
+            let value = rg_parse_usize(&rg_option_value(args, index, "-C")?);
+            options.before_context = value;
+            options.after_context = value;
+        }
+        _ if arg.starts_with("--glob=") => {
+            options.globs.push(arg["--glob=".len()..].to_string());
+        }
+        _ if arg.starts_with("--type=") => {
+            options
+                .type_includes
+                .push(arg["--type=".len()..].to_string());
+        }
+        _ if arg.starts_with("--type-not=") => {
+            options
+                .type_excludes
+                .push(arg["--type-not=".len()..].to_string());
+        }
+        _ if arg.starts_with("--max-count=") => {
+            options.max_count = Some(rg_parse_usize(&arg["--max-count=".len()..]));
+        }
+        _ if arg.starts_with("--max-depth=") => {
+            options.max_depth = Some(rg_parse_usize(&arg["--max-depth=".len()..]));
+        }
+        _ if arg.starts_with("--after-context=") => {
+            options.after_context = rg_parse_usize(&arg["--after-context=".len()..]);
+        }
+        _ if arg.starts_with("--before-context=") => {
+            options.before_context = rg_parse_usize(&arg["--before-context=".len()..]);
+        }
+        _ if arg.starts_with("--context=") => {
+            let value = rg_parse_usize(&arg["--context=".len()..]);
+            options.before_context = value;
+            options.after_context = value;
+        }
+        _ if arg.starts_with("--context-separator=") => {
+            options.context_separator = arg["--context-separator=".len()..].to_string();
+        }
+        _ if arg.starts_with("--") => {
+            return Err(stderr_result(
+                1,
+                format!("rg: unrecognized option '{arg}'\n"),
+            ));
+        }
+        _ if arg.starts_with("-m") && arg.len() > 2 => {
+            options.max_count = Some(rg_parse_usize(&arg[2..]));
+        }
+        _ if arg.starts_with("-d") && arg.len() > 2 => {
+            options.max_depth = Some(rg_parse_usize(&arg[2..]));
+        }
+        _ if arg.starts_with("-A") && arg.len() > 2 => {
+            options.after_context = rg_parse_usize(&arg[2..]);
+        }
+        _ if arg.starts_with("-B") && arg.len() > 2 => {
+            options.before_context = rg_parse_usize(&arg[2..]);
+        }
+        _ if arg.starts_with("-C") && arg.len() > 2 => {
+            let value = rg_parse_usize(&arg[2..]);
+            options.before_context = value;
+            options.after_context = value;
+        }
+        _ if arg.starts_with("-e") && arg.len() > 2 => patterns.push(arg[2..].to_string()),
+        _ if arg.starts_with("-g") && arg.len() > 2 => options.globs.push(arg[2..].to_string()),
+        _ if arg.starts_with("-t") && arg.len() > 2 => {
+            options.type_includes.push(arg[2..].to_string());
+        }
+        _ if arg.starts_with("-T") && arg.len() > 2 => {
+            options.type_excludes.push(arg[2..].to_string());
+        }
+        _ if arg.starts_with('-') => parse_rg_short_flags(arg, options)?,
+        _ => {}
+    }
+    *index += 1;
+    Ok(None)
+}
+
+fn parse_rg_short_flags(arg: &str, options: &mut RgOptions) -> Result<(), CommandResult> {
+    let mut unrestricted = 0;
+    for flag in arg[1..].chars() {
+        match flag {
+            'n' => options.line_number = Some(true),
+            'N' => options.line_number = Some(false),
+            'i' => options.ignore_case = Some(true),
+            's' => options.ignore_case = Some(false),
+            'S' => options.ignore_case = None,
+            'F' => options.fixed = true,
+            'w' => options.word_regexp = true,
+            'x' => options.line_regexp = true,
+            'v' => options.invert = true,
+            'c' => options.count = true,
+            'l' => options.files_with_matches = true,
+            'q' => options.quiet = true,
+            'o' => options.only_matching = true,
+            'I' => options.no_filename = true,
+            'a' => options.text = true,
+            '0' => options.null_separator = true,
+            'L' => {}
+            'u' => unrestricted += 1,
+            _ => {
+                return Err(stderr_result(
+                    1,
+                    format!("rg: unrecognized option '-{flag}'\n"),
+                ));
             }
         }
+    }
+    if unrestricted > 0 {
+        options.no_ignore = true;
+    }
+    if unrestricted > 1 {
+        options.hidden = true;
+    }
+    Ok(())
+}
+
+fn rg_option_value(
+    args: &[String],
+    index: &mut usize,
+    option: &str,
+) -> Result<String, CommandResult> {
+    let Some(value) = args.get(*index + 1) else {
+        return Err(stderr_result(
+            2,
+            format!("rg: option '{option}' requires an argument\n"),
+        ));
+    };
+    *index += 1;
+    Ok(value.clone())
+}
+
+fn rg_parse_usize(value: &str) -> usize {
+    value.parse().unwrap_or(0)
+}
+
+fn rg_type_list() -> String {
+    [
+        "js: *.js, *.jsx",
+        "ts: *.ts, *.tsx",
+        "py: *.py",
+        "rust: *.rs",
+        "md: *.md, *.markdown, *.mdown",
+        "json: *.json",
+        "html: *.html, *.htm",
+    ]
+    .join("\n")
+        + "\n"
+}
+
+#[derive(Clone, Debug)]
+struct RgInput {
+    label: String,
+    text: String,
+    explicit_file: bool,
+}
+
+fn rg_load_pattern_files(
+    state: &ExecState<'_>,
+    stdin: &str,
+    pattern_files: &[String],
+    patterns: &mut Vec<String>,
+) -> Result<(), CommandResult> {
+    if pattern_files.is_empty() {
+        return Ok(());
+    }
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, "rg: filesystem lock poisoned\n"))?;
+    for pattern_file in pattern_files {
+        let content = if pattern_file == "-" {
+            stdin.to_string()
+        } else {
+            let path = resolve_path(&state.cwd, pattern_file);
+            fs.read_file(&path)
+                .map_err(|_| stderr_result(2, format!("rg: {path}: No such file or directory\n")))?
+        };
+        patterns.extend(content.lines().map(ToString::to_string));
+    }
+    Ok(())
+}
+
+fn command_rg_files(state: &ExecState<'_>, request: &RgRequest) -> CommandResult {
+    let inputs = match rg_inputs(state, request) {
+        Ok(inputs) => inputs,
+        Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+    };
+    if request.options.quiet {
         return CommandResult {
-            exit_code: if matches == 0 { 1 } else { 0 },
-            stdout,
+            exit_code: if inputs.is_empty() { 1 } else { 0 },
             ..CommandResult::default()
         };
     }
-    let fs = match state.session.inner.fs.lock() {
-        Ok(fs) => fs,
-        Err(_) => return stderr_result(1, "rg: filesystem lock poisoned\n"),
+    let separator = if request.options.null_separator {
+        '\0'
+    } else {
+        '\n'
     };
-    let search_roots = if roots.is_empty() {
+    let stdout = inputs
+        .iter()
+        .map(|input| format!("{}{}", input.label, separator))
+        .collect::<String>();
+    CommandResult {
+        exit_code: if inputs.is_empty() { 1 } else { 0 },
+        stdout,
+        ..CommandResult::default()
+    }
+}
+
+fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>, String> {
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| "filesystem lock poisoned".to_string())?;
+    let ignore_rules = if request.options.no_ignore {
+        Vec::new()
+    } else {
+        rg_ignore_rules(&fs)
+    };
+    let roots = if request.roots.is_empty() {
         vec![state.cwd.clone()]
     } else {
-        roots
+        request
+            .roots
             .iter()
             .map(|root| resolve_path(&state.cwd, root))
             .collect()
     };
-    let ignore_case = ignore_case.unwrap_or_else(|| rg_smart_case_ignores_case(&pattern));
-    let matcher = match LineMatcher::new(
-        &pattern,
-        ignore_case,
-        false,
-        if fixed {
-            GrepMode::Fixed
-        } else {
-            GrepMode::Regex
-        },
-    ) {
-        Ok(matcher) => matcher,
-        Err(error) => return stderr_result(2, format!("rg: {error}\n")),
-    };
-    let mut stdout = String::new();
-    let mut matches = 0;
-    for root in search_roots {
+    let mut inputs = Vec::new();
+    for root in roots {
+        let root_stat = fs
+            .stat(&root)
+            .map_err(|_| format!("{root}: No such file or directory"))?;
+        if root_stat.is_file {
+            rg_push_input(
+                &state.cwd,
+                &fs,
+                request,
+                &ignore_rules,
+                &mut inputs,
+                RgCandidate {
+                    root: &root,
+                    path: &root,
+                    explicit_file: true,
+                },
+            );
+            continue;
+        }
         let mut paths = fs
             .get_all_paths()
             .into_iter()
-            .filter(|path| path == &root || path.starts_with(&format!("{root}/")))
+            .filter(|path| path.starts_with(&format!("{root}/")))
             .collect::<Vec<_>>();
         paths.sort();
         for path in paths {
-            let Ok(stat) = fs.stat(&path) else {
-                continue;
-            };
-            if !stat.is_file {
-                continue;
-            }
-            if let Ok(content) = fs.read_file(&path) {
-                if content.contains('\0') {
-                    continue;
-                }
-                for (line_index, line) in content.lines().enumerate() {
-                    if !matcher.is_match(line) {
-                        continue;
-                    }
-                    matches += 1;
-                    stdout.push_str(&relative_display_path(&state.cwd, &path));
-                    stdout.push(':');
-                    if show_line_numbers {
-                        stdout.push_str(&(line_index + 1).to_string());
-                        stdout.push(':');
-                    }
-                    stdout.push_str(line);
-                    stdout.push('\n');
-                }
-            }
+            rg_push_input(
+                &state.cwd,
+                &fs,
+                request,
+                &ignore_rules,
+                &mut inputs,
+                RgCandidate {
+                    root: &root,
+                    path: &path,
+                    explicit_file: false,
+                },
+            );
         }
     }
+    inputs.sort_by(|left, right| left.label.cmp(&right.label));
+    Ok(inputs)
+}
+
+struct RgCandidate<'a> {
+    root: &'a str,
+    path: &'a str,
+    explicit_file: bool,
+}
+
+fn rg_push_input(
+    cwd: &str,
+    fs: &VirtualFileSystem,
+    request: &RgRequest,
+    ignore_rules: &[RgIgnoreRule],
+    inputs: &mut Vec<RgInput>,
+    candidate: RgCandidate<'_>,
+) {
+    let Ok(stat) = fs.stat(candidate.path) else {
+        return;
+    };
+    if !stat.is_file {
+        return;
+    }
+    let label = relative_display_path(cwd, candidate.path);
+    if !rg_file_passes_filters(
+        candidate.path,
+        &label,
+        candidate.root,
+        candidate.explicit_file,
+        request,
+        ignore_rules,
+    ) {
+        return;
+    }
+    let Ok(text) = fs.read_file(candidate.path) else {
+        return;
+    };
+    if !request.options.text && text.contains('\0') {
+        return;
+    }
+    inputs.push(RgInput {
+        label,
+        text,
+        explicit_file: candidate.explicit_file,
+    });
+}
+
+fn rg_file_passes_filters(
+    path: &str,
+    label: &str,
+    root: &str,
+    explicit_file: bool,
+    request: &RgRequest,
+    ignore_rules: &[RgIgnoreRule],
+) -> bool {
+    if let Some(max_depth) = request.options.max_depth
+        && !explicit_file
+        && rg_depth(root, path) >= max_depth
+    {
+        return false;
+    }
+    if !request.options.hidden && rg_path_is_hidden(label) {
+        return false;
+    }
+    if !ignore_rules.is_empty() && rg_is_ignored(path, ignore_rules) {
+        return false;
+    }
+    if !rg_type_filters_match(path, &request.options) {
+        return false;
+    }
+    rg_globs_match(label, &request.options.globs)
+}
+
+fn rg_depth(root: &str, path: &str) -> usize {
+    path.strip_prefix(root)
+        .and_then(|relative| relative.strip_prefix('/'))
+        .unwrap_or(path)
+        .matches('/')
+        .count()
+}
+
+fn rg_path_is_hidden(path: &str) -> bool {
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .any(|part| part.starts_with('.'))
+}
+
+fn rg_type_filters_match(path: &str, options: &RgOptions) -> bool {
+    if !options.type_includes.is_empty()
+        && !options
+            .type_includes
+            .iter()
+            .any(|type_name| rg_path_matches_type(path, type_name).unwrap_or(false))
+    {
+        return false;
+    }
+    !options
+        .type_excludes
+        .iter()
+        .any(|type_name| rg_path_matches_type(path, type_name).unwrap_or(false))
+}
+
+fn rg_path_matches_type(path: &str, type_name: &str) -> Option<bool> {
+    let extension = path.rsplit_once('.').map(|(_, extension)| {
+        extension
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    })?;
+    let extensions = match type_name {
+        "js" | "javascript" => &["js", "jsx"][..],
+        "ts" | "typescript" => &["ts", "tsx"][..],
+        "py" | "python" => &["py"][..],
+        "rs" | "rust" => &["rs"][..],
+        "css" => &["css"][..],
+        "md" | "markdown" => &["md", "markdown", "mdown"][..],
+        "json" => &["json"][..],
+        "html" => &["html", "htm"][..],
+        "txt" | "text" => &["txt"][..],
+        "log" => &["log"][..],
+        _ => return None,
+    };
+    Some(extensions.contains(&extension.as_str()))
+}
+
+fn rg_globs_match(label: &str, globs: &[String]) -> bool {
+    let mut saw_positive = false;
+    let mut positive_match = false;
+    for glob in globs {
+        let (negated, pattern) = glob
+            .strip_prefix('!')
+            .map_or((false, glob.as_str()), |pattern| (true, pattern));
+        let matched = rg_glob_matches_path(pattern, label);
+        if negated && matched {
+            return false;
+        }
+        if !negated {
+            saw_positive = true;
+            positive_match |= matched;
+        }
+    }
+    !saw_positive || positive_match
+}
+
+#[derive(Clone, Debug)]
+struct RgIgnoreRule {
+    base: String,
+    pattern: String,
+    negated: bool,
+    directory_only: bool,
+    rooted: bool,
+}
+
+fn rg_ignore_rules(fs: &VirtualFileSystem) -> Vec<RgIgnoreRule> {
+    let mut paths = fs
+        .get_all_paths()
+        .into_iter()
+        .filter(|path| path.ends_with("/.gitignore"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut rules = Vec::new();
+    for path in paths {
+        let Ok(content) = fs.read_file(&path) else {
+            continue;
+        };
+        let base = path
+            .rsplit_once('/')
+            .map_or("/", |(base, _)| if base.is_empty() { "/" } else { base });
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (negated, line) = line
+                .strip_prefix('!')
+                .map_or((false, line), |line| (true, line));
+            let directory_only = line.ends_with('/');
+            let line = line.trim_end_matches('/');
+            let rooted = line.starts_with('/');
+            let pattern = line.trim_start_matches('/').to_string();
+            if pattern.is_empty() {
+                continue;
+            }
+            rules.push(RgIgnoreRule {
+                base: base.to_string(),
+                pattern,
+                negated,
+                directory_only,
+                rooted,
+            });
+        }
+    }
+    rules
+}
+
+fn rg_is_ignored(path: &str, rules: &[RgIgnoreRule]) -> bool {
+    let mut ignored = false;
+    for rule in rules {
+        if rg_ignore_rule_matches(rule, path) {
+            ignored = !rule.negated;
+        }
+    }
+    ignored
+}
+
+fn rg_ignore_rule_matches(rule: &RgIgnoreRule, path: &str) -> bool {
+    let Some(relative) = path
+        .strip_prefix(&rule.base)
+        .and_then(|relative| relative.strip_prefix('/'))
+    else {
+        return false;
+    };
+    if relative.is_empty() {
+        return false;
+    }
+    if rule.directory_only {
+        if rule.rooted {
+            return relative == rule.pattern || relative.starts_with(&format!("{}/", rule.pattern));
+        }
+        let directories = relative
+            .rsplit_once('/')
+            .map(|(directories, _)| directories)
+            .unwrap_or("");
+        return directories.split('/').any(|part| part == rule.pattern)
+            || rg_glob_matches_path(&rule.pattern, directories);
+    }
+    if rule.rooted {
+        return rg_glob_match(&rule.pattern, relative);
+    }
+    if rule.pattern.contains('/') {
+        return rg_glob_matches_path(&rule.pattern, relative)
+            || relative.ends_with(&format!("/{}", rule.pattern));
+    }
+    relative
+        .split('/')
+        .any(|part| rg_glob_match(&rule.pattern, part))
+}
+
+fn rg_glob_matches_path(pattern: &str, path: &str) -> bool {
+    if let Some(unrooted) = pattern.strip_prefix("**/")
+        && rg_glob_matches_path(unrooted, path)
+    {
+        return true;
+    }
+    if pattern.contains('/') {
+        rg_glob_match(pattern, path)
+    } else {
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        rg_glob_match(pattern, basename)
+    }
+}
+
+fn rg_glob_match(pattern: &str, text: &str) -> bool {
+    Regex::new(&rg_glob_regex(pattern))
+        .map(|regex| regex.is_match(text))
+        .unwrap_or_else(|_| wildcard_match(pattern, text))
+}
+
+fn rg_glob_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                regex.push_str(".*");
+            }
+            '*' => regex.push_str("[^/]*"),
+            '?' => regex.push_str("[^/]"),
+            '[' => {
+                regex.push('[');
+                if chars.peek() == Some(&'!') {
+                    chars.next();
+                    regex.push('^');
+                }
+                for class_ch in chars.by_ref() {
+                    regex.push(class_ch);
+                    if class_ch == ']' {
+                        break;
+                    }
+                }
+            }
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+    regex.push('$');
+    regex
+}
+
+#[derive(Clone, Debug)]
+struct RgLineMatch {
+    index: usize,
+    line: String,
+    only_matches: Vec<String>,
+}
+
+fn rg_render_search(
+    request: &RgRequest,
+    matchers: &[LineMatcher],
+    inputs: &[RgInput],
+) -> CommandResult {
+    let mut stdout = String::new();
+    let mut total_matches = 0;
+    for input in inputs {
+        let line_matches = rg_line_matches(input, matchers, &request.options);
+        let file_match_count = if request.options.count_matches {
+            line_matches
+                .iter()
+                .map(|line_match| line_match.only_matches.len().max(1))
+                .sum()
+        } else {
+            line_matches.len()
+        };
+        total_matches += file_match_count;
+        if request.options.quiet && file_match_count > 0 {
+            return CommandResult {
+                exit_code: 0,
+                ..CommandResult::default()
+            };
+        }
+        if request.options.files_with_matches {
+            if file_match_count > 0 {
+                rg_push_file_label(&mut stdout, input, &request.options);
+            }
+            continue;
+        }
+        if request.options.files_without_match {
+            if file_match_count == 0 {
+                rg_push_file_label(&mut stdout, input, &request.options);
+                total_matches += 1;
+            }
+            continue;
+        }
+        if request.options.count || request.options.count_matches {
+            if file_match_count > 0 || request.options.include_zero {
+                rg_push_count(&mut stdout, request, input, file_match_count);
+            }
+            continue;
+        }
+        rg_push_matches(&mut stdout, request, input, &line_matches);
+    }
     CommandResult {
-        exit_code: if matches == 0 { 1 } else { 0 },
+        exit_code: if total_matches == 0 { 1 } else { 0 },
         stdout,
         ..CommandResult::default()
     }
+}
+
+fn rg_line_matches(
+    input: &RgInput,
+    matchers: &[LineMatcher],
+    options: &RgOptions,
+) -> Vec<RgLineMatch> {
+    let max_count = options.max_count.filter(|count| *count > 0);
+    let mut matches = Vec::new();
+    for (index, line) in input.text.lines().enumerate() {
+        let only_matches = matchers
+            .iter()
+            .flat_map(|matcher| matcher.match_texts(line))
+            .collect::<Vec<_>>();
+        let matched = !only_matches.is_empty();
+        if matched ^ options.invert {
+            matches.push(RgLineMatch {
+                index,
+                line: line.to_string(),
+                only_matches,
+            });
+            if max_count.is_some_and(|limit| matches.len() >= limit) {
+                break;
+            }
+        }
+    }
+    matches
+}
+
+fn rg_push_file_label(stdout: &mut String, input: &RgInput, options: &RgOptions) {
+    stdout.push_str(&input.label);
+    stdout.push(if options.null_separator { '\0' } else { '\n' });
+}
+
+fn rg_push_count(stdout: &mut String, request: &RgRequest, input: &RgInput, count: usize) {
+    if rg_show_filename(request, input) {
+        stdout.push_str(&input.label);
+        stdout.push(':');
+    }
+    stdout.push_str(&format!("{count}\n"));
+}
+
+fn rg_push_matches(
+    stdout: &mut String,
+    request: &RgRequest,
+    input: &RgInput,
+    line_matches: &[RgLineMatch],
+) {
+    if line_matches.is_empty() {
+        return;
+    }
+    if request.options.heading && rg_show_filename(request, input) {
+        stdout.push_str(&input.label);
+        stdout.push('\n');
+    }
+    if request.options.only_matching && !request.options.invert {
+        rg_push_only_matches(stdout, request, input, line_matches);
+        return;
+    }
+    if request.options.before_context == 0 && request.options.after_context == 0 {
+        for line_match in line_matches {
+            rg_push_line(
+                stdout,
+                request,
+                input,
+                line_match.index,
+                &line_match.line,
+                true,
+            );
+        }
+        return;
+    }
+    rg_push_context_matches(stdout, request, input, line_matches);
+}
+
+fn rg_push_only_matches(
+    stdout: &mut String,
+    request: &RgRequest,
+    input: &RgInput,
+    line_matches: &[RgLineMatch],
+) {
+    for line_match in line_matches {
+        for only_match in &line_match.only_matches {
+            rg_push_line(stdout, request, input, line_match.index, only_match, true);
+        }
+    }
+}
+
+fn rg_push_context_matches(
+    stdout: &mut String,
+    request: &RgRequest,
+    input: &RgInput,
+    line_matches: &[RgLineMatch],
+) {
+    let lines = input.text.lines().collect::<Vec<_>>();
+    let mut previous_end = None;
+    for line_match in line_matches {
+        let start = line_match
+            .index
+            .saturating_sub(request.options.before_context);
+        let end = (line_match.index + request.options.after_context).min(lines.len() - 1);
+        if let Some(previous_end) = previous_end
+            && start > previous_end + 1
+        {
+            stdout.push_str(&request.options.context_separator);
+            stdout.push('\n');
+        }
+        let first = previous_end.map_or(start, |previous_end| start.max(previous_end + 1));
+        for (index, line) in lines.iter().enumerate().take(end + 1).skip(first) {
+            rg_push_line(
+                stdout,
+                request,
+                input,
+                index,
+                line,
+                index == line_match.index,
+            );
+        }
+        previous_end = Some(end);
+    }
+}
+
+fn rg_push_line(
+    stdout: &mut String,
+    request: &RgRequest,
+    input: &RgInput,
+    line_index: usize,
+    text: &str,
+    matched: bool,
+) {
+    let show_filename = (request.options.only_matching || !request.options.heading)
+        && rg_show_filename(request, input);
+    let show_line_number = rg_show_line_number(request, input);
+    let separator = if matched { ':' } else { '-' };
+    if show_filename {
+        stdout.push_str(&input.label);
+        stdout.push(separator);
+    }
+    if show_line_number {
+        stdout.push_str(&(line_index + 1).to_string());
+        stdout.push(separator);
+    }
+    stdout.push_str(text);
+    stdout.push('\n');
+}
+
+fn rg_show_filename(request: &RgRequest, input: &RgInput) -> bool {
+    !request.options.no_filename && !input.explicit_file
+}
+
+fn rg_show_line_number(request: &RgRequest, input: &RgInput) -> bool {
+    if request.options.only_matching {
+        return request.options.line_number.unwrap_or(false);
+    }
+    request.options.line_number.unwrap_or(!input.explicit_file)
 }
 
 fn rg_smart_case_ignores_case(pattern: &str) -> bool {

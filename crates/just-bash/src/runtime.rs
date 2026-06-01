@@ -96,6 +96,38 @@ mod tests {
         Bash::new()
     }
 
+    const SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n";
+
+    fn home_bash(files: &[(&str, &str)]) -> Bash {
+        Bash::with_options(BashOptions {
+            cwd: Some("/home/user".to_string()),
+            files: files
+                .iter()
+                .map(|(path, content)| {
+                    let path = if path.starts_with('/') {
+                        (*path).to_string()
+                    } else {
+                        format!("/home/user/{path}")
+                    };
+                    (path, (*content).to_string())
+                })
+                .collect(),
+            ..BashOptions::default()
+        })
+    }
+
+    fn assert_home_exec(files: &[(&str, &str)], script: &str, exit_code: i32, stdout: &str) {
+        let result = home_bash(files).exec(script);
+        assert_eq!(result.exit_code, exit_code, "{script}");
+        assert_eq!(result.stdout, stdout, "{script}");
+        assert_eq!(result.stderr, "", "{script}");
+    }
+
     #[test]
     fn registry_upstream_bash_commands_registers_all_supported_by_default() {
         // maps packages/just-bash/src/Bash.commands.test.ts:6
@@ -1146,19 +1178,13 @@ mod tests {
             "src/app.ts:1:const hello = 'world';\nsrc/lib/util.ts:1:export const hello = 1;\n"
         );
         assert_eq!(rg_env.exec("rg nomatch").exit_code, 1);
-        assert_eq!(
-            rg_env.exec("rg Hello file.txt").stdout,
-            "file.txt:1:Hello World\n"
-        );
+        assert_eq!(rg_env.exec("rg Hello file.txt").stdout, "Hello World\n");
         assert_eq!(
             rg_env.exec("rg -i HELLO file.txt").stdout,
-            "file.txt:1:Hello World\nfile.txt:2:hello world\n"
+            "Hello World\nhello world\n"
         );
-        assert_eq!(
-            rg_env.exec("rg -s hello file.txt").stdout,
-            "file.txt:2:hello world\n"
-        );
-        assert_eq!(rg_env.exec("rg -N hello a.txt").stdout, "a.txt:hello\n");
+        assert_eq!(rg_env.exec("rg -s hello file.txt").stdout, "hello world\n");
+        assert_eq!(rg_env.exec("rg -N hello a.txt").stdout, "hello\n");
         assert_eq!(
             Bash::with_options(BashOptions {
                 cwd: Some("/home/user".to_string()),
@@ -1524,6 +1550,1276 @@ mod tests {
             env.exec("awk '{print FILENAME, FNR, NR}' /a.txt /b.txt")
                 .stdout,
             "/a.txt 1 1\n/a.txt 2 2\n/b.txt 1 3\n/b.txt 2 4\n"
+        );
+    }
+
+    #[test]
+    fn rg_upstream_basic_rows_are_portable() {
+        assert_home_exec(
+            &[("file.txt", "hello world\nfoo bar\n")],
+            "rg hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        assert_home_exec(
+            &[("a.txt", "hello\n"), ("b.txt", "hello\n")],
+            "rg hello",
+            0,
+            "a.txt:1:hello\nb.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                ("src/app.ts", "const hello = 'world';\n"),
+                ("README.md", "# Hello\n"),
+            ],
+            "rg hello src",
+            0,
+            "src/app.ts:1:const hello = 'world';\n",
+        );
+        assert_home_exec(&[("file.txt", "hello world\n")], "rg nomatch", 1, "");
+        assert_home_exec(
+            &[("file.txt", "line1\nhello\nline3\n")],
+            "rg hello",
+            0,
+            "file.txt:2:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -N hello",
+            0,
+            "file.txt:hello world\n",
+        );
+        assert_home_exec(
+            &[("src/lib/util.ts", "export const hello = 1;\n")],
+            "rg hello",
+            0,
+            "src/lib/util.ts:1:export const hello = 1;\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello World\nhello world\n")],
+            "rg hello",
+            0,
+            "file.txt:1:Hello World\nfile.txt:2:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello World\nhello world\n")],
+            "rg Hello",
+            0,
+            "file.txt:1:Hello World\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello World\nhello world\nHELLO WORLD\n")],
+            "rg -i HELLO",
+            0,
+            "file.txt:1:Hello World\nfile.txt:2:hello world\nfile.txt:3:HELLO WORLD\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello World\nhello world\n")],
+            "rg -s hello",
+            0,
+            "file.txt:2:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello World\nhello world\n")],
+            "rg -i Hello",
+            0,
+            "file.txt:1:Hello World\nfile.txt:2:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "ABC123\nabc123\n")],
+            "rg 123",
+            0,
+            "file.txt:1:ABC123\nfile.txt:2:abc123\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo::bar\nFOO::BAR\n")],
+            "rg -F '::'",
+            0,
+            "file.txt:1:foo::bar\nfile.txt:2:FOO::BAR\n",
+        );
+        assert_home_exec(
+            &[("text.txt", "hello\n"), ("binary.bin", "hello\0world\n")],
+            "rg hello",
+            0,
+            "text.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                ("level0.txt", "hello\n"),
+                ("dir1/level1.txt", "hello\n"),
+                ("dir1/dir2/level2.txt", "hello\n"),
+            ],
+            "rg --max-depth 2 hello",
+            0,
+            "dir1/level1.txt:1:hello\nlevel0.txt:1:hello\n",
+        );
+        let missing = Bash::new().exec("rg");
+        assert_eq!(missing.exit_code, 2);
+        assert_eq!(missing.stdout, "");
+        assert_eq!(missing.stderr, "rg: no pattern given\n");
+        let unknown = Bash::new().exec("rg --unknown-option pattern");
+        assert_eq!(unknown.exit_code, 1);
+        assert_eq!(unknown.stdout, "");
+        assert_eq!(
+            unknown.stderr,
+            "rg: unrecognized option '--unknown-option'\n"
+        );
+        assert_home_exec(&[("file.txt", "hello\n")], "rg -t unknowntype hello", 1, "");
+    }
+
+    #[test]
+    fn rg_upstream_filtering_rows_are_portable() {
+        assert_home_exec(
+            &[
+                ("app.ts", "const foo = 1;\n"),
+                ("app.js", "const foo = 2;\n"),
+                ("style.css", "foo { }\n"),
+            ],
+            "rg -t ts foo",
+            0,
+            "app.ts:1:const foo = 1;\n",
+        );
+        assert_home_exec(
+            &[
+                ("app.ts", "const foo = 1;\n"),
+                ("app.js", "const foo = 2;\n"),
+            ],
+            "rg -T ts foo",
+            0,
+            "app.js:1:const foo = 2;\n",
+        );
+        let type_list = Bash::new().exec("rg --type-list");
+        assert_eq!(type_list.exit_code, 0);
+        assert!(type_list.stdout.contains("js:"));
+        assert!(type_list.stdout.contains("ts:"));
+        assert!(type_list.stdout.contains("py:"));
+        assert_eq!(type_list.stderr, "");
+        assert_home_exec(
+            &[
+                ("app.ts", "const foo = 1;\n"),
+                ("app.js", "const foo = 2;\n"),
+            ],
+            "rg -g '*.ts' foo",
+            0,
+            "app.ts:1:const foo = 1;\n",
+        );
+        assert_home_exec(
+            &[
+                ("app.ts", "const foo = 1;\n"),
+                ("test.ts", "const foo = 2;\n"),
+            ],
+            "rg -g '!test.ts' foo",
+            0,
+            "app.ts:1:const foo = 1;\n",
+        );
+        assert_home_exec(
+            &[("a.ts", "foo\n"), ("b.ts", "foo\n"), ("c.js", "foo\n")],
+            "rg -g '*.ts' foo",
+            0,
+            "a.ts:1:foo\nb.ts:1:foo\n",
+        );
+        assert_home_exec(
+            &[("visible.txt", "hello\n"), (".hidden.txt", "hello\n")],
+            "rg hello",
+            0,
+            "visible.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[("visible.txt", "hello\n"), (".hidden.txt", "hello\n")],
+            "rg --hidden hello",
+            0,
+            ".hidden.txt:1:hello\nvisible.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n"),
+                ("app.ts", "hello\n"),
+                ("debug.log", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "app.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n"),
+                ("app.ts", "hello\n"),
+                ("debug.log", "hello\n"),
+            ],
+            "rg --no-ignore hello",
+            0,
+            "app.ts:1:hello\ndebug.log:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n!important.log\n"),
+                ("debug.log", "hello\n"),
+                ("important.log", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "important.log:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "build/\n"),
+                ("src/app.ts", "hello\n"),
+                ("build/output.js", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "src/app.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n"),
+                ("app.ts", "hello\n"),
+                ("subdir/file.ts", "hello\n"),
+                ("subdir/debug.log", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "app.ts:1:hello\nsubdir/file.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "node_modules/\n"),
+                ("node_modules/pkg/index.js", "hello\n"),
+                ("node_modules_backup/file.js", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "node_modules_backup/file.js:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "**/cache/**\n"),
+                ("src/app.ts", "hello\n"),
+                ("src/cache/data.json", "hello\n"),
+                ("cache/index.json", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "src/app.ts:1:hello\n",
+        );
+    }
+
+    #[test]
+    fn rg_upstream_output_mode_rows_are_portable() {
+        assert_home_exec(
+            &[("file.txt", "hello\nhello\nhello\n")],
+            "rg -c hello",
+            0,
+            "file.txt:3\n",
+        );
+        assert_home_exec(
+            &[("a.txt", "hello\nhello\n"), ("b.txt", "hello\n")],
+            "rg -c hello",
+            0,
+            "a.txt:2\nb.txt:1\n",
+        );
+        assert_home_exec(
+            &[("file1.txt", "hello\n"), ("file2.txt", "hello\n")],
+            "rg -l hello",
+            0,
+            "file1.txt\nfile2.txt\n",
+        );
+        assert_home_exec(
+            &[("file1.txt", "hello\n"), ("file2.txt", "world\n")],
+            "rg --files-without-match hello",
+            0,
+            "file2.txt\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -o hello",
+            0,
+            "file.txt:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello hello hello\n")],
+            "rg -o hello",
+            0,
+            "file.txt:hello\nfile.txt:hello\nfile.txt:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "line1\nhello\nline3\nline4\n")],
+            "rg -A 1 hello",
+            0,
+            "file.txt:2:hello\nfile.txt-3-line3\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "line1\nline2\nhello\nline4\n")],
+            "rg -B 1 hello",
+            0,
+            "file.txt-2-line2\nfile.txt:3:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "line1\nline2\nhello\nline4\nline5\n")],
+            "rg -C 1 hello",
+            0,
+            "file.txt-2-line2\nfile.txt:3:hello\nfile.txt-4-line4\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "match\nline2\nline3\n")],
+            "rg -B 2 match",
+            0,
+            "file.txt:1:match\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "line1\nline2\nmatch\n")],
+            "rg -A 2 match",
+            0,
+            "file.txt:3:match\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a\nmatch1\nb\nmatch2\nc\n")],
+            "rg -C 1 match",
+            0,
+            "file.txt-1-a\nfile.txt:2:match1\nfile.txt-3-b\nfile.txt:4:match2\nfile.txt-5-c\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a\nhello\nb\nc\nd\n")],
+            "rg -A2 hello",
+            0,
+            "file.txt:2:hello\nfile.txt-3-b\nfile.txt-4-c\n",
+        );
+        assert_home_exec(&[("file.txt", "hello world\n")], "rg -q hello", 0, "");
+        assert_home_exec(&[("file.txt", "hello world\n")], "rg -q nomatch", 1, "");
+        assert_home_exec(
+            &[
+                ("file1.txt", "hello\n"),
+                ("file2.txt", "hello\n"),
+                ("file3.txt", "hello\n"),
+            ],
+            "rg -q hello",
+            0,
+            "",
+        );
+        assert_home_exec(&[("file.txt", "hello world\n")], "rg --quiet hello", 0, "");
+        let help = Bash::new().exec("rg --help");
+        assert_eq!(help.exit_code, 0);
+        assert!(help.stdout.contains("rg"));
+        assert!(help.stdout.contains("recursively search"));
+        assert_eq!(help.stderr, "");
+    }
+
+    #[test]
+    fn rg_upstream_max_count_rows_are_portable() {
+        assert_home_exec(
+            &[("file.txt", "foo\nfoo\nfoo\nfoo\n")],
+            "rg -m1 foo",
+            0,
+            "file.txt:1:foo\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\nfoo\nbar\nfoo\n")],
+            "rg -m2 foo",
+            0,
+            "file.txt:1:foo\nfile.txt:3:foo\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "test\ntest\ntest\ntest\ntest\n")],
+            "rg -m 3 test",
+            0,
+            "file.txt:1:test\nfile.txt:2:test\nfile.txt:3:test\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "abc\nabc\nabc\nabc\n")],
+            "rg --max-count=2 abc",
+            0,
+            "file.txt:1:abc\nfile.txt:2:abc\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "xyz\nxyz\nxyz\n")],
+            "rg --max-count 1 xyz",
+            0,
+            "file.txt:1:xyz\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\n")],
+            "rg -m100 foo",
+            0,
+            "file.txt:1:foo\n",
+        );
+        assert_home_exec(&[("file.txt", "foo\nbar\n")], "rg -m1 notfound", 1, "");
+        assert_home_exec(
+            &[
+                ("a.txt", "match\nmatch\nmatch\n"),
+                ("b.txt", "match\nmatch\nmatch\n"),
+            ],
+            "rg -m1 match",
+            0,
+            "a.txt:1:match\nb.txt:1:match\n",
+        );
+        assert_home_exec(
+            &[
+                ("file1.txt", "foo\nfoo\nfoo\nfoo\n"),
+                ("file2.txt", "foo\nfoo\nfoo\n"),
+            ],
+            "rg -m2 foo",
+            0,
+            "file1.txt:1:foo\nfile1.txt:2:foo\nfile2.txt:1:foo\nfile2.txt:2:foo\n",
+        );
+        assert_home_exec(
+            &[("many.txt", "x\nx\nx\nx\nx\n"), ("few.txt", "x\n")],
+            "rg -m3 x",
+            0,
+            "few.txt:1:x\nmany.txt:1:x\nmany.txt:2:x\nmany.txt:3:x\n",
+        );
+        assert_home_exec(
+            &[("data.txt", "line1\nline2\nline3\nline4\nline5\n")],
+            "rg -m2 line data.txt",
+            0,
+            "line1\nline2\n",
+        );
+        assert_home_exec(
+            &[("data.txt", "a\na\na\na\na\n")],
+            "rg -n -m2 a data.txt",
+            0,
+            "1:a\n2:a\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "x\nx\nx\nx\nx\n")],
+            "rg -c x",
+            0,
+            "file.txt:5\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\nfoo\nbaz\nfoo\n")],
+            "rg -m2 -v foo",
+            0,
+            "file.txt:2:bar\nfile.txt:4:baz\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Foo\nFOO\nfoo\nFoO\n")],
+            "rg -m2 -i foo",
+            0,
+            "file.txt:1:Foo\nfile.txt:2:FOO\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo bar\nfoobar\nbar foo\nbaz foo baz\n")],
+            "rg -m2 -w foo",
+            0,
+            "file.txt:1:foo bar\nfile.txt:3:bar foo\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "abc123def\nabc456def\nabc789def\n")],
+            "rg -m2 -o '[0-9]+'",
+            0,
+            "file.txt:123\nfile.txt:456\n",
+        );
+        assert_home_exec(
+            &[("a.txt", "test\ntest\ntest\n"), ("b.txt", "test\n")],
+            "rg -m1 -l test",
+            0,
+            "a.txt\nb.txt\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "find me\nfind me\nfind me\n")],
+            "rg -m1 -q 'find me'",
+            0,
+            "",
+        );
+        assert_home_exec(
+            &[(
+                "file.txt",
+                "match1\nafter1\nmatch2\nafter2\nmatch3\nafter3\n",
+            )],
+            "rg -m1 -A1 match file.txt",
+            0,
+            "match1\nafter1\n",
+        );
+        assert_home_exec(
+            &[(
+                "file.txt",
+                "before1\nmatch1\nbefore2\nmatch2\nbefore3\nmatch3\n",
+            )],
+            "rg -m1 -B1 match file.txt",
+            0,
+            "before1\nmatch1\n",
+        );
+        assert_home_exec(
+            &[(
+                "file.txt",
+                "ctx1\nmatch1\nctx2\nmatch2\nctx3\nmatch3\nctx4\n",
+            )],
+            "rg -m1 -C1 match file.txt",
+            0,
+            "ctx1\nmatch1\nctx2\n",
+        );
+        let context = home_bash(&[(
+            "file.txt",
+            "a\nb\nmatch\nc\nd\ne\nf\nmatch\ng\nh\ni\nj\nmatch\nk\n",
+        )])
+        .exec("rg -m2 -A2 match file.txt");
+        assert_eq!(context.exit_code, 0);
+        assert_eq!(context.stdout.lines().count(), 7);
+        assert!(context.stdout.contains("--\n"));
+        assert_home_exec(
+            &[("file.txt", "a\na\na\n")],
+            "rg -m0 a",
+            0,
+            "file.txt:1:a\nfile.txt:2:a\nfile.txt:3:a\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "test\ntest\n")],
+            "rg -m999999 test",
+            0,
+            "file.txt:1:test\nfile.txt:2:test\n",
+        );
+        assert_home_exec(&[("empty.txt", "")], "rg -m1 test", 1, "");
+        assert_home_exec(
+            &[
+                ("code.js", "const x = 1;\nconst y = 2;\nconst z = 3;\n"),
+                ("code.py", "const = 'not js'\n"),
+            ],
+            "rg -m1 -t js const",
+            0,
+            "code.js:1:const x = 1;\n",
+        );
+        assert_home_exec(
+            &[
+                ("test.log", "error\nerror\nerror\n"),
+                ("test.txt", "error\n"),
+            ],
+            "rg -m1 -g '*.log' error",
+            0,
+            "test.log:1:error\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "cat\ndog\ncat\nbird\ncat\n")],
+            "rg -m2 'cat|dog'",
+            0,
+            "file.txt:1:cat\nfile.txt:2:dog\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "start line\nmiddle start\nstart again\n")],
+            "rg -m1 '^start'",
+            0,
+            "file.txt:1:start line\n",
+        );
+    }
+
+    #[test]
+    fn rg_upstream_no_filename_rows_are_portable() {
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -I hello",
+            0,
+            "1:hello world\n",
+        );
+        assert_home_exec(
+            &[("data.txt", "test line\n")],
+            "rg --no-filename test",
+            0,
+            "1:test line\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "match here\n")],
+            "rg -I -N match",
+            0,
+            "match here\n",
+        );
+        assert_home_exec(
+            &[("test.txt", "foo bar\n")],
+            "rg -I foo test.txt",
+            0,
+            "foo bar\n",
+        );
+        assert_home_exec(
+            &[
+                ("a.txt", "found\n"),
+                ("b.txt", "found\n"),
+                ("c.txt", "found\n"),
+            ],
+            "rg -I found",
+            0,
+            "1:found\n1:found\n1:found\n",
+        );
+        assert_home_exec(
+            &[
+                ("first.txt", "line one\nline two\n"),
+                ("second.txt", "line three\n"),
+            ],
+            "rg -I --sort path line",
+            0,
+            "1:line one\n2:line two\n1:line three\n",
+        );
+        assert_home_exec(
+            &[
+                ("src/app.ts", "export const x = 1;\n"),
+                ("lib/util.ts", "export const y = 2;\n"),
+            ],
+            "rg -I export",
+            0,
+            "1:export const y = 2;\n1:export const x = 1;\n",
+        );
+        assert_home_exec(&[("file.txt", "a\na\na\n")], "rg -I -c a", 0, "3\n");
+        assert_home_exec(
+            &[("a.txt", "x\nx\n"), ("b.txt", "x\nx\nx\n")],
+            "rg -I -c x",
+            0,
+            "2\n3\n",
+        );
+        assert_home_exec(
+            &[("nums.txt", "abc123def456\n")],
+            "rg -I -o '[0-9]+'",
+            0,
+            "123\n456\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "keep\nremove\nkeep\n")],
+            "rg -I -v remove",
+            0,
+            "1:keep\n3:keep\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello\nHELLO\nhello\n")],
+            "rg -I -i hello",
+            0,
+            "1:Hello\n2:HELLO\n3:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo bar\nfoobar\nbar foo baz\n")],
+            "rg -I -w foo",
+            0,
+            "1:foo bar\n3:bar foo baz\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "test\ntest\ntest\ntest\n")],
+            "rg -I -m2 test",
+            0,
+            "1:test\n2:test\n",
+        );
+        assert_home_exec(
+            &[("a.txt", "match\n"), ("b.txt", "match\n")],
+            "rg -I -l match",
+            0,
+            "a.txt\nb.txt\n",
+        );
+        assert_home_exec(
+            &[("has.txt", "match\n"), ("no.txt", "other\n")],
+            "rg -I --files-without-match match",
+            0,
+            "no.txt\n",
+        );
+    }
+
+    #[test]
+    fn rg_upstream_ripgrep_compat_rows_are_portable() {
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nbe, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\nsherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -N Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nbe, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -v Sherlock sherlock",
+            0,
+            "Holmeses, success in the province of detective work must always\ncan extract a clew from a wisp of straw or a flake of cigar ash;\nbut Doctor Watson has to have it taken out for him and dusted,\nand exhibited clearly, with a label attached.\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -n -v Sherlock sherlock",
+            0,
+            "2:Holmeses, success in the province of detective work must always\n4:can extract a clew from a wisp of straw or a flake of cigar ash;\n5:but Doctor Watson has to have it taken out for him and dusted,\n6:and exhibited clearly, with a label attached.\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -i sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nbe, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(&[("foo", "tEsT\n")], "rg test", 0, "foo:1:tEsT\n");
+        assert_home_exec(&[("foo", "tEsT\nTEST\n")], "rg TEST", 0, "foo:2:TEST\n");
+        assert_home_exec(&[("foo", "tEsT\ntest\n")], "rg -s test", 0, "foo:2:test\n");
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -w as sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n",
+        );
+        assert_home_exec(
+            &[("haystack", "foo bar baz\nfoobar\n")],
+            "rg -w foo haystack",
+            0,
+            "foo bar baz\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -x 'and exhibited clearly, with a label attached.' sherlock",
+            0,
+            "and exhibited clearly, with a label attached.\n",
+        );
+        assert_home_exec(
+            &[("file", "blib\n()\nblab\n")],
+            "rg -F '()' file",
+            0,
+            "()\n",
+        );
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg -q Sherlock sherlock", 0, "");
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg -q NADA sherlock", 1, "");
+        assert_home_exec(
+            &[
+                ("sherlock", SHERLOCK),
+                ("file.py", "Sherlock\n"),
+                ("file.rs", "Sherlock\n"),
+            ],
+            "rg -t rust Sherlock",
+            0,
+            "file.rs:1:Sherlock\n",
+        );
+        assert_home_exec(
+            &[("file.py", "Sherlock\n"), ("file.rs", "Sherlock\n")],
+            "rg -T rust Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        assert_home_exec(
+            &[
+                ("sherlock", SHERLOCK),
+                ("file.py", "Sherlock\n"),
+                ("file.rs", "Sherlock\n"),
+            ],
+            "rg -g '*.rs' Sherlock",
+            0,
+            "file.rs:1:Sherlock\n",
+        );
+        assert_home_exec(
+            &[("file.py", "Sherlock\n"), ("file.rs", "Sherlock\n")],
+            "rg -g '!*.rs' Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        assert_home_exec(
+            &[("file.HTML", "Sherlock\n"), ("file.html", "Sherlock\n")],
+            "rg -g '*.html' Sherlock",
+            0,
+            "file.html:1:Sherlock\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -c Sherlock",
+            0,
+            "sherlock:2\n",
+        );
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg -l Sherlock", 0, "sherlock\n");
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "foo\n")],
+            "rg --files-without-match Sherlock",
+            0,
+            "file.py\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -A 1 Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\nbe, to a very large extent, the result of luck. Sherlock Holmes\ncan extract a clew from a wisp of straw or a flake of cigar ash;\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -B 1 Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\nbe, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -C 1 'world|attached' sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\n--\nbut Doctor Watson has to have it taken out for him and dusted,\nand exhibited clearly, with a label attached.\n",
+        );
+        assert_home_exec(&[(".sherlock", SHERLOCK)], "rg Sherlock", 1, "");
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg --hidden Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[(".gitignore", "sherlock\n"), ("sherlock", SHERLOCK)],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        assert_home_exec(
+            &[(".gitignore", "sherlock\n"), ("sherlock", SHERLOCK)],
+            "rg --no-ignore Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\nsherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("one/pass", "far\n"), ("one/too/many", "far\n")],
+            "rg --max-depth 2 far",
+            0,
+            "one/pass:1:far\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\nbaz\n")],
+            "rg -e foo -e bar",
+            0,
+            "file.txt:1:foo\nfile.txt:2:bar\n",
+        );
+        assert_home_exec(&[("foo", "-test\n")], "rg -e '-test'", 0, "foo:1:-test\n");
+        assert_home_exec(
+            &[("digits.txt", "1 2 3\n")],
+            "rg -o '[0-9]+' digits.txt",
+            0,
+            "1\n2\n3\n",
+        );
+        assert_home_exec(
+            &[("foo", "192.168.1.1\n")],
+            "rg '(\\d{1,3}\\.){3}\\d{1,3}'",
+            0,
+            "foo:1:192.168.1.1\n",
+        );
+        assert_home_exec(
+            &[("file", "cat\ndog\nbird\n")],
+            "rg 'cat|dog'",
+            0,
+            "file:1:cat\nfile:2:dog\n",
+        );
+        assert_eq!(
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg .").exit_code,
+            0
+        );
+        assert_eq!(
+            home_bash(&[("sherlock", SHERLOCK)])
+                .exec("rg NADA")
+                .exit_code,
+            1
+        );
+        assert_eq!(
+            home_bash(&[("sherlock", SHERLOCK)])
+                .exec("rg '*'")
+                .exit_code,
+            2
+        );
+        assert_home_exec(
+            &[("text.txt", "hello\n"), ("binary.bin", "hello\0world\n")],
+            "rg hello",
+            0,
+            "text.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "ghi/\n"),
+                ("ghi/toplevel.txt", "xyz\n"),
+                ("def/ghi/subdir.txt", "xyz\n"),
+            ],
+            "rg xyz",
+            1,
+            "",
+        );
+        assert_home_exec(
+            &[(".gitignore", "/llvm/\n"), ("src/llvm/foo", "test\n")],
+            "rg test",
+            0,
+            "src/llvm/foo:1:test\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "vendor/**\n!vendor/manifest\n"),
+                ("vendor/manifest", "test\n"),
+                ("vendor/other", "test\n"),
+            ],
+            "rg test",
+            0,
+            "vendor/manifest:1:test\n",
+        );
+        assert_home_exec(
+            &[(".gitignore", "foo/bar\n"), ("test/foo/bar/baz", "test\n")],
+            "rg xyz",
+            1,
+            "",
+        );
+        assert_home_exec(
+            &[(".gitignore", "!.foo\n"), (".foo", "test\n")],
+            "rg --hidden test",
+            0,
+            ".foo:1:test\n",
+        );
+        assert_home_exec(
+            &[("foo", "привет\nПривет\nПрИвЕт\n")],
+            "rg -i привет",
+            0,
+            "foo:1:привет\nfoo:2:Привет\nfoo:3:ПрИвЕт\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".patterns", "Sherlock\nHolmes\n")],
+            "rg -f .patterns sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\nbe, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -0 -l Sherlock",
+            0,
+            "sherlock\0",
+        );
+        assert_home_exec(
+            &[("foo", "test\ntest\ntest\n")],
+            "rg -m1 test",
+            0,
+            "foo:1:test\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count-matches the",
+            0,
+            "sherlock:4\n",
+        );
+        let heading = home_bash(&[("sherlock", SHERLOCK)]).exec("rg --heading Sherlock");
+        assert_eq!(heading.exit_code, 0);
+        assert!(heading.stdout.starts_with("sherlock\n"));
+        assert_home_exec(
+            &[("test", "foo\nctx\nbar\nctx\nfoo\nctx\n")],
+            "rg -A1 --context-separator AAA foo test",
+            0,
+            "foo\nctx\nAAA\nfoo\nctx\n",
+        );
+        assert_home_exec(
+            &[
+                ("foo", "test\n"),
+                ("abc", "test\n"),
+                ("zoo", "test\n"),
+                ("bar", "test\n"),
+            ],
+            "rg --sort path test",
+            0,
+            "abc:1:test\nbar:1:test\nfoo:1:test\nzoo:1:test\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --no-filename Sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -I Sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -c --include-zero nada",
+            1,
+            "sherlock:0\n",
+        );
+    }
+
+    #[test]
+    fn rg_upstream_files_and_imported_feature_rows_are_portable() {
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg --files", 0, "sherlock\n");
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg --files -0", 0, "sherlock\0");
+        assert_home_exec(
+            &[
+                ("zebra.txt", "z\n"),
+                ("alpha.txt", "a\n"),
+                ("beta.txt", "b\n"),
+            ],
+            "rg --files",
+            0,
+            "alpha.txt\nbeta.txt\nzebra.txt\n",
+        );
+        assert_home_exec(
+            &[
+                ("code.js", "js\n"),
+                ("code.py", "py\n"),
+                ("code.ts", "ts\n"),
+            ],
+            "rg --files -t js",
+            0,
+            "code.js\n",
+        );
+        assert_home_exec(
+            &[
+                ("test.txt", "txt\n"),
+                ("test.log", "log\n"),
+                ("other.txt", "txt\n"),
+            ],
+            "rg --files -g 'test.*'",
+            0,
+            "test.log\ntest.txt\n",
+        );
+        assert_home_exec(
+            &[
+                ("top.txt", "top\n"),
+                ("sub/deep.txt", "deep\n"),
+                ("sub/deeper/bottom.txt", "bottom\n"),
+            ],
+            "rg --files -d 2",
+            0,
+            "sub/deep.txt\ntop.txt\n",
+        );
+        assert_home_exec(&[(".hidden", "hidden\n")], "rg --files", 1, "");
+        assert_home_exec(
+            &[(".hidden", "hidden\n"), ("visible", "visible\n")],
+            "rg --files --hidden",
+            0,
+            ".hidden\nvisible\n",
+        );
+        assert_home_exec(
+            &[("dir/abc", "content\n"), ("foo/abc", "content\n")],
+            "rg --files foo",
+            0,
+            "foo/abc\n",
+        );
+        assert_home_exec(
+            &[
+                ("file.py", "python\n"),
+                ("file.rs", "rust\n"),
+                ("file.txt", "text\n"),
+            ],
+            "rg --files --glob '*.py'",
+            0,
+            "file.py\n",
+        );
+        assert_home_exec(
+            &[("file.py", "python\n"), ("file.rs", "rust\n")],
+            "rg --quiet --files --glob '*.py'",
+            0,
+            "",
+        );
+        assert_home_exec(
+            &[("one/pass", "far\n"), ("one/too/many", "far\n")],
+            "rg -d 2 far",
+            0,
+            "one/pass:1:far\n",
+        );
+        assert_home_exec(
+            &[("top.txt", "match\n"), ("sub/nested.txt", "match\n")],
+            "rg -d 1 match",
+            0,
+            "top.txt:1:match\n",
+        );
+        assert_home_exec(
+            &[("a/b/c/deep.txt", "found\n")],
+            "rg -d 4 found",
+            0,
+            "a/b/c/deep.txt:1:found\n",
+        );
+        assert_home_exec(
+            &[
+                ("top.js", "test\n"),
+                ("sub/nested.js", "test\n"),
+                ("top.py", "test\n"),
+            ],
+            "rg -d 1 -t js test",
+            0,
+            "top.js:1:test\n",
+        );
+        assert_home_exec(&[("foo", "tEsT\n")], "rg -S -s test", 1, "");
+        assert_home_exec(&[("foo", "TEST\n")], "rg -i -s test", 1, "");
+        assert_home_exec(
+            &[("foo", "test\ntest\ntest\n")],
+            "rg -m 2 test",
+            0,
+            "foo:1:test\nfoo:2:test\n",
+        );
+        assert_home_exec(
+            &[("foo", "test\ntest\n")],
+            "rg -m0 test",
+            0,
+            "foo:1:test\nfoo:2:test\n",
+        );
+        assert_home_exec(
+            &[("test", "1\n2\n3\n4\n5\n6\n7\n8\n9\n")],
+            "rg -C1 -A2 5 test",
+            0,
+            "4\n5\n6\n7\n",
+        );
+        assert_home_exec(
+            &[("test", "foo\nctx\nbar\nctx\nfoo\nctx\n")],
+            "rg -A1 foo test",
+            0,
+            "foo\nctx\n--\nfoo\nctx\n",
+        );
+        assert_home_exec(
+            &[("file", "foo\nbar\nbaz\n")],
+            "rg -e foo -e bar",
+            0,
+            "file:1:foo\nfile:2:bar\n",
+        );
+        assert_home_exec(
+            &[
+                ("visible.txt", "test\n"),
+                ("ignored.txt", "test\n"),
+                (".gitignore", "ignored.txt\n"),
+            ],
+            "rg test",
+            0,
+            "visible.txt:1:test\n",
+        );
+        assert_home_exec(
+            &[
+                ("visible.txt", "test\n"),
+                ("ignored.txt", "test\n"),
+                (".gitignore", "ignored.txt\n"),
+            ],
+            "rg --no-ignore --sort path test",
+            0,
+            "ignored.txt:1:test\nvisible.txt:1:test\n",
+        );
+        assert_home_exec(
+            &[(".hidden", "test\n"), ("visible", "test\n")],
+            "rg test",
+            0,
+            "visible:1:test\n",
+        );
+        assert_home_exec(
+            &[(".hidden", "test\n"), ("visible", "test\n")],
+            "rg --hidden --sort path test",
+            0,
+            ".hidden:1:test\nvisible:1:test\n",
+        );
+        assert_home_exec(
+            &[
+                ("code.js", "test\n"),
+                ("code.py", "test\n"),
+                ("code.rs", "test\n"),
+            ],
+            "rg -t js test",
+            0,
+            "code.js:1:test\n",
+        );
+        assert_home_exec(
+            &[("code.js", "test\n"), ("code.py", "test\n")],
+            "rg -T js test",
+            0,
+            "code.py:1:test\n",
+        );
+        assert_home_exec(
+            &[("README.md", "test\n"), ("code.py", "test\n")],
+            "rg -t markdown test",
+            0,
+            "README.md:1:test\n",
+        );
+        assert_home_exec(
+            &[("doc.markdown", "content\n"), ("code.js", "content\n")],
+            "rg -t markdown content",
+            0,
+            "doc.markdown:1:content\n",
+        );
+        assert_home_exec(
+            &[("notes.mdown", "info\n"), ("code.py", "info\n")],
+            "rg -t markdown info",
+            0,
+            "notes.mdown:1:info\n",
+        );
+        let md = home_bash(&[("doc.md", "text\n"), ("other.txt", "text\n")]);
+        assert_eq!(
+            md.exec("rg -t md text").stdout,
+            md.exec("rg -t markdown text").stdout
+        );
+        assert_home_exec(
+            &[("README.md", "test\n"), ("code.py", "test\n")],
+            "rg -T markdown test",
+            0,
+            "code.py:1:test\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "test\n"), ("file.log", "test\n")],
+            "rg -g '*.txt' test",
+            0,
+            "file.txt:1:test\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "test\n"), ("file.log", "test\n")],
+            "rg -g '!*.log' test",
+            0,
+            "file.txt:1:test\n",
+        );
+        assert_home_exec(
+            &[("file", "foo foobar barfoo\n")],
+            "rg -w foo",
+            0,
+            "file:1:foo foobar barfoo\n",
+        );
+        assert_home_exec(&[("file", "foobar\n")], "rg -w foo", 1, "");
+        assert_home_exec(
+            &[("file", "foo\nfoo bar\n")],
+            "rg -x foo",
+            0,
+            "file:1:foo\n",
+        );
+        assert_home_exec(
+            &[("file", "foo\nbar\nbaz\n")],
+            "rg -v foo",
+            0,
+            "file:2:bar\nfile:3:baz\n",
+        );
+        assert_home_exec(
+            &[("file", "foo.*bar\nfoobar\n")],
+            "rg -F 'foo.*bar'",
+            0,
+            "file:1:foo.*bar\n",
+        );
+        assert_home_exec(&[("file", "test\n")], "rg -q test", 0, "");
+        assert_home_exec(&[("file", "test\n")], "rg -q notfound", 1, "");
+        assert_home_exec(
+            &[("file", "foo\ntest\nbar\n")],
+            "rg -n test file",
+            0,
+            "2:test\n",
+        );
+        assert_home_exec(&[("file", "test\n")], "rg -N test file", 0, "test\n");
+        assert_home_exec(
+            &[("file", "a\nmatch\nb\nc\n")],
+            "rg -A2 match file",
+            0,
+            "match\nb\nc\n",
+        );
+        assert_home_exec(
+            &[("file", "a\nb\nmatch\nc\n")],
+            "rg -B2 match file",
+            0,
+            "a\nb\nmatch\n",
+        );
+        assert_home_exec(
+            &[("file", "a\nb\nmatch\nc\nd\n")],
+            "rg -C1 match file",
+            0,
+            "b\nmatch\nc\n",
+        );
+        assert_home_exec(
+            &[("file", "FOO foobar\n")],
+            "rg -iw foo",
+            0,
+            "file:1:FOO foobar\n",
+        );
+        assert_home_exec(&[("file", "foo\nFOO\nFoo\n")], "rg -ci foo", 0, "file:3\n");
+        assert_home_exec(
+            &[("a.txt", "FOO\n"), ("b.txt", "bar\n")],
+            "rg -li foo",
+            0,
+            "a.txt\n",
+        );
+        assert_home_exec(
+            &[("in.txt", "miss\n한글 found\nmiss\n")],
+            "cat in.txt | rg '한글'",
+            0,
+            "<stdin>:2:한글 found\n",
         );
     }
 
