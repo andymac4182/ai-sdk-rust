@@ -60,21 +60,44 @@ is too large, but the parent row remains open until all child rows are merged.
 | ID | Status | Owner scope | Build | Verify before merge |
 | --- | --- | --- | --- | --- |
 | T2R-00 | in-progress | Master tracker and dispatch coordination | Keep this file current with upstream snapshots, thread ids, and close criteria. | `git diff --check`; relevant ledger/gate commands named in changed rows. |
-| OA-01 | queued | Open Agents upstream inventory gate | Add `docs/open-agents/upstream-parity.md` plus a generator/checker that inventories packages, source files, and all upstream tests. | Fresh `npx opensrc fetch https://github.com/vercel-labs/open-agents`; gate command proves every row is mapped or explicitly excluded; `cargo test -p open-agents-core -p open-agents-runtime -p open-agents-sandbox -p open-agents-slack -p open-agents-service`. |
-| OA-02 | queued | Open Agents Slack remote-agent runtime closure | Close remaining runtime gaps surfaced by OA-01: durable resume, tool approvals/questions, finish actions, and real sandbox/model error handling. | OA-01 gate; Slack emulator E2E; ignored live Slack/Gateway/Vercel proof documented with env names. |
-| WF-01 | queued | Workflow core E2E parity closure | Own the remaining `packages/core` E2E rows and either port them to `workflow-core` tests or classify them with explicit exceptions. | `node scripts/workflow-test-inventory.mjs --check`; `node scripts/workflow-parity-check.mjs`; `cargo test -p workflow-core`. |
-| WF-02 | queued | Workflow current-upstream drift audit | Compare refreshed upstream `ae3c833...` against the checked-in inventory and update rows for new, renamed, or removed tests/packages. | `node scripts/workflow-test-inventory.mjs --check`; `node scripts/workflow-parity-check.mjs`; no unclassified `needs-review` rows. |
-| CHAT-01 | queued | Chat SDK current-upstream drift audit | Reconcile refreshed upstream `ffc43fc...` with `docs/chat/upstream-parity.md`; preserve 100% only if every current portable row still maps to named Rust tests. | Regenerate `docs/chat/package-progress.md`; focused `cargo test -p chat-sdk-chat` and touched adapter crates; no unmapped portable rows. |
-| AI-01 | queued | AI SDK large foundational providers | Port or fully inventory `@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`, and `@ai-sdk/google-vertex`. | Package-owned upstream test mapping; provider crate tests; progress regeneration. |
-| AI-02 | queued | AI SDK OpenAI-compatible major providers | Port or close `@ai-sdk/xai`, `@ai-sdk/groq`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, and `@ai-sdk/togetherai`. | Package-owned tests plus shared OpenAI-compatible regression tests where applicable; progress regeneration. |
-| AI-03 | queued | AI SDK media generation providers | Port or close `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, `@ai-sdk/replicate`, `@ai-sdk/luma`, and `@ai-sdk/black-forest-labs`. | Image/video request/response fixture tests, error metadata tests, ignored live proofs where credentials exist. |
-| AI-04 | queued | AI SDK speech, transcription, and audio providers | Port or close `@ai-sdk/elevenlabs`, `@ai-sdk/gladia`, `@ai-sdk/deepgram`, `@ai-sdk/hume`, `@ai-sdk/lmnt`, `@ai-sdk/revai`, `@ai-sdk/assemblyai`, and `@ai-sdk/voyage`. | Speech/transcription fixture tests, warning/error mapping tests, progress regeneration. |
-| AI-05 | queued | AI SDK remaining in-progress wrappers | Finish `@ai-sdk/azure`, `@ai-sdk/baseten`, `@ai-sdk/bytedance`, `@ai-sdk/cerebras`, `@ai-sdk/deepinfra`, `@ai-sdk/huggingface`, `@ai-sdk/moonshotai`, and `@ai-sdk/vercel`. | Package-owned tests for every row named in `docs/upstream-parity.md`; progress regeneration. |
-| AI-06 | queued | AI SDK public API and examples parity | Audit root `ai` ergonomics, examples, docs snippets, and high-level generate/stream/embed/object APIs against upstream. | Root crate tests, example compile checks, docs update, progress regeneration. |
-| AI-07 | queued | AI SDK Alibaba provider | Port or close `@ai-sdk/alibaba`, including chat/video provider behavior, usage conversion, cache control, and message conversion. | Package-owned Alibaba tests, explicit exceptions for non-portable rows, and progress regeneration. |
-| CROSS-01 | queued | Cross-SDK examples and docs parity | Inventory upstream examples/docs that imply public behavior across all four projects and either port them or document exclusions. | Checked-in inventory rows; `cargo test --doc` where docs are Rust; no undocumented examples that imply missing Rust behavior. |
-| CROSS-02 | queued | Live integration proof registry | Centralize ignored live tests for Slack, Vercel AI Gateway, Vercel Sandbox, provider APIs, Postgres/Redis, and emulator-based local E2E. | A docs page listing env vars and commands; ignored tests compile; local emulator tests pass without live credentials. |
-| CROSS-03 | queued | Master parity gate | Add a single command that runs the package progress generators, workflow gate, Open Agents gate, and drift checks without requiring live credentials. | New gate command passes locally and in CI-safe mode; live-only checks are skipped with clear messages. |
+| OA-01 | active | Open Agents upstream inventory gate | Add `docs/open-agents/upstream-parity.md` plus a generator/checker that inventories packages, source files, and all upstream tests. | Fresh `npx opensrc fetch https://github.com/vercel-labs/open-agents`; gate command proves every row is mapped or explicitly excluded; `cargo test -p open-agents-core -p open-agents-runtime -p open-agents-sandbox -p open-agents-slack -p open-agents-service`. |
+| OA-02 | active | Open Agents Slack remote-agent runtime closure | Close remaining runtime gaps surfaced by OA-01: durable resume, tool approvals/questions, finish actions, and real sandbox/model error handling. | OA-01 gate; Slack emulator E2E; ignored live Slack/Gateway/Vercel proof documented with env names. |
+| WF-01 | active | Workflow core E2E parity closure | Own the remaining `packages/core` E2E rows and either port them to `workflow-core` tests or classify them with explicit exceptions. | `node scripts/workflow-test-inventory.mjs --check`; `node scripts/workflow-parity-check.mjs`; `cargo test -p workflow-core`. |
+| WF-02 | active | Workflow current-upstream drift audit | Compare refreshed upstream `ae3c833...` against the checked-in inventory and update rows for new, renamed, or removed tests/packages. | `node scripts/workflow-test-inventory.mjs --check`; `node scripts/workflow-parity-check.mjs`; no unclassified `needs-review` rows. |
+| CHAT-01 | active | Chat SDK current-upstream drift audit | Reconcile refreshed upstream `ffc43fc...` with `docs/chat/upstream-parity.md`; preserve 100% only if every current portable row still maps to named Rust tests. | Regenerate `docs/chat/package-progress.md`; focused `cargo test -p chat-sdk-chat` and touched adapter crates; no unmapped portable rows. |
+| AI-01 | active | AI SDK large foundational providers | Port or fully inventory `@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`, and `@ai-sdk/google-vertex`. | Package-owned upstream test mapping; provider crate tests; progress regeneration. |
+| AI-02 | active | AI SDK OpenAI-compatible major providers | Port or close `@ai-sdk/xai`, `@ai-sdk/groq`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, and `@ai-sdk/togetherai`. | Package-owned tests plus shared OpenAI-compatible regression tests where applicable; progress regeneration. |
+| AI-03 | active | AI SDK media generation providers | Port or close `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, `@ai-sdk/replicate`, `@ai-sdk/luma`, and `@ai-sdk/black-forest-labs`. | Image/video request/response fixture tests, error metadata tests, ignored live proofs where credentials exist. |
+| AI-04 | active | AI SDK speech, transcription, and audio providers | Port or close `@ai-sdk/elevenlabs`, `@ai-sdk/gladia`, `@ai-sdk/deepgram`, `@ai-sdk/hume`, `@ai-sdk/lmnt`, `@ai-sdk/revai`, `@ai-sdk/assemblyai`, and `@ai-sdk/voyage`. | Speech/transcription fixture tests, warning/error mapping tests, progress regeneration. |
+| AI-05 | active | AI SDK remaining in-progress wrappers | Finish `@ai-sdk/azure`, `@ai-sdk/baseten`, `@ai-sdk/bytedance`, `@ai-sdk/cerebras`, `@ai-sdk/deepinfra`, `@ai-sdk/huggingface`, `@ai-sdk/moonshotai`, and `@ai-sdk/vercel`. | Package-owned tests for every row named in `docs/upstream-parity.md`; progress regeneration. |
+| AI-06 | active | AI SDK public API and examples parity | Audit root `ai` ergonomics, examples, docs snippets, and high-level generate/stream/embed/object APIs against upstream. | Root crate tests, example compile checks, docs update, progress regeneration. |
+| AI-07 | active | AI SDK Alibaba provider | Port or close `@ai-sdk/alibaba`, including chat/video provider behavior, usage conversion, cache control, and message conversion. | Package-owned Alibaba tests, explicit exceptions for non-portable rows, and progress regeneration. |
+| CROSS-01 | active | Cross-SDK examples and docs parity | Inventory upstream examples/docs that imply public behavior across all four projects and either port them or document exclusions. | Checked-in inventory rows; `cargo test --doc` where docs are Rust; no undocumented examples that imply missing Rust behavior. |
+| CROSS-02 | active | Live integration proof registry | Centralize ignored live tests for Slack, Vercel AI Gateway, Vercel Sandbox, provider APIs, Postgres/Redis, and emulator-based local E2E. | A docs page listing env vars and commands; ignored tests compile; local emulator tests pass without live credentials. |
+| CROSS-03 | active | Master parity gate | Add a single command that runs the package progress generators, workflow gate, Open Agents gate, and drift checks without requiring live credentials. | New gate command passes locally and in CI-safe mode; live-only checks are skipped with clear messages. |
+
+## Active Thread Map
+
+First dispatch wave created on 2026-06-01 with `gpt-5.5` and `xhigh`
+reasoning.
+
+| Tracker row | Thread id | Thread title |
+| --- | --- | --- |
+| OA-01 | `019e830a-7e74-7e10-829a-4dcf0f930dd3` | Add Open Agents parity inventory |
+| OA-02 | `019e830b-41e9-73f2-9136-babce50bbc2a` | Close OA-02 runtime gaps |
+| WF-01 | `019e830b-4400-7193-834f-cca74a33063f` | T2R WF-01 Workflow Core E2E Closure |
+| WF-02 | `019e830b-441a-7503-943d-06fb626f1f44` | Audit workflow upstream drift |
+| CHAT-01 | `019e830b-44d2-7063-9030-5a3cd764a76c` | Audit Chat SDK drift |
+| AI-01 | `019e830b-fd70-7600-a380-3d6567ac3ec2` | Port foundational AI providers |
+| AI-02 | `019e830b-fd70-7600-a380-3d77ad85215a` | Port OpenAI-compatible providers |
+| AI-03 | `019e830b-feaf-7322-9ef1-37f3a740f1ed` | Port media generation providers |
+| AI-04 | `019e830c-0437-7d61-9b03-0d5715493ff7` | Port AI-04 audio providers |
+| AI-05 | `019e830c-029b-7440-8f0e-d64f43f6f1f8` | Finish AI-05 provider wrappers |
+| AI-06 | `019e830c-0dc3-7c91-b704-0111e1c66a18` | Audit AI root API parity |
+| AI-07 | `019e830c-8e7d-7b63-88d2-3034e30347d7` | Add Alibaba AI SDK provider |
+| CROSS-01 | `019e830c-8e75-7bf3-9a9c-c4925d0bd572` | Examples and docs parity |
+| CROSS-02 | `019e830c-0e17-76e3-9363-7dc7377c32c6` | Add live proof registry |
+| CROSS-03 | `019e830b-48a7-7713-a041-766f1b5efcb6` | Add master parity gate |
 
 ## AI SDK Package Queue
 
