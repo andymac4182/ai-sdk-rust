@@ -122,7 +122,7 @@ Required for the Slack release:
 | `OPEN_AGENTS_STATE_URL` | `open-agents-service` | Durable state connection string or URL. The first backend bucket defines the concrete format. |
 | `OPEN_AGENTS_RESOURCE_PROFILE` | `open-agents-service` | Optional deployment sizing profile. Values beyond `default` and `hobby` need explicit docs. |
 | `OPEN_AGENTS_SANDBOX` | `open-agents-service` | Selects `local` or `vercel` sandbox execution. |
-| `VERCEL_TOKEN`, `VERCEL_OIDC_TOKEN` | `open-agents-sandbox` | Vercel Sandbox bearer credential. Prefer OIDC on Vercel, token for local/live smoke. |
+| `OPEN_AGENTS_VERCEL_TOKEN`, `VERCEL_TOKEN`, `VERCEL_OIDC_TOKEN` | `open-agents-sandbox` | Vercel Sandbox bearer credential. Prefer `OPEN_AGENTS_VERCEL_TOKEN` on Vercel deployments so application auth does not collide with CLI build auth. |
 | `VERCEL_TEAM_ID` | `open-agents-sandbox` | Vercel team id passed to the Sandbox v2 API. |
 | `VERCEL_PROJECT_ID` | `open-agents-sandbox` | Vercel project id passed to Sandbox create/list/get requests. |
 | `VERCEL_SANDBOX_NAME` | `open-agents-sandbox` | Optional stable named sandbox to resume. |

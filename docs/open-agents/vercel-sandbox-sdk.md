@@ -38,9 +38,12 @@ through the existing sandbox crate. It implements:
 
 Set `OPEN_AGENTS_SANDBOX=vercel` to select the backend. Live use requires:
 
-- `VERCEL_TOKEN` or `VERCEL_OIDC_TOKEN`
+- `OPEN_AGENTS_VERCEL_TOKEN`, `VERCEL_TOKEN`, or `VERCEL_OIDC_TOKEN`
 - `VERCEL_TEAM_ID`
 - `VERCEL_PROJECT_ID`
+
+Use `OPEN_AGENTS_VERCEL_TOKEN` for deployed Open Agents services to avoid
+conflicting with Vercel CLI build authentication.
 
 Optional:
 

@@ -255,7 +255,7 @@ Optional production or live settings:
 - `OPEN_AGENTS_STATE=postgres`
 - `OPEN_AGENTS_STATE_URL` or `POSTGRES_URL`, required for Postgres mode
 - `OPEN_AGENTS_SANDBOX=vercel`
-- `VERCEL_TOKEN` or `VERCEL_OIDC_TOKEN`, required for live Vercel Sandbox use
+- `OPEN_AGENTS_VERCEL_TOKEN`, `VERCEL_TOKEN`, or `VERCEL_OIDC_TOKEN`, required for live Vercel Sandbox use. Prefer `OPEN_AGENTS_VERCEL_TOKEN` in Vercel deployments.
 - `VERCEL_TEAM_ID`, required for live Vercel Sandbox use
 - `VERCEL_PROJECT_ID`, required for live Vercel Sandbox use
 - `VERCEL_SANDBOX_NAME`, optional named sandbox to resume

@@ -42,6 +42,9 @@ pub const VERCEL_SANDBOX_VCPUS_ENV: &str = "VERCEL_SANDBOX_VCPUS";
 pub const VERCEL_SANDBOX_TIMEOUT_MS_ENV: &str = "VERCEL_SANDBOX_TIMEOUT_MS";
 /// Optional flag to enable named-sandbox persistence at creation time.
 pub const VERCEL_SANDBOX_PERSISTENT_ENV: &str = "VERCEL_SANDBOX_PERSISTENT";
+/// Service-specific Vercel access-token credential. Preferred on Vercel to avoid
+/// colliding with the CLI's own `VERCEL_TOKEN` handling during builds.
+pub const OPEN_AGENTS_VERCEL_TOKEN_ENV: &str = "OPEN_AGENTS_VERCEL_TOKEN";
 /// Vercel access-token credential used when OIDC is unavailable.
 pub const VERCEL_TOKEN_ENV: &str = "VERCEL_TOKEN";
 /// Vercel OIDC token credential, available automatically on Vercel.

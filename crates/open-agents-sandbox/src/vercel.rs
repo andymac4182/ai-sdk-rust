@@ -12,13 +12,13 @@ use serde_json::Value;
 use tar::{Builder as TarBuilder, Header};
 
 use crate::{
-    DEFAULT_MAX_OUTPUT_LENGTH, Sandbox, SandboxConnectConfig, SandboxDetachedCommand,
-    SandboxDetachedOptions, SandboxDirEntry, SandboxDirEntryKind, SandboxError, SandboxExecOptions,
-    SandboxExecResult, SandboxMkdirOptions, SandboxResult, SandboxSource, SandboxState,
-    SandboxStats, SandboxTimeoutExtension, SandboxType, SnapshotResult, VERCEL_OIDC_TOKEN_ENV,
-    VERCEL_PROJECT_ID_ENV, VERCEL_SANDBOX_API_BASE_URL_ENV, VERCEL_SANDBOX_NAME_ENV,
-    VERCEL_SANDBOX_PERSISTENT_ENV, VERCEL_SANDBOX_RUNTIME_ENV, VERCEL_SANDBOX_TIMEOUT_MS_ENV,
-    VERCEL_SANDBOX_VCPUS_ENV, VERCEL_TEAM_ID_ENV, VERCEL_TOKEN_ENV,
+    DEFAULT_MAX_OUTPUT_LENGTH, OPEN_AGENTS_VERCEL_TOKEN_ENV, Sandbox, SandboxConnectConfig,
+    SandboxDetachedCommand, SandboxDetachedOptions, SandboxDirEntry, SandboxDirEntryKind,
+    SandboxError, SandboxExecOptions, SandboxExecResult, SandboxMkdirOptions, SandboxResult,
+    SandboxSource, SandboxState, SandboxStats, SandboxTimeoutExtension, SandboxType,
+    SnapshotResult, VERCEL_OIDC_TOKEN_ENV, VERCEL_PROJECT_ID_ENV, VERCEL_SANDBOX_API_BASE_URL_ENV,
+    VERCEL_SANDBOX_NAME_ENV, VERCEL_SANDBOX_PERSISTENT_ENV, VERCEL_SANDBOX_RUNTIME_ENV,
+    VERCEL_SANDBOX_TIMEOUT_MS_ENV, VERCEL_SANDBOX_VCPUS_ENV, VERCEL_TEAM_ID_ENV, VERCEL_TOKEN_ENV,
 };
 
 const DEFAULT_VERCEL_API_BASE_URL: &str = "https://vercel.com/api";
@@ -130,10 +130,11 @@ impl VercelSandboxConfig {
     pub fn from_reader(
         mut read_var: impl FnMut(&'static str) -> Option<String>,
     ) -> SandboxResult<Self> {
-        let token = present(read_var(VERCEL_TOKEN_ENV))
+        let token = present(read_var(OPEN_AGENTS_VERCEL_TOKEN_ENV))
+            .or_else(|| present(read_var(VERCEL_TOKEN_ENV)))
             .or_else(|| present(read_var(VERCEL_OIDC_TOKEN_ENV)))
             .ok_or(SandboxError::MissingConfig {
-                name: VERCEL_TOKEN_ENV,
+                name: OPEN_AGENTS_VERCEL_TOKEN_ENV,
             })?;
         let team_id = present(read_var(VERCEL_TEAM_ID_ENV)).ok_or(SandboxError::MissingConfig {
             name: VERCEL_TEAM_ID_ENV,
@@ -2446,12 +2447,12 @@ mod tests {
         assert!(matches!(
             error,
             SandboxError::MissingConfig {
-                name: VERCEL_TOKEN_ENV
+                name: OPEN_AGENTS_VERCEL_TOKEN_ENV
             }
         ));
 
         let config = VercelSandboxConfig::from_reader(|name| match name {
-            VERCEL_TOKEN_ENV => Some("token".to_string()),
+            OPEN_AGENTS_VERCEL_TOKEN_ENV => Some("token".to_string()),
             VERCEL_TEAM_ID_ENV => Some("team".to_string()),
             VERCEL_PROJECT_ID_ENV => Some("project".to_string()),
             VERCEL_SANDBOX_NAME_ENV => Some("oa".to_string()),
@@ -2469,6 +2470,19 @@ mod tests {
         assert_eq!(config.vcpus, Some(2));
         assert_eq!(config.timeout_ms, Some(60000));
         assert_eq!(config.persistent, Some(true));
+    }
+
+    #[test]
+    fn vercel_config_from_reader_accepts_legacy_vercel_token_env() {
+        let config = VercelSandboxConfig::from_reader(|name| match name {
+            VERCEL_TOKEN_ENV => Some("legacy-token".to_string()),
+            VERCEL_TEAM_ID_ENV => Some("team".to_string()),
+            VERCEL_PROJECT_ID_ENV => Some("project".to_string()),
+            _ => None,
+        })
+        .expect("config");
+
+        assert_eq!(config.credentials.token, "legacy-token");
     }
 
     #[test]

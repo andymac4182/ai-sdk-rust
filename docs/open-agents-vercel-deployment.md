@@ -35,9 +35,13 @@ Optional:
 For Vercel Sandbox execution set:
 
 - `OPEN_AGENTS_SANDBOX=vercel`
-- `VERCEL_TOKEN` or `VERCEL_OIDC_TOKEN`
+- `OPEN_AGENTS_VERCEL_TOKEN`, `VERCEL_TOKEN`, or `VERCEL_OIDC_TOKEN`
 - `VERCEL_TEAM_ID`
 - `VERCEL_PROJECT_ID`
+
+On Vercel deployments, prefer `OPEN_AGENTS_VERCEL_TOKEN` so the application
+credential does not collide with the Vercel CLI's own `VERCEL_TOKEN` handling
+during builds.
 
 Optional Vercel Sandbox settings:
 
@@ -81,7 +85,7 @@ Ignored live sandbox smoke:
 
 ```sh
 OPEN_AGENTS_SANDBOX=vercel \
-VERCEL_TOKEN=... \
+OPEN_AGENTS_VERCEL_TOKEN=... \
 VERCEL_TEAM_ID=... \
 VERCEL_PROJECT_ID=... \
 cargo test -p open-agents-sandbox live_vercel_sandbox_create_exec_read_write_list_stop_smoke -- --ignored --nocapture
