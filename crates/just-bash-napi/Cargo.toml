@@ -1,0 +1,29 @@
+[package]
+name = "just-bash-napi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Node-API adapter for the Rust Just Bash backend."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "just_bash_napi"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[lints.rust]
+# napi-rs expands #[napi] exports into Node-API FFI glue that contains unsafe code.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+just-bash = { path = "../just-bash" }
+napi = { version = "2.16.17", default-features = false, features = ["napi4"] }
+napi-derive = "2.16.13"
+
+[build-dependencies]
+napi-build = "2.2.3"

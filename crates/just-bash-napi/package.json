@@ -1,0 +1,11 @@
+{
+  "name": "@ai-sdk-rust/just-bash-napi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "./index.cjs",
+  "scripts": {
+    "build": "cargo build -p just-bash-napi && node scripts/copy-addon.cjs",
+    "test": "npm run build --silent && node test/smoke.cjs"
+  }
+}

@@ -51,6 +51,7 @@ members = [
     "crates/chat-sdk-state-pg",
     "crates/chat-sdk-state-redis",
     "crates/just-bash",
+    "crates/just-bash-napi",
     "crates/open-agents-core",
     "crates/open-agents-persistence",
     "crates/open-agents-runtime",
