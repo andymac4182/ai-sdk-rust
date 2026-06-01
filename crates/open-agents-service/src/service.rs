@@ -492,6 +492,7 @@ impl LocalRuntimeRouter {
             .ensure_mapping(&request.target, request.user_id.as_deref())
             .await?;
         let run_id = run_id_for_start(&request);
+        let run_sandbox = self.sandbox.for_run(&run_id);
         let user_id = request
             .user_id
             .clone()
@@ -522,12 +523,23 @@ impl LocalRuntimeRouter {
                 mapping.chat_id
             )));
         }
+        self.persistence
+            .update_sandbox_state(
+                &mapping.session_id,
+                SandboxStateUpdate {
+                    lifecycle_state: LifecycleState::Running,
+                    sandbox_state: Some(run_sandbox.persistence_state()),
+                    lifecycle_error: None,
+                },
+            )
+            .await
+            .map_err(ServiceError::Persistence)?;
 
         let runtime_request = RemoteAgentRunRequest::new(
             RemoteAgentIdentity::new(mapping.session_id.clone(), mapping.chat_id.clone())
                 .with_run_id(run_id.clone()),
             AgentModelSelection::new(self.model_id.clone()),
-            self.sandbox.runtime_context(),
+            run_sandbox.runtime_context(),
         )
         .with_message(json!({
             "id": user_message_id(&request),
@@ -539,11 +551,7 @@ impl LocalRuntimeRouter {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(
                 run_id.clone(),
-                ScriptedRunScenario::new(
-                    request.text.clone(),
-                    runtime_request,
-                    self.sandbox.clone(),
-                ),
+                ScriptedRunScenario::new(request.text.clone(), runtime_request, run_sandbox),
             );
 
         self.record_outbound(
@@ -756,10 +764,7 @@ impl LocalRuntimeRouter {
                     mapping,
                     run_id,
                     LocalOutboundKind::Final,
-                    render_run_terminal(
-                        SlackRunTerminalStatus::Finished,
-                        Some("local sandbox proof complete"),
-                    ),
+                    render_run_terminal(SlackRunTerminalStatus::Finished, Some("run complete")),
                 );
             }
             DurableRunState::WaitingForInput => {
@@ -1042,6 +1047,44 @@ impl ServiceSandbox {
                     },
                 })
             }
+        }
+    }
+
+    fn for_run(&self, run_id: &str) -> Self {
+        let SandboxState::Vercel {
+            sandbox_name: None,
+            sandbox_id: None,
+            ..
+        } = &self.connect.state
+        else {
+            return self.clone();
+        };
+
+        let sandbox_name = run_sandbox_name(run_id);
+        let mut connect = self.connect.clone();
+        if let SandboxState::Vercel {
+            sandbox_name: name, ..
+        } = &mut connect.state
+        {
+            *name = Some(sandbox_name.clone());
+        }
+
+        let mut context = self.context.clone();
+        context.state = serde_json::to_value(&connect.state).unwrap_or_else(|_| {
+            json!({
+                "type": "vercel",
+                "sandboxName": sandbox_name,
+            })
+        });
+
+        let mut persisted = self.persisted.clone();
+        persisted.sandbox_name = Some(sandbox_name);
+        persisted.raw = context.state.clone();
+
+        Self {
+            connect,
+            context,
+            persisted,
         }
     }
 
@@ -1733,6 +1776,10 @@ fn run_id_for_start(request: &SlackRunStartRequest) -> String {
     format!("slack-run-{}", stable_id(seed))
 }
 
+fn run_sandbox_name(run_id: &str) -> String {
+    format!("oa-run-{}", stable_id(run_id))
+}
+
 fn user_message_id(request: &SlackRunStartRequest) -> String {
     let seed = request
         .message_ts
@@ -1931,6 +1978,39 @@ mod tests {
             status,
             body: body.to_string(),
         }
+    }
+
+    #[test]
+    fn vercel_sandbox_without_configured_name_gets_stable_run_name() {
+        let config = OpenAgentsServiceConfig::from_reader(|name| match name {
+            "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
+            "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
+            "OPEN_AGENTS_SANDBOX" => Some("vercel".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let sandbox = ServiceSandbox::from_config(&config).unwrap();
+        let run_sandbox = sandbox.for_run("slack-run-test");
+        let expected_name = run_sandbox_name("slack-run-test");
+
+        match &run_sandbox.connect.state {
+            SandboxState::Vercel { sandbox_name, .. } => {
+                assert_eq!(sandbox_name.as_deref(), Some(expected_name.as_str()));
+            }
+            state => panic!("expected Vercel sandbox state, got {state:?}"),
+        }
+        assert_eq!(
+            run_sandbox
+                .runtime_context()
+                .state
+                .get("sandboxName")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_name.as_str())
+        );
+        assert_eq!(
+            run_sandbox.persistence_state().sandbox_name.as_deref(),
+            Some(expected_name.as_str())
+        );
     }
 
     fn current_timestamp() -> String {
