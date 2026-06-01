@@ -12,7 +12,7 @@ Local mirror inspected at `/Users/andrewmcclenaghan/.opensrc/repos/github.com/ve
 
 JB-05 owns the portable command registry and earlier high-risk built-ins/coreutils/text/search command smoke coverage implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
 
-JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. JBC-10 extends the `command:rg` slice with exact row closures for portable ripgrep-compatible virtual filesystem search, filters, output modes, context, max-count, no-filename, `--files`, and stdin behavior. JBC-11 promotes exact-pass generated conformance-corpus comparison rows to verified rows without hiding unrelated command-family failures. These slices do not claim remaining filesystem rows beyond the JBC-13 mappings, remaining parser/syntax/transform rows beyond the JBC-12 mappings, security rows, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, PCRE/stats/replace/vimgrep/multiline/passthru behavior, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test or generated corpus proof below.
+JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. JBC-10 extends the `command:rg` slice with exact row closures for portable ripgrep-compatible virtual filesystem search, filters, output modes, context, max-count, no-filename, `--files`, and stdin behavior. JBC-11 promotes exact-pass generated conformance-corpus comparison rows to verified rows without hiding unrelated command-family failures. JBC-15 closes additional interpreter core, builtin dispatch, expansion, substitution, arithmetic, array, alias/function, loop, pipefail/status, and diagnostic rows. These slices do not claim remaining filesystem rows beyond the JBC-13 mappings, remaining parser/syntax/transform rows beyond the JBC-12 mappings, security rows beyond the JBC-14 mappings, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, PCRE/stats/replace/vimgrep/multiline/passthru behavior, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test or generated corpus proof below.
 
 Mapped Rust tests:
 
@@ -96,16 +96,19 @@ generated comparison corpus rows. With JBC-09, JBC-10, and JBC-11 complete, the
 refreshed parent baseline is `1,359` verified / `8,461` pending / `116`
 JS-only. JBC-12 maps 43 syntax rows plus 79 transform rows to named Rust tests.
 JBC-13 maps 157 filesystem rows to named Rust tests. JBC-14 maps 40 exact
-portable security sandbox rows and 8 JS-only worker rows. These slices do not
-claim full command, filesystem, syntax, transform, or security parity. After
-regeneration the full Just Bash ledger is `1,678` verified / `8,134`
-pending / `124` JS-only.
+portable security sandbox rows and 8 JS-only worker rows. JBC-15 maps 73
+interpreter core, builtin, expansion, substitution, arithmetic, array,
+alias/function, loop, status, and diagnostic rows to named Rust tests. These
+slices do not claim full command, filesystem, syntax, transform, interpreter,
+or security parity. After regeneration the full Just Bash ledger is `1,751`
+verified / `8,061` pending / `124` JS-only.
 
 The counts below are the exact current upstream command-family case counts from
-`docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, JBC-09,
-JBC-10, and JBC-11 row mappings. Seed smoke coverage in these slices does not
-close rows outside the named verified cases. JBC-12 syntax/transform closure is
-tracked above and in the generated per-domain tables.
+`docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, and
+JBC-09 through JBC-15 row mappings. Seed smoke coverage in these slices does
+not close rows outside the named verified cases. JBC-12 syntax/transform and
+JBC-15 interpreter closure are tracked above and in the generated per-domain
+tables.
 
 | Family | Exact upstream command cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |
