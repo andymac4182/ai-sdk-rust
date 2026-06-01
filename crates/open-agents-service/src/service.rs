@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ai_sdk_rust::{
-    FinishReason, ToolLoopAgentModelSettings, UiMessageChunk,
-    VercelAiGatewayOpenAICompatibleProvider,
+    FinishReason, GatewayProvider, GatewayProviderSettings, ToolLoopAgentModelSettings,
+    UiMessageChunk,
     open_agents_tools::{
         OpenAgentToolApprovalPolicy, OpenAgentToolsOptions, open_agent_tools_with_options,
     },
@@ -80,6 +80,8 @@ use crate::{SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL};
 const SLACK_EVENTS_PATH: &str = "/slack/events";
 const SLACK_INTERACTIONS_PATH: &str = "/slack/interactions";
 const SLACK_COMMANDS_PATH: &str = "/slack/commands";
+const OPEN_AGENTS_GATEWAY_APP_URL: &str = "https://open-agents.dev";
+const OPEN_AGENTS_GATEWAY_APP_NAME: &str = "Open Agents";
 const ASK_USER_TOOL_CALL_ID: &str = "ask-user-question";
 const SANDBOX_TOOL_CALL_ID: &str = "sandbox-pwd";
 const SANDBOX_APPROVAL_ID: &str = "sandbox-pwd-approval";
@@ -1580,7 +1582,7 @@ async fn generate_gateway_result(
     let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(ServiceExperimentalSandbox::new(
         scenario.sandbox.connect.clone(),
     ));
-    let provider = VercelAiGatewayOpenAICompatibleProvider::new().with_api_key(settings.api_key);
+    let provider = GatewayProvider::from_settings(native_gateway_settings(settings.api_key));
     let model = provider.language_model(settings.model_id.clone());
     let tool_options = OpenAgentToolsOptions::new()
         .with_working_directory(scenario.runtime_request.sandbox.working_directory.clone())
@@ -1613,6 +1615,13 @@ async fn generate_gateway_result(
         .generate(call)
         .await
         .map_err(|error| error.to_string())
+}
+
+fn native_gateway_settings(api_key: String) -> GatewayProviderSettings {
+    GatewayProviderSettings::new()
+        .with_api_key(api_key)
+        .with_header("http-referer", OPEN_AGENTS_GATEWAY_APP_URL)
+        .with_header("x-title", OPEN_AGENTS_GATEWAY_APP_NAME)
 }
 
 #[derive(Debug, Clone)]
@@ -2562,6 +2571,27 @@ mod tests {
             status,
             body: body.to_string(),
         }
+    }
+
+    #[test]
+    fn gateway_runtime_uses_native_gateway_provider_settings() {
+        use ai_sdk_rust::LanguageModel as _;
+
+        let settings = native_gateway_settings("gateway-key".to_string());
+        assert_eq!(settings.api_key.as_deref(), Some("gateway-key"));
+        assert_eq!(
+            settings.headers.get("http-referer").map(String::as_str),
+            Some(OPEN_AGENTS_GATEWAY_APP_URL)
+        );
+        assert_eq!(
+            settings.headers.get("x-title").map(String::as_str),
+            Some(OPEN_AGENTS_GATEWAY_APP_NAME)
+        );
+        assert_eq!(settings.base_url, None);
+
+        let model = GatewayProvider::from_settings(settings).language_model("openai/gpt-4.1");
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "openai/gpt-4.1");
     }
 
     #[test]
