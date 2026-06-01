@@ -22,17 +22,21 @@ use ai_sdk_rust::{
 use ai_sdk_workflow::{
     DurableRunAgent, DurableRunAgentContext, DurableRunAgentError, DurableRunAgentOutput,
     DurableRunEngine, DurableRunError, DurableRunEventPayload, DurableRunExecution,
-    DurableRunResume, DurableRunStartOptions, DurableRunState, DurableRunStore,
-    InMemoryDurableRunStore, chat_message_bridge::open_agent_message_from_stream_chunks,
+    DurableRunPause, DurableRunRecord, DurableRunResume, DurableRunStartOptions, DurableRunState,
+    DurableRunStore, InMemoryDurableRunStore,
+    chat_message_bridge::open_agent_message_from_stream_chunks,
 };
 use async_trait::async_trait;
 use chat_sdk_adapter_slack::{
     SlackAdapter, SlackAdapterOptions,
     message_bridge::render_open_agent_message_for_slack_with_context,
     outbound::{
-        SlackOutboundActionKind, SlackOutboundMessage, SlackQuestion, SlackQuestionOption,
+        SlackApprovalRequest, SlackCommitSummary, SlackGitSummaryStatus, SlackOutboundActionKind,
+        SlackOutboundMessage, SlackPullRequestSummary, SlackQuestion, SlackQuestionOption,
         SlackQuestionPrompt, SlackRunContext, SlackRunTerminalStatus, decode_slack_action_id,
-        render_progress_update, render_question_prompt, render_run_started, render_run_terminal,
+        render_approval_request, render_commit_summary, render_progress_update,
+        render_pull_request_summary, render_question_prompt, render_run_error, render_run_started,
+        render_run_terminal,
     },
 };
 use chat_sdk_chat::{
@@ -52,8 +56,9 @@ use open_agents_persistence::{
 use open_agents_runtime::RemoteAgentRunRequest;
 use open_agents_runtime::{OpenAgent, OpenAgentCallOptions, OpenAgentSettings};
 use open_agents_sandbox::{
-    SandboxConnectConfig, SandboxConnectOptions, SandboxContext, SandboxError, SandboxExecOptions,
-    SandboxState, connect_sandbox,
+    GitCredentials, GitFinishOptions, GitFinishReport, GitFinishStatus, GitSandbox,
+    PullRequestOptions, PushOptions, SandboxConnectConfig, SandboxConnectOptions, SandboxContext,
+    SandboxError, SandboxExecOptions, SandboxState, connect_sandbox, run_git_finish,
 };
 use open_agents_slack::{
     SlackHttpRequest, SlackHttpResponse, SlackIngress, SlackIngressOptions, SlackIngressRoute,
@@ -68,7 +73,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{
-    AgentRuntimeMode, AgentToolApprovalMode, OpenAgentsServiceConfig, SandboxMode,
+    AgentFinishActions, AgentRuntimeMode, AgentToolApprovalMode, OpenAgentsServiceConfig,
+    SandboxMode,
 };
 use crate::health::HealthCheck;
 use crate::{SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL};
@@ -78,6 +84,7 @@ const SLACK_INTERACTIONS_PATH: &str = "/slack/interactions";
 const SLACK_COMMANDS_PATH: &str = "/slack/commands";
 const ASK_USER_TOOL_CALL_ID: &str = "ask-user-question";
 const SANDBOX_TOOL_CALL_ID: &str = "sandbox-pwd";
+const SANDBOX_APPROVAL_ID: &str = "sandbox-pwd-approval";
 
 /// Deployable Open Agents service with Slack HTTP routes and local runtime
 /// wiring.
@@ -245,6 +252,7 @@ pub enum LocalOutboundKind {
     Question,
     Final,
     Cancelled,
+    Failed,
 }
 
 /// Captured Slack outbound message emitted by the local deterministic route.
@@ -285,6 +293,7 @@ pub struct LocalRuntimeRouter {
     outbounds: Mutex<Vec<LocalOutbound>>,
     sandbox: ServiceSandbox,
     model_id: String,
+    finish_actions: AgentFinishActions,
 }
 
 impl LocalRuntimeRouter {
@@ -306,6 +315,7 @@ impl LocalRuntimeRouter {
             outbounds: Mutex::new(Vec::new()),
             sandbox: ServiceSandbox::from_config(config)?,
             model_id: config.model_id().to_string(),
+            finish_actions: config.finish_actions().clone(),
         })
     }
 
@@ -374,6 +384,13 @@ impl LocalRuntimeRouter {
             .store()
             .load_run(run_id)
             .map_err(ServiceError::DurableRun)
+    }
+
+    fn execution_for_run(&self, run_id: &str) -> Result<DurableRunExecution, ServiceError> {
+        let record = self
+            .durable_run(run_id)?
+            .ok_or_else(|| ServiceError::NotFound(run_id.to_string()))?;
+        Ok(execution_from_record(record))
     }
 
     async fn latest_run_for_chat(&self, chat_id: &str) -> Result<Option<RunRecord>, ServiceError> {
@@ -498,6 +515,36 @@ impl LocalRuntimeRouter {
             .clone()
             .unwrap_or_else(|| mapping.user_id.clone());
 
+        if let Some(existing_run_id) = self
+            .persistence
+            .get_chat(&mapping.chat_id)
+            .await
+            .map_err(ServiceError::Persistence)?
+            .and_then(|chat| chat.active_run_id)
+        {
+            if let Some(durable) = self.durable_run(&existing_run_id)? {
+                if durable.state.is_terminal() {
+                    self.persistence
+                        .compare_and_set_chat_active_run(
+                            &mapping.chat_id,
+                            Some(existing_run_id),
+                            None,
+                        )
+                        .await
+                        .map_err(ServiceError::Persistence)?;
+                } else {
+                    return self
+                        .resume_or_reconnect_start(mapping, request, existing_run_id, durable)
+                        .await;
+                }
+            } else {
+                self.persistence
+                    .compare_and_set_chat_active_run(&mapping.chat_id, Some(existing_run_id), None)
+                    .await
+                    .map_err(ServiceError::Persistence)?;
+            }
+        }
+
         self.persist_user_message(&mapping, &request).await?;
         self.persistence
             .create_run(CreateRunInput {
@@ -566,12 +613,26 @@ impl LocalRuntimeRouter {
                 .engine
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            engine
-                .start(DurableRunStartOptions::new(
-                    run_id.clone(),
-                    mapping.chat_id.clone(),
-                ))
-                .map_err(ServiceError::DurableRun)?
+            engine.start(DurableRunStartOptions::new(
+                run_id.clone(),
+                mapping.chat_id.clone(),
+            ))
+        };
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(error) => {
+                let execution = self.execution_for_run(&run_id)?;
+                self.apply_execution(&mapping, &run_id, &execution, None)
+                    .await?;
+                return Ok(
+                    SlackRunHandoff::new(Some(run_id), false).with_metadata(json!({
+                        "sessionId": mapping.session_id,
+                        "chatId": mapping.chat_id,
+                        "state": durable_state_label(execution.state),
+                        "error": error.to_string(),
+                    })),
+                );
+            }
         };
         self.apply_execution(&mapping, &run_id, &execution, None)
             .await?;
@@ -581,6 +642,33 @@ impl LocalRuntimeRouter {
                 "sessionId": mapping.session_id,
                 "chatId": mapping.chat_id,
                 "state": durable_state_label(execution.state),
+            })),
+        )
+    }
+
+    async fn resume_or_reconnect_start(
+        &self,
+        mapping: SlackThreadMappingRecord,
+        request: SlackRunStartRequest,
+        run_id: String,
+        durable: DurableRunRecord,
+    ) -> Result<SlackRunHandoff, ServiceError> {
+        self.persist_user_message(&mapping, &request).await?;
+
+        if durable.state == DurableRunState::WaitingForInput {
+            let tool_call_id = waiting_tool_input_call_id(&durable)
+                .unwrap_or_else(|| ASK_USER_TOOL_CALL_ID.into());
+            let answer = request.text.trim().to_string();
+            return self
+                .resume_with_tool_input(&mapping, &run_id, tool_call_id, answer)
+                .await;
+        }
+
+        Ok(
+            SlackRunHandoff::new(Some(run_id), true).with_metadata(json!({
+                "sessionId": mapping.session_id,
+                "chatId": mapping.chat_id,
+                "state": durable_state_label(durable.state),
             })),
         )
     }
@@ -596,10 +684,15 @@ impl LocalRuntimeRouter {
         let decoded = decode_slack_action_id(&action.action_id);
         let is_cancel = action.action_id == SLACK_ACTION_CANCEL
             || action.value.as_deref() == Some("cancel")
-            || decoded.as_ref().is_some_and(|action| {
-                action.kind == SlackOutboundActionKind::QuestionDecline
-                    || action.kind == SlackOutboundActionKind::Deny
-            });
+            || decoded
+                .as_ref()
+                .is_some_and(|action| action.kind == SlackOutboundActionKind::QuestionDecline);
+        let is_approval = decoded.as_ref().is_some_and(|action| {
+            matches!(
+                action.kind,
+                SlackOutboundActionKind::Approve | SlackOutboundActionKind::Deny
+            )
+        }) || matches!(action.action_id.as_str(), "approve" | "deny");
         let mapping = self
             .mapping_for_interaction(&request, decoded.as_ref())
             .await?;
@@ -634,6 +727,22 @@ impl LocalRuntimeRouter {
             );
         }
 
+        if is_approval {
+            let approved = decoded
+                .as_ref()
+                .is_some_and(|action| action.kind == SlackOutboundActionKind::Approve)
+                || action.action_id == "approve";
+            let durable = self
+                .durable_run(&run_id)?
+                .ok_or_else(|| ServiceError::NotFound(run_id.clone()))?;
+            let (approval_id, tool_call_id) = waiting_tool_approval(&durable).ok_or_else(|| {
+                ServiceError::Unsupported("run is not waiting for approval".to_string())
+            })?;
+            return self
+                .resume_with_tool_approval(&mapping, &run_id, approval_id, tool_call_id, approved)
+                .await;
+        }
+
         let answer = action_answer(action, decoded.as_ref());
         if action.action_id != SLACK_ACTION_ANSWER
             && !decoded.as_ref().is_some_and(|action| {
@@ -648,8 +757,24 @@ impl LocalRuntimeRouter {
             )));
         }
 
+        let durable = self
+            .durable_run(&run_id)?
+            .ok_or_else(|| ServiceError::NotFound(run_id.clone()))?;
+        let tool_call_id =
+            waiting_tool_input_call_id(&durable).unwrap_or_else(|| ASK_USER_TOOL_CALL_ID.into());
+        self.resume_with_tool_input(&mapping, &run_id, tool_call_id, answer)
+            .await
+    }
+
+    async fn resume_with_tool_input(
+        &self,
+        mapping: &SlackThreadMappingRecord,
+        run_id: &str,
+        tool_call_id: String,
+        answer: String,
+    ) -> Result<SlackRunHandoff, ServiceError> {
         let resume = DurableRunResume::ToolInput {
-            tool_call_id: ASK_USER_TOOL_CALL_ID.to_string(),
+            tool_call_id,
             input: json!({ "answer": answer }),
         };
         let execution = {
@@ -657,21 +782,89 @@ impl LocalRuntimeRouter {
                 .engine
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            engine
-                .resume(&run_id, resume)
-                .map_err(ServiceError::DurableRun)?
+            engine.resume(run_id, resume)
+        };
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(error) => {
+                let execution = self.execution_for_run(run_id)?;
+                self.apply_execution(mapping, run_id, &execution, None)
+                    .await?;
+                return Ok(
+                    SlackRunHandoff::new(Some(run_id.to_string()), true).with_metadata(json!({
+                        "state": durable_state_label(execution.state),
+                        "error": error.to_string(),
+                    })),
+                );
+            }
         };
         self.record_outbound(
-            &mapping,
-            &run_id,
+            mapping,
+            run_id,
             LocalOutboundKind::Progress,
             render_progress_update(&format!("Received answer: {answer}")),
         );
-        self.apply_execution(&mapping, &run_id, &execution, Some(answer))
+        self.apply_execution(mapping, run_id, &execution, Some(answer))
             .await?;
 
         Ok(
-            SlackRunHandoff::new(Some(run_id), true).with_metadata(json!({
+            SlackRunHandoff::new(Some(run_id.to_string()), true).with_metadata(json!({
+                "state": durable_state_label(execution.state),
+            })),
+        )
+    }
+
+    async fn resume_with_tool_approval(
+        &self,
+        mapping: &SlackThreadMappingRecord,
+        run_id: &str,
+        approval_id: String,
+        tool_call_id: String,
+        approved: bool,
+    ) -> Result<SlackRunHandoff, ServiceError> {
+        let resume = DurableRunResume::ToolApproval {
+            approval_id,
+            tool_call_id,
+            approved,
+            reason: Some(if approved {
+                "approved from Slack".to_string()
+            } else {
+                "denied from Slack".to_string()
+            }),
+        };
+        let execution = {
+            let mut engine = self
+                .engine
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            engine.resume(run_id, resume)
+        };
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(error) => {
+                let execution = self.execution_for_run(run_id)?;
+                self.apply_execution(mapping, run_id, &execution, None)
+                    .await?;
+                return Ok(
+                    SlackRunHandoff::new(Some(run_id.to_string()), true).with_metadata(json!({
+                        "state": durable_state_label(execution.state),
+                        "error": error.to_string(),
+                    })),
+                );
+            }
+        };
+        let decision = if approved { "approved" } else { "denied" };
+        self.record_outbound(
+            mapping,
+            run_id,
+            LocalOutboundKind::Progress,
+            render_progress_update(&format!("Tool approval {decision}")),
+        );
+        self.apply_execution(mapping, run_id, &execution, None)
+            .await?;
+
+        Ok(
+            SlackRunHandoff::new(Some(run_id.to_string()), true).with_metadata(json!({
                 "state": durable_state_label(execution.state),
             })),
         )
@@ -766,6 +959,9 @@ impl LocalRuntimeRouter {
                     LocalOutboundKind::Final,
                     render_run_terminal(SlackRunTerminalStatus::Finished, Some("run complete")),
                 );
+                for message in self.finish_action_messages(run_id) {
+                    self.record_outbound(mapping, run_id, LocalOutboundKind::Final, message);
+                }
             }
             DurableRunState::WaitingForInput => {
                 self.persistence
@@ -836,17 +1032,33 @@ impl LocalRuntimeRouter {
                 );
             }
             DurableRunState::Failed => {
+                let error = run_failed_message(execution)
+                    .unwrap_or_else(|| "local runtime failed".to_string());
                 self.persistence
                     .update_run_status(
                         run_id,
                         RunStatusUpdate {
                             status: RunStatus::Failed,
                             finished_at: Some(OffsetDateTime::now_utc()),
-                            error: Some("local runtime failed".to_string()),
+                            error: Some(error.clone()),
                         },
                     )
                     .await
                     .map_err(ServiceError::Persistence)?;
+                self.persistence
+                    .compare_and_set_chat_active_run(
+                        &mapping.chat_id,
+                        Some(run_id.to_string()),
+                        None,
+                    )
+                    .await
+                    .map_err(ServiceError::Persistence)?;
+                self.record_outbound(
+                    mapping,
+                    run_id,
+                    LocalOutboundKind::Failed,
+                    render_run_error(&error),
+                );
             }
             DurableRunState::Queued | DurableRunState::Running | DurableRunState::Canceling => {}
             DurableRunState::WaitingForApproval => {
@@ -861,10 +1073,84 @@ impl LocalRuntimeRouter {
                     )
                     .await
                     .map_err(ServiceError::Persistence)?;
+                let (approval_id, tool_call_id) = waiting_approval_from_execution(execution)
+                    .unwrap_or_else(|| {
+                        (
+                            SANDBOX_APPROVAL_ID.to_string(),
+                            SANDBOX_TOOL_CALL_ID.to_string(),
+                        )
+                    });
+                self.record_outbound(
+                    mapping,
+                    run_id,
+                    LocalOutboundKind::Question,
+                    render_approval_request(
+                        &SlackRunContext::new(run_id, format!("{run_id}-approval")),
+                        &SlackApprovalRequest {
+                            approval_id,
+                            tool_call_id,
+                            tool_name: "bash".to_string(),
+                            title: "Approve sandbox command execution".to_string(),
+                            details: Some("Run `pwd` in the selected sandbox.".to_string()),
+                        },
+                    ),
+                );
             }
         }
 
         Ok(())
+    }
+
+    fn finish_action_messages(&self, run_id: &str) -> Vec<SlackOutboundMessage> {
+        if !self.finish_actions.git_enabled {
+            return Vec::new();
+        }
+        let repository = match self.sandbox.git_repository() {
+            Ok(Some(repository)) => repository,
+            Ok(None) => {
+                return vec![render_progress_update(
+                    "Finish actions skipped: git finish is only available for local sandbox repositories",
+                )];
+            }
+            Err(error) => {
+                return vec![render_run_error(&format!("Finish actions failed: {error}"))];
+            }
+        };
+        match run_git_finish(&repository, &self.git_finish_options(run_id)) {
+            Ok(report) => slack_messages_from_git_finish_report(&report),
+            Err(error) => vec![render_run_error(&format!("Finish actions failed: {error}"))],
+        }
+    }
+
+    fn git_finish_options(&self, run_id: &str) -> GitFinishOptions {
+        let credentials = self.github_token_credentials();
+        GitFinishOptions {
+            commit_message: self.finish_actions.commit_message.clone(),
+            push: PushOptions {
+                mode: self.finish_actions.push_mode,
+                remote: "origin".to_string(),
+                branch: None,
+                credentials: credentials.clone(),
+            },
+            pull_request: PullRequestOptions {
+                mode: self.finish_actions.pull_request_mode,
+                base: self.finish_actions.pull_request_base.clone(),
+                head: None,
+                title: self.finish_actions.pull_request_title.clone(),
+                body: format!("{}\n\nRun: {run_id}", self.finish_actions.pull_request_body),
+                repository: self.finish_actions.pull_request_repository.clone(),
+                credentials,
+            },
+        }
+    }
+
+    fn github_token_credentials(&self) -> Option<GitCredentials> {
+        self.sandbox
+            .connect
+            .options
+            .github_token
+            .as_ref()
+            .map(|token| GitCredentials::new(token.clone()))
     }
 
     async fn persist_run_step(
@@ -902,7 +1188,12 @@ impl LocalRuntimeRouter {
         execution: &DurableRunExecution,
         answer: Option<&str>,
     ) -> Result<(), ServiceError> {
-        if execution.chunks.is_empty() {
+        if execution.chunks.is_empty()
+            && !matches!(
+                execution.state,
+                DurableRunState::Canceled | DurableRunState::Failed | DurableRunState::Finished
+            )
+        {
             return Ok(());
         }
 
@@ -1095,6 +1386,20 @@ impl ServiceSandbox {
     fn persistence_state(&self) -> PersistedSandboxState {
         self.persisted.clone()
     }
+
+    fn git_repository(&self) -> Result<Option<GitSandbox>, ServiceError> {
+        let SandboxState::Local {
+            root,
+            working_directory,
+            ..
+        } = &self.connect.state
+        else {
+            return Ok(None);
+        };
+        let repository = GitSandbox::open(root, working_directory)
+            .map_err(|error| ServiceError::FinishAction(error.to_string()))?;
+        Ok(Some(repository))
+    }
 }
 
 fn sandbox_connect_config(
@@ -1135,6 +1440,19 @@ impl ScriptedRunScenario {
 
     fn wants_question(&self) -> bool {
         self.prompt.to_ascii_lowercase().contains("question")
+    }
+
+    fn wants_approval(&self) -> bool {
+        self.prompt.to_ascii_lowercase().contains("approval")
+    }
+
+    fn wants_model_error(&self) -> bool {
+        let prompt = self.prompt.to_ascii_lowercase();
+        prompt.contains("model error") || prompt.contains("fail model")
+    }
+
+    fn wants_sandbox_error(&self) -> bool {
+        self.prompt.to_ascii_lowercase().contains("sandbox error")
     }
 }
 
@@ -1223,10 +1541,10 @@ impl DurableRunAgent for GatewayOpenAgent {
         &mut self,
         context: DurableRunAgentContext,
     ) -> Result<DurableRunAgentOutput, DurableRunAgentError> {
-        if context.resume.is_some() {
-            return Err(DurableRunAgentError::new(
-                "Gateway-backed runs do not yet support Slack interaction resume",
-            ));
+        if let Some(resume) = context.resume {
+            return Ok(DurableRunAgentOutput::Finished {
+                chunks: chunks_from_gateway_resume(&context.run_id, &resume),
+            });
         }
 
         let scenario = self
@@ -1381,6 +1699,34 @@ fn chunks_from_gateway_result(
     chunks
 }
 
+fn chunks_from_gateway_resume(run_id: &str, resume: &DurableRunResume) -> Vec<UiMessageChunk> {
+    let text = match resume {
+        DurableRunResume::ToolInput { input, .. } => format!(
+            "Gateway run resumed from Slack answer: {}.",
+            input
+                .get("answer")
+                .and_then(|answer| answer.as_str())
+                .unwrap_or("received")
+        ),
+        DurableRunResume::ToolApproval { approved, .. } => {
+            let decision = if *approved { "approved" } else { "denied" };
+            format!("Gateway run resumed from Slack approval: {decision}.")
+        }
+    };
+    vec![
+        UiMessageChunk::start_with_message_id(assistant_message_id(
+            run_id,
+            DurableRunState::Finished,
+        )),
+        UiMessageChunk::start_step(),
+        UiMessageChunk::text_start("text-1"),
+        UiMessageChunk::text_delta("text-1", text),
+        UiMessageChunk::text_end("text-1"),
+        UiMessageChunk::finish_step(),
+        UiMessageChunk::finish_with_reason(FinishReason::Stop),
+    ]
+}
+
 fn poll_ready<T>(future: impl Future<Output = T>) -> Result<T, String> {
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
@@ -1409,6 +1755,12 @@ impl DurableRunAgent for LocalScriptedAgent {
             .get(&context.run_id)
             .cloned()
             .ok_or_else(|| DurableRunAgentError::new("missing local scripted run scenario"))?;
+
+        if context.resume.is_none() && scenario.wants_model_error() {
+            return Err(DurableRunAgentError::new(
+                "scripted model error requested by Slack prompt",
+            ));
+        }
 
         if context.resume.is_none()
             && scenario.wants_question()
@@ -1453,17 +1805,78 @@ impl DurableRunAgent for LocalScriptedAgent {
             });
         }
 
-        let answer = match context.resume {
+        if context.resume.is_none()
+            && scenario.wants_approval()
+            && !context.previous_events.iter().any(|event| {
+                matches!(
+                    event.payload,
+                    DurableRunEventPayload::WaitingForApproval { .. }
+                )
+            })
+        {
+            return Ok(DurableRunAgentOutput::WaitingForApproval {
+                approval_id: SANDBOX_APPROVAL_ID.to_string(),
+                tool_call_id: SANDBOX_TOOL_CALL_ID.to_string(),
+                chunks: vec![
+                    UiMessageChunk::start_with_message_id(assistant_message_id(
+                        &context.run_id,
+                        DurableRunState::WaitingForApproval,
+                    )),
+                    UiMessageChunk::start_step(),
+                    UiMessageChunk::tool_input_available(
+                        SANDBOX_TOOL_CALL_ID,
+                        "bash",
+                        json!({ "command": "pwd" }),
+                    ),
+                    UiMessageChunk::tool_approval_request(
+                        SANDBOX_APPROVAL_ID,
+                        SANDBOX_TOOL_CALL_ID,
+                    ),
+                    UiMessageChunk::finish_step(),
+                ],
+            });
+        }
+
+        let answer = match &context.resume {
             Some(DurableRunResume::ToolInput { input, .. }) => input
                 .get("answer")
                 .and_then(|answer| answer.as_str())
                 .map(str::to_string),
             _ => None,
         };
+        let approval = match &context.resume {
+            Some(DurableRunResume::ToolApproval { approved, .. }) => Some(*approved),
+            _ => None,
+        };
+        if approval == Some(false) {
+            return Ok(DurableRunAgentOutput::Finished {
+                chunks: vec![
+                    UiMessageChunk::start_with_message_id(assistant_message_id(
+                        &context.run_id,
+                        DurableRunState::Finished,
+                    )),
+                    UiMessageChunk::start_step(),
+                    UiMessageChunk::tool_approval_response(SANDBOX_APPROVAL_ID, false),
+                    UiMessageChunk::tool_output_denied(SANDBOX_TOOL_CALL_ID, "bash"),
+                    UiMessageChunk::text_start("text-1"),
+                    UiMessageChunk::text_delta(
+                        "text-1",
+                        "Fixture approval denied; sandbox command was not executed.",
+                    ),
+                    UiMessageChunk::text_end("text-1"),
+                    UiMessageChunk::finish_step(),
+                    UiMessageChunk::finish_with_reason(FinishReason::Stop),
+                ],
+            });
+        }
         let sandbox = connect_sandbox(scenario.sandbox.connect.clone())
             .map_err(|error| DurableRunAgentError::new(error.to_string()))?;
+        let mut exec_options = SandboxExecOptions::new("pwd");
+        if scenario.wants_sandbox_error() {
+            exec_options = exec_options.with_cwd("/definitely-outside-open-agents-sandbox");
+        }
         let result = sandbox
-            .exec(SandboxExecOptions::new("pwd"))
+            .exec(exec_options)
             .map_err(|error| DurableRunAgentError::new(error.to_string()))?;
         let pwd = result.stdout.trim();
         let final_text = match answer.as_deref() {
@@ -1471,36 +1884,47 @@ impl DurableRunAgent for LocalScriptedAgent {
                 "Fixture agent finished after answer `{answer}` in {}.",
                 scenario.runtime_request.sandbox.working_directory
             ),
+            None if approval == Some(true) => {
+                format!("Fixture agent finished after approval in {pwd}.")
+            }
             None => format!("Fixture agent finished with local sandbox proof in {pwd}."),
         };
 
-        Ok(DurableRunAgentOutput::Finished {
-            chunks: vec![
-                UiMessageChunk::start_with_message_id(assistant_message_id(
-                    &context.run_id,
-                    DurableRunState::Finished,
-                )),
-                UiMessageChunk::start_step(),
-                UiMessageChunk::text_start("text-1"),
-                UiMessageChunk::text_delta("text-1", final_text),
-                UiMessageChunk::text_end("text-1"),
-                UiMessageChunk::tool_input_available(
-                    SANDBOX_TOOL_CALL_ID,
-                    "bash",
-                    json!({ "command": "pwd" }),
-                ),
-                UiMessageChunk::tool_output_available(
-                    SANDBOX_TOOL_CALL_ID,
-                    json!({
-                        "success": result.success,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                    }),
-                ),
-                UiMessageChunk::finish_step(),
-                UiMessageChunk::finish_with_reason(FinishReason::Stop),
-            ],
-        })
+        let mut chunks = vec![
+            UiMessageChunk::start_with_message_id(assistant_message_id(
+                &context.run_id,
+                DurableRunState::Finished,
+            )),
+            UiMessageChunk::start_step(),
+        ];
+        if approval == Some(true) {
+            chunks.push(UiMessageChunk::tool_approval_response(
+                SANDBOX_APPROVAL_ID,
+                true,
+            ));
+        }
+        chunks.extend([
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", final_text),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::tool_input_available(
+                SANDBOX_TOOL_CALL_ID,
+                "bash",
+                json!({ "command": "pwd" }),
+            ),
+            UiMessageChunk::tool_output_available(
+                SANDBOX_TOOL_CALL_ID,
+                json!({
+                    "success": result.success,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }),
+            ),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish_with_reason(FinishReason::Stop),
+        ]);
+
+        Ok(DurableRunAgentOutput::Finished { chunks })
     }
 }
 
@@ -1516,6 +1940,7 @@ pub enum ServiceError {
     MissingSlackTarget,
     NotFound(String),
     SlackOutbound(String),
+    FinishAction(String),
     Unsupported(String),
     BadRequest(String),
 }
@@ -1542,6 +1967,7 @@ impl fmt::Display for ServiceError {
             Self::SlackOutbound(error) => {
                 write!(formatter, "service Slack outbound error: {error}")
             }
+            Self::FinishAction(error) => write!(formatter, "service finish action error: {error}"),
             Self::Unsupported(error) => write!(formatter, "unsupported service request: {error}"),
             Self::BadRequest(error) => write!(formatter, "bad service request: {error}"),
         }
@@ -1801,6 +2227,9 @@ fn fallback_assistant_message(
     let text = match (execution.state, answer) {
         (DurableRunState::WaitingForInput, _) => "Waiting for answer".to_string(),
         (DurableRunState::Canceled, _) => "Cancelled".to_string(),
+        (DurableRunState::Failed, _) => {
+            run_failed_message(execution).unwrap_or_else(|| "Run failed".to_string())
+        }
         (_, Some(answer)) => format!("Finished after answer: {answer}"),
         _ => "Finished".to_string(),
     };
@@ -1809,6 +2238,134 @@ fn fallback_assistant_message(
         OpenAgentMessageRole::Assistant,
     )
     .with_part(OpenAgentMessagePart::done_text(text))
+}
+
+fn execution_from_record(record: DurableRunRecord) -> DurableRunExecution {
+    let chunks = record
+        .events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            DurableRunEventPayload::StreamChunk { chunk } => Some(chunk.clone()),
+            _ => None,
+        })
+        .collect();
+    DurableRunExecution {
+        run_id: record.run_id,
+        state: record.state,
+        chunks,
+        events: record.events,
+    }
+}
+
+fn waiting_tool_input_call_id(record: &DurableRunRecord) -> Option<String> {
+    match &record.pause {
+        Some(DurableRunPause::ToolInput { tool_call_id }) => Some(tool_call_id.clone()),
+        _ => None,
+    }
+}
+
+fn waiting_tool_approval(record: &DurableRunRecord) -> Option<(String, String)> {
+    match &record.pause {
+        Some(DurableRunPause::ToolApproval {
+            approval_id,
+            tool_call_id,
+        }) => Some((approval_id.clone(), tool_call_id.clone())),
+        _ => None,
+    }
+}
+
+fn waiting_approval_from_execution(execution: &DurableRunExecution) -> Option<(String, String)> {
+    execution.events.iter().rev().find_map(|event| {
+        if let DurableRunEventPayload::WaitingForApproval {
+            approval_id,
+            tool_call_id,
+        } = &event.payload
+        {
+            Some((approval_id.clone(), tool_call_id.clone()))
+        } else {
+            None
+        }
+    })
+}
+
+fn run_failed_message(execution: &DurableRunExecution) -> Option<String> {
+    execution.events.iter().rev().find_map(|event| {
+        if let DurableRunEventPayload::RunFailed { error } = &event.payload {
+            Some(error.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn slack_messages_from_git_finish_report(report: &GitFinishReport) -> Vec<SlackOutboundMessage> {
+    let mut messages = Vec::new();
+    let status = slack_git_status_from_finish(report.status);
+
+    if let Some(commit) = &report.commit {
+        messages.push(render_commit_summary(&SlackCommitSummary {
+            status,
+            committed: Some(commit.committed),
+            pushed: report.push.as_ref().map(|push| push.pushed),
+            commit_message: commit.commit_message.clone(),
+            commit_sha: commit.commit_sha.clone(),
+            url: None,
+            error: report.error.clone(),
+        }));
+    }
+
+    if let Some(pr) = &report.pull_request {
+        messages.push(render_pull_request_summary(&SlackPullRequestSummary {
+            status,
+            created: Some(pr.created),
+            synced_existing: None,
+            pr_number: None,
+            url: pr.url.clone(),
+            error: report.error.clone(),
+            skip_reason: if pr.created {
+                None
+            } else {
+                Some("pull request creation did not execute".to_string())
+            },
+        }));
+    }
+
+    if messages.is_empty() {
+        let summary = match report.status {
+            GitFinishStatus::NoChanges => {
+                format!("Finish actions: no git changes on {}", report.branch)
+            }
+            GitFinishStatus::Skipped => {
+                format!(
+                    "Finish actions: git changes detected but commit is disabled on {}",
+                    report.branch
+                )
+            }
+            GitFinishStatus::Error => format!(
+                "Finish actions failed on {}: {}",
+                report.branch,
+                report.error.as_deref().unwrap_or("unknown error")
+            ),
+            GitFinishStatus::Committed
+            | GitFinishStatus::Pushed
+            | GitFinishStatus::PullRequestCreated => {
+                format!("Finish actions completed on {}", report.branch)
+            }
+        };
+        messages.push(render_progress_update(&summary));
+    }
+
+    messages
+}
+
+fn slack_git_status_from_finish(status: GitFinishStatus) -> SlackGitSummaryStatus {
+    match status {
+        GitFinishStatus::Error => SlackGitSummaryStatus::Error,
+        GitFinishStatus::NoChanges | GitFinishStatus::Skipped => SlackGitSummaryStatus::Skipped,
+        GitFinishStatus::Committed
+        | GitFinishStatus::Pushed
+        | GitFinishStatus::PullRequestCreated => SlackGitSummaryStatus::Success,
+    }
 }
 
 fn durable_state_label(state: DurableRunState) -> &'static str {
@@ -1896,10 +2453,12 @@ impl RemoteAgentRunRequestExt for RemoteAgentRunRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chat_sdk_adapter_slack::outbound::{SlackOutboundActionKind, encode_slack_action_id};
     use hmac::{Hmac, Mac};
     use open_agents_slack::SlackThreadAddress;
     use sha2::Sha256;
     use std::env;
+    use std::fs;
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
@@ -2081,6 +2640,31 @@ mod tests {
         .to_string()
     }
 
+    fn app_mention_thread_reply_body(
+        text: &str,
+        event_id: &str,
+        ts: &str,
+        thread_ts: &str,
+    ) -> String {
+        json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "api_app_id": "A123",
+            "event_id": event_id,
+            "event_time": 1710000000,
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "text": text,
+                "channel": "C123",
+                "team": "T123",
+                "ts": ts,
+                "thread_ts": thread_ts
+            }
+        })
+        .to_string()
+    }
+
     fn action_body(action_id: &str, value: &str, thread_ts: &str) -> String {
         let payload = json!({
             "type": "block_actions",
@@ -2121,6 +2705,33 @@ mod tests {
             _ => None,
         })
         .unwrap()
+    }
+
+    fn finish_git_config_with_sandbox_root(
+        sandbox_root: &std::path::Path,
+    ) -> OpenAgentsServiceConfig {
+        OpenAgentsServiceConfig::from_reader(|name| match name {
+            "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
+            "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
+            "OPEN_AGENTS_BIND_ADDR" => Some("127.0.0.1:0".to_string()),
+            "OPEN_AGENTS_SANDBOX_ROOT" => Some(sandbox_root.to_string_lossy().to_string()),
+            "OPEN_AGENTS_GIT_FINISH" => Some("report".to_string()),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "open-agents-service-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 
     async fn start_fake_slack_api(
@@ -2360,6 +2971,181 @@ mod tests {
                 .any(|event| matches!(event.payload, DurableRunEventPayload::RunResumed { .. }))
         );
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn threaded_message_resumes_waiting_run_without_starting_duplicate() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000250";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let start = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "ask a question before continuing",
+                "EvE2EResumeStart",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+        assert_eq!(start.status, 200);
+        let runtime = server.service.local_runtime();
+        let waiting = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(waiting.status, RunStatus::Paused);
+
+        let resume = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_thread_reply_body(
+                "ship it from the thread",
+                "EvE2EResumeReply",
+                "1710000000.000251",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(resume.status, 200);
+        let completed = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(completed.id, waiting.id);
+        assert_eq!(completed.status, RunStatus::Finished);
+        assert_eq!(
+            runtime.active_run_id_for_thread(&thread_id).await.unwrap(),
+            None
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn block_action_approval_resumes_waiting_run_to_completion() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000260";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let start = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "ask for approval before running pwd",
+                "EvE2EApproval",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+        assert_eq!(start.status, 200);
+        let runtime = server.service.local_runtime();
+        let waiting = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(waiting.status, RunStatus::Paused);
+        assert!(
+            runtime
+                .outbound_for_thread(&thread_id)
+                .iter()
+                .any(|message| {
+                    message.kind == LocalOutboundKind::Question
+                        && message.text.contains("Approval required")
+                })
+        );
+
+        let context = SlackRunContext::new(waiting.id.clone(), format!("{}-approval", waiting.id));
+        let action_id = encode_slack_action_id(
+            SlackOutboundActionKind::Approve,
+            &context,
+            SANDBOX_APPROVAL_ID,
+        );
+        let approve = post(
+            server.addr,
+            SLACK_INTERACTIONS_PATH,
+            &action_body(&action_id, SANDBOX_APPROVAL_ID, thread_ts),
+            "application/x-www-form-urlencoded",
+        )
+        .await;
+
+        assert_eq!(approve.status, 200);
+        let completed = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(completed.status, RunStatus::Finished);
+        let durable = runtime.durable_run(&completed.id).unwrap().unwrap();
+        assert_eq!(durable.state, DurableRunState::Finished);
+        assert!(
+            runtime
+                .outbound_for_thread(&thread_id)
+                .iter()
+                .any(|message| message.text.contains("after approval"))
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn scripted_runtime_failure_is_persisted_and_reported_to_slack() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000270";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "please fail model for coverage",
+                "EvE2EModelError",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let runtime = server.service.local_runtime();
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(
+            runtime.active_run_id_for_thread(&thread_id).await.unwrap(),
+            None
+        );
+        assert!(
+            runtime
+                .outbound_for_thread(&thread_id)
+                .iter()
+                .any(|message| {
+                    message.kind == LocalOutboundKind::Failed && message.text.contains("Run failed")
+                })
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn finish_action_errors_are_reported_without_failing_finished_run() {
+        let sandbox_root = unique_temp_dir("finish-action-error");
+        let server =
+            TestServer::start_with_config(finish_git_config_with_sandbox_root(&sandbox_root)).await;
+        let thread_ts = "1710000000.000280";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body("inspect the repo", "EvE2EFinishError", thread_ts),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let runtime = server.service.local_runtime();
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Finished);
+        assert!(
+            runtime
+                .outbound_for_thread(&thread_id)
+                .iter()
+                .any(|message| {
+                    message.kind == LocalOutboundKind::Final
+                        && message.text.contains("Finish actions failed")
+                })
+        );
+        server.stop().await;
+        fs::remove_dir_all(sandbox_root).unwrap();
     }
 
     #[tokio::test]

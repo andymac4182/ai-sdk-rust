@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use open_agents_sandbox::GitRemoteActionMode;
 use open_agents_slack::SlackIngressMode;
 
 const DEFAULT_GATEWAY_MODEL_ID: &str = "openai/gpt-4.1-mini";
@@ -102,6 +103,42 @@ impl AgentToolApprovalMode {
     }
 }
 
+/// Optional sandbox-bound finish automation after a run completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFinishActions {
+    /// Whether to inspect/run git finish automation at all.
+    pub git_enabled: bool,
+    /// Commit message used when the sandbox repository is dirty.
+    pub commit_message: Option<String>,
+    /// Optional push mode.
+    pub push_mode: GitRemoteActionMode,
+    /// Optional pull-request creation mode.
+    pub pull_request_mode: GitRemoteActionMode,
+    /// Pull-request base branch.
+    pub pull_request_base: String,
+    /// Pull-request title.
+    pub pull_request_title: String,
+    /// Pull-request body.
+    pub pull_request_body: String,
+    /// Optional owner/repo target for pull-request creation.
+    pub pull_request_repository: Option<String>,
+}
+
+impl Default for AgentFinishActions {
+    fn default() -> Self {
+        Self {
+            git_enabled: false,
+            commit_message: None,
+            push_mode: GitRemoteActionMode::Disabled,
+            pull_request_mode: GitRemoteActionMode::Disabled,
+            pull_request_base: "main".to_string(),
+            pull_request_title: "Open Agents changes".to_string(),
+            pull_request_body: "Created by the Open Agents Slack remote agent.".to_string(),
+            pull_request_repository: None,
+        }
+    }
+}
+
 /// Deployable service configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OpenAgentsServiceConfig {
@@ -119,6 +156,7 @@ pub struct OpenAgentsServiceConfig {
     model_max_steps: usize,
     model_max_output_tokens: u64,
     tool_approval: AgentToolApprovalMode,
+    finish_actions: AgentFinishActions,
     github_token: Option<String>,
 }
 
@@ -146,6 +184,7 @@ impl fmt::Debug for OpenAgentsServiceConfig {
             .field("model_max_steps", &self.model_max_steps)
             .field("model_max_output_tokens", &self.model_max_output_tokens)
             .field("tool_approval", &self.tool_approval)
+            .field("finish_actions", &self.finish_actions)
             .field(
                 "github_token",
                 &self.github_token.as_ref().map(|_| "<redacted>"),
@@ -229,6 +268,7 @@ impl OpenAgentsServiceConfig {
         )?;
         let tool_approval =
             parse_tool_approval(present(read_var("OPEN_AGENTS_TOOL_APPROVAL")).as_deref())?;
+        let finish_actions = parse_finish_actions(&mut read_var)?;
         let github_token = present(read_var("OPEN_AGENTS_GITHUB_TOKEN"))
             .or_else(|| present(read_var("GITHUB_TOKEN")))
             .or_else(|| present(read_var("GH_TOKEN")));
@@ -248,6 +288,7 @@ impl OpenAgentsServiceConfig {
             model_max_steps,
             model_max_output_tokens,
             tool_approval,
+            finish_actions,
             github_token,
         })
     }
@@ -273,6 +314,7 @@ impl OpenAgentsServiceConfig {
             model_max_steps: DEFAULT_GATEWAY_MAX_STEPS,
             model_max_output_tokens: DEFAULT_GATEWAY_MAX_OUTPUT_TOKENS,
             tool_approval: AgentToolApprovalMode::Sensitive,
+            finish_actions: AgentFinishActions::default(),
             github_token: None,
         }
     }
@@ -347,6 +389,11 @@ impl OpenAgentsServiceConfig {
         self.tool_approval
     }
 
+    /// Optional finish automation settings.
+    pub fn finish_actions(&self) -> &AgentFinishActions {
+        &self.finish_actions
+    }
+
     /// Optional GitHub token exposed only to sandbox commands for clone/push/PR workflows.
     pub fn github_token(&self) -> Option<&str> {
         self.github_token.as_deref()
@@ -355,7 +402,7 @@ impl OpenAgentsServiceConfig {
     /// Redacted summary safe to print in operator logs.
     pub fn operator_summary(&self) -> String {
         format!(
-            "bind_addr={} state={} slack_ingress={} sandbox={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} github_token={}",
+            "bind_addr={} state={} slack_ingress={} sandbox={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} finish_git={} finish_push={} finish_pr={} github_token={}",
             self.bind_addr,
             self.state_store.label(),
             slack_ingress_label(self.slack_ingress),
@@ -370,6 +417,9 @@ impl OpenAgentsServiceConfig {
             self.model_max_steps,
             self.model_max_output_tokens,
             self.tool_approval.label(),
+            self.finish_actions.git_enabled,
+            git_remote_action_label(self.finish_actions.push_mode),
+            git_remote_action_label(self.finish_actions.pull_request_mode),
             present_label(self.github_token.as_ref()),
         )
     }
@@ -529,6 +579,79 @@ fn parse_tool_approval(raw: Option<&str>) -> Result<AgentToolApprovalMode, Confi
     }
 }
 
+fn parse_finish_actions(
+    read_var: &mut impl FnMut(&'static str) -> Option<String>,
+) -> Result<AgentFinishActions, ConfigError> {
+    let raw_git = present(read_var("OPEN_AGENTS_GIT_FINISH"));
+    let commit_message = present(read_var("OPEN_AGENTS_GIT_FINISH_COMMIT_MESSAGE"));
+    let push_mode = parse_git_remote_action(
+        present(read_var("OPEN_AGENTS_GIT_FINISH_PUSH")).as_deref(),
+        "OPEN_AGENTS_GIT_FINISH_PUSH",
+    )?;
+    let pull_request_mode = parse_git_remote_action(
+        present(read_var("OPEN_AGENTS_GIT_FINISH_PR")).as_deref(),
+        "OPEN_AGENTS_GIT_FINISH_PR",
+    )?;
+    let mut actions = AgentFinishActions {
+        git_enabled: parse_finish_git_enabled(raw_git.as_deref())?,
+        commit_message,
+        push_mode,
+        pull_request_mode,
+        pull_request_base: present(read_var("OPEN_AGENTS_GIT_FINISH_PR_BASE"))
+            .unwrap_or_else(|| "main".to_string()),
+        pull_request_title: present(read_var("OPEN_AGENTS_GIT_FINISH_PR_TITLE"))
+            .unwrap_or_else(|| "Open Agents changes".to_string()),
+        pull_request_body: present(read_var("OPEN_AGENTS_GIT_FINISH_PR_BODY"))
+            .unwrap_or_else(|| "Created by the Open Agents Slack remote agent.".to_string()),
+        pull_request_repository: present(read_var("OPEN_AGENTS_GIT_FINISH_PR_REPOSITORY")),
+    };
+
+    if actions.commit_message.is_some()
+        || actions.push_mode != GitRemoteActionMode::Disabled
+        || actions.pull_request_mode != GitRemoteActionMode::Disabled
+    {
+        actions.git_enabled = true;
+    }
+
+    Ok(actions)
+}
+
+fn parse_finish_git_enabled(raw: Option<&str>) -> Result<bool, ConfigError> {
+    match raw.unwrap_or("disabled") {
+        "disabled" | "false" | "off" | "none" => Ok(false),
+        "report" | "true" | "on" | "enabled" => Ok(true),
+        value => Err(ConfigError::InvalidVar {
+            name: "OPEN_AGENTS_GIT_FINISH",
+            value: value.to_string(),
+            expected: "disabled, report, or true",
+        }),
+    }
+}
+
+fn parse_git_remote_action(
+    raw: Option<&str>,
+    name: &'static str,
+) -> Result<GitRemoteActionMode, ConfigError> {
+    match raw.unwrap_or("disabled") {
+        "disabled" | "false" | "off" | "none" => Ok(GitRemoteActionMode::Disabled),
+        "dry-run" | "dry_run" | "dryrun" => Ok(GitRemoteActionMode::DryRun),
+        "execute" | "true" | "on" => Ok(GitRemoteActionMode::Execute),
+        value => Err(ConfigError::InvalidVar {
+            name,
+            value: value.to_string(),
+            expected: "disabled, dry-run, or execute",
+        }),
+    }
+}
+
+fn git_remote_action_label(mode: GitRemoteActionMode) -> &'static str {
+    match mode {
+        GitRemoteActionMode::Disabled => "disabled",
+        GitRemoteActionMode::DryRun => "dry-run",
+        GitRemoteActionMode::Execute => "execute",
+    }
+}
+
 fn parse_usize(
     raw: Option<&str>,
     name: &'static str,
@@ -655,6 +778,41 @@ mod tests {
         assert_eq!(config.model_max_output_tokens(), 512);
         assert_eq!(config.tool_approval(), AgentToolApprovalMode::Never);
         assert_eq!(config.github_token(), Some("ghp-test"));
+    }
+
+    #[test]
+    fn from_reader_parses_finish_git_actions() {
+        let config = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("OPEN_AGENTS_GIT_FINISH", "report"),
+            (
+                "OPEN_AGENTS_GIT_FINISH_COMMIT_MESSAGE",
+                "feat: apply agent changes",
+            ),
+            ("OPEN_AGENTS_GIT_FINISH_PUSH", "dry-run"),
+            ("OPEN_AGENTS_GIT_FINISH_PR", "dry-run"),
+            ("OPEN_AGENTS_GIT_FINISH_PR_REPOSITORY", "acme/service"),
+        ])
+        .unwrap();
+
+        assert!(config.finish_actions().git_enabled);
+        assert_eq!(
+            config.finish_actions().commit_message.as_deref(),
+            Some("feat: apply agent changes")
+        );
+        assert_eq!(
+            config.finish_actions().push_mode,
+            GitRemoteActionMode::DryRun
+        );
+        assert_eq!(
+            config.finish_actions().pull_request_mode,
+            GitRemoteActionMode::DryRun
+        );
+        assert_eq!(
+            config.finish_actions().pull_request_repository.as_deref(),
+            Some("acme/service")
+        );
     }
 
     #[test]

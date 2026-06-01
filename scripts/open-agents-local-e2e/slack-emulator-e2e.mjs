@@ -163,6 +163,36 @@ async function main() {
     );
     console.log(`ok: direct interaction payload resumed the run: ${answered.text}`);
 
+    const approvalText = `<@${BOT_USER_ID}> ask for approval before running pwd`;
+    const approval = await slackApi(slack.url, "chat.postMessage", {
+      channel: CHANNEL_ID,
+      text: approvalText,
+    });
+    await postAppMentionEvent(serviceUrl, approvalText, approval.ts, "EvLOCAL004", CHANNEL_ID);
+    const approvalPrompt = await waitForThreadMessage(
+      slack.url,
+      CHANNEL_ID,
+      approval.ts,
+      "Approval required",
+    );
+    const approveActionId = Array.isArray(approvalPrompt.blocks)
+      ? findButtonActionId(approvalPrompt, "Approve")
+      : "approve";
+    await postSlackInteraction(
+      serviceUrl,
+      CHANNEL_ID,
+      approval.ts,
+      approveActionId,
+      "sandbox-pwd-approval",
+    );
+    const approved = await waitForThreadMessage(
+      slack.url,
+      CHANNEL_ID,
+      approval.ts,
+      "Fixture agent finished after approval",
+    );
+    console.log(`ok: approval interaction payload resumed the run: ${approved.text}`);
+
     const cancelText = `<@${BOT_USER_ID}> ask a question and then cancel`;
     const cancel = await slackApi(slack.url, "chat.postMessage", {
       channel: CHANNEL_ID,
@@ -340,6 +370,18 @@ async function waitForThreadMessage(slackUrl, channelId, threadTs, expectedText)
     `Slack thread ${threadTs} to contain ${JSON.stringify(expectedText)}`,
     30_000,
   );
+}
+
+function findButtonActionId(message, label) {
+  for (const block of message.blocks ?? []) {
+    for (const element of block.elements ?? []) {
+      const text = element.text?.text ?? element.text;
+      if (element.type === "button" && text === label && element.action_id) {
+        return element.action_id;
+      }
+    }
+  }
+  throw new Error(`Could not find ${label} button action id in ${JSON.stringify(message.blocks)}`);
 }
 
 async function waitFor(probe, label, timeoutMs) {

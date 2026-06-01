@@ -2,19 +2,20 @@
 
 This guide captures the local verification shape for the Rust Open Agents Slack
 remote-agent path. The repository currently has deterministic fixture coverage,
-Slack ingress/router unit coverage, service health checks, and an ignored live
-Slack smoke, plus a no-credentials Slack emulator E2E lane for the fixture
-runtime path.
+Slack ingress/router unit coverage, service health checks, local durable
+resume/approval/error coverage, and an ignored live Slack smoke, plus a
+no-credentials Slack emulator E2E lane for the fixture runtime path.
 
 The current Rust slice extends the existing `open-agents-service` process with
 configuration validation, health checks, graceful shutdown, state and sandbox
 selection, local Slack event fixtures, a testable signed Slack HTTP route,
-optional Slack Web API base URL override, a real Vercel AI Gateway runtime mode,
-and an ignored live Slack smoke test.
+optional Slack Web API base URL override, durable run resume and block-action
+approval handling, finish-action reporting, real sandbox/model error reporting,
+a real Vercel AI Gateway runtime mode, and an ignored live Slack smoke test.
 
-Keep this document honest as later durable-runtime buckets land: replace
-remaining TODOs with exact commands only after those branches wire production
-model behavior, persistence, and sandbox behavior.
+Keep this document honest as OA-01 lands the full upstream inventory: add exact
+gate commands and mapped upstream test names there rather than guessing from
+the local runtime closure lane.
 
 ## Source Rechecked
 
@@ -30,6 +31,10 @@ Reviewed upstream files:
 - `apps/web/app/api/chat/route.ts`
 - `apps/web/app/api/chat/_lib/runtime.ts`
 - `apps/web/app/workflows/chat.ts`
+- `apps/web/app/workflows/chat-post-finish.ts`
+- `apps/web/app/workflows/chat-sandbox-runtime.ts`
+- `packages/agent/tools/ask-user-question.ts`
+- `packages/sandbox/interface.ts`
 
 Relevant upstream constraints carried into this guide:
 
@@ -39,6 +44,10 @@ Relevant upstream constraints carried into this guide:
 - the agent runs outside the sandbox and reaches the sandbox through tools
 - sandbox lifecycle, git automation, and final commit/PR behavior are separate
   verification surfaces
+- question prompts and approval requests resume the paused durable run instead
+  of starting another run in the Slack thread
+- model and sandbox failures are terminal run states that are reported to Slack
+  and clear the active-run pointer
 
 Emulator reference: <https://emulate.dev/docs/slack>. The Slack emulator is a
 stateful local Slack Web API with channels, messages, threads, reactions, user
@@ -98,6 +107,23 @@ repository mutation in production until the selected sandbox backend is
 disposable and the token has only the repository permissions required by the
 target workflow.
 
+Finish automation is disabled by default. Enable report-only or remote actions
+with explicit env vars:
+
+```sh
+export OPEN_AGENTS_GIT_FINISH=report
+export OPEN_AGENTS_GIT_FINISH_COMMIT_MESSAGE="chore: apply Open Agents changes"
+export OPEN_AGENTS_GIT_FINISH_PUSH=dry-run
+export OPEN_AGENTS_GIT_FINISH_PR=dry-run
+export OPEN_AGENTS_GIT_FINISH_PR_BASE=main
+export OPEN_AGENTS_GIT_FINISH_PR_REPOSITORY=owner/repo
+```
+
+`OPEN_AGENTS_GIT_FINISH_PUSH` and `OPEN_AGENTS_GIT_FINISH_PR` accept
+`disabled`, `dry-run`, or `execute`. Finish-action errors are emitted as Slack
+error messages after the completed run is persisted; they do not turn the
+completed Slack callback into a failed HTTP response.
+
 ## Fixture Path
 
 The fixture path does not require Slack credentials. It parses a synthetic
@@ -114,6 +140,12 @@ Expected assertions:
 - a run record is persisted under the in-memory fixture key
 - the fake sandbox step list contains `sandbox.exec pwd`
 - active run state is cleared after completion
+- waiting runs resume from direct thread replies without starting duplicates
+- question answer, cancel, and approval block actions resume the paused durable
+  state
+- scripted model and sandbox errors persist `failed` run status and notify Slack
+- enabled finish actions emit commit/PR/no-change/error summaries without
+  corrupting the terminal run state
 
 Targeted deterministic tests:
 
@@ -160,6 +192,7 @@ ok: open-agents-service local E2E listening at http://127.0.0.1:...
 ok: app mention completed in Slack thread ...
 ok: question prompt posted in Slack thread ...
 ok: direct interaction payload resumed the run ...
+ok: approval interaction payload resumed the run ...
 ```
 
 The harness seeds:
@@ -190,6 +223,8 @@ Expected emulator assertions:
 - the completed run text appears in `conversations.replies`
 - a waiting/question run posts a prompt into the same thread
 - a direct `block_actions` payload to `/slack/interactions` resumes the run
+- an approval prompt posts Approve/Deny controls and the direct approval payload
+  resumes the same run
 - run completion persists fixture state and clears active run state
 - health probes stay green during event processing
 
@@ -198,7 +233,8 @@ Known emulator limits:
 - Slash command and interaction callbacks are not simulated by the emulator
   today. The local E2E lane posts app mentions through Slack Web API state, then
   sends the matching `event_callback` to the service directly. The question
-  continuation posts a direct `block_actions` payload to `/slack/interactions`.
+  and approval continuations post direct `block_actions` payloads to
+  `/slack/interactions`.
 - Socket Mode is not implemented by the emulator. Keep local E2E on Events API
   webhooks and leave Socket Mode for live smoke or unit-level config checks.
 - Chat streaming is not implemented by the emulator. Assert Slack message/update
@@ -272,6 +308,17 @@ Optional production or live settings:
   URL override for local emulators
 - `OPEN_AGENTS_SLACK_INGRESS=socket-mode`
 - `SLACK_APP_TOKEN`, required for Socket Mode
+- `OPEN_AGENTS_GIT_FINISH=disabled|report|true`, optional local sandbox git
+  finish reporting
+- `OPEN_AGENTS_GIT_FINISH_COMMIT_MESSAGE`, optional commit message for dirty
+  sandbox repositories
+- `OPEN_AGENTS_GIT_FINISH_PUSH=disabled|dry-run|execute`, optional push action
+- `OPEN_AGENTS_GIT_FINISH_PR=disabled|dry-run|execute`, optional pull-request
+  action
+- `OPEN_AGENTS_GIT_FINISH_PR_BASE`, default `main`
+- `OPEN_AGENTS_GIT_FINISH_PR_TITLE`, default `Open Agents changes`
+- `OPEN_AGENTS_GIT_FINISH_PR_BODY`, default checked-in service text
+- `OPEN_AGENTS_GIT_FINISH_PR_REPOSITORY`, optional `owner/repo` target
 
 Optional live smoke settings:
 
@@ -286,6 +333,19 @@ cargo test -p open-agents-sandbox live_vercel_sandbox_create_exec_read_write_lis
 
 The ignored smoke requires the live Vercel variables above and creates a real
 temporary sandbox.
+
+Ignored AI Gateway smoke:
+
+```sh
+export AI_GATEWAY_API_KEY=...
+scripts/open-agents-local-e2e.sh --live-gateway
+
+cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture
+```
+
+The wrapper also runs the lower-level `open-agents-runtime` Gateway smoke. Both
+tests are skipped unless `AI_GATEWAY_API_KEY` or
+`AI_SDK_RUST_AI_GATEWAY_API_KEY` is configured.
 
 ## Slack App Configuration
 
@@ -312,6 +372,8 @@ Interactivity:
 - Request URL: `https://YOUR_DOMAIN/slack/interactions`
 - Enable block actions for answer/resume and cancel actions.
 - The fixture action ids are `open_agents_answer` and `open_agents_cancel`.
+- Approval buttons use encoded Open Agents action ids and carry the approval id
+  in the Slack action value.
 
 Socket Mode:
 
@@ -343,13 +405,14 @@ path through a real Slack app once live outbound assertions are available.
 | URL verification | Covered through the service HTTP route and Slack ingress unit tests | `cargo test -p open-agents-service slack_events_url_verification_traverses_service_http_route`; `cargo test -p open-agents-slack events_api_url_verification_returns_challenge` | Live Slack app proof still TODO |
 | App mention | Covered through the signed service route and emulator-backed local service path | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live Slack-to-Gateway proof still TODO |
 | DM | `open-agents-slack` covers DM routing | `cargo test -p open-agents-slack dm_event_starts_run_and_routes_as_dm_thread` | Emulator-backed DM scenario still TODO |
-| Thread routing | Emulator-backed app mention thread replay plus parser/router tests | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Broader DM/thread matrix still TODO |
+| Thread routing | Emulator-backed app mention thread replay plus parser/router tests; active waiting runs resume instead of duplicating | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-slack app_mention_threaded_reply_routes_to_parent_thread_ts`; `cargo test -p open-agents-service threaded_message_resumes_waiting_run_without_starting_duplicate` | Broader DM/thread matrix still TODO |
 | Durable run completion | Covered locally through the service route with a scripted durable runtime; Gateway runtime is selectable when AI Gateway credentials are present | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Live Slack-to-Gateway proof still TODO |
-| Waiting, answer, cancel | Emulator-backed question prompt plus direct signed block action payload; service cancel test | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
+| Waiting, answer, approval, cancel | Emulator-backed question and approval prompts plus direct signed block action payloads; service answer/approval/cancel tests | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_approval_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
 | Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
 | Sandbox command | Local service route executes `sandbox.exec pwd`; Gateway runtime passes Open Agent tools through the selected sandbox command adapter; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel sandbox plus live git mutation proof remains credential-gated |
-| Git automation summary | Unit renderer coverage only; Gateway runtime can expose GitHub tokens to sandbox commands when configured | `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | End-to-end auto-commit/PR summary from a run still TODO |
+| Model/sandbox errors | Scripted local model and sandbox failures persist failed run status, clear active run state, and post Slack errors | `cargo test -p open-agents-service scripted_runtime_failure_is_persisted_and_reported_to_slack` | Live Gateway/Vercel failure proof remains credential-gated |
+| Git automation summary | Finish actions can emit local git no-change/commit/PR/error summaries after a completed run; renderer coverage verifies Slack shapes | `cargo test -p open-agents-service finish_action_errors_are_reported_without_failing_finished_run`; `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | Live push/PR execution remains credential-gated |
 | Health/readiness | Covered by service tests, manual probes, and emulator readiness polling | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Live deployment probes still TODO |
 
 ## CI Shape
