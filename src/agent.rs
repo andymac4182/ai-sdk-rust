@@ -40,7 +40,11 @@ use crate::stream_text::{
     stream_text,
 };
 use crate::telemetry::TelemetryOptions;
-use crate::ui_message_stream::{UiMessage, UiMessageStreamResponse, UiMessageStreamResponseInit};
+use crate::ui_message_stream::{
+    UiMessage, UiMessageChunk, UiMessageStreamResponse, UiMessageStreamResponseInit,
+    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
+    pipe_ui_message_stream_to_response,
+};
 
 /// Upstream version tag for `ToolLoopAgent`.
 pub const TOOL_LOOP_AGENT_VERSION: &str = "agent-v1";
@@ -227,7 +231,55 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
     }
 }
 
-/// Options for [`create_agent_ui_stream_response`].
+/// Options for [`create_agent_ui_stream`].
+pub struct AgentUiStreamOptions<'options, 'agent, M: LanguageModel + ?Sized> {
+    /// Agent used to stream the response.
+    pub agent: &'options ToolLoopAgent<'agent, M>,
+
+    /// Existing UI messages to convert into the next model prompt.
+    pub ui_messages: Vec<UiMessage>,
+
+    /// UI-message stream conversion options.
+    pub ui_message_stream_options: StreamTextUiMessageStreamOptions,
+
+    /// Per-call sandbox passed through to local tool execution.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+}
+
+impl<'options, 'agent, M: LanguageModel + ?Sized> AgentUiStreamOptions<'options, 'agent, M> {
+    /// Creates stream options for an agent and UI-message history.
+    pub fn new(
+        agent: &'options ToolLoopAgent<'agent, M>,
+        ui_messages: impl IntoIterator<Item = UiMessage>,
+    ) -> Self {
+        Self {
+            agent,
+            ui_messages: ui_messages.into_iter().collect(),
+            ui_message_stream_options: StreamTextUiMessageStreamOptions::default(),
+            experimental_sandbox: None,
+        }
+    }
+
+    /// Sets UI-message stream conversion options.
+    pub fn with_ui_message_stream_options(
+        mut self,
+        ui_message_stream_options: StreamTextUiMessageStreamOptions,
+    ) -> Self {
+        self.ui_message_stream_options = ui_message_stream_options;
+        self
+    }
+
+    /// Sets a per-call sandbox.
+    pub fn with_experimental_sandbox(
+        mut self,
+        experimental_sandbox: Arc<dyn ExperimentalSandbox>,
+    ) -> Self {
+        self.experimental_sandbox = Some(experimental_sandbox);
+        self
+    }
+}
+
+/// Options for [`create_agent_ui_stream_response`] and [`pipe_agent_ui_stream_to_response`].
 pub struct AgentUiStreamResponseOptions<'options, 'agent, M: LanguageModel + ?Sized> {
     /// Agent used to stream the response.
     pub agent: &'options ToolLoopAgent<'agent, M>,
@@ -287,6 +339,55 @@ impl<'options, 'agent, M: LanguageModel + ?Sized>
     }
 }
 
+/// Error returned by [`pipe_agent_ui_stream_to_response`].
+#[derive(Debug)]
+pub enum AgentUiStreamPipeError<E> {
+    /// The agent stream could not be created.
+    Stream(ChatTransportError),
+
+    /// The response writer failed while receiving the encoded stream.
+    Write(E),
+}
+
+impl<E: fmt::Display> fmt::Display for AgentUiStreamPipeError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stream(error) => write!(formatter, "{error}"),
+            Self::Write(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+/// Runs an agent response as upstream-compatible UI-message chunks.
+///
+/// This ports the portable core of upstream `createAgentUIStream`.
+/// Prior UI messages are converted back into model messages, assistant tool
+/// outputs are resolved through matching Rust tool `toModelOutput` callbacks,
+/// the agent is streamed in-process, and the collected UI-message chunks are
+/// returned for response helpers or framework adapters.
+pub async fn create_agent_ui_stream<M>(
+    options: AgentUiStreamOptions<'_, '_, M>,
+) -> Result<Vec<UiMessageChunk>, ChatTransportError>
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+{
+    let AgentUiStreamOptions {
+        agent,
+        ui_messages,
+        ui_message_stream_options,
+        experimental_sandbox,
+    } = options;
+
+    agent_ui_stream_chunks(
+        agent,
+        ui_messages,
+        ui_message_stream_options,
+        experimental_sandbox,
+    )
+    .await
+}
+
 /// Streams an agent response as upstream-compatible UI-message SSE chunks.
 ///
 /// This ports the portable core of upstream `createAgentUIStreamResponse`.
@@ -305,10 +406,70 @@ where
         agent,
         ui_messages,
         response_init,
-        mut ui_message_stream_options,
+        ui_message_stream_options,
         experimental_sandbox,
     } = options;
 
+    let stream = agent_ui_stream_chunks(
+        agent,
+        ui_messages,
+        ui_message_stream_options,
+        experimental_sandbox,
+    )
+    .await?;
+
+    Ok(crate::ui_message_stream::create_ui_message_stream_response(
+        UiMessageStreamResponseOptions::from_init(stream, response_init),
+    ))
+}
+
+/// Pipes an agent UI-message stream into an HTTP-framework-neutral writer.
+///
+/// This mirrors upstream `pipeAgentUIStreamToResponse` without taking a
+/// dependency on Node's `ServerResponse`.
+pub async fn pipe_agent_ui_stream_to_response<M, W>(
+    response: &mut W,
+    options: AgentUiStreamResponseOptions<'_, '_, M>,
+) -> Result<(), AgentUiStreamPipeError<W::Error>>
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+    W: UiMessageStreamResponseWriter,
+{
+    let AgentUiStreamResponseOptions {
+        agent,
+        ui_messages,
+        response_init,
+        ui_message_stream_options,
+        experimental_sandbox,
+    } = options;
+
+    let stream = agent_ui_stream_chunks(
+        agent,
+        ui_messages,
+        ui_message_stream_options,
+        experimental_sandbox,
+    )
+    .await
+    .map_err(AgentUiStreamPipeError::Stream)?;
+
+    pipe_ui_message_stream_to_response(
+        response,
+        UiMessageStreamResponseOptions::from_init(stream, response_init),
+    )
+    .map_err(AgentUiStreamPipeError::Write)
+}
+
+async fn agent_ui_stream_chunks<M>(
+    agent: &ToolLoopAgent<'_, M>,
+    ui_messages: Vec<UiMessage>,
+    mut ui_message_stream_options: StreamTextUiMessageStreamOptions,
+    experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+) -> Result<Vec<UiMessageChunk>, ChatTransportError>
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+{
     let model_messages = convert_ui_messages_to_model_messages_with_tools(
         &ui_messages,
         ConvertUiMessagesToModelMessagesOptions::default(),
@@ -331,7 +492,7 @@ where
             ui_message_stream_options.with_original_messages(ui_messages.clone());
     }
 
-    Ok(result.to_ui_message_stream_response_with_options(response_init, ui_message_stream_options))
+    Ok(result.to_ui_message_stream_with_options(ui_message_stream_options))
 }
 
 /// Shared settings for a [`ToolLoopAgent`].

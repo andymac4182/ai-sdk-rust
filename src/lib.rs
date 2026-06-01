@@ -67,13 +67,26 @@ pub mod video_model;
 pub mod voyage;
 pub mod warning;
 
+/// Rust namespace for upstream `ai` structured-output helpers.
+///
+/// Upstream exposes these as `Output.*`. Rust keeps the implementation in
+/// [`generate_text_output`] and offers this lowercase facade for root-crate
+/// ergonomics.
+pub mod output {
+    pub use crate::generate_text_output::{
+        ArrayOutput, ArrayOutputElementStreamTransform, ChoiceOutput, JsonOutput, ObjectOutput,
+        OutputParseContext, TextOutput, array, choice, json, object, text,
+    };
+}
+
 pub use agent::{
-    AgentCallParameters, AgentStreamParameters, AgentUiStreamResponseOptions,
-    TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings,
-    ToolLoopAgentOnFinishCallback, ToolLoopAgentOnStartCallback, ToolLoopAgentOnStepFinishCallback,
-    ToolLoopAgentOnStepStartCallback, ToolLoopAgentOnToolExecutionEndCallback,
-    ToolLoopAgentOnToolExecutionStartCallback, ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall,
-    ToolLoopAgentSettings, create_agent_ui_stream_response,
+    AgentCallParameters, AgentStreamParameters, AgentUiStreamOptions, AgentUiStreamPipeError,
+    AgentUiStreamResponseOptions, TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions,
+    ToolLoopAgentModelSettings, ToolLoopAgentOnFinishCallback, ToolLoopAgentOnStartCallback,
+    ToolLoopAgentOnStepFinishCallback, ToolLoopAgentOnStepStartCallback,
+    ToolLoopAgentOnToolExecutionEndCallback, ToolLoopAgentOnToolExecutionStartCallback,
+    ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall, ToolLoopAgentSettings,
+    create_agent_ui_stream, create_agent_ui_stream_response, pipe_agent_ui_stream_to_response,
 };
 pub use baseten::{
     BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
@@ -453,7 +466,10 @@ pub use stream_object::{
 pub use stream_text::{
     SmoothStreamChunkDetector, SmoothStreamChunking, SmoothStreamError, SmoothStreamOptions,
     StreamTextAbortController, StreamTextAbortSignal, StreamTextMessageMetadata,
-    StreamTextMessageMetadataFunction, StreamTextOnAbortEvent, StreamTextOptions,
+    StreamTextMessageMetadataFunction, StreamTextOnAbort, StreamTextOnAbortEvent,
+    StreamTextOnAbortFunction, StreamTextOnAbortFuture, StreamTextOnChunk, StreamTextOnChunkEvent,
+    StreamTextOnChunkFunction, StreamTextOnChunkFuture, StreamTextOnError, StreamTextOnErrorEvent,
+    StreamTextOnErrorFunction, StreamTextOnErrorFuture, StreamTextOptions,
     StreamTextResponseMetadata, StreamTextResult, StreamTextStep, StreamTextStepPerformance,
     StreamTextTransform, StreamTextTransformFunction, StreamTextUiMessageStreamOptions,
     TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart,
@@ -608,6 +624,13 @@ mod tests {
         assert_type::<StreamObjectResult>();
         assert_type::<EmbedResult>();
         assert_type::<GenerateImageResult>();
+        assert_type::<output::OutputParseContext<'static>>();
+        assert_type::<output::TextOutput>();
+        assert_type::<output::ObjectOutput<JsonValue>>();
+        assert_type::<output::ArrayOutput<JsonValue>>();
+        assert_type::<output::ChoiceOutput>();
+        assert_type::<output::JsonOutput>();
+        assert_type::<output::ArrayOutputElementStreamTransform<JsonValue>>();
         assert_type::<GenerateSpeechOptions<'static, MockSpeechModel>>();
         assert_type::<GenerateVideoOptions<'static, MockVideoModel>>();
         assert_type::<RerankResult>();
@@ -617,6 +640,7 @@ mod tests {
         assert_type::<ToolLoopAgent<'static, MockLanguageModel>>();
         assert_type::<AgentCallParameters<'static, MockLanguageModel>>();
         assert_type::<AgentStreamParameters<'static, MockLanguageModel>>();
+        assert_type::<AgentUiStreamOptions<'static, 'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentCallOptions<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentModelSettings>();
         assert_type::<ToolLoopAgentOnStartCallback<'static>>();
@@ -628,11 +652,33 @@ mod tests {
         assert_type::<ToolLoopAgentPrepareCall<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentPreparedCall<'static, MockLanguageModel>>();
         assert_type::<ToolLoopAgentSettings<'static, MockLanguageModel>>();
+        assert_type::<AgentUiStreamPipeError<()>>();
         assert_type::<TelemetryOptions>();
+        assert_type::<StreamTextOnChunkEvent>();
+        assert_type::<StreamTextOnChunkFunction<'static>>();
+        assert_type::<StreamTextOnChunkFuture<'static>>();
+        assert_type::<StreamTextOnChunk<'static>>();
+        assert_type::<StreamTextOnErrorEvent>();
+        assert_type::<StreamTextOnErrorFunction<'static>>();
+        assert_type::<StreamTextOnErrorFuture<'static>>();
+        assert_type::<StreamTextOnError<'static>>();
+        assert_type::<StreamTextOnAbortEvent>();
+        assert_type::<StreamTextOnAbortFunction<'static>>();
+        assert_type::<StreamTextOnAbortFuture<'static>>();
+        assert_type::<StreamTextOnAbort<'static>>();
         assert_type::<TextStreamPart>();
         assert_type::<UiMessage>();
         assert_type::<UploadFileOptions>();
         assert_type::<UploadSkillOptions>();
         assert_type::<AsyncIterableStream<JsonValue, VecAsyncIterableStreamSource<JsonValue>>>();
+
+        let _text_output = output::text();
+        let _object_output = output::object::<JsonValue>(_schema.clone());
+        let _array_output = output::array::<JsonValue>(_schema.clone());
+        let _choice_output = output::choice(vec!["red".to_string(), "blue".to_string()]);
+        let _json_output = output::json();
+        let _chunk_callback = StreamTextOnChunk::new(|_event| async {});
+        let _error_callback = StreamTextOnError::new(|_event| async {});
+        let _abort_callback = StreamTextOnAbort::new(|_event| async {});
     }
 }

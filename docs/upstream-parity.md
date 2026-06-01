@@ -230,7 +230,7 @@ earlier in that order remains open.
 | Upstream commit | `ab6d66482d31afe15f4973a51c5f7cfa09c92ea6` |
 | Upstream commit date | `2026-05-30T00:54:18Z` |
 | Inventory date | `2026-06-01` |
-| Upstream package count | 56 packages under `packages/*/package.json` |
+| Upstream package count | 58 packages under `packages/*/package.json` |
 | Upstream package test files | 521 `*.test.ts`, `*.test.tsx`, `*.test-d.ts`, `*.test-d.tsx`, `*.spec.ts`, and `*.spec.tsx` files under `packages/*` |
 | Upstream examples | 22 top-level example apps/directories under `examples/*` |
 
@@ -560,6 +560,34 @@ inventory.
 | Vercel AI Gateway OpenAI-compatible streamed object generation | verified | `src/vercel_ai_gateway.rs`, `crates/ai-sdk-openai-compatible`, root facade shim in `src/openai_compatible.rs`, `src/stream_object.rs` | `vercel_ai_gateway_openai_compatible_streams_object_through_openai_chat`; ignored `live_vercel_ai_gateway_openai_compatible_stream_object`; ignored `live_vercel_ai_gateway_openai_compatible_stream_object_with_otel` | Proves high-level `stream_object` reaches the Vercel AI Gateway OpenAI-compatible `/chat/completions` SSE route, omits Gateway's unsupported `response_format` body field, injects JSON/schema prompt guidance, collects JSON text deltas, parses the final object, surfaces usage/response metadata, passes against `.env.local` live Gateway credentials, and exports live stream-object telemetry through the local OTLP receiver; the OTel live test passed on `2026-05-20`. |
 | Vercel v0 provider package | in-progress | `src/vercel.rs`, `src/openai_compatible.rs` | `vercel_provider_creates_openai_compatible_chat_model`; `vercel_provider_uses_default_base_url_and_function_alias`; `vercel_provider_reports_unsupported_model_families`; `vercel_provider_implements_provider_trait` | Mirrors upstream `createVercel` construction around OpenAI-compatible chat models with default/custom base URLs, headers, `VERCEL_API_KEY`, provider id `vercel.chat`, Vercel-specific user-agent suffix, and unsupported embedding/image lookups. Live v0 API validation remains optional and unported because this goal currently only has AI Gateway credentials. |
 | Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs`, `src/deepinfra.rs`, `src/togetherai.rs`, `src/huggingface.rs`, `src/cerebras.rs`, `src/baseten.rs`, `src/voyage.rs`, `crates/ai-sdk-deepseek`, `crates/ai-sdk-lmnt`, `crates/ai-sdk-luma`, `crates/ai-sdk-moonshotai`, `crates/ai-sdk-perplexity`, `crates/ai-sdk-revai`, `crates/ai-sdk-assemblyai`, `crates/ai-sdk-azure`, `crates/ai-sdk-bytedance`, `crates/ai-sdk-black-forest-labs`, `crates/ai-sdk-hume`, `crates/ai-sdk-deepgram` | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Black Forest Labs, Hume, and Deepgram provider-wrapper tests listed above | OpenAI non-Responses, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Black Forest Labs, Hume, and Deepgram have initial Rust provider-wrapper slices. DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Black Forest Labs, Hume, and Deepgram are intentionally package-owned crates instead of new root modules, establishing the extraction direction required by the crate-splitting acceptance rule. Most concrete provider package rows above remain unported. |
+
+## AI-06 Public API And Examples Audit
+
+Refreshed `vercel/ai` with `npx opensrc fetch github:vercel/ai` on
+2026-06-01 and audited the current root `packages/ai/src/index.ts` export
+surface plus the top-level examples that import from `ai`.
+
+- Root public API ergonomics now include a Rust `output` facade for upstream
+  `Output.*` helpers, root re-exports for stream-text `onChunk`, `onError`,
+  and `onAbort` callback wrappers, and the agent UI stream helpers
+  `create_agent_ui_stream`, `create_agent_ui_stream_response`, and
+  `pipe_agent_ui_stream_to_response`.
+- The compile-time root facade test
+  `root_facade_reexports_upstream_index_surface` proves root access to Gateway,
+  provider-utils helpers, high-level `generate_text`, `stream_text`,
+  `embed`/`embed_many`, `generate_object`, `stream_object`, media generation,
+  prompt, registry, telemetry, text-stream, UI-message stream, upload, util,
+  structured-output, stream callback, agent, and mock-provider surfaces.
+- Existing examples remain intentionally root-focused and provider-light:
+  `examples/kitchen_sink.rs` proves deterministic tool-loop `generate_text`,
+  while the Vercel AI Gateway examples prove live-provider entry points without
+  copying provider-bucket implementation work into AI-06.
+- Current upstream examples with JavaScript frameworks remain
+  `js-only-documented` rows, and provider-specific examples remain owned by
+  AI-01 through AI-05 provider buckets unless they expose missing root `ai`
+  behavior.
+- Remaining public API drift is in broader example inventory and provider-owned
+  package work, not in the root facade proof added for AI-06.
 
 ## Examples Inventory
 
@@ -6045,9 +6073,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    named Rust counterpart `root_facade_reexports_upstream_index_surface`,
    and `exposes_crate_version`, proving root access to Gateway,
    provider-utils helpers, high-level generation APIs, prompt/registry/
-   telemetry/text-stream/UI/upload/util surfaces, crate-version smoke
+   telemetry/text-stream/UI/upload/util surfaces, structured-output helpers,
+   stream-text callback wrappers, agent UI stream helpers, crate-version smoke
    coverage, and mock provider-v4 fixtures without moving package-owned
    implementation code back into the root crate.
+   The 2026-06-01 AI-06 audit against upstream
+   `ab6d66482d31afe15f4973a51c5f7cfa09c92ea6` added the root `output`
+   facade plus `StreamTextOnChunk*`, `StreamTextOnError*`,
+   `StreamTextOnAbort*`, `create_agent_ui_stream`, and
+   `pipe_agent_ui_stream_to_response` root exposure proofs.
    The upstream callback error-handling case now has the named Rust counterpart
    `stream_object_callback_panics_do_not_break_stream`.
    The upstream warning logger spy cases now have named Rust counterparts in

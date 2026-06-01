@@ -110,8 +110,9 @@ pub fn open_agent_tools_in_workspace(working_directory: impl Into<String>) -> Ve
 /// Returns the Open Agents tool set for [`crate::ToolLoopAgent`].
 ///
 /// This covers the tool names used by Open Agents:
-/// `todo_write`, `read`, `write`, `edit`, `grep`, `glob`, `bash`, `task`,
-/// `ask_user_question`, `skill`, and `web_fetch`.
+/// `todo_write`, `read`, `write`, `edit`, `grep`, `glob`, `bash`,
+/// `github_create_pull_request`, `task`, `ask_user_question`, `skill`, and
+/// `web_fetch`.
 pub fn open_agent_tools_with_options(options: OpenAgentToolsOptions) -> Vec<Tool> {
     vec![
         todo_write_tool(),
@@ -2212,6 +2213,7 @@ mod tests {
                 GREP_TOOL_NAME,
                 GLOB_TOOL_NAME,
                 BASH_TOOL_NAME,
+                GITHUB_CREATE_PULL_REQUEST_TOOL_NAME,
                 TASK_TOOL_NAME,
                 ASK_USER_QUESTION_TOOL_NAME,
                 SKILL_TOOL_NAME,
