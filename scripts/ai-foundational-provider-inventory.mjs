@@ -314,6 +314,87 @@ function anthropicRustTestName(testCase, index) {
   )}`;
 }
 
+const AMAZON_BEDROCK_TEST_TARGETS = new Map([
+  [
+    'amazon-bedrock-api-types.test.ts',
+    'amazon_bedrock_cache_points_match_upstream_ttl_cases',
+  ],
+  [
+    'amazon-bedrock-chat-language-model-options.test.ts',
+    'amazon_bedrock_chat_options_validate_service_tier_and_types',
+  ],
+  [
+    'amazon-bedrock-chat-language-model.test.ts',
+    'amazon_bedrock_chat_generate_and_stream_match_upstream_fixtures',
+  ],
+  [
+    'amazon-bedrock-embedding-model.test.ts',
+    'amazon_bedrock_embedding_models_prepare_requests_and_parse_responses',
+  ],
+  [
+    'amazon-bedrock-event-stream-response-handler.test.ts',
+    'amazon_bedrock_event_stream_decoder_handles_fixtures_frames_and_errors',
+  ],
+  [
+    'amazon-bedrock-image-model.test.ts',
+    'amazon_bedrock_image_model_prepares_generation_editing_and_response_cases',
+  ],
+  [
+    'amazon-bedrock-prepare-tools.test.ts',
+    'amazon_bedrock_prepare_tools_maps_function_anthropic_and_choice_cases',
+  ],
+  [
+    'amazon-bedrock-provider.test.ts',
+    'amazon_bedrock_provider_factories_auth_and_headers_match_upstream',
+  ],
+  [
+    'amazon-bedrock-sigv4-fetch.test.ts',
+    'amazon_bedrock_sigv4_and_api_key_fetch_wrappers_sign_requests',
+  ],
+  [
+    'anthropic/amazon-bedrock-anthropic-fetch.test.ts',
+    'amazon_bedrock_anthropic_fetch_transforms_event_streams',
+  ],
+  [
+    'anthropic/amazon-bedrock-anthropic-provider.test.ts',
+    'amazon_bedrock_anthropic_provider_transforms_tools_and_model_factories',
+  ],
+  [
+    'convert-amazon-bedrock-usage.test.ts',
+    'amazon_bedrock_usage_conversion_maps_cache_and_missing_usage',
+  ],
+  [
+    'convert-to-amazon-bedrock-chat-messages.test.ts',
+    'amazon_bedrock_message_conversion_maps_prompt_content_files_tools_and_reasoning',
+  ],
+  [
+    'inject-fetch-headers.test.ts',
+    'amazon_bedrock_provider_factories_auth_and_headers_match_upstream',
+  ],
+  [
+    'mantle/bedrock-mantle-provider.test.ts',
+    'amazon_bedrock_mantle_provider_maps_openai_compatible_factories',
+  ],
+  [
+    'normalize-tool-call-id.test.ts',
+    'amazon_bedrock_mistral_tool_call_id_normalization_matches_upstream',
+  ],
+  [
+    'reranking/amazon-bedrock-reranking-model.test.ts',
+    'amazon_bedrock_reranking_model_prepares_requests_and_parses_responses',
+  ],
+]);
+
+function amazonBedrockRustTestName(testCase) {
+  const testName = AMAZON_BEDROCK_TEST_TARGETS.get(
+    testCase.file.replace(/^src\//, ''),
+  );
+  if (!testName) {
+    throw new Error(`missing Amazon Bedrock Rust test mapping for ${testCase.file}`);
+  }
+  return `crates/ai-sdk-amazon-bedrock/src/lib.rs::tests::${testName}`;
+}
+
 function formatCaseName(testCase) {
   return testCase.tableRows == null
     ? `${testCase.kind} ${testCase.name}`
@@ -421,6 +502,15 @@ function classifyCase(packageInfo, testCase, index) {
       rustTarget: 'exception: TypeScript compiler-only generic inference',
       notes:
         'The upstream assertion exists only in TypeScript generic inference or @ts-expect-error space; Rust needs typed API design but not this exact compiler test.',
+    };
+  }
+
+  if (packageInfo.dir === 'amazon-bedrock') {
+    return {
+      status: 'portable-mapped',
+      rustTarget: amazonBedrockRustTestName(testCase),
+      notes:
+        'Portable Amazon Bedrock behavior is mapped to a named Rust crate test covering the upstream file group with deterministic request/response fixtures.',
     };
   }
 

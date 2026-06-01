@@ -2,7 +2,6 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
-amazon-bedrock	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01B.
 cohere	35	Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current upstream case parity remain explicitly inventoried.
 fireworks	45	OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image workflows, polling, editing, binary result handling, and live proof remain explicitly inventoried.
 google-vertex	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01D.
