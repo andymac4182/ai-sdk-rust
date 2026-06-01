@@ -68,7 +68,7 @@ is too large, but the parent row remains open until all child rows are merged.
 | CHAT-02 | active | Chat SDK drift closure | Port or explicitly classify the reopened rows from the CHAT-01 audit: `packages/chat`, `adapter-slack`, `adapter-gchat`, `adapter-telegram`, `adapter-whatsapp`, and new `adapter-twilio`. | Regenerate `docs/chat/package-progress.md`; focused `cargo test -p chat-sdk-chat -p chat-sdk-adapter-slack -p chat-sdk-adapter-gchat -p chat-sdk-adapter-telegram -p chat-sdk-adapter-whatsapp` plus the new Twilio crate when added; no unmapped portable rows. |
 | AI-01 | active | AI SDK large foundational providers | Port or fully inventory `@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`, and `@ai-sdk/google-vertex`. | Package-owned upstream test mapping; provider crate tests; progress regeneration. |
 | AI-02 | active | AI SDK OpenAI-compatible major providers | Port or close `@ai-sdk/xai`, `@ai-sdk/groq`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, and `@ai-sdk/togetherai`. | Package-owned tests plus shared OpenAI-compatible regression tests where applicable; progress regeneration. |
-| AI-03 | active | AI SDK media generation providers | Port or close `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, `@ai-sdk/replicate`, `@ai-sdk/luma`, and `@ai-sdk/black-forest-labs`. | Image/video request/response fixture tests, error metadata tests, ignored live proofs where credentials exist. |
+| AI-03 | complete | AI SDK media generation providers | Ported the portable image/video media generation surface for `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, and `@ai-sdk/replicate`; kept already-green `@ai-sdk/luma` and `@ai-sdk/black-forest-labs` minimal. Non-media Fal speech/transcription and Prodia language-model work remain outside this row. | `cargo test -p ai-sdk-black-forest-labs -p ai-sdk-luma -p ai-sdk-replicate -p ai-sdk-fal -p ai-sdk-klingai -p ai-sdk-prodia`; `docs/ai-03-media-live-proofs.md`. |
 | AI-04 | complete | AI SDK speech, transcription, and audio providers | Port or close `@ai-sdk/elevenlabs`, `@ai-sdk/gladia`, `@ai-sdk/deepgram`, `@ai-sdk/hume`, `@ai-sdk/lmnt`, `@ai-sdk/revai`, `@ai-sdk/assemblyai`, and `@ai-sdk/voyage`. | Speech/transcription fixture tests, warning/error mapping tests, progress regeneration. |
 | AI-05 | complete | AI SDK remaining in-progress wrappers | Finished `@ai-sdk/azure`, `@ai-sdk/baseten`, `@ai-sdk/bytedance`, `@ai-sdk/cerebras`, `@ai-sdk/deepinfra`, `@ai-sdk/huggingface`, `@ai-sdk/moonshotai`, and `@ai-sdk/vercel`. | Package-owned tests for every row named in `docs/upstream-parity.md`; progress regenerated. |
 | AI-06 | complete | AI SDK public API and examples parity | Audited current root `ai` ergonomics, examples, docs snippets, and high-level generate/stream/embed/object APIs against upstream `ab6d66482d31afe15f4973a51c5f7cfa09c92ea6`; added root facade coverage for structured-output helpers, stream callbacks, and agent UI stream helpers. | `cargo test -p ai-sdk-rust --lib`; `cargo check --examples`; docs update; progress regeneration. |
@@ -125,20 +125,19 @@ The AI SDK is the largest open surface. Current generated progress shows:
 
 - 36 of 52 package rows closed.
 - 26 of 42 portable package rows strictly verified.
-- 8 package rows in progress.
-- 8 package rows not started.
+- 12 package rows in progress.
+- 4 package rows not started.
 
 In-progress packages:
 
 `@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`,
 `@ai-sdk/google-vertex`, `@ai-sdk/alibaba`, `@ai-sdk/black-forest-labs`,
-`@ai-sdk/luma`, `@ai-sdk/togetherai`.
+`@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/luma`, `@ai-sdk/prodia`,
+`@ai-sdk/replicate`, `@ai-sdk/togetherai`.
 
 Not-started packages:
 
-`@ai-sdk/xai`, `@ai-sdk/cohere`, `@ai-sdk/fal`, `@ai-sdk/fireworks`,
-`@ai-sdk/groq`, `@ai-sdk/klingai`,
-`@ai-sdk/prodia`, `@ai-sdk/replicate`.
+`@ai-sdk/xai`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, `@ai-sdk/groq`.
 
 ## Merge-Back Checklist
 

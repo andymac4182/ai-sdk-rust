@@ -3,12 +3,12 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 73.9%
-- Portable package average: 67.7%
+- Average estimated completion: 80.1%
+- Portable package average: 75.4%
 - Closed package rows: 36 / 52
 - Strict portable verified rows: 26 / 42
-- In-progress rows: 8
-- Not-started rows: 8
+- In-progress rows: 12
+- Not-started rows: 4
 
 ## 100% Closed
 
@@ -60,8 +60,12 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/google` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/alibaba` | 70% | In progress | provider package | Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion,... |
-| `@ai-sdk/black-forest-labs` | 65% | In progress | provider package | Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still... |
-| `@ai-sdk/luma` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
+| `@ai-sdk/black-forest-labs` | 80% | In progress | provider package | Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures... |
+| `@ai-sdk/fal` | 65% | In progress | provider package | Image and video media generation landed with request/response, queue polling, warning, download, and error metadata... |
+| `@ai-sdk/klingai` | 75% | In progress | provider package | Video generation landed with auth/header, task polling, warning, response metadata, and error metadata fixtures; JWT... |
+| `@ai-sdk/luma` | 70% | In progress | provider package | Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures... |
+| `@ai-sdk/prodia` | 65% | In progress | provider package | Image and video media generation landed with JSON/multipart request, binary response, URL media download, and error... |
+| `@ai-sdk/replicate` | 75% | In progress | provider package | Image and video media generation landed with prediction request, polling/wait headers, downloads, warning, response... |
 | `@ai-sdk/togetherai` | 45% | In progress | provider package | Initial provider wrapper exists; broader package behavior and live proof remain. |
 
 ## Not Started
@@ -70,9 +74,5 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | --- | ---: | --- | --- |
 | `@ai-sdk/xai` | 0% | Not started | provider package |
 | `@ai-sdk/cohere` | 0% | Not started | provider package |
-| `@ai-sdk/fal` | 0% | Not started | provider package |
 | `@ai-sdk/fireworks` | 0% | Not started | provider package |
 | `@ai-sdk/groq` | 0% | Not started | provider package |
-| `@ai-sdk/klingai` | 0% | Not started | provider package |
-| `@ai-sdk/prodia` | 0% | Not started | provider package |
-| `@ai-sdk/replicate` | 0% | Not started | provider package |

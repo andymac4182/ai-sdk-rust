@@ -1,0 +1,30 @@
+[package]
+name = "ai-sdk-klingai"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust port of the Vercel AI SDK KlingAI video generation provider package."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "ai_sdk_klingai"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+ai-sdk-rust = { path = "../.." }
+base64 = "0.22.1"
+hmac = "0.12.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+time = { version = "0.3.45", features = ["serde", "serde-well-known"] }
+ureq = "3.3.0"
+url = { version = "2.5.8", features = ["serde"] }

@@ -5,8 +5,12 @@
 alibaba	70	Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion, streaming, and video polling/error coverage; live Alibaba proof, one-to-one split names for aggregate mappings, and JS-only/runtime exception documentation remain.
 amazon-bedrock	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01B.
 anthropic	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01A.
-black-forest-labs	65	Initial provider crate exists; full upstream test parity is mapped, with live-provider validation still credential-gated.
+black-forest-labs	80	Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures green; live-provider validation remains credential-gated.
+fal	65	Image and video media generation landed with request/response, queue polling, warning, download, and error metadata fixtures; speech and transcription remain for AI-04.
 google	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01C.
 google-vertex	5	Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior remains unmapped pending AI-01D.
-luma	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+klingai	75	Video generation landed with auth/header, task polling, warning, response metadata, and error metadata fixtures; JWT edge fixtures and live validation remain.
+luma	70	Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures green; broader schema edge fixtures and live validation remain.
+prodia	65	Image and video media generation landed with JSON/multipart request, binary response, URL media download, and error metadata fixtures; language model remains outside AI-03.
+replicate	75	Image and video media generation landed with prediction request, polling/wait headers, downloads, warning, response metadata, and error metadata fixtures; live validation remains.
 togetherai	45	Initial provider wrapper exists; broader package behavior and live proof remain.
