@@ -92,6 +92,11 @@ run_tests() {
 run_live_gateway() {
   (
     cd "$repo_root"
+    if [[ -f .env.local ]]; then
+      set -a
+      source .env.local
+      set +a
+    fi
     cargo test -p open-agents-runtime live_open_agent_gateway_generate_text_smoke -- --ignored --nocapture
   )
 }
