@@ -2454,13 +2454,15 @@ mod tests {
         LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
         LanguageModelUserContentPart, LanguageModelUserMessage, ModelType, Provider,
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderOptions, ProviderWithVideoModel, VideoModel, VideoModelCallOptions, VideoModelFile,
-        VideoModelVideoData,
+        ProviderOptions, ProviderReference, ProviderWithVideoModel, VideoModel,
+        VideoModelCallOptions, VideoModelFile, VideoModelResult, VideoModelVideoData,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::{Future, ready};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
     use time::OffsetDateTime;
     use url::Url;
 
@@ -2481,6 +2483,29 @@ mod tests {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures use ready transports"),
+        }
+    }
+
+    fn poll_until_ready<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        let start = std::time::Instant::now();
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(2),
+                        "test future did not complete"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
         }
     }
 
@@ -2687,6 +2712,76 @@ mod tests {
     }
 
     #[test]
+    fn alibaba_chat_model_maps_top_level_reasoning_variants_and_provider_override() {
+        let (requests, transport) = chat_success_transport();
+        let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        poll_ready(
+            provider.chat("qwen-plus").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_reasoning(LanguageModelReasoningEffort::High),
+            ),
+        );
+        poll_ready(
+            provider.chat("qwen-plus").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_reasoning(LanguageModelReasoningEffort::None),
+            ),
+        );
+        poll_ready(
+            provider
+                .chat("qwen-plus")
+                .do_generate(LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                    ])),
+                ])),
+        );
+        poll_ready(
+            provider.chat("qwen-plus").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_reasoning(LanguageModelReasoningEffort::None)
+                .with_provider_options(provider_options(
+                    "alibaba",
+                    json!({ "enableThinking": true }),
+                )),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        let high_reasoning = request_body_json(&requests[0]);
+        let no_reasoning = request_body_json(&requests[1]);
+        let unspecified_reasoning = request_body_json(&requests[2]);
+        let provider_override = request_body_json(&requests[3]);
+
+        assert_eq!(high_reasoning["enable_thinking"], true);
+        assert!(
+            high_reasoning["thinking_budget"]
+                .as_u64()
+                .is_some_and(|budget| budget > 0)
+        );
+        assert_eq!(no_reasoning["enable_thinking"], false);
+        assert!(no_reasoning.get("thinking_budget").is_none());
+        assert!(unspecified_reasoning.get("enable_thinking").is_none());
+        assert!(unspecified_reasoning.get("thinking_budget").is_none());
+        assert_eq!(provider_override["enable_thinking"], true);
+        assert!(provider_override.get("thinking_budget").is_none());
+    }
+
+    #[test]
     fn alibaba_chat_model_converts_multimodal_assistant_and_tool_messages() {
         let (requests, transport) = chat_success_transport();
         let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
@@ -2785,6 +2880,120 @@ mod tests {
             body["messages"][4]["content"][0]["cache_control"],
             json!({ "type": "ephemeral" })
         );
+    }
+
+    #[test]
+    fn alibaba_chat_model_applies_cache_control_precedence_and_breakpoint_warning() {
+        let (requests, transport) = chat_success_transport();
+        let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let result = poll_ready(provider.chat("qwen-plus").do_generate(
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello").with_provider_options(
+                            provider_options("alibaba", json!({ "cacheControl": "part" })),
+                        ),
+                    )])
+                    .with_provider_options(provider_options(
+                        "alibaba",
+                        json!({ "cacheControl": "message" }),
+                    )),
+                ),
+                LanguageModelMessage::Tool(
+                    ToolMessageBuilder::new(vec![LanguageModelToolContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "call-1",
+                            "get_weather",
+                            LanguageModelToolResultOutput::text("sunny"),
+                        )
+                        .with_provider_options(provider_options(
+                            "alibaba",
+                            json!({ "cacheControl": "tool-part" }),
+                        )),
+                    )])
+                    .with_provider_options(provider_options(
+                        "alibaba",
+                        json!({ "cacheControl": "tool-message" }),
+                    )),
+                ),
+                LanguageModelMessage::System(
+                    ai_sdk_rust::LanguageModelSystemMessage::new("System prompt")
+                        .with_provider_options(provider_options(
+                            "alibaba",
+                            json!({ "cacheControl": "system" }),
+                        )),
+                ),
+            ]),
+        ));
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                ai_sdk_rust::Warning::Other { message }
+                    if message.contains("Max breakpoint limit exceeded")
+            )
+        }));
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        let body = request_body_json(&requests[0]);
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"], "part");
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            "tool-part"
+        );
+        assert_eq!(body["messages"][2]["content"][0]["cache_control"], "system");
+    }
+
+    #[test]
+    fn alibaba_chat_model_reports_provider_reference_and_invalid_option_errors() {
+        let reference = ProviderReference::from_map(BTreeMap::from([(
+            "alibaba".to_string(),
+            "file-ref-123".to_string(),
+        )]))
+        .expect("provider reference is valid");
+        let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(chat_success_transport().1);
+
+        let provider_reference_result = poll_ready(provider.chat("qwen-plus").do_generate(
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(FileData::Reference { reference }, "image/png"),
+                )]),
+            )]),
+        ));
+        let invalid_options_result = poll_ready(
+            provider.chat("qwen-plus").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options("alibaba", json!({ "thinkingBudget": 0 }))),
+            ),
+        );
+
+        for (result, expected) in [
+            (
+                provider_reference_result,
+                "file parts with provider references",
+            ),
+            (invalid_options_result, "invalid alibaba provider options"),
+        ] {
+            assert_eq!(result.finish_reason.unified, FinishReason::Error);
+            let message = result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("alibaba"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(|message| message.as_str())
+                .unwrap_or("<missing errorMessage>");
+            assert!(
+                message.contains(expected),
+                "expected error message to contain {expected:?}, got {message:?}"
+            );
+        }
     }
 
     struct ToolMessageBuilder;
@@ -2920,6 +3129,171 @@ mod tests {
         let body = request_body_json(&requests[0]);
         assert_eq!(body["stream"], true);
         assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn alibaba_chat_model_requests_stream_usage_by_default() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: AlibabaTransport = Arc::new(move |request| -> AlibabaTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request);
+            let chunk = json!({
+                "id": "stream-usage",
+                "created": 0,
+                "model": "qwen-plus",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 0,
+                    "total_tokens": 1
+                }
+            })
+            .to_string();
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+            ))))
+        });
+        let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let result = poll_ready(provider.chat("qwen-plus").do_stream(
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )]),
+            )]),
+        ));
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream finish is emitted");
+        assert_eq!(finish.usage.input_tokens.total, Some(1));
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        let body = request_body_json(&requests[0]);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"], json!({ "include_usage": true }));
+    }
+
+    #[test]
+    fn alibaba_chat_model_streams_incremental_tool_call_arguments() {
+        let transport: AlibabaTransport = Arc::new(move |_request| -> AlibabaTransportFuture {
+            let chunks = [
+                json!({
+                    "id": "stream-tool",
+                    "created": 0,
+                    "model": "qwen-plus",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-weather",
+                                "type": "function",
+                                "function": {
+                                    "name": "weather",
+                                    "arguments": ""
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                })
+                .to_string(),
+                json!({
+                    "id": "stream-tool",
+                    "created": 0,
+                    "model": "qwen-plus",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "arguments": "{\"location\":\"San"
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                })
+                .to_string(),
+                json!({
+                    "id": "stream-tool",
+                    "created": 0,
+                    "model": "qwen-plus",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "arguments": " Francisco\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5
+                    }
+                })
+                .to_string(),
+            ];
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    chunks[0], chunks[1], chunks[2]
+                ),
+            ))))
+        });
+        let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let result = poll_ready(provider.chat("qwen-plus").do_stream(
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )]),
+            )]),
+        ));
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::ToolInputStart(start)
+                if start.id == "call-weather" && start.tool_name == "weather")
+        }));
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::ToolInputDelta(delta)
+                if delta.id == "call-weather" && delta.delta.contains("San"))
+        }));
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::ToolInputEnd(end)
+                if end.id == "call-weather")
+        }));
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::ToolCall(tool_call)
+                if tool_call.tool_call_id == "call-weather"
+                    && tool_call.tool_name == "weather"
+                    && tool_call.input == "{\"location\":\"San Francisco\"}")
+        }));
     }
 
     fn video_success_transport() -> (Arc<Mutex<Vec<ProviderApiRequest>>>, AlibabaTransport) {
@@ -3085,6 +3459,113 @@ mod tests {
     }
 
     #[test]
+    fn alibaba_video_model_uses_custom_base_url_and_polls_until_succeeded() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let status_polls = Arc::new(Mutex::new(0_u32));
+        let status_polls_for_transport = Arc::clone(&status_polls);
+        let transport: AlibabaTransport = Arc::new(move |request| -> AlibabaTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request.clone());
+
+            let response = match (request.method, request.url.as_str()) {
+                (
+                    ProviderApiRequestMethod::Post,
+                    "https://video.example.com/api/v1/services/aigc/video-generation/video-synthesis",
+                ) => json_response(json!({
+                    "output": {
+                        "task_status": "PENDING",
+                        "task_id": "task-poll"
+                    }
+                })),
+                (
+                    ProviderApiRequestMethod::Get,
+                    "https://video.example.com/api/v1/tasks/task-poll",
+                ) => {
+                    let mut polls = status_polls_for_transport
+                        .lock()
+                        .expect("status poll mutex is not poisoned");
+                    *polls += 1;
+                    match *polls {
+                        1 => json_response(json!({
+                            "output": {
+                                "task_id": "task-poll",
+                                "task_status": "PENDING"
+                            }
+                        })),
+                        2 => json_response(json!({
+                            "output": {
+                                "task_id": "task-poll",
+                                "task_status": "RUNNING"
+                            }
+                        })),
+                        _ => json_response(json!({
+                            "output": {
+                                "task_id": "task-poll",
+                                "task_status": "SUCCEEDED",
+                                "video_url": "https://dashscope-result.oss.aliyuncs.com/poll.mp4"
+                            }
+                        }))
+                        .with_headers(
+                            [("x-request-id".to_string(), "req-poll-done".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                    }
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({ "message": "unexpected request" }).to_string(),
+                ),
+            };
+
+            Box::pin(ready(Ok(response)))
+        });
+        let provider = create_alibaba(
+            AlibabaProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_video_base_url("https://video.example.com/"),
+        )
+        .with_transport(transport);
+
+        let result = poll_until_ready(
+            provider.video("wan2.6-t2v").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A short cinematic shot")
+                    .with_provider_options(provider_options(
+                        "alibaba",
+                        json!({ "pollIntervalMs": 1, "pollTimeoutMs": 100 }),
+                    )),
+            ),
+        );
+
+        assert_eq!(
+            result.videos,
+            vec![VideoModelVideoData::url(
+                Url::parse("https://dashscope-result.oss.aliyuncs.com/poll.mp4")
+                    .expect("valid URL"),
+                "video/mp4"
+            )]
+        );
+        assert_eq!(
+            *status_polls
+                .lock()
+                .expect("status poll mutex is not poisoned"),
+            3
+        );
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests.len(), 4);
+        assert!(requests[1].headers.get("x-dashscope-async").is_none());
+        assert_eq!(
+            requests[1].url,
+            "https://video.example.com/api/v1/tasks/task-poll"
+        );
+    }
+
+    #[test]
     fn alibaba_video_model_maps_i2v_r2v_resolution_and_warnings() {
         let (requests, transport) = video_success_transport();
         let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
@@ -3156,6 +3637,15 @@ mod tests {
         assert_eq!(r2v_body["parameters"]["size"], "1280*720");
     }
 
+    fn alibaba_video_error_message(result: &VideoModelResult) -> Option<&str> {
+        result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("alibaba"))
+            .and_then(|metadata| metadata.get("errorMessage"))
+            .and_then(|message| message.as_str())
+    }
+
     #[test]
     fn alibaba_video_model_maps_api_and_status_errors_to_metadata() {
         let transport: AlibabaTransport = Arc::new(move |request| -> AlibabaTransportFuture {
@@ -3218,6 +3708,100 @@ mod tests {
     }
 
     #[test]
+    fn alibaba_video_model_maps_missing_task_canceled_and_missing_url_errors() {
+        for (case, expected) in [
+            ("missing-task", "No task_id returned"),
+            ("canceled-task", "canceled"),
+            ("missing-url", "No video URL"),
+        ] {
+            let case_label = case.to_string();
+            let case_for_transport = case_label.clone();
+            let transport: AlibabaTransport = Arc::new(move |request| -> AlibabaTransportFuture {
+                let response = match (
+                    case_for_transport.as_str(),
+                    request.method,
+                    request.url.as_str(),
+                ) {
+                    (
+                        "missing-task",
+                        ProviderApiRequestMethod::Post,
+                        "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
+                    ) => json_response(json!({
+                        "output": null,
+                        "request_id": "req-missing-task"
+                    })),
+                    (
+                        "canceled-task",
+                        ProviderApiRequestMethod::Post,
+                        "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
+                    ) => json_response(json!({
+                        "output": {
+                            "task_status": "PENDING",
+                            "task_id": "canceled-task"
+                        }
+                    })),
+                    (
+                        "canceled-task",
+                        ProviderApiRequestMethod::Get,
+                        "https://dashscope-intl.aliyuncs.com/api/v1/tasks/canceled-task",
+                    ) => json_response(json!({
+                        "output": {
+                            "task_id": "canceled-task",
+                            "task_status": "CANCELED"
+                        }
+                    })),
+                    (
+                        "missing-url",
+                        ProviderApiRequestMethod::Post,
+                        "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
+                    ) => json_response(json!({
+                        "output": {
+                            "task_status": "PENDING",
+                            "task_id": "missing-url-task"
+                        }
+                    })),
+                    (
+                        "missing-url",
+                        ProviderApiRequestMethod::Get,
+                        "https://dashscope-intl.aliyuncs.com/api/v1/tasks/missing-url-task",
+                    ) => json_response(json!({
+                        "output": {
+                            "task_id": "missing-url-task",
+                            "task_status": "SUCCEEDED",
+                            "video_url": null
+                        }
+                    })),
+                    _ => ProviderApiResponse::text(
+                        404,
+                        "Not Found",
+                        json!({ "message": "unexpected request" }).to_string(),
+                    ),
+                };
+
+                Box::pin(ready(Ok(response)))
+            });
+            let provider =
+                create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+                    .with_transport(transport)
+                    .with_current_date(fixed_timestamp);
+
+            let result = poll_ready(
+                provider
+                    .video("wan2.6-t2v")
+                    .do_generate(VideoModelCallOptions::new(1).with_prompt("bad")),
+            );
+
+            assert!(result.videos.is_empty());
+            assert!(
+                alibaba_video_error_message(&result)
+                    .is_some_and(|message| message.contains(expected)),
+                "expected {case_label} error to contain {expected:?}, got {:?}",
+                alibaba_video_error_message(&result)
+            );
+        }
+    }
+
+    #[test]
     fn alibaba_provider_reports_unsupported_model_families_and_trait_video() {
         let provider = AlibabaProvider::new();
         let embedding_error = match provider.embedding_model("some-model") {
@@ -3273,6 +3857,62 @@ mod tests {
         assert_eq!(
             DEFAULT_ALIBABA_VIDEO_BASE_URL,
             "https://dashscope-intl.aliyuncs.com"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires ALIBABA_API_KEY and makes a live Alibaba chat request"]
+    fn live_alibaba_chat_generate_text_smoke_when_env_present() {
+        if std::env::var("ALIBABA_API_KEY").is_err() {
+            eprintln!("missing ALIBABA_API_KEY; skipping live Alibaba chat smoke");
+            return;
+        }
+        let model_id =
+            std::env::var("ALIBABA_CHAT_MODEL").unwrap_or_else(|_| "qwen-plus".to_string());
+
+        let result = poll_ready(AlibabaProvider::new().chat_model(model_id).do_generate(
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Reply with a short acknowledgement."),
+                )]),
+            )]),
+        ));
+
+        assert_ne!(result.finish_reason.unified, FinishReason::Error);
+        assert!(result.content.iter().any(|content| {
+            matches!(content, LanguageModelContent::Text(text) if !text.text.trim().is_empty())
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires ALIBABA_API_KEY, ALIBABA_LIVE_VIDEO=1, and makes a live Alibaba video request"]
+    fn live_alibaba_video_generate_smoke_when_env_present() {
+        if std::env::var("ALIBABA_API_KEY").is_err() {
+            eprintln!("missing ALIBABA_API_KEY; skipping live Alibaba video smoke");
+            return;
+        }
+        if std::env::var("ALIBABA_LIVE_VIDEO").ok().as_deref() != Some("1") {
+            eprintln!("set ALIBABA_LIVE_VIDEO=1 to run the live Alibaba video smoke");
+            return;
+        }
+        let model_id =
+            std::env::var("ALIBABA_VIDEO_MODEL").unwrap_or_else(|_| "wan2.6-t2v".to_string());
+
+        let result = poll_until_ready(
+            AlibabaProvider::new().video(model_id).do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A calm three second abstract light pattern")
+                    .with_provider_options(provider_options(
+                        "alibaba",
+                        json!({ "pollIntervalMs": 1_000, "pollTimeoutMs": 120_000 }),
+                    )),
+            ),
+        );
+
+        assert!(
+            !result.videos.is_empty(),
+            "expected a live Alibaba video URL, got {:?}",
+            alibaba_video_error_message(&result)
         );
     }
 }

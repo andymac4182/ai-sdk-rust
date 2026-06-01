@@ -214,15 +214,38 @@ prints `missing Vercel sandbox credentials; skipping live smoke` and returns.
 
 ## Provider API Proofs
 
-Current registered direct-provider live tests: none outside Vercel AI Gateway.
 Provider packages use deterministic transport, fixture, and error-mapping tests
-in normal runs. New direct-provider live tests must be `#[ignore]`, skip with a
+in normal runs. Direct-provider live tests must be `#[ignore]`, skip with a
 clear missing-env message, and be added to this table before use.
+
+Registered direct-provider safe compile commands:
+
+```sh
+cargo test -p ai-sdk-alibaba live_alibaba_chat_generate_text_smoke_when_env_present
+cargo test -p ai-sdk-alibaba live_alibaba_video_generate_smoke_when_env_present
+```
+
+Alibaba live smoke commands:
+
+```sh
+ALIBABA_API_KEY=... cargo test -p ai-sdk-alibaba live_alibaba_chat_generate_text_smoke_when_env_present -- --ignored --nocapture
+ALIBABA_API_KEY=... ALIBABA_LIVE_VIDEO=1 cargo test -p ai-sdk-alibaba live_alibaba_video_generate_smoke_when_env_present -- --ignored --nocapture
+```
+
+Expected behavior: the chat smoke makes one live DashScope-compatible chat call
+and asserts non-empty text. The video smoke submits one native DashScope video
+task, polls until a video URL is returned, and is additionally gated by
+`ALIBABA_LIVE_VIDEO=1` to avoid accidental media spend.
+
+Skip semantics: both Alibaba tests are `#[ignore]`. If run with `-- --ignored`
+without `ALIBABA_API_KEY`, they print a skip message and return. The video test
+also skips unless `ALIBABA_LIVE_VIDEO=1` is set.
 
 Credential names already used by provider constructors:
 
 | Provider surface | Environment variables |
 | --- | --- |
+| Alibaba Cloud DashScope | `ALIBABA_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
 | Azure OpenAI | `AZURE_API_KEY`, `AZURE_RESOURCE_NAME` |
 | Baseten | `BASETEN_API_KEY` |

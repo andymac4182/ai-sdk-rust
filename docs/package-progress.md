@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 87.0%
-- Portable package average: 83.9%
-- Closed package rows: 38 / 52
-- Strict portable verified rows: 28 / 42
-- In-progress rows: 14
+- Average estimated completion: 87.6%
+- Portable package average: 84.6%
+- Closed package rows: 39 / 52
+- Strict portable verified rows: 29 / 42
+- In-progress rows: 13
 - Not-started rows: 0
 
 ## 100% Closed
@@ -21,6 +21,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/anthropic` | 100% | Verified | provider package |
 | `@ai-sdk/google` | 100% | Verified | provider package |
+| `@ai-sdk/alibaba` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
 | `@ai-sdk/azure` | 100% | Verified | provider package |
 | `@ai-sdk/baseten` | 100% | Verified | provider package |
@@ -60,7 +61,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/amazon-bedrock` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, chat, and image provider wrapper exists; files, video, xAI server tools, custom usage/message... |
-| `@ai-sdk/alibaba` | 70% | In progress | provider package | Initial provider crate exists with mapped deterministic chat/video provider, usage, cache-control, message-conversion,... |
 | `@ai-sdk/black-forest-labs` | 80% | In progress | provider package | Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures... |
 | `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current... |
 | `@ai-sdk/fal` | 65% | In progress | provider package | Image and video media generation landed with request/response, queue polling, warning, download, and error metadata... |
