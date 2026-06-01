@@ -89,6 +89,7 @@ const OPEN_AGENTS_GATEWAY_APP_NAME: &str = "Open Agents";
 const ASK_USER_TOOL_CALL_ID: &str = "ask-user-question";
 const SANDBOX_TOOL_CALL_ID: &str = "sandbox-pwd";
 const SANDBOX_APPROVAL_ID: &str = "sandbox-pwd-approval";
+const JUST_BASH_CONFORMANCE_TOOL_CALL_ID: &str = "just-bash-conformance";
 
 /// Deployable Open Agents service with Slack HTTP routes and local runtime
 /// wiring.
@@ -1539,6 +1540,11 @@ impl ScriptedRunScenario {
     fn wants_sandbox_error(&self) -> bool {
         self.prompt.to_ascii_lowercase().contains("sandbox error")
     }
+
+    fn wants_just_bash_conformance(&self) -> bool {
+        let prompt = self.prompt.to_ascii_lowercase();
+        prompt.contains("just bash conformance") || prompt.contains("just-bash conformance")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1734,31 +1740,34 @@ impl ExperimentalSandbox for ServiceExperimentalSandbox {
 
     fn run_command(&self, options: AiSandboxCommandOptions) -> SandboxRunCommandFuture {
         let connect = self.connect.clone();
-        Box::pin(async move {
-            let sandbox = match connect_sandbox(connect) {
-                Ok(sandbox) => sandbox,
-                Err(error) => {
-                    return AiSandboxCommandResult::new(1)
-                        .with_stderr(format!("failed to connect sandbox: {error}"));
-                }
-            };
-            let mut exec_options = SandboxExecOptions::new(options.command);
-            if let Some(cwd) = options.working_directory {
-                exec_options = exec_options.with_cwd(cwd);
-            }
-            match sandbox.exec(exec_options) {
-                Ok(result) => {
-                    AiSandboxCommandResult::new(result.exit_code.unwrap_or(if result.success {
-                        0
-                    } else {
-                        1
-                    }))
-                    .with_stdout(result.stdout)
-                    .with_stderr(result.stderr)
-                }
-                Err(error) => AiSandboxCommandResult::new(1).with_stderr(error.to_string()),
-            }
-        })
+        Box::pin(async move { run_service_sandbox_command(connect, options) })
+    }
+}
+
+fn run_service_sandbox_command(
+    connect: SandboxConnectConfig,
+    options: AiSandboxCommandOptions,
+) -> AiSandboxCommandResult {
+    let sandbox = match connect_sandbox(connect) {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            return AiSandboxCommandResult::new(1)
+                .with_stderr(format!("failed to connect sandbox: {error}"));
+        }
+    };
+    let mut exec_options = SandboxExecOptions::new(options.command);
+    if let Some(cwd) = options.working_directory {
+        exec_options = exec_options.with_cwd(cwd);
+    }
+    match sandbox.exec(exec_options) {
+        Ok(result) => AiSandboxCommandResult::new(result.exit_code.unwrap_or(if result.success {
+            0
+        } else {
+            1
+        }))
+        .with_stdout(result.stdout)
+        .with_stderr(result.stderr),
+        Err(error) => AiSandboxCommandResult::new(1).with_stderr(error.to_string()),
     }
 }
 
@@ -1989,6 +1998,14 @@ impl DurableRunAgent for LocalScriptedAgent {
                 ],
             });
         }
+
+        if scenario.wants_just_bash_conformance() {
+            let report = run_just_bash_conformance_probe(&context.run_id, &scenario)?;
+            return Ok(DurableRunAgentOutput::Finished {
+                chunks: chunks_from_just_bash_conformance_report(&context.run_id, report),
+            });
+        }
+
         let sandbox = connect_sandbox(scenario.sandbox.connect.clone())
             .map_err(|error| DurableRunAgentError::new(error.to_string()))?;
         let mut exec_options = SandboxExecOptions::new("pwd");
@@ -2046,6 +2063,193 @@ impl DurableRunAgent for LocalScriptedAgent {
 
         Ok(DurableRunAgentOutput::Finished { chunks })
     }
+}
+
+fn run_just_bash_conformance_probe(
+    run_id: &str,
+    scenario: &ScriptedRunScenario,
+) -> Result<serde_json::Value, DurableRunAgentError> {
+    let cwd = scenario.runtime_request.sandbox.working_directory.clone();
+    let write = run_probe_command(
+        scenario,
+        "mkdir -p reports && printf 'alpha' > reports/probe.txt",
+        &cwd,
+    );
+    expect_probe_success("write virtual file", &write)?;
+
+    let append = run_probe_command(scenario, "printf '\\nbeta' >> reports/probe.txt", &cwd);
+    expect_probe_success("append virtual file", &append)?;
+
+    let persisted = run_probe_command(scenario, "cat reports/probe.txt", &cwd);
+    expect_probe_success("read persisted virtual file", &persisted)?;
+    if persisted.stdout != "alpha\nbeta" {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash virtual FS persistence mismatch: {:?}",
+            persisted.stdout
+        )));
+    }
+
+    let mut_cwd_env = run_probe_command(
+        scenario,
+        "mkdir -p nested && export TEMP_VALUE=present; cd nested; pwd; echo $TEMP_VALUE",
+        &cwd,
+    );
+    expect_probe_success("mutate cwd and env", &mut_cwd_env)?;
+    if mut_cwd_env.stdout != "/workspace/nested\npresent\n" {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash cwd/env mutation probe mismatch: {:?}",
+            mut_cwd_env.stdout
+        )));
+    }
+
+    let reset = run_probe_command(scenario, "pwd; echo $TEMP_VALUE", &cwd);
+    expect_probe_success("verify cwd/env reset", &reset)?;
+    if reset.stdout != "/workspace\n\n" {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash cwd/env reset mismatch: {:?}",
+            reset.stdout
+        )));
+    }
+
+    let missing = run_probe_command(scenario, "cat reports/missing.txt", &cwd);
+    if missing.exit_code != 1 || !missing.stderr.contains("No such file or directory") {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash missing-file failure mismatch: exit={} stderr={:?}",
+            missing.exit_code, missing.stderr
+        )));
+    }
+
+    let unsupported = run_probe_command(scenario, "python -c 'print(1)'", &cwd);
+    if unsupported.exit_code != 127 || !unsupported.stderr.contains("command not found") {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash unsupported-command failure mismatch: exit={} stderr={:?}",
+            unsupported.exit_code, unsupported.stderr
+        )));
+    }
+
+    let host_shell = run_probe_command(scenario, "/bin/bash -lc 'printf host-fallback'", &cwd);
+    if host_shell.exit_code != 127
+        || host_shell.stdout.contains("host-fallback")
+        || !host_shell.stderr.contains("No such file or directory")
+    {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash host-shell fallback probe mismatch: exit={} stdout={:?} stderr={:?}",
+            host_shell.exit_code, host_shell.stdout, host_shell.stderr
+        )));
+    }
+
+    let corpus = [
+        ("echo", "echo corpus-ok", "corpus-ok\n"),
+        ("pwd", "pwd", "/workspace\n"),
+        (
+            "redirection",
+            "printf 'shared' > corpus.txt; cat corpus.txt",
+            "shared",
+        ),
+        (
+            "mkdir-touch-ls",
+            "mkdir -p corpus && touch corpus/item.txt && ls corpus",
+            "item.txt\n",
+        ),
+    ];
+    let mut corpus_cases = Vec::new();
+    for (name, command, expected_stdout) in corpus {
+        let result = run_probe_command(scenario, command, &cwd);
+        expect_probe_success(name, &result)?;
+        if result.stdout != expected_stdout {
+            return Err(DurableRunAgentError::new(format!(
+                "Just Bash corpus case {name} stdout mismatch: {:?}",
+                result.stdout
+            )));
+        }
+        corpus_cases.push(json!({
+            "name": name,
+            "command": command,
+            "stdout": result.stdout,
+        }));
+    }
+
+    let false_result = run_probe_command(scenario, "false", &cwd);
+    if false_result.exit_code != 1 || !false_result.stdout.is_empty() {
+        return Err(DurableRunAgentError::new(format!(
+            "Just Bash false corpus case mismatch: exit={} stdout={:?}",
+            false_result.exit_code, false_result.stdout
+        )));
+    }
+    corpus_cases.push(json!({
+        "name": "false",
+        "command": "false",
+        "exitCode": false_result.exit_code,
+    }));
+
+    Ok(json!({
+        "runId": run_id,
+        "workingDirectory": cwd,
+        "persistedContent": persisted.stdout,
+        "cwdEnvMutationStdout": mut_cwd_env.stdout,
+        "cwdEnvResetStdout": reset.stdout,
+        "missingFileExitCode": missing.exit_code,
+        "unsupportedCommandExitCode": unsupported.exit_code,
+        "hostShellExitCode": host_shell.exit_code,
+        "hostShellStdout": host_shell.stdout,
+        "corpusCases": corpus_cases,
+        "adapter": "ServiceExperimentalSandbox",
+    }))
+}
+
+fn run_probe_command(
+    scenario: &ScriptedRunScenario,
+    command: impl Into<String>,
+    cwd: &str,
+) -> AiSandboxCommandResult {
+    run_service_sandbox_command(
+        scenario.sandbox.connect.clone(),
+        AiSandboxCommandOptions::new(command).with_working_directory(cwd.to_string()),
+    )
+}
+
+fn expect_probe_success(
+    label: &str,
+    result: &AiSandboxCommandResult,
+) -> Result<(), DurableRunAgentError> {
+    if result.exit_code == 0 {
+        Ok(())
+    } else {
+        Err(DurableRunAgentError::new(format!(
+            "Just Bash probe {label} failed: exit={} stdout={:?} stderr={:?}",
+            result.exit_code, result.stdout, result.stderr
+        )))
+    }
+}
+
+fn chunks_from_just_bash_conformance_report(
+    run_id: &str,
+    report: serde_json::Value,
+) -> Vec<UiMessageChunk> {
+    vec![
+        UiMessageChunk::start_with_message_id(assistant_message_id(
+            run_id,
+            DurableRunState::Finished,
+        )),
+        UiMessageChunk::start_step(),
+        UiMessageChunk::text_start("text-1"),
+        UiMessageChunk::text_delta(
+            "text-1",
+            "Just Bash conformance probe passed in /workspace: virtual FS persisted, cwd/env reset, failures stayed shell-shaped, and host shell fallback was blocked.",
+        ),
+        UiMessageChunk::text_end("text-1"),
+        UiMessageChunk::tool_input_available(
+            JUST_BASH_CONFORMANCE_TOOL_CALL_ID,
+            "bash",
+            json!({
+                "command": "Open Agents Just Bash conformance smoke",
+                "cwd": JUST_BASH_DEFAULT_WORKING_DIRECTORY,
+            }),
+        ),
+        UiMessageChunk::tool_output_available(JUST_BASH_CONFORMANCE_TOOL_CALL_ID, report),
+        UiMessageChunk::finish_step(),
+        UiMessageChunk::finish_with_reason(FinishReason::Stop),
+    ]
 }
 
 /// Errors returned by the composed Open Agents service.
@@ -3084,6 +3288,70 @@ mod tests {
         assert!(assistant_json.contains("tool-bash"));
         assert!(assistant_json.contains("/workspace"));
         assert!(!assistant_json.contains("/bin/bash"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn slack_app_mention_runs_just_bash_conformance_probe_through_service_adapter() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000106";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "run just bash conformance proof",
+                "EvJustBashConformance",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let runtime = server.service.local_runtime();
+        let mapping = runtime
+            .mapping_for_slack_thread_id(&thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let session = runtime
+            .persistence
+            .get_session(&mapping.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let sandbox_state = session.sandbox_state.expect("sandbox state");
+        assert_eq!(sandbox_state.provider, "just-bash");
+
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Finished);
+        let messages = runtime
+            .persistence
+            .list_chat_messages(&mapping.chat_id)
+            .await
+            .unwrap();
+        let assistant_json = serde_json::to_string(&messages[1].parts).unwrap();
+        assert!(assistant_json.contains("Just Bash conformance probe passed"));
+        assert!(assistant_json.contains(JUST_BASH_CONFORMANCE_TOOL_CALL_ID));
+        assert!(assistant_json.contains("ServiceExperimentalSandbox"));
+        assert!(assistant_json.contains("persistedContent"));
+        assert!(assistant_json.contains("missingFileExitCode"));
+        assert!(assistant_json.contains("hostShellExitCode"));
+        assert!(!assistant_json.contains("host-fallback"));
+
+        let state: SandboxState = serde_json::from_value(sandbox_state.raw).unwrap();
+        let sandbox = connect_sandbox(SandboxConnectConfig::new(state)).unwrap();
+        assert_eq!(
+            sandbox.read_file("reports/probe.txt").unwrap(),
+            "alpha\nbeta"
+        );
+        let reset = sandbox
+            .exec(SandboxExecOptions::new("pwd; echo $TEMP_VALUE"))
+            .unwrap();
+        assert_eq!(reset.stdout, "/workspace\n\n");
+
         server.stop().await;
     }
 

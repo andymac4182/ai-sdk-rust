@@ -25,7 +25,8 @@ language runtimes, or arbitrary host processes.
 The adapter runs in process with a virtual filesystem and exposes `/workspace`
 as the Open Agents working directory. The Open Agents smoke tests cover the
 default command path, filesystem persistence, per-exec env/cwd reset, failure
-mapping, and no-host-shell behavior.
+mapping, and no-host-shell behavior through both direct sandbox calls and the
+service sandbox command adapter used by the Open Agents runtime.
 
 Open Agents fixture coverage currently exercises:
 
@@ -62,6 +63,15 @@ external backends:
 `--check-config` prints `sandbox=just-bash` and
 `sandbox_working_directory=/workspace` for the default route.
 
+Focused local operator command:
+
+```sh
+scripts/open-agents-local-e2e.sh --just-bash-conformance
+```
+
+That command runs the Slack service-route conformance probe plus the focused
+Open Agents sandbox adapter tests.
+
 ## Ledger Rows
 
 The generated Just Bash inventory in `docs/open-agents/just-bash-parity.md`
@@ -74,6 +84,7 @@ are tracked in `docs/open-agents/upstream-parity.md`.
 | Just Bash `Bash` uses a virtual filesystem and restores per-exec cwd/env | `just_bash_resets_env_and_cwd_between_exec_calls` | covered-adapter | Proves Open Agents starts each tool call from the configured virtual cwd/env while retaining virtual FS mutations. |
 | Just Bash in-memory filesystem persists files across executions | `just_bash_persists_virtual_files_across_exec_calls` | covered-adapter | Covers Open Agents sandbox persistence across tool calls through the shared crate. |
 | Open Agents bash tool can run simple commands through a sandbox without Vercel credentials | `slack_app_mention_routes_bash_tool_call_through_just_bash_without_vercel_credentials` | covered-adapter | Proves Slack-started Open Agents fixture routing uses the safe backend. |
+| Open Agents service/runtime executes a Just Bash conformance smoke through the sandbox command adapter | `slack_app_mention_runs_just_bash_conformance_probe_through_service_adapter` | covered-service | Signed Slack route proves virtual FS persistence, cwd/env reset, shell-shaped failure mapping, no host `/bin/bash` fallback, and a small shared command corpus through `ServiceExperimentalSandbox`. |
 | Open Agents bash approval policy still gates risky commands | `open_agent_risky_commands_need_approval` | covered | Existing approval logic remains unchanged. |
 | Unsupported Just Bash commands must not fall back to host processes | `just_bash_maps_failures_to_shell_shaped_exec_results` | covered-adapter | Unsupported commands return `127` from the crate-backed runtime. |
 | External sandbox backends stay explicit options | `from_reader_accepts_explicit_local_sandbox_for_host_process_backend`; `from_reader_accepts_vercel_sandbox_selection_without_credentials` | covered | Local and Vercel remain selectable, but no longer the default safe backend. |

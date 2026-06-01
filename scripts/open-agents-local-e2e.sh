@@ -19,6 +19,8 @@ Commands:
   --check-config   Run service config validation with local fixture secrets.
   --fixture        Run the deterministic open-agents-service fixture.
   --emulator       Run the Slack emulator-backed local E2E proof.
+  --just-bash-conformance
+                   Run the focused Open Agents Just Bash conformance proof.
   --test           Run cargo test -p open-agents-service.
   --live-gateway   Run the ignored Open Agents live AI Gateway smoke.
   --all-local      Run --check-config, --fixture, --emulator, and --test.
@@ -37,7 +39,7 @@ print_matrix() {
 | Waiting, answer, approval, cancel | Emulator-backed question/approval prompts plus direct signed answer/approval/cancel block action payloads | Live Slack interaction proof still TODO |
 | Outbound Slack message/update | Emulator Web API state assertions for postMessage; Slack outbound body tests cover post/update shapes | Emulator-backed chat.update scenario still TODO |
 | Persistence | In-memory service route run and active-run keys | Postgres-backed persistence still TODO |
-| Sandbox command | Service route records bash pwd proof through the crate-backed Just Bash virtual backend | Live Vercel sandbox and git automation proof still TODO |
+| Sandbox command | Service route records bash pwd proof and focused Just Bash conformance through the crate-backed virtual backend | Live Vercel sandbox and git automation proof still TODO |
 | Model/sandbox errors | Scripted local model and sandbox failures persist failed run status and notify Slack | Live Gateway/Vercel failure proof still TODO |
 | Git automation summary | Finish actions can emit local git no-change/commit/PR/error summaries after completed runs | Live push/PR execution proof still TODO |
 | Health/readiness | Service health/readiness tests, manual probes, and emulator readiness polling | Live deployment probes still TODO |
@@ -51,6 +53,7 @@ scripts/open-agents-local-e2e.sh --matrix
 scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
 scripts/open-agents-local-e2e.sh --emulator
+scripts/open-agents-local-e2e.sh --just-bash-conformance
 cargo test -p open-agents-service
 
 The emulator lane starts emulate@0.6.0 programmatically, starts
@@ -58,6 +61,11 @@ open-agents-service, posts an app mention through the emulator Web API, sends a
 signed Events API payload to the service route, verifies DM routing, verifies
 direct signed answer/approval/cancel interaction payloads, and confirms replies
 through conversations.replies.
+
+The Just Bash conformance lane sends a signed Slack app mention through the
+Open Agents service route and verifies virtual FS persistence, cwd/env reset,
+failure mapping, a no-host-shell fallback probe, and a small shared command
+corpus through the service sandbox adapter.
 
 Credential-gated live model smoke:
 AI_GATEWAY_API_KEY=... scripts/open-agents-local-e2e.sh --live-gateway
@@ -88,6 +96,14 @@ run_tests() {
   (
     cd "$repo_root"
     cargo test -p open-agents-service
+  )
+}
+
+run_just_bash_conformance() {
+  (
+    cd "$repo_root"
+    cargo test -p open-agents-service slack_app_mention_runs_just_bash_conformance_probe_through_service_adapter
+    cargo test -p open-agents-sandbox just_bash
   )
 }
 
@@ -133,6 +149,9 @@ case "$command" in
     ;;
   --emulator)
     run_emulator
+    ;;
+  --just-bash-conformance)
+    run_just_bash_conformance
     ;;
   --test)
     run_tests

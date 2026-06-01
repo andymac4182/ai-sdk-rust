@@ -70,6 +70,7 @@ scripts/open-agents-local-e2e.sh --matrix
 scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
 scripts/open-agents-local-e2e.sh --emulator
+scripts/open-agents-local-e2e.sh --just-bash-conformance
 cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future
 cargo test -p open-agents-service
 ```
@@ -78,8 +79,11 @@ cargo test -p open-agents-service
 and points `OPEN_AGENTS_PLUGIN_ROOTS` at the checked-in minimal Open Plugin
 fixture when the shell has not selected plugin roots. `--fixture` drives the
 deterministic local Slack event harness. `--emulator` starts the local Slack
-emulator and service together. `--matrix` prints the coverage table from this
-guide for CI logs and local handoffs.
+emulator and service together. `--just-bash-conformance` drives a signed Slack
+app mention through the service route and verifies Just Bash virtual FS
+persistence, cwd/env reset, failure mapping, no host-shell fallback, and a small
+shared command corpus through the service sandbox adapter. `--matrix` prints
+the coverage table from this guide for CI logs and local handoffs.
 
 The cross-surface live and emulator command registry lives in
 `docs/live-integration-proof-registry.md`.
@@ -187,6 +191,9 @@ Expected assertions:
 - question answer, cancel, and approval block actions resume the paused durable
   state
 - scripted model and sandbox errors persist `failed` run status and notify Slack
+- Just Bash conformance runs through the Open Agents service sandbox adapter
+  with virtual FS persistence, cwd/env reset, failure mapping, no host-shell
+  fallback, and a small shared command corpus
 - enabled finish actions emit commit/PR/no-change/error summaries without
   corrupting the terminal run state
 
