@@ -73,10 +73,12 @@ cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generat
 cargo test -p open-agents-service
 ```
 
-`--check-config` supplies local fixture secrets if the shell has no Slack env.
-`--fixture` drives the deterministic local Slack event harness. `--emulator`
-starts the local Slack emulator and service together. `--matrix` prints the
-coverage table from this guide for CI logs and local handoffs.
+`--check-config` supplies local fixture secrets if the shell has no Slack env
+and points `OPEN_AGENTS_PLUGIN_ROOTS` at the checked-in minimal Open Plugin
+fixture when the shell has not selected plugin roots. `--fixture` drives the
+deterministic local Slack event harness. `--emulator` starts the local Slack
+emulator and service together. `--matrix` prints the coverage table from this
+guide for CI logs and local handoffs.
 
 The cross-surface live and emulator command registry lives in
 `docs/live-integration-proof-registry.md`.
@@ -125,6 +127,42 @@ export OPEN_AGENTS_GIT_FINISH_PR_REPOSITORY=owner/repo
 `disabled`, `dry-run`, or `execute`. Finish-action errors are emitted as Slack
 error messages after the completed run is persisted; they do not turn the
 completed Slack callback into a failed HTTP response.
+
+## Open Plugin Packages
+
+The service can load Open Plugin v1 packages from operator-provided package
+roots:
+
+```sh
+export OPEN_AGENTS_PLUGIN_ROOTS="/opt/open-agents/plugins/hello-plugin:/opt/open-agents/plugins/deploy-tools"
+export OPEN_AGENTS_PLUGIN_DATA_DIR="/var/lib/open-agents/plugin-data"
+cargo run -p open-agents-service --bin open-agents-slack -- --check-config
+```
+
+`OPEN_AGENTS_PLUGIN_ROOTS` uses the platform path-list separator (`:` on Unix,
+`;` on Windows). Each root must contain `.plugin/plugin.json`. The loader
+validates the plugin name, rejects manifest paths that do not start with `./` or
+that traverse outside the plugin root, discovers default `skills/` directories
+and `.mcp.json` files, and respects manifest-declared `skills` and
+`mcpServers` paths. Plugin skills are surfaced to the runtime as
+`{plugin-name}:{skill-name}` so they do not collide with project or global
+skills. MCP configs are validated and `${PLUGIN_ROOT}` and, when configured,
+`${PLUGIN_DATA}` are expanded, but the service does not start plugin MCP
+subprocesses yet. The runtime exposes a sanitized MCP planning surface with
+server names, source paths, command labels, env var names, and the recommended
+`mcp__plugin_{plugin}_{server}__<tool>` prefix.
+
+The local fixture is
+`crates/open-agents-service/fixtures/open-plugin/minimal`. It contains
+`.plugin/plugin.json`, `skills/greet/SKILL.md`, and `.mcp.json`. The
+no-credential verification commands are:
+
+```sh
+cargo test -p open-agents-service from_reader_loads_open_plugin_fixture_components
+cargo test -p open-agents-service local_runtime_exposes_open_plugin_components_without_starting_mcp
+cargo test -p open-agents-runtime open_agent_prepare_composes_prompt_context_model_and_tools
+scripts/open-agents-local-e2e.sh --check-config
+```
 
 ## Fixture Path
 
@@ -322,6 +360,10 @@ Optional production or live settings:
 - `OPEN_AGENTS_GIT_FINISH_PR_TITLE`, default `Open Agents changes`
 - `OPEN_AGENTS_GIT_FINISH_PR_BODY`, default checked-in service text
 - `OPEN_AGENTS_GIT_FINISH_PR_REPOSITORY`, optional `owner/repo` target
+- `OPEN_AGENTS_PLUGIN_ROOTS`, optional platform path-list of Open Plugin package
+  roots
+- `OPEN_AGENTS_PLUGIN_DATA_DIR`, optional host-managed data root expanded into
+  MCP config values as `${PLUGIN_DATA}`
 
 Optional live smoke settings:
 
@@ -415,6 +457,7 @@ path through a real Slack app once live outbound assertions are available.
 | Durable run completion | Covered locally through the service route with a scripted durable runtime; Gateway mode waits for async model completion and is credential-gated for live Gateway | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-service gateway_async_runner_waits_for_pending_generation_future`; `cargo test -p open-agents-service live_gateway_runtime_handles_app_mention_without_fixture_text -- --ignored --nocapture` | Live deployed Slack app proof still TODO |
 | Waiting, answer, approval, cancel | Emulator-backed question and approval prompts plus direct signed block action payloads; service answer/approval/cancel tests | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_approval_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
 | Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
+| Open Plugin components | Config validation loads `.plugin/plugin.json`, namespaced fixture skills, and sanitized MCP server planning metadata without live Slack, Gateway, Vercel, or subprocess execution | `scripts/open-agents-local-e2e.sh --check-config`; `cargo test -p open-agents-service from_reader_loads_open_plugin_fixture_components`; `cargo test -p open-agents-service local_runtime_exposes_open_plugin_components_without_starting_mcp`; `cargo test -p open-agents-runtime open_agent_prepare_composes_prompt_context_model_and_tools` | Executable plugin MCP adapters remain a pending OP-03/runtime adapter seam |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
 | Sandbox command | Local service route executes `sandbox.exec pwd`; Gateway runtime passes Open Agent tools through the selected sandbox command adapter; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel sandbox plus live git mutation proof remains credential-gated |
 | Model/sandbox errors | Scripted local model and sandbox failures persist failed run status, clear active run state, and post Slack errors | `cargo test -p open-agents-service scripted_runtime_failure_is_persisted_and_reported_to_slack` | Live Gateway/Vercel failure proof remains credential-gated |

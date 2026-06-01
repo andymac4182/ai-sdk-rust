@@ -21,6 +21,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some("--check-config") => {
             let config = OpenAgentsServiceConfig::from_env()?;
             println!("{}", config.operator_summary());
+            for diagnostic in config.plugin_catalog().diagnostics() {
+                println!("{diagnostic}");
+            }
             Ok(())
         }
         Some("--fixture") => run_fixture(),

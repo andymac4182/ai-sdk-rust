@@ -370,7 +370,7 @@ pub fn group_by_provider(options: &[ModelOption]) -> Vec<ModelGroup> {
             .push(option.clone());
     }
 
-    providers.sort_by(|left, right| provider_sort_key(left).cmp(&provider_sort_key(right)));
+    providers.sort_by_key(|provider| provider_sort_key(provider));
     providers
         .into_iter()
         .map(|provider| ModelGroup {

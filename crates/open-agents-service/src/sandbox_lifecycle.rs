@@ -309,9 +309,7 @@ pub fn sandbox_status_decision(
     lifecycle_failed: bool,
     runtime_active: bool,
 ) -> ReconnectRouteDecision {
-    if due {
-        ReconnectRouteDecision::RecoveredFailedLifecycle
-    } else if lifecycle_failed && runtime_active {
+    if due || (lifecycle_failed && runtime_active) {
         ReconnectRouteDecision::RecoveredFailedLifecycle
     } else {
         ReconnectRouteDecision::MarkExpired

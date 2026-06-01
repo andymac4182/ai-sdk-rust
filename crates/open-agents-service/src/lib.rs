@@ -9,6 +9,7 @@
 pub mod config;
 pub mod health;
 pub mod local_fixture;
+pub mod plugin;
 pub mod sandbox_lifecycle;
 pub mod service;
 pub mod session_routes;
@@ -26,6 +27,11 @@ pub use health::{
 pub use local_fixture::{
     FixtureError, FixtureHarness, FixtureOutbound, FixtureOutboundKind, FixtureReply, FixtureRun,
     FixtureRunStatus, SLACK_ACTION_ANSWER, SLACK_ACTION_CANCEL,
+};
+pub use plugin::{
+    OPEN_AGENTS_PLUGIN_DATA_DIR_ENV, OPEN_AGENTS_PLUGIN_ROOTS_ENV, OpenPluginCatalog,
+    OpenPluginDiagnostic, OpenPluginDiagnosticLevel, OpenPluginError, OpenPluginMcpServer,
+    OpenPluginPackage, OpenPluginSkill,
 };
 pub use sandbox_lifecycle::{
     ArchiveRecoveryPatch, LifecycleEvaluation, LifecycleKickDecision, LifecycleTiming,

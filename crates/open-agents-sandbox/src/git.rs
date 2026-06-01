@@ -996,6 +996,7 @@ pub struct ConversationMessage<'a> {
 
 /// Evaluates the local, already-fetched state needed before opening or syncing
 /// an automatic pull request.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_auto_pull_request(
     current_branch: Option<&str>,
     default_branch: &str,

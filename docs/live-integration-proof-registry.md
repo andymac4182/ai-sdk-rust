@@ -41,7 +41,17 @@ scripts/open-agents-local-e2e.sh --check-config
 scripts/open-agents-local-e2e.sh --fixture
 scripts/open-agents-local-e2e.sh --emulator
 cargo test -p open-agents-service
+cargo test -p open-agents-service from_reader_loads_open_plugin_fixture_components
+cargo test -p open-agents-service local_runtime_exposes_open_plugin_components_without_starting_mcp
+cargo test -p open-agents-runtime open_agent_prepare_composes_prompt_context_model_and_tools
 ```
+
+`scripts/open-agents-local-e2e.sh --check-config` defaults
+`OPEN_AGENTS_PLUGIN_ROOTS` to
+`crates/open-agents-service/fixtures/open-plugin/minimal` when the shell has not
+selected plugin roots, so this no-credentials lane validates `.plugin/plugin.json`,
+`skills/greet/SKILL.md`, and `.mcp.json` discovery without starting MCP
+subprocesses.
 
 Live outbound adapter proof:
 

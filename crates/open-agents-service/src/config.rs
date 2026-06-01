@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use open_agents_sandbox::GitRemoteActionMode;
 use open_agents_slack::SlackIngressMode;
 
+use crate::plugin::{
+    OPEN_AGENTS_PLUGIN_DATA_DIR_ENV, OPEN_AGENTS_PLUGIN_ROOTS_ENV, OpenPluginCatalog,
+};
+
 const DEFAULT_GATEWAY_MODEL_ID: &str = "openai/gpt-4.1-mini";
 const DEFAULT_GATEWAY_MAX_STEPS: usize = 8;
 const DEFAULT_GATEWAY_MAX_OUTPUT_TOKENS: u64 = 2048;
@@ -158,6 +162,7 @@ pub struct OpenAgentsServiceConfig {
     tool_approval: AgentToolApprovalMode,
     finish_actions: AgentFinishActions,
     github_token: Option<String>,
+    plugin_catalog: OpenPluginCatalog,
 }
 
 impl fmt::Debug for OpenAgentsServiceConfig {
@@ -189,6 +194,7 @@ impl fmt::Debug for OpenAgentsServiceConfig {
                 "github_token",
                 &self.github_token.as_ref().map(|_| "<redacted>"),
             )
+            .field("plugin_catalog", &self.plugin_catalog)
             .finish()
     }
 }
@@ -272,6 +278,11 @@ impl OpenAgentsServiceConfig {
         let github_token = present(read_var("OPEN_AGENTS_GITHUB_TOKEN"))
             .or_else(|| present(read_var("GITHUB_TOKEN")))
             .or_else(|| present(read_var("GH_TOKEN")));
+        let plugin_catalog = OpenPluginCatalog::from_env_values(
+            present(read_var(OPEN_AGENTS_PLUGIN_ROOTS_ENV)),
+            present(read_var(OPEN_AGENTS_PLUGIN_DATA_DIR_ENV)),
+        )
+        .map_err(|error| ConfigError::PluginConfig(error.to_string()))?;
 
         Ok(Self {
             bind_addr,
@@ -290,6 +301,7 @@ impl OpenAgentsServiceConfig {
             tool_approval,
             finish_actions,
             github_token,
+            plugin_catalog,
         })
     }
 
@@ -316,6 +328,7 @@ impl OpenAgentsServiceConfig {
             tool_approval: AgentToolApprovalMode::Sensitive,
             finish_actions: AgentFinishActions::default(),
             github_token: None,
+            plugin_catalog: OpenPluginCatalog::default(),
         }
     }
 
@@ -399,10 +412,15 @@ impl OpenAgentsServiceConfig {
         self.github_token.as_deref()
     }
 
+    /// Open Plugin packages loaded for this service.
+    pub fn plugin_catalog(&self) -> &OpenPluginCatalog {
+        &self.plugin_catalog
+    }
+
     /// Redacted summary safe to print in operator logs.
     pub fn operator_summary(&self) -> String {
         format!(
-            "bind_addr={} state={} slack_ingress={} sandbox={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} finish_git={} finish_push={} finish_pr={} github_token={}",
+            "bind_addr={} state={} slack_ingress={} sandbox={} runtime={} slack_bot_token={} signing_secret={} socket_mode_token={} slack_api_url={} model_credential={} model={} model_max_steps={} model_max_output_tokens={} tool_approval={} finish_git={} finish_push={} finish_pr={} github_token={} plugin_roots={} plugins={} plugin_skills={} plugin_mcp_servers={} plugin_data_dir={} plugin_diagnostics={}",
             self.bind_addr,
             self.state_store.label(),
             slack_ingress_label(self.slack_ingress),
@@ -421,6 +439,16 @@ impl OpenAgentsServiceConfig {
             git_remote_action_label(self.finish_actions.push_mode),
             git_remote_action_label(self.finish_actions.pull_request_mode),
             present_label(self.github_token.as_ref()),
+            self.plugin_catalog.roots().len(),
+            self.plugin_catalog.packages().len(),
+            self.plugin_catalog.runtime_skills().len(),
+            self.plugin_catalog.runtime_mcp_servers().len(),
+            if self.plugin_catalog.data_dir().is_some() {
+                "present"
+            } else {
+                "missing"
+            },
+            self.plugin_catalog.diagnostics().len(),
         )
     }
 }
@@ -436,6 +464,8 @@ pub enum ConfigError {
         value: String,
         expected: &'static str,
     },
+    /// Open Plugin package configuration failed to load.
+    PluginConfig(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -452,6 +482,9 @@ impl fmt::Display for ConfigError {
                 formatter,
                 "{name}={value:?} is invalid: expected {expected}"
             ),
+            Self::PluginConfig(message) => {
+                write!(formatter, "Open Plugin config is invalid: {message}")
+            }
         }
     }
 }
@@ -682,6 +715,8 @@ fn parse_u64(raw: Option<&str>, name: &'static str, default: u64) -> Result<u64,
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::env;
+    use std::path::PathBuf;
 
     fn load(
         pairs: &[(&'static str, &'static str)],
@@ -691,6 +726,17 @@ mod tests {
             .map(|(key, value)| (*key, (*value).to_string()))
             .collect();
         OpenAgentsServiceConfig::from_reader(|name| vars.get(name).cloned())
+    }
+
+    fn load_owned(
+        pairs: &[(&'static str, String)],
+    ) -> Result<OpenAgentsServiceConfig, ConfigError> {
+        let vars: HashMap<&'static str, String> = pairs.iter().cloned().collect();
+        OpenAgentsServiceConfig::from_reader(|name| vars.get(name).cloned())
+    }
+
+    fn plugin_fixture_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/open-plugin/minimal")
     }
 
     #[test]
@@ -812,6 +858,88 @@ mod tests {
         assert_eq!(
             config.finish_actions().pull_request_repository.as_deref(),
             Some("acme/service")
+        );
+    }
+
+    #[test]
+    fn from_reader_loads_open_plugin_fixture_components() {
+        let plugin_root = plugin_fixture_root()
+            .canonicalize()
+            .expect("fixture plugin root exists");
+        let data_dir = env::temp_dir().join("open-agents-service-plugin-data-fixture");
+        let plugin_roots = env::join_paths([plugin_root.clone()])
+            .expect("plugin roots join")
+            .into_string()
+            .expect("fixture path is utf-8");
+        let config = load_owned(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test".to_string()),
+            ("SLACK_SIGNING_SECRET", "signing-real-secret".to_string()),
+            (OPEN_AGENTS_PLUGIN_ROOTS_ENV, plugin_roots),
+            (
+                OPEN_AGENTS_PLUGIN_DATA_DIR_ENV,
+                data_dir.display().to_string(),
+            ),
+        ])
+        .unwrap();
+
+        let catalog = config.plugin_catalog();
+        assert_eq!(catalog.roots(), std::slice::from_ref(&plugin_root));
+        assert_eq!(catalog.packages().len(), 1);
+        assert!(catalog.diagnostics().is_empty());
+        assert_eq!(catalog.runtime_skills()[0].name, "hello-plugin:greet");
+        assert_eq!(
+            catalog.runtime_skills()[0].description,
+            "Greet a Slack user from the Open Plugin fixture"
+        );
+
+        let mcp = &catalog.packages()[0].mcp_servers[0];
+        assert_eq!(mcp.plugin_name, "hello-plugin");
+        assert_eq!(mcp.server_name, "echo");
+        let expected_command = format!("{}/bin/echo-mcp", plugin_root.display());
+        assert_eq!(mcp.command.as_deref(), Some(expected_command.as_str()));
+        assert!(
+            mcp.args
+                .iter()
+                .any(|arg| arg == &data_dir.join("hello-plugin").display().to_string())
+        );
+        assert_eq!(
+            mcp.env_keys,
+            vec![
+                "PLUGIN_FIXTURE_DATA".to_string(),
+                "PLUGIN_FIXTURE_ROOT".to_string()
+            ]
+        );
+
+        let runtime_mcp = &catalog.runtime_mcp_servers()[0];
+        assert_eq!(runtime_mcp.tool_prefix, "mcp__plugin_hello-plugin_echo__");
+        assert!(runtime_mcp.has_args);
+        assert_eq!(runtime_mcp.env_keys, mcp.env_keys);
+
+        let summary = config.operator_summary();
+        assert!(summary.contains("plugin_roots=1"));
+        assert!(summary.contains("plugins=1"));
+        assert!(summary.contains("plugin_skills=1"));
+        assert!(summary.contains("plugin_mcp_servers=1"));
+        assert!(summary.contains("plugin_data_dir=present"));
+        assert!(!summary.contains("xoxb-test"));
+        assert!(!summary.contains("signing-real-secret"));
+    }
+
+    #[test]
+    fn from_reader_reports_invalid_plugin_root() {
+        let missing_root = env::temp_dir().join("open-agents-missing-plugin-root");
+        let err = load_owned(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test".to_string()),
+            ("SLACK_SIGNING_SECRET", "secret".to_string()),
+            (
+                OPEN_AGENTS_PLUGIN_ROOTS_ENV,
+                missing_root.display().to_string(),
+            ),
+        ])
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigError::PluginConfig(message) if message.contains("failed to read plugin root"))
         );
     }
 

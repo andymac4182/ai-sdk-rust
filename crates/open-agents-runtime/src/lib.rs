@@ -39,10 +39,11 @@ pub use model_catalog::{
 };
 pub use open_agent::{
     DEFAULT_OPEN_AGENT_MODEL_LABEL, OpenAgent, OpenAgentCallOptions, OpenAgentError,
-    OpenAgentModelVariant, OpenAgentPreparedCall, OpenAgentSettings, OpenAgentSkillMetadata,
-    OpenAgentSkillOptions, OpenAgentSystemPromptOptions, OpenAgentUsageEvent, OpenAgentUsageHook,
-    ResolvedChatModelSelection, build_open_agent_system_prompt,
-    get_open_agent_provider_options_for_model, resolve_chat_model_selection,
+    OpenAgentModelVariant, OpenAgentPluginMcpServer, OpenAgentPreparedCall, OpenAgentSettings,
+    OpenAgentSkillMetadata, OpenAgentSkillOptions, OpenAgentSystemPromptOptions,
+    OpenAgentUsageEvent, OpenAgentUsageHook, ResolvedChatModelSelection,
+    build_open_agent_system_prompt, get_open_agent_provider_options_for_model,
+    resolve_chat_model_selection,
 };
 pub use open_agents_core::{AgentModelSelection, RemoteAgentIdentity};
 use open_agents_sandbox::SandboxContext;

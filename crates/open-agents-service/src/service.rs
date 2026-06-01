@@ -52,7 +52,10 @@ use open_agents_persistence::{
     SlackThreadMappingRepository,
 };
 use open_agents_runtime::RemoteAgentRunRequest;
-use open_agents_runtime::{OpenAgent, OpenAgentCallOptions, OpenAgentSettings};
+use open_agents_runtime::{
+    OpenAgent, OpenAgentCallOptions, OpenAgentPluginMcpServer, OpenAgentSettings,
+    OpenAgentSkillMetadata,
+};
 use open_agents_sandbox::{
     GitCredentials, GitFinishOptions, GitFinishReport, GitFinishStatus, GitSandbox,
     PullRequestOptions, PushOptions, SandboxConnectConfig, SandboxConnectOptions, SandboxContext,
@@ -298,6 +301,8 @@ pub struct LocalRuntimeRouter {
     sandbox: ServiceSandbox,
     model_id: String,
     finish_actions: AgentFinishActions,
+    plugin_skills: Vec<OpenAgentSkillMetadata>,
+    plugin_mcp_servers: Vec<OpenAgentPluginMcpServer>,
 }
 
 impl LocalRuntimeRouter {
@@ -320,6 +325,8 @@ impl LocalRuntimeRouter {
             sandbox: ServiceSandbox::from_config(config)?,
             model_id: config.model_id().to_string(),
             finish_actions: config.finish_actions().clone(),
+            plugin_skills: config.plugin_catalog().runtime_skills(),
+            plugin_mcp_servers: config.plugin_catalog().runtime_mcp_servers(),
         })
     }
 
@@ -337,6 +344,16 @@ impl LocalRuntimeRouter {
             .into_iter()
             .filter(|message| message.thread_id == thread_id)
             .collect()
+    }
+
+    /// Namespaced Open Plugin skills configured for runtime calls.
+    pub fn plugin_skills(&self) -> Vec<OpenAgentSkillMetadata> {
+        self.plugin_skills.clone()
+    }
+
+    /// Sanitized Open Plugin MCP servers configured for runtime planning.
+    pub fn plugin_mcp_servers(&self) -> Vec<OpenAgentPluginMcpServer> {
+        self.plugin_mcp_servers.clone()
     }
 
     /// Load the persisted Open Agents run for a Slack thread.
@@ -1506,6 +1523,8 @@ struct GatewayOpenAgentSettings {
     max_steps: usize,
     max_output_tokens: u64,
     tool_approval: AgentToolApprovalMode,
+    plugin_skills: Vec<OpenAgentSkillMetadata>,
+    plugin_mcp_servers: Vec<OpenAgentPluginMcpServer>,
 }
 
 impl fmt::Debug for GatewayOpenAgentSettings {
@@ -1532,6 +1551,8 @@ impl GatewayOpenAgentSettings {
             max_steps: config.model_max_steps(),
             max_output_tokens: config.model_max_output_tokens(),
             tool_approval: config.tool_approval(),
+            plugin_skills: config.plugin_catalog().runtime_skills(),
+            plugin_mcp_servers: config.plugin_catalog().runtime_mcp_servers(),
         })
     }
 }
@@ -1626,7 +1647,9 @@ async fn generate_gateway_result(
     let agent = OpenAgent::new(agent_settings);
     let mut call =
         OpenAgentCallOptions::from_prompt(scenario.prompt, scenario.runtime_request.sandbox)
-            .with_model(AgentModelSelection::new(settings.model_id));
+            .with_model(AgentModelSelection::new(settings.model_id))
+            .with_skills(settings.plugin_skills)
+            .with_plugin_mcp_servers(settings.plugin_mcp_servers);
     call.tool_loop_options = call
         .tool_loop_options
         .with_experimental_sandbox(sandbox)
@@ -2794,6 +2817,23 @@ mod tests {
         .unwrap()
     }
 
+    fn config_with_open_plugin_fixture() -> OpenAgentsServiceConfig {
+        let plugin_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/open-plugin/minimal")
+            .canonicalize()
+            .unwrap();
+        let data_dir = env::temp_dir().join("open-agents-service-plugin-data-runtime");
+        OpenAgentsServiceConfig::from_reader(|name| match name {
+            "SLACK_BOT_TOKEN" => Some("xoxb-fixture".to_string()),
+            "SLACK_SIGNING_SECRET" => Some("fixture-signing-secret".to_string()),
+            "OPEN_AGENTS_BIND_ADDR" => Some("127.0.0.1:0".to_string()),
+            crate::plugin::OPEN_AGENTS_PLUGIN_ROOTS_ENV => Some(plugin_root.display().to_string()),
+            crate::plugin::OPEN_AGENTS_PLUGIN_DATA_DIR_ENV => Some(data_dir.display().to_string()),
+            _ => None,
+        })
+        .unwrap()
+    }
+
     fn finish_git_config_with_sandbox_root(
         sandbox_root: &std::path::Path,
     ) -> OpenAgentsServiceConfig {
@@ -2885,6 +2925,33 @@ mod tests {
             .expect("Slack outbound adapter should be configured");
 
         assert_eq!(adapter.api_base(), DEFAULT_API_BASE);
+    }
+
+    #[tokio::test]
+    async fn local_runtime_exposes_open_plugin_components_without_starting_mcp() {
+        let service = OpenAgentsService::from_config(config_with_open_plugin_fixture()).unwrap();
+        let runtime = service.local_runtime();
+
+        let skills = runtime.plugin_skills();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "hello-plugin:greet");
+        assert!(skills[0].path.ends_with("skills/greet"));
+
+        let mcp_servers = runtime.plugin_mcp_servers();
+        assert_eq!(mcp_servers.len(), 1);
+        assert_eq!(mcp_servers[0].plugin_name, "hello-plugin");
+        assert_eq!(mcp_servers[0].server_name, "echo");
+        assert_eq!(
+            mcp_servers[0].tool_prefix,
+            "mcp__plugin_hello-plugin_echo__"
+        );
+        assert!(mcp_servers[0].has_args);
+        assert!(
+            mcp_servers[0]
+                .command
+                .as_deref()
+                .is_some_and(|command| command.ends_with("/bin/echo-mcp"))
+        );
     }
 
     #[tokio::test]

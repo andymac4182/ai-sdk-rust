@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "echo": {
+      "command": "${PLUGIN_ROOT}/bin/echo-mcp",
+      "args": ["--root", "${PLUGIN_ROOT}", "--data", "${PLUGIN_DATA}"],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "PLUGIN_FIXTURE_ROOT": "${PLUGIN_ROOT}",
+        "PLUGIN_FIXTURE_DATA": "${PLUGIN_DATA}"
+      }
+    }
+  }
+}

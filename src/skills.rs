@@ -1165,9 +1165,7 @@ impl AgentSkillsMemoryCache {
 
     fn get_key(&mut self, key: &str, now_ms: u64) -> Option<Vec<AgentSkillMetadata>> {
         self.prune(now_ms);
-        let Some(entry) = self.entries.get(key) else {
-            return None;
-        };
+        let entry = self.entries.get(key)?;
         if entry.expires_at_ms <= now_ms {
             self.entries.remove(key);
             return None;

@@ -122,6 +122,87 @@ impl OpenAgentSkillMetadata {
     }
 }
 
+/// Sanitized plugin MCP server metadata exposed to planning/runtime context.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAgentPluginMcpServer {
+    /// Open Plugin package name.
+    pub plugin_name: String,
+
+    /// MCP server name inside the plugin.
+    pub server_name: String,
+
+    /// Recommended MCP tool identifier prefix for tools from this server.
+    pub tool_prefix: String,
+
+    /// Manifest or config file source used for discovery.
+    pub source: String,
+
+    /// Expanded command, when the config uses a stdio-like command field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Expanded cwd, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+
+    /// Environment variable names configured for the server. Values are not
+    /// exposed to the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+
+    /// Whether the discovered config included argv entries. Argument values are
+    /// intentionally not exposed because they may contain operator secrets.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_args: bool,
+}
+
+impl OpenAgentPluginMcpServer {
+    /// Creates a sanitized plugin MCP planning surface.
+    pub fn new(
+        plugin_name: impl Into<String>,
+        server_name: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        let plugin_name = plugin_name.into();
+        let server_name = server_name.into();
+        Self {
+            tool_prefix: format!("mcp__plugin_{plugin_name}_{server_name}__"),
+            plugin_name,
+            server_name,
+            source: source.into(),
+            command: None,
+            cwd: None,
+            env_keys: Vec::new(),
+            has_args: false,
+        }
+    }
+
+    /// Sets the expanded command field.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
+        self
+    }
+
+    /// Sets the expanded cwd field.
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Sets configured environment variable names.
+    pub fn with_env_keys(mut self, env_keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.env_keys = env_keys.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Records whether argv entries were present.
+    pub const fn with_has_args(mut self, has_args: bool) -> Self {
+        self.has_args = has_args;
+        self
+    }
+}
+
 /// Usage event emitted when an Open Agent run finishes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenAgentUsageEvent {
@@ -342,6 +423,7 @@ pub struct OpenAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub subagent_model: Option<AgentModelSelection>,
     pub custom_instructions: Option<String>,
     pub skills: Vec<OpenAgentSkillMetadata>,
+    pub plugin_mcp_servers: Vec<OpenAgentPluginMcpServer>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> OpenAgentCallOptions<'a, M> {
@@ -354,6 +436,7 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgentCallOptions<'a, M> {
             subagent_model: None,
             custom_instructions: None,
             skills: Vec::new(),
+            plugin_mcp_servers: Vec::new(),
         }
     }
 
@@ -371,6 +454,7 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgentCallOptions<'a, M> {
             subagent_model: None,
             custom_instructions: None,
             skills: Vec::new(),
+            plugin_mcp_servers: Vec::new(),
         }
     }
 
@@ -404,6 +488,15 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgentCallOptions<'a, M> {
         self
     }
 
+    /// Sets discovered plugin MCP servers for planning/runtime context.
+    pub fn with_plugin_mcp_servers(
+        mut self,
+        servers: impl IntoIterator<Item = OpenAgentPluginMcpServer>,
+    ) -> Self {
+        self.plugin_mcp_servers = servers.into_iter().collect();
+        self
+    }
+
     /// Sets per-call model settings.
     pub fn with_model_settings(mut self, model_settings: ToolLoopAgentModelSettings) -> Self {
         self.tool_loop_options.model_settings = model_settings;
@@ -423,6 +516,7 @@ pub struct OpenAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub subagent_model_id: Option<String>,
     pub sandbox: SandboxContext,
     pub skills: Vec<OpenAgentSkillMetadata>,
+    pub plugin_mcp_servers: Vec<OpenAgentPluginMcpServer>,
     pub tool_loop: ToolLoopAgentPreparedCall<'a, M>,
 }
 
@@ -551,6 +645,7 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgent<'a, M> {
             subagent_model_id: metadata.subagent_model_id,
             sandbox: metadata.sandbox,
             skills: metadata.skills,
+            plugin_mcp_servers: metadata.plugin_mcp_servers,
             tool_loop,
         })
     }
@@ -605,6 +700,7 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgent<'a, M> {
             subagent_model,
             custom_instructions,
             skills,
+            plugin_mcp_servers,
         } = options;
         let sandbox = sandbox.ok_or(OpenAgentError::MissingSandbox)?;
         let model_selection =
@@ -625,12 +721,14 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgent<'a, M> {
             custom_instructions,
             environment_details: sandbox.environment_details.clone(),
             skills: skills.clone(),
+            plugin_mcp_servers: plugin_mcp_servers.clone(),
             model_id: Some(model_selection.id.clone()),
         };
         let instructions = build_open_agent_system_prompt(prompt_options);
         let runtime_context = open_agent_runtime_context(
             &sandbox,
             &skills,
+            &plugin_mcp_servers,
             &model_selection.id,
             subagent_model_id.as_deref(),
         );
@@ -683,6 +781,7 @@ impl<'a, M: LanguageModel + ?Sized> OpenAgent<'a, M> {
                 subagent_model_id,
                 sandbox,
                 skills,
+                plugin_mcp_servers,
             },
         ))
     }
@@ -693,6 +792,7 @@ struct OpenAgentPreparedMetadata {
     subagent_model_id: Option<String>,
     sandbox: SandboxContext,
     skills: Vec<OpenAgentSkillMetadata>,
+    plugin_mcp_servers: Vec<OpenAgentPluginMcpServer>,
 }
 
 /// Inputs used to build an Open Agent system prompt.
@@ -703,6 +803,7 @@ pub struct OpenAgentSystemPromptOptions {
     pub custom_instructions: Option<String>,
     pub environment_details: Option<String>,
     pub skills: Vec<OpenAgentSkillMetadata>,
+    pub plugin_mcp_servers: Vec<OpenAgentPluginMcpServer>,
     pub model_id: Option<String>,
 }
 
@@ -735,6 +836,10 @@ pub fn build_open_agent_system_prompt(options: OpenAgentSystemPromptOptions) -> 
 
     if let Some(skills) = build_skills_prompt(&options.skills) {
         parts.push(skills);
+    }
+
+    if let Some(plugin_mcp_servers) = build_plugin_mcp_prompt(&options.plugin_mcp_servers) {
+        parts.push(plugin_mcp_servers);
     }
 
     parts.join("\n")
@@ -815,12 +920,14 @@ pub fn get_open_agent_provider_options_for_model(
 fn open_agent_runtime_context(
     sandbox: &SandboxContext,
     skills: &[OpenAgentSkillMetadata],
+    plugin_mcp_servers: &[OpenAgentPluginMcpServer],
     model_id: &str,
     subagent_model_id: Option<&str>,
 ) -> JsonValue {
     json!({
         "sandbox": sandbox,
         "skills": skills,
+        "pluginMcpServers": plugin_mcp_servers,
         "modelId": model_id,
         "subagentModelId": subagent_model_id,
     })
@@ -916,6 +1023,40 @@ fn build_skills_prompt(skills: &[OpenAgentSkillMetadata]) -> Option<String> {
 
     Some(format!(
         "\n## Skills\n- `skill` - Execute a skill to extend your capabilities\n- Use the `skill` tool when a listed skill is relevant\n\nAvailable skills:\n{skills_list}"
+    ))
+}
+
+fn build_plugin_mcp_prompt(servers: &[OpenAgentPluginMcpServer]) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+
+    let server_list = servers
+        .iter()
+        .map(|server| {
+            let command = server
+                .command
+                .as_ref()
+                .map(|command| format!(" command={command}"))
+                .unwrap_or_default();
+            format!(
+                "- {}:{} as `{}{}` from {}{}",
+                server.plugin_name,
+                server.server_name,
+                server.tool_prefix,
+                "<tool>",
+                server.source,
+                command
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Some(format!(
+        "\n## Plugin MCP Servers\n\
+         The service discovered these Open Plugin MCP server configs and expanded plugin placeholders. \
+         MCP subprocess adapters are not attached in this runtime yet, so treat them as planned external capabilities unless matching tools are present.\n\n\
+         {server_list}"
     ))
 }
 
@@ -1023,8 +1164,8 @@ mod tests {
 
     use super::{
         DEFAULT_OPEN_AGENT_MODEL_LABEL, OpenAgent, OpenAgentCallOptions, OpenAgentError,
-        OpenAgentModelVariant, OpenAgentSettings, OpenAgentSkillMetadata, OpenAgentSkillOptions,
-        resolve_chat_model_selection,
+        OpenAgentModelVariant, OpenAgentPluginMcpServer, OpenAgentSettings, OpenAgentSkillMetadata,
+        OpenAgentSkillOptions, resolve_chat_model_selection,
     };
     use ai_sdk_rust::{
         FinishReason, GatewayProvider, GenerateTextTool, InputTokenUsage, Instructions, JsonSchema,
@@ -1190,7 +1331,14 @@ mod tests {
             )
             .with_subagent_model(AgentModelSelection::new(DEFAULT_OPEN_AGENT_MODEL_LABEL))
             .with_custom_instructions("Always run the targeted tests.")
-            .with_skill(review_skill());
+            .with_skill(review_skill())
+            .with_plugin_mcp_servers([OpenAgentPluginMcpServer::new(
+                "hello-plugin",
+                "echo",
+                "./.mcp.json",
+            )
+            .with_command("/plugins/hello/bin/echo-mcp")
+            .with_has_args(true)]);
 
         let prepared = agent.prepare_call(options).expect("prepare succeeds");
 
@@ -1219,6 +1367,8 @@ mod tests {
         assert!(instructions.contains("Current branch: codex/open-agents-02-agent-core-runtime"));
         assert!(instructions.contains("Always run the targeted tests."));
         assert!(instructions.contains("- review: Review code for correctness (model-only)"));
+        assert!(instructions.contains("hello-plugin:echo"));
+        assert!(instructions.contains("mcp__plugin_hello-plugin_echo__<tool>"));
 
         let context = prepared
             .tool_loop
@@ -1243,6 +1393,13 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("review")
         );
+        assert_eq!(
+            context
+                .pointer("/pluginMcpServers/0/serverName")
+                .and_then(serde_json::Value::as_str),
+            Some("echo")
+        );
+        assert_eq!(prepared.plugin_mcp_servers.len(), 1);
 
         let provider_options = prepared
             .tool_loop

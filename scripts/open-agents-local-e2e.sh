@@ -72,6 +72,8 @@ run_check_config() {
       OPEN_AGENTS_STATE="${OPEN_AGENTS_STATE:-memory}" \
       OPEN_AGENTS_SANDBOX="${OPEN_AGENTS_SANDBOX:-local}" \
       OPEN_AGENTS_SANDBOX_ROOT="${OPEN_AGENTS_SANDBOX_ROOT:-$repo_root}" \
+      OPEN_AGENTS_PLUGIN_ROOTS="${OPEN_AGENTS_PLUGIN_ROOTS:-$repo_root/crates/open-agents-service/fixtures/open-plugin/minimal}" \
+      OPEN_AGENTS_PLUGIN_DATA_DIR="${OPEN_AGENTS_PLUGIN_DATA_DIR:-$repo_root/target/open-agents-plugin-data}" \
       cargo run -p open-agents-service --bin open-agents-slack -- --check-config
   )
 }
