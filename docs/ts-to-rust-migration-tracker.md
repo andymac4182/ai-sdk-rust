@@ -4,6 +4,7 @@ This tracker records the completed work to make the Rust workspace match the
 public behavior and portable tests from these upstream TypeScript projects:
 
 - `vercel-labs/open-agents`
+- `vercel-labs/just-bash`
 - `vercel/workflow`
 - `vercel/chat`
 - `vercel/ai`
@@ -17,6 +18,7 @@ explicit exception for every JavaScript-only or TypeScript-type-system-only row.
 
 - Refresh the upstream source before making parity claims:
   - `npx opensrc fetch https://github.com/vercel-labs/open-agents`
+  - `npx opensrc fetch https://github.com/vercel-labs/just-bash`
   - `npx opensrc fetch https://github.com/vercel/workflow`
   - `npx opensrc fetch github:vercel/chat`
   - `npx opensrc fetch github:vercel/ai`
@@ -33,11 +35,13 @@ explicit exception for every JavaScript-only or TypeScript-type-system-only row.
 
 ## Source Snapshot
 
-Refreshed on 2026-06-01 with `npx opensrc fetch`.
+Refreshed on 2026-06-01 with `npx opensrc fetch`; the Just Bash row was
+refreshed on 2026-06-02.
 
 | Project | Upstream HEAD | Local cache | Package manifests | TS/TSX files | Test files | Current Rust tracker |
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | Open Agents | `24d679c7ba3d274aa73814c15673aeffcbe3c1c2` | `~/.opensrc/repos/github.com/vercel-labs/open-agents/main` | 6 | 567 | 106 | `docs/open-agents/*` |
+| Just Bash | `d64009aef6bc1556e7c84b22ed455863275ea953` | `~/.opensrc/repos/github.com/vercel-labs/just-bash/main` | 8 | 908 | 485 | `docs/open-agents/just-bash-parity.md` |
 | Workflow SDK | `ae3c833acd4f44ab84db65b44eb2ba2646eaecf9` | `~/.opensrc/repos/github.com/vercel/workflow/main` | 47 | 1019 | 149 | `docs/workflow-upstream-parity.md`, `docs/workflow-test-inventory.md` |
 | Chat SDK | `ffc43fcf1f7679164be0806308bea237113c7590` | `~/.opensrc/repos/github.com/vercel/chat/main` | 23 | 504 | 131 | `docs/chat/upstream-parity.md`, `docs/chat/package-progress.md` |
 | AI SDK | `ab6d66482d31afe15f4973a51c5f7cfa09c92ea6` | `~/.opensrc/repos/github.com/vercel/ai/main` | 87 | 4161 | 688 | `docs/upstream-parity.md`, `docs/package-progress.md` |
@@ -47,6 +51,7 @@ Refreshed on 2026-06-01 with `npx opensrc fetch`.
 | Project | Current state | Evidence | Required next proof |
 | --- | --- | --- | --- |
 | Open Agents | Current tracked rows are closed. The Rust service has Slack webhook ingress, native Vercel AI Gateway runtime config, Vercel sandbox support, deployment docs, and a generated upstream inventory covering all 6 package manifests, 461 source files, and 106 test files. OA-03B replaced the one-poll Gateway runtime path with async completion coverage and an ignored live Gateway smoke path. | `docs/open-agents/upstream-parity.md`, `scripts/open-agents-test-inventory.mjs`, `docs/open-agents/bucket-ownership.md`, `docs/open-agents/slack-remote-agent-architecture.md`, `docs/open-agents/deployment-verification.md`, `crates/open-agents-*` | Keep the Open Agents gate green and rerun the live Slack/Gateway/Vercel proof paths when credentials or upstream drift change. |
+| Just Bash | JB-01 added the current-upstream inventory ledger and gate at `d64009aef6bc1556e7c84b22ed455863275ea953`. The non-blocking gate passes with 8 manifests, 908 TS/TSX files, 423 non-test source files, 485 test files, and 9,936 case rows. All case rows remain `portable-pending`; this is an honest inventory surface, not a parity claim. | `docs/open-agents/just-bash-parity.md`; `node scripts/just-bash-test-inventory.mjs --check` | Sibling Just Bash implementation threads must convert owned rows to `portable-verified` with named Rust tests or explicit exceptions, then make `node scripts/just-bash-test-inventory.mjs --strict` pass. |
 | Workflow SDK | Current upstream portable rows are closed by the row-level gate. The gate currently passes with 2,679 inventory rows, 22 summary packages, and 28 ledger packages. `packages/core`/`workflow-core` is `verified`: the core inventory has 1,216 rows, 1,023 portable rows all mapped to named Rust tests, 189 `js-only-documented` rows, 4 `type-system-impossible` rows, and 0 `needs-review` rows. Core E2E specifically has 154 rows: 79 portable verified and 75 `js-only-documented`. | `node scripts/workflow-test-inventory.mjs --check && node scripts/workflow-parity-check.mjs`; `cargo test -p workflow-core` | Preserve the zero-`needs-review` invariant and rerun the drift audit whenever upstream `vercel/workflow` moves. |
 | Chat SDK | CHAT-02 closed current-upstream drift at `ffc43fcf1f7679164be0806308bea237113c7590`: package progress is restored to 100.0%, all 19 package rows are closed, and all 16 portable package rows are strictly verified with named Rust tests or existing explicit exceptions. | `docs/chat/upstream-parity.md`, `docs/chat/package-progress.md` | Rerun the Chat SDK drift audit when upstream `vercel/chat` moves; preserve the hard rule that every portable row needs a named Rust test or explicit exception before any future 100% claim. |
 | AI SDK | Current upstream package rows are closed. Package progress is 100.0%, all 52 package rows are closed, and all 42 portable rows are strictly verified with named Rust tests or explicit JavaScript-only/type-system exceptions. | `docs/upstream-parity.md`, `docs/package-progress.md`, `docs/ai-02-openai-compatible-providers.md` | Rerun the AI SDK drift audit when upstream `vercel/ai` moves; preserve the hard rule that every portable row needs a named Rust test or explicit exception before any future 100% claim. |
@@ -63,6 +68,7 @@ is too large, but the parent row remains open until all child rows are merged.
 | OA-01 | complete | Open Agents upstream inventory gate | Added `docs/open-agents/upstream-parity.md` plus `scripts/open-agents-test-inventory.mjs` to inventory packages, source files, and all 106 upstream tests. | Fresh `npx opensrc fetch https://github.com/vercel-labs/open-agents`; `node scripts/open-agents-test-inventory.mjs --check`; `cargo test -p open-agents-core -p open-agents-runtime -p open-agents-sandbox -p open-agents-slack -p open-agents-service`. |
 | OA-02 | complete | Open Agents Slack remote-agent runtime closure | Closed the local Slack runtime gaps surfaced by OA-01: durable active-run resume, question and approval block-action resumes, finish-action Slack summaries, terminal sandbox/model error reporting, and emulator approval coverage. | `node scripts/open-agents-test-inventory.mjs --check`; `cargo test -p open-agents-core -p open-agents-runtime -p open-agents-sandbox -p open-agents-slack -p open-agents-service -p chat-sdk-adapter-slack`; `scripts/open-agents-local-e2e.sh --all-local`; ignored Slack/Gateway/Vercel proof envs documented in `docs/open-agents/deployment-verification.md`. |
 | OA-03B | complete | Open Agents real Gateway runtime proof | Replaced the one-poll `poll_ready` Gateway path with a real async execution path, switched the service runtime to the native `GatewayProvider`, added deterministic Pending-then-Ready/native-provider coverage, preserved fixture/durable Slack behavior, and deployed the production service with `runtime=gateway`. | `cargo test -p open-agents-service`; `scripts/master-parity-gate.sh`; ignored live Gateway smoke when credentials exist. |
+| JB-01 | complete | Just Bash strict inventory gate | Added `docs/open-agents/just-bash-parity.md` plus `scripts/just-bash-test-inventory.mjs` to inventory all current upstream package manifests, TS/TSX source files, test files, fixture roots, and 9,936 test cases. All portable rows remain pending until sibling implementation threads map them to named Rust tests or explicit documented exceptions. | Fresh `npx opensrc fetch https://github.com/vercel-labs/just-bash`; `git ls-remote https://github.com/vercel-labs/just-bash HEAD refs/heads/main`; `node scripts/just-bash-test-inventory.mjs --check`; `node scripts/just-bash-test-inventory.mjs --strict` is the documented fail-closed closure gate while pending rows remain. |
 | OP-01 | complete | Open Plugin Spec manifest gate | Added `open-agents-core::plugin` for Open Plugin Spec v1.0.0 manifest loading, metadata parsing, `skills` and `mcpServers` field-shape validation, plugin name validation, path containment, optional vendor manifest diagnostics, and non-fatal unsupported-component diagnostics. Reconciled the conformance tracker with the already-landed OP-02 skill discovery and OP-03 MCP config surfaces so plugin support cannot claim unimplemented service/runtime rows. | Fresh `npx opensrc fetch https://github.com/vercel-labs/open-plugin-spec`; `git ls-remote https://github.com/vercel-labs/open-plugin-spec HEAD`; `cargo test -p open-agents-core`; `node scripts/open-plugin-spec-gate.mjs --check`; `scripts/master-parity-gate.sh`. |
 | OP-02 | verified | Open Plugin skill discovery and invocation | Default and manifest-declared plugin skill directories are discovered through `ai-sdk-rust::skills`; `SKILL.md` metadata is surfaced with namespaced plugin skill IDs and `/plugin:skill` invocation without scanning defaults when manifest paths override them. | `open_plugin_default_discovery_namespaces_skills`; `open_plugin_manifest_skill_paths_override_default`; `open_plugin_manifest_can_explicitly_retain_default_skills`; `open_plugin_namespaced_slash_invocation_loads_plugin_skill_directory`. |
 | OP-03 | verified | Open Plugin MCP discovery and runtime expansion | `open-agents-core::open_plugin` loads `.mcp.json`, manifest path config, and inline `mcpServers`; resolves conflicts deterministically; keeps invalid config failures non-fatal; expands `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` in MCP runtime fields. Real process/network startup remains OP-04. | `open_plugin_mcp_loads_default_mcp_json_when_manifest_field_absent`; `open_plugin_mcp_inline_config_uses_manifest_servers`; `open_plugin_mcp_duplicate_server_names_emit_conflict_and_first_source_wins`; `open_plugin_mcp_expands_plugin_root_and_data_placeholders`; `open_plugin_mcp_invalid_config_shape_does_not_block_other_sources`. |
@@ -100,6 +106,7 @@ reasoning.
 | OA-01 | `019e830a-7e74-7e10-829a-4dcf0f930dd3` | Add Open Agents parity inventory |
 | OA-02 | `019e830b-41e9-73f2-9136-babce50bbc2a` | Close OA-02 runtime gaps |
 | OA-03B | `019e8336-56e1-7691-a400-7da8d5ec959f` | T2R OA-03B Gateway Runtime Fix |
+| JB-01 | `019e7d5d-6e30-72d3-813e-e6f7c72014db` | Just Bash strict inventory gate |
 | WF-01 | `019e830b-4400-7193-834f-cca74a33063f` | T2R WF-01 Workflow Core E2E Closure |
 | WF-02 | `019e830b-441a-7503-943d-06fb626f1f44` | Audit workflow upstream drift |
 | CHAT-01 | `019e830b-44d2-7063-9030-5a3cd764a76c` | Audit Chat SDK drift |

@@ -1,0 +1,1322 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..'
+);
+
+const defaultUpstreamRoot =
+  '/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel-labs/just-bash/main';
+const upstreamRoot = process.env.JUST_BASH_UPSTREAM_PATH ?? defaultUpstreamRoot;
+const outputPath = path.join(
+  repositoryRoot,
+  'docs/open-agents/just-bash-parity.md'
+);
+
+const upstreamRepo = 'vercel-labs/just-bash';
+const upstreamHead = 'd64009aef6bc1556e7c84b22ed455863275ea953';
+const inventoryDate = '2026-06-02';
+
+const expectedManifestCount = 8;
+const expectedTsFileCount = 908;
+const expectedTestFileCount = 485;
+
+const skipDirectories = new Set(['.git', 'dist', 'node_modules', 'vendor']);
+const codeFilePattern = /\.(?:[cm]?ts|tsx)$/;
+const testFilePattern = /\.(?:test|spec)(?:-d)?\.(?:[cm]?ts|tsx)$/;
+const validStatuses = new Set([
+  'portable-pending',
+  'portable-verified',
+  'js-only-documented',
+  'type-system-impossible',
+]);
+const strictPassStatuses = new Set([
+  'portable-verified',
+  'js-only-documented',
+  'type-system-impossible',
+]);
+
+function usage() {
+  console.log(`Usage: node scripts/just-bash-test-inventory.mjs [options]
+
+Options:
+  --check      Verify docs/open-agents/just-bash-parity.md is current.
+  --strict     Fail when any portable case is pending or maps to a missing Rust test.
+  --dry-run    Print current inventory counts as JSON.
+  --help       Show this help text.
+
+Environment:
+  JUST_BASH_UPSTREAM_PATH  Override the OpenSrc mirror path.`);
+}
+
+function fail(message) {
+  console.error(`just-bash inventory: ${message}`);
+  process.exit(1);
+}
+
+function parseArgs(argv) {
+  const options = { check: false, strict: false, dryRun: false };
+  for (const arg of argv) {
+    if (arg === '--help') {
+      usage();
+      process.exit(0);
+    }
+    if (arg === '--check') {
+      options.check = true;
+      continue;
+    }
+    if (arg === '--strict') {
+      options.strict = true;
+      continue;
+    }
+    if (arg === '--dry-run') {
+      options.dryRun = true;
+      continue;
+    }
+    fail(`unknown option: ${arg}`);
+  }
+  return options;
+}
+
+function walk(directory) {
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (skipDirectories.has(entry.name)) {
+      continue;
+    }
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walk(entryPath));
+    } else if (entry.isFile()) {
+      files.push(entryPath);
+    }
+  }
+  return files;
+}
+
+function upstreamRelative(filePath) {
+  return path.relative(upstreamRoot, filePath).replaceAll(path.sep, '/');
+}
+
+function repositoryRelative(filePath) {
+  return path.relative(repositoryRoot, filePath).replaceAll(path.sep, '/');
+}
+
+function escapeCell(value) {
+  return String(value ?? '')
+    .replaceAll('\\', '\\\\')
+    .replaceAll('|', '\\|')
+    .replaceAll('\n', '<br>');
+}
+
+function renderTable(headers, rows) {
+  const lines = [
+    `| ${headers.map(escapeCell).join(' | ')} |`,
+    `| ${headers.map(() => '---').join(' | ')} |`,
+  ];
+  for (const row of rows) {
+    lines.push(`| ${row.map(escapeCell).join(' | ')} |`);
+  }
+  return lines.join('\n');
+}
+
+function isEscaped(text, index) {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function unescapeCell(cell) {
+  return cell
+    .trim()
+    .replaceAll('<br>', '\n')
+    .replace(/\\([\\|])/g, '$1');
+}
+
+function splitMarkdownRow(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+    return undefined;
+  }
+  const cells = [];
+  let current = '';
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    const char = trimmed[index];
+    if (char === '|' && !isEscaped(trimmed, index)) {
+      cells.push(unescapeCell(current));
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  cells.push(unescapeCell(current));
+  return cells;
+}
+
+function isSeparatorRow(cells) {
+  return cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function parseTable(markdown, heading) {
+  const lines = markdown.split(/\r?\n/);
+  const headingIndex = lines.findIndex((line) => line.trim() === heading);
+  if (headingIndex === -1) {
+    return { headers: [], rows: [] };
+  }
+
+  let tableIndex = headingIndex + 1;
+  while (tableIndex < lines.length && !lines[tableIndex].trim().startsWith('|')) {
+    tableIndex += 1;
+  }
+
+  const headers = splitMarkdownRow(lines[tableIndex] ?? '');
+  const separator = splitMarkdownRow(lines[tableIndex + 1] ?? '');
+  if (!headers || !separator || !isSeparatorRow(separator)) {
+    return { headers: [], rows: [] };
+  }
+
+  const rows = [];
+  for (let rowIndex = tableIndex + 2; rowIndex < lines.length; rowIndex += 1) {
+    const cells = splitMarkdownRow(lines[rowIndex]);
+    if (!cells) {
+      break;
+    }
+    if (cells.length !== headers.length) {
+      continue;
+    }
+    rows.push(Object.fromEntries(headers.map((header, index) => [header, cells[index]])));
+  }
+  return { headers, rows };
+}
+
+function readExistingLedger() {
+  if (!fs.existsSync(outputPath)) {
+    return {
+      sourceRows: new Map(),
+      caseRows: new Map(),
+    };
+  }
+
+  const markdown = fs.readFileSync(outputPath, 'utf8');
+  const sourceRows = new Map();
+  for (const row of parseTable(markdown, '## Source File Inventory').rows) {
+    if (row['Upstream source file']) {
+      sourceRows.set(row['Upstream source file'], row);
+    }
+  }
+
+  const caseRows = new Map();
+  for (const row of parseTable(markdown, '## Test Case Inventory').rows) {
+    const key = testCaseKey({
+      file: row['Upstream test file'],
+      line: Number.parseInt(row.Line, 10),
+      declaration: row.Declaration,
+      name: row.Case,
+    });
+    if (key) {
+      caseRows.set(key, row);
+    }
+  }
+
+  return { sourceRows, caseRows };
+}
+
+function packageIdFor(relativePath) {
+  if (relativePath === 'package.json') {
+    return 'root';
+  }
+  if (relativePath.startsWith('packages/')) {
+    return relativePath.split('/').slice(0, 2).join('/');
+  }
+  if (relativePath.startsWith('examples/')) {
+    return relativePath.split('/').slice(0, 2).join('/');
+  }
+  if (relativePath.startsWith('.changeset/')) {
+    return '.changeset';
+  }
+  if (relativePath.startsWith('.github/')) {
+    return '.github';
+  }
+  return relativePath.split('/')[0] || 'root';
+}
+
+function packageName(manifestRelativePath) {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(upstreamRoot, manifestRelativePath), 'utf8')
+  );
+  return manifest.name ?? '(unnamed)';
+}
+
+function domainForPath(relativePath) {
+  if (relativePath.startsWith('packages/just-bash-executor/')) {
+    return 'executor';
+  }
+  if (relativePath.startsWith('examples/')) {
+    return `example:${relativePath.split('/')[1] ?? 'root'}`;
+  }
+  if (!relativePath.startsWith('packages/just-bash/src/')) {
+    return packageIdFor(relativePath);
+  }
+
+  const parts = relativePath.split('/');
+  const area = parts[3] ?? 'core';
+  const areaEntry = parts[4] ?? '';
+  if (!areaEntry && codeFilePattern.test(area)) {
+    return 'core';
+  }
+  if (area === 'commands') {
+    return codeFilePattern.test(areaEntry)
+      ? 'command:shared'
+      : `command:${areaEntry || 'registry'}`;
+  }
+  if (area === 'spec-tests') {
+    return `spec:${areaEntry || 'suite'}`;
+  }
+  if (area === 'comparison-tests') {
+    return 'comparison-tests';
+  }
+  if (area === 'agent-examples') {
+    return 'agent-examples';
+  }
+  if (area === 'security') {
+    return `security:${parts[4] ?? 'core'}`;
+  }
+  if (area === 'fs') {
+    return codeFilePattern.test(areaEntry)
+      ? 'fs:core'
+      : `fs:${areaEntry || 'core'}`;
+  }
+  if (area === 'interpreter') {
+    return codeFilePattern.test(areaEntry)
+      ? 'interpreter:core'
+      : `interpreter:${areaEntry || 'core'}`;
+  }
+  if (area === 'cli' || area === 'shell') {
+    return area;
+  }
+  return area;
+}
+
+function ownerForPath(relativePath) {
+  const domain = domainForPath(relativePath);
+  if (domain.startsWith('command:')) {
+    return `pending:just-bash-${domain.replace(':', '-')}`;
+  }
+  if (domain.startsWith('example:')) {
+    return 'pending:just-bash-examples';
+  }
+  if (domain.startsWith('fs:')) {
+    return 'pending:just-bash-fs';
+  }
+  if (domain.startsWith('security:')) {
+    return 'pending:just-bash-security';
+  }
+  if (domain.startsWith('interpreter:') || domain === 'parser' || domain === 'syntax' || domain === 'ast') {
+    return 'pending:just-bash-parser-interpreter';
+  }
+  if (domain === 'executor') {
+    return 'pending:just-bash-executor';
+  }
+  if (domain === 'cli' || domain === 'shell') {
+    return 'pending:just-bash-cli';
+  }
+  if (domain === 'network') {
+    return 'pending:just-bash-network';
+  }
+  if (domain === 'sandbox') {
+    return 'pending:just-bash-sandbox';
+  }
+  if (domain === 'agent-examples') {
+    return 'pending:just-bash-agent-examples';
+  }
+  if (domain === 'comparison-tests' || domain.startsWith('spec:')) {
+    return 'pending:just-bash-spec-comparison';
+  }
+  return 'pending:just-bash-core';
+}
+
+function isIdentifierStart(char) {
+  return /[A-Za-z_$]/.test(char ?? '');
+}
+
+function isIdentifierPart(char) {
+  return /[A-Za-z0-9_$]/.test(char ?? '');
+}
+
+function skipWhitespace(source, index) {
+  let cursor = index;
+  while (/\s/.test(source[cursor] ?? '')) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function lineStarts(source) {
+  const starts = [0];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === '\n') {
+      starts.push(index + 1);
+    }
+  }
+  return starts;
+}
+
+function lineNumberAt(starts, index) {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (starts[middle] <= index) {
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return high + 1;
+}
+
+function findMatching(source, openIndex, openChar, closeChar) {
+  let depth = 0;
+  let state = 'code';
+  for (let index = openIndex; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+
+    if (state === 'line-comment') {
+      if (char === '\n') {
+        state = 'code';
+      }
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (char === '*' && next === '/') {
+        index += 1;
+        state = 'code';
+      }
+      continue;
+    }
+    if (state === 'single') {
+      if (char === '\\') {
+        index += 1;
+      } else if (char === "'") {
+        state = 'code';
+      }
+      continue;
+    }
+    if (state === 'double') {
+      if (char === '\\') {
+        index += 1;
+      } else if (char === '"') {
+        state = 'code';
+      }
+      continue;
+    }
+    if (state === 'template') {
+      if (char === '\\') {
+        index += 1;
+      } else if (char === '`') {
+        state = 'code';
+      }
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      index += 1;
+      state = 'line-comment';
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      index += 1;
+      state = 'block-comment';
+      continue;
+    }
+    if (char === "'") {
+      state = 'single';
+      continue;
+    }
+    if (char === '"') {
+      state = 'double';
+      continue;
+    }
+    if (char === '`') {
+      state = 'template';
+      continue;
+    }
+
+    if (char === openChar) {
+      depth += 1;
+    } else if (char === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+  return undefined;
+}
+
+function parseStringLiteral(source, index) {
+  const quote = source[index];
+  if (quote !== '"' && quote !== "'" && quote !== '`') {
+    return undefined;
+  }
+
+  let value = '';
+  for (let cursor = index + 1; cursor < source.length; cursor += 1) {
+    const char = source[cursor];
+    if (char === '\\') {
+      value += source[cursor + 1] ?? '';
+      cursor += 1;
+      continue;
+    }
+    if (char === quote) {
+      return {
+        value: value.trim().replace(/\s+/g, ' '),
+        end: cursor,
+      };
+    }
+    value += char;
+  }
+  return undefined;
+}
+
+function firstArgumentText(source, openIndex, closeIndex) {
+  const start = skipWhitespace(source, openIndex + 1);
+  const literal = parseStringLiteral(source, start);
+  if (literal) {
+    return literal.value || '<empty>';
+  }
+
+  let cursor = start;
+  let state = 'code';
+  while (cursor < closeIndex) {
+    const char = source[cursor];
+    const next = source[cursor + 1];
+    if (state === 'line-comment') {
+      if (char === '\n') state = 'code';
+      cursor += 1;
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (char === '*' && next === '/') {
+        cursor += 2;
+        state = 'code';
+      } else {
+        cursor += 1;
+      }
+      continue;
+    }
+    if (state === 'single' || state === 'double' || state === 'template') {
+      const end = state === 'single' ? "'" : state === 'double' ? '"' : '`';
+      if (char === '\\') {
+        cursor += 2;
+      } else if (char === end) {
+        cursor += 1;
+        state = 'code';
+      } else {
+        cursor += 1;
+      }
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      cursor += 2;
+      state = 'line-comment';
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      cursor += 2;
+      state = 'block-comment';
+      continue;
+    }
+    if (char === "'") {
+      cursor += 1;
+      state = 'single';
+      continue;
+    }
+    if (char === '"') {
+      cursor += 1;
+      state = 'double';
+      continue;
+    }
+    if (char === '`') {
+      cursor += 1;
+      state = 'template';
+      continue;
+    }
+    if (char === ',') {
+      break;
+    }
+    cursor += 1;
+  }
+
+  const expression = source.slice(start, cursor).trim().replace(/\s+/g, ' ');
+  return expression ? `<dynamic:${expression.slice(0, 80)}>` : '<unknown>';
+}
+
+function findBlockRange(source, startIndex) {
+  const open = source.indexOf('{', startIndex);
+  if (open === -1) {
+    return undefined;
+  }
+  const close = findMatching(source, open, '{', '}');
+  if (close === undefined) {
+    return undefined;
+  }
+  return { start: open, end: close };
+}
+
+function parseTestLikeCall(source, idStart, idEnd, name) {
+  let cursor = skipWhitespace(source, idEnd);
+  const declaration = [name];
+  while (source[cursor] === '.') {
+    cursor += 1;
+    cursor = skipWhitespace(source, cursor);
+    if (!isIdentifierStart(source[cursor])) {
+      return undefined;
+    }
+    const propStart = cursor;
+    cursor += 1;
+    while (isIdentifierPart(source[cursor])) {
+      cursor += 1;
+    }
+    declaration.push(source.slice(propStart, cursor));
+    cursor = skipWhitespace(source, cursor);
+  }
+
+  if (source[cursor] !== '(') {
+    return undefined;
+  }
+
+  const firstOpen = cursor;
+  const firstClose = findMatching(source, firstOpen, '(', ')');
+  if (firstClose === undefined) {
+    return undefined;
+  }
+
+  let titleOpen = firstOpen;
+  let titleClose = firstClose;
+  const afterFirst = skipWhitespace(source, firstClose + 1);
+  if (source[afterFirst] === '(') {
+    const secondClose = findMatching(source, afterFirst, '(', ')');
+    if (secondClose === undefined) {
+      return undefined;
+    }
+    titleOpen = afterFirst;
+    titleClose = secondClose;
+  }
+
+  return {
+    declaration: declaration.join('.'),
+    name: firstArgumentText(source, titleOpen, titleClose),
+    start: idStart,
+    end: titleClose,
+    block: name === 'describe' ? findBlockRange(source, titleClose + 1) : undefined,
+  };
+}
+
+function scanIdentifiers(source, callback) {
+  let state = 'code';
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+
+    if (state === 'line-comment') {
+      if (char === '\n') state = 'code';
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (char === '*' && next === '/') {
+        index += 1;
+        state = 'code';
+      }
+      continue;
+    }
+    if (state === 'single') {
+      if (char === '\\') index += 1;
+      else if (char === "'") state = 'code';
+      continue;
+    }
+    if (state === 'double') {
+      if (char === '\\') index += 1;
+      else if (char === '"') state = 'code';
+      continue;
+    }
+    if (state === 'template') {
+      if (char === '\\') index += 1;
+      else if (char === '`') state = 'code';
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      index += 1;
+      state = 'line-comment';
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      index += 1;
+      state = 'block-comment';
+      continue;
+    }
+    if (char === "'") {
+      state = 'single';
+      continue;
+    }
+    if (char === '"') {
+      state = 'double';
+      continue;
+    }
+    if (char === '`') {
+      state = 'template';
+      continue;
+    }
+
+    if (!isIdentifierStart(char)) {
+      continue;
+    }
+    const start = index;
+    index += 1;
+    while (isIdentifierPart(source[index])) {
+      index += 1;
+    }
+    const identifier = source.slice(start, index);
+    callback(identifier, start, index);
+    index -= 1;
+  }
+}
+
+function testCaseKey(row) {
+  if (!row.file || !row.line || !row.declaration || !row.name) {
+    return undefined;
+  }
+  return `${row.file}:${row.line}:${row.declaration}:${row.name}`;
+}
+
+function extractTestCases(relativePath) {
+  const absolutePath = path.join(upstreamRoot, relativePath);
+  const source = fs.readFileSync(absolutePath, 'utf8');
+  const starts = lineStarts(source);
+  const describes = [];
+  const cases = [];
+
+  scanIdentifiers(source, (identifier, start, end) => {
+    if (identifier !== 'describe' && identifier !== 'it' && identifier !== 'test') {
+      return;
+    }
+    const call = parseTestLikeCall(source, start, end, identifier);
+    if (!call) {
+      return;
+    }
+    if (identifier === 'describe') {
+      if (call.block) {
+        describes.push(call);
+      }
+      return;
+    }
+    cases.push({
+      file: relativePath,
+      line: lineNumberAt(starts, start),
+      declaration: call.declaration,
+      name: call.name,
+      start,
+    });
+  });
+
+  describes.sort((left, right) => left.start - right.start);
+  for (const row of cases) {
+    row.suite = describes
+      .filter((suite) => suite.block && suite.block.start < row.start && row.start < suite.block.end)
+      .map((suite) => suite.name)
+      .join(' > ') || '(top-level)';
+  }
+  return cases;
+}
+
+function splitRustTestNames(value) {
+  return String(value ?? '')
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isPendingMarker(value) {
+  return (
+    !value ||
+    value === 'n/a' ||
+    value === 'missing' ||
+    value.startsWith('pending:')
+  );
+}
+
+function discoverRustTests() {
+  const roots = ['crates', 'src']
+    .map((entry) => path.join(repositoryRoot, entry))
+    .filter((entry) => fs.existsSync(entry));
+  const names = new Set();
+
+  for (const root of roots) {
+    for (const file of walk(root).filter((entry) => entry.endsWith('.rs'))) {
+      const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+      let pendingTestAttribute = false;
+      for (const line of lines) {
+        if (/^\s*#\[(?:tokio::)?test(?:\([^]]*\))?\]/.test(line)) {
+          pendingTestAttribute = true;
+          continue;
+        }
+        if (pendingTestAttribute && /^\s*#\[/.test(line)) {
+          continue;
+        }
+        const match =
+          /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(
+            line
+          );
+        if (pendingTestAttribute && match) {
+          names.add(match[1]);
+        }
+        pendingTestAttribute = false;
+      }
+    }
+  }
+  return names;
+}
+
+function findFixtureRoots(allFiles) {
+  const fixtureNames = new Set(['fixtures', 'fixture', '__fixtures__', 'testdata', 'examples']);
+  const roots = new Map();
+
+  for (const file of allFiles) {
+    const parts = file.split('/');
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      if (!fixtureNames.has(parts[index])) {
+        continue;
+      }
+      if (parts[index] === 'examples' && index !== 0 && !file.includes('/commands/js-exec/examples/')) {
+        continue;
+      }
+      const root = parts.slice(0, index + 1).join('/');
+      const current = roots.get(root) ?? {
+        root,
+        packageId: packageIdFor(root),
+        domain: domainForPath(root),
+        files: 0,
+      };
+      current.files += 1;
+      roots.set(root, current);
+      break;
+    }
+  }
+
+  return [...roots.values()].sort((left, right) => left.root.localeCompare(right.root));
+}
+
+function defaultSourceRow(relativePath) {
+  return {
+    packageId: packageIdFor(relativePath),
+    domain: domainForPath(relativePath),
+    file: relativePath,
+    status: 'portable-pending',
+    owner: ownerForPath(relativePath),
+    notes:
+      'Inventory-only source row; classify only with a named Rust test or an explicit documented exception.',
+  };
+}
+
+function sourceRowWithOverride(relativePath, existingRows) {
+  const row = defaultSourceRow(relativePath);
+  const existing = existingRows.get(relativePath);
+  if (!existing) {
+    return row;
+  }
+  return {
+    ...row,
+    status: existing.Status || row.status,
+    owner: existing['Rust owner crate/module or exception'] || row.owner,
+    notes: existing.Notes || row.notes,
+  };
+}
+
+function defaultCaseRow(testCase) {
+  return {
+    packageId: packageIdFor(testCase.file),
+    domain: domainForPath(testCase.file),
+    file: testCase.file,
+    line: testCase.line,
+    suite: testCase.suite,
+    name: testCase.name,
+    declaration: testCase.declaration,
+    status: 'portable-pending',
+    owner: ownerForPath(testCase.file),
+    rustTest: ownerForPath(testCase.file),
+    notes:
+      'Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.',
+  };
+}
+
+function caseRowWithOverride(testCase, existingRows) {
+  const row = defaultCaseRow(testCase);
+  const existing = existingRows.get(testCaseKey(testCase));
+  if (!existing) {
+    return row;
+  }
+  return {
+    ...row,
+    status: existing.Status || row.status,
+    owner: existing['Rust owner crate/module'] || row.owner,
+    rustTest: existing['Rust test name or exception'] || row.rustTest,
+    notes: existing.Notes || row.notes,
+  };
+}
+
+function countBy(rows, keyFn, seedFn) {
+  const counts = new Map();
+  for (const row of rows) {
+    const key = keyFn(row);
+    const current = counts.get(key) ?? seedFn(row);
+    current.total += 1;
+    current[row.status] = (current[row.status] ?? 0) + 1;
+    counts.set(key, current);
+  }
+  return [...counts.values()].sort((left, right) =>
+    `${left.packageId}:${left.domain}`.localeCompare(`${right.packageId}:${right.domain}`)
+  );
+}
+
+function summarizeTestFiles(caseRows) {
+  const files = new Map();
+  for (const row of caseRows) {
+    const key = row.file;
+    const current = files.get(key) ?? {
+      packageId: row.packageId,
+      domain: row.domain,
+      file: row.file,
+      cases: 0,
+      'portable-pending': 0,
+      'portable-verified': 0,
+      'js-only-documented': 0,
+      'type-system-impossible': 0,
+      owners: new Set(),
+    };
+    current.cases += 1;
+    current[row.status] += 1;
+    current.owners.add(row.owner);
+    files.set(key, current);
+  }
+  return [...files.values()].sort((left, right) => left.file.localeCompare(right.file));
+}
+
+function strictGaps(caseRows, rustTests) {
+  const gaps = [];
+  for (const row of caseRows) {
+    if (row.status === 'portable-pending') {
+      gaps.push({
+        ...row,
+        reason: 'portable-pending',
+      });
+      continue;
+    }
+    if (row.status === 'portable-verified') {
+      const names = splitRustTestNames(row.rustTest);
+      if (names.length === 0 || names.some(isPendingMarker)) {
+        gaps.push({ ...row, reason: 'missing-named-rust-test' });
+        continue;
+      }
+      for (const name of names) {
+        if (!rustTests.has(name)) {
+          gaps.push({ ...row, reason: `rust-test-not-found:${name}` });
+        }
+      }
+    }
+  }
+  return gaps;
+}
+
+function validateRows(sourceRows, caseRows) {
+  const errors = [];
+  for (const row of sourceRows) {
+    if (!validStatuses.has(row.status)) {
+      errors.push(`${row.file}: invalid source status "${row.status}"`);
+    }
+    if (!row.owner) {
+      errors.push(`${row.file}: missing source owner or exception`);
+    }
+    if (
+      (row.status === 'js-only-documented' || row.status === 'type-system-impossible') &&
+      !row.notes
+    ) {
+      errors.push(`${row.file}: exception source row must carry notes`);
+    }
+  }
+  for (const row of caseRows) {
+    if (!validStatuses.has(row.status)) {
+      errors.push(`${row.file}:${row.line}: invalid case status "${row.status}"`);
+    }
+    if (!row.owner) {
+      errors.push(`${row.file}:${row.line}: missing case owner`);
+    }
+    if (strictPassStatuses.has(row.status) && !row.rustTest) {
+      errors.push(`${row.file}:${row.line}: closed case row must name a Rust test or exception`);
+    }
+    if (
+      (row.status === 'js-only-documented' || row.status === 'type-system-impossible') &&
+      !row.notes
+    ) {
+      errors.push(`${row.file}:${row.line}: exception case row must carry notes`);
+    }
+  }
+  return errors;
+}
+
+function buildInventory() {
+  if (!fs.existsSync(upstreamRoot)) {
+    fail(
+      `upstream path not found: ${upstreamRoot}; run npx opensrc fetch https://github.com/vercel-labs/just-bash`
+    );
+  }
+
+  const existing = readExistingLedger();
+  const allFiles = walk(upstreamRoot).map(upstreamRelative).sort();
+  const manifests = allFiles.filter((file) => file.endsWith('package.json'));
+  const tsFiles = allFiles.filter((file) => codeFilePattern.test(file));
+  const testFiles = tsFiles.filter((file) => testFilePattern.test(file));
+  const testFileSet = new Set(testFiles);
+  const sourceFiles = tsFiles.filter((file) => !testFileSet.has(file));
+
+  const sourceRows = sourceFiles.map((file) => sourceRowWithOverride(file, existing.sourceRows));
+  const caseRows = testFiles.flatMap((file) =>
+    extractTestCases(file).map((testCase) => caseRowWithOverride(testCase, existing.caseRows))
+  );
+
+  return {
+    allFiles,
+    manifests,
+    tsFiles,
+    testFiles,
+    sourceFiles,
+    sourceRows,
+    caseRows,
+    fixtureRoots: findFixtureRoots(allFiles),
+  };
+}
+
+function renderMarkdown(inventory, rustTests, gaps) {
+  const sourceSummary = countBy(
+    inventory.sourceRows,
+    (row) => `${row.packageId}|${row.domain}`,
+    (row) => ({
+      packageId: row.packageId,
+      domain: row.domain,
+      total: 0,
+      'portable-pending': 0,
+      'portable-verified': 0,
+      'js-only-documented': 0,
+      'type-system-impossible': 0,
+    })
+  );
+  const caseSummary = countBy(
+    inventory.caseRows,
+    (row) => `${row.packageId}|${row.domain}`,
+    (row) => ({
+      packageId: row.packageId,
+      domain: row.domain,
+      total: 0,
+      'portable-pending': 0,
+      'portable-verified': 0,
+      'js-only-documented': 0,
+      'type-system-impossible': 0,
+    })
+  );
+  const testFileSummary = summarizeTestFiles(inventory.caseRows);
+
+  const packageIds = new Set([
+    ...inventory.manifests.map(packageIdFor),
+    ...inventory.sourceRows.map((row) => row.packageId),
+    ...inventory.caseRows.map((row) => row.packageId),
+  ]);
+  const manifestByPackage = new Map(
+    inventory.manifests.map((manifest) => [packageIdFor(manifest), manifest])
+  );
+  const packageInventory = [...packageIds].sort().map((packageId) => {
+    const manifest = manifestByPackage.get(packageId);
+    const sourceCount = inventory.sourceRows.filter((row) => row.packageId === packageId).length;
+    const testFileCount = inventory.testFiles.filter((file) => packageIdFor(file) === packageId).length;
+    const caseCount = inventory.caseRows.filter((row) => row.packageId === packageId).length;
+    return [
+      packageId,
+      manifest ?? '(none)',
+      manifest ? packageName(manifest) : '(none)',
+      sourceCount,
+      testFileCount,
+      caseCount,
+      ownerForPath(`${packageId}/`),
+    ];
+  });
+
+  const pendingCases = inventory.caseRows.filter((row) => row.status === 'portable-pending').length;
+  const verifiedCases = inventory.caseRows.filter((row) => row.status === 'portable-verified').length;
+  const jsOnlyCases = inventory.caseRows.filter((row) => row.status === 'js-only-documented').length;
+  const typeSystemCases = inventory.caseRows.filter((row) => row.status === 'type-system-impossible').length;
+  const gapSummary = countBy(
+    gaps,
+    (row) => `${row.owner}|${row.reason}`,
+    (row) => ({
+      packageId: row.owner,
+      domain: row.reason,
+      total: 0,
+      'portable-pending': 0,
+      'portable-verified': 0,
+      'js-only-documented': 0,
+      'type-system-impossible': 0,
+    })
+  );
+
+  const lines = [
+    '# Just Bash Upstream Parity',
+    '',
+    'This ledger is generated from the refreshed upstream Just Bash mirror and is the JB-01 inventory gate for future Rust implementation buckets. It is intentionally inventory-only: no row is verified until a sibling implementation bucket maps it to a named Rust test or records an explicit exception.',
+    '',
+    '## Source Snapshot',
+    '',
+    renderTable(
+      ['Field', 'Value'],
+      [
+        ['Upstream repo', upstreamRepo],
+        ['Inventory command', 'npx opensrc fetch https://github.com/vercel-labs/just-bash'],
+        ['Local source path', upstreamRoot],
+        ['Remote HEAD verification', 'git ls-remote https://github.com/vercel-labs/just-bash HEAD refs/heads/main'],
+        ['Upstream commit', upstreamHead],
+        ['Inventory date', inventoryDate],
+        ['Package manifests', inventory.manifests.length],
+        ['TS/TSX files outside dist/vendor/node_modules', inventory.tsFiles.length],
+        ['Non-test TS/TSX source files', inventory.sourceFiles.length],
+        ['Test files', inventory.testFiles.length],
+        ['Test cases', inventory.caseRows.length],
+        ['Portable pending cases', pendingCases],
+        ['Portable verified cases', verifiedCases],
+        ['JS-only documented cases', jsOnlyCases],
+        ['Type-system impossible cases', typeSystemCases],
+        ['Strict gate gaps', gaps.length],
+        ['Inventory check command', 'node scripts/just-bash-test-inventory.mjs --check'],
+        ['Strict gate command', 'node scripts/just-bash-test-inventory.mjs --strict'],
+      ]
+    ),
+    '',
+    '## Status Rules',
+    '',
+    '- `portable-pending`: Rust ownership is identified, but no named Rust test closes the upstream row yet. This is not parity.',
+    '- `portable-verified`: the row names one or more existing Rust `#[test]` or `#[tokio::test]` functions in `Rust test name or exception`.',
+    '- `js-only-documented`: the row is explicitly excluded because it only verifies JavaScript packaging, browser bundling, Vitest harness behavior, or other non-Rust-runtime behavior. The notes column must explain why.',
+    '- `type-system-impossible`: the row only verifies TypeScript type-system behavior that cannot become a Rust runtime test. The notes column must explain why.',
+    '',
+    'Do not classify missing behavior as nonportable. Until a sibling thread proves an exception, keep the row `portable-pending`. JB-01 does not execute host shell commands as a Just Bash fallback; this bucket only inventories upstream behavior.',
+    '',
+    '## Gate Rules',
+    '',
+    '- The refreshed upstream count is expected to be exactly 8 package manifests, 908 TS/TSX files outside `dist`, `vendor`, and `node_modules`, and 485 test files.',
+    '- `--check` is the non-blocking inventory gate. It fails for upstream drift, stale generated markdown, invalid statuses, missing owners, or undocumented exceptions.',
+    '- `--strict` is the implementation gate. It additionally fails when any `portable-pending` test case remains or when a `portable-verified` row names a Rust test that does not exist in the workspace.',
+    '- Extra Rust tests are additive. They do not close an upstream row unless the row names the Rust test.',
+    '',
+    '## Package Inventory',
+    '',
+    renderTable(
+      ['Package id', 'Manifest', 'Package name', 'Non-test TS/TSX files', 'Test files', 'Test cases', 'Default Rust owner'],
+      packageInventory
+    ),
+    '',
+    '## Fixture Coverage',
+    '',
+    renderTable(
+      ['Fixture root', 'Package', 'Domain', 'Files'],
+      inventory.fixtureRoots.map((row) => [row.root, row.packageId, row.domain, row.files])
+    ),
+    '',
+    '## Source Summary',
+    '',
+    renderTable(
+      ['Package', 'Domain', 'Source files', 'Portable pending', 'Portable verified', 'JS-only documented', 'Type-system impossible'],
+      sourceSummary.map((row) => [
+        row.packageId,
+        row.domain,
+        row.total,
+        row['portable-pending'],
+        row['portable-verified'],
+        row['js-only-documented'],
+        row['type-system-impossible'],
+      ])
+    ),
+    '',
+    '## Test Case Summary',
+    '',
+    renderTable(
+      ['Package', 'Domain', 'Cases', 'Portable pending', 'Portable verified', 'JS-only documented', 'Type-system impossible'],
+      caseSummary.map((row) => [
+        row.packageId,
+        row.domain,
+        row.total,
+        row['portable-pending'],
+        row['portable-verified'],
+        row['js-only-documented'],
+        row['type-system-impossible'],
+      ])
+    ),
+    '',
+    '## Strict Gap Summary',
+    '',
+    renderTable(
+      ['Rust owner crate/module', 'Gap reason', 'Rows'],
+      gapSummary.map((row) => [row.packageId, row.domain, row.total])
+    ),
+    '',
+    '## Test File Inventory',
+    '',
+    renderTable(
+      ['Package', 'Domain', 'Upstream test file', 'Cases', 'Portable pending', 'Portable verified', 'JS-only documented', 'Type-system impossible', 'Rust owner summary'],
+      testFileSummary.map((row) => [
+        row.packageId,
+        row.domain,
+        row.file,
+        row.cases,
+        row['portable-pending'],
+        row['portable-verified'],
+        row['js-only-documented'],
+        row['type-system-impossible'],
+        [...row.owners].sort().join('; '),
+      ])
+    ),
+    '',
+    '## Source File Inventory',
+    '',
+    renderTable(
+      ['Package', 'Domain', 'Upstream source file', 'Status', 'Rust owner crate/module or exception', 'Notes'],
+      inventory.sourceRows.map((row) => [
+        row.packageId,
+        row.domain,
+        row.file,
+        row.status,
+        row.owner,
+        row.notes,
+      ])
+    ),
+    '',
+    '## Test Case Inventory',
+    '',
+    renderTable(
+      ['Package', 'Domain', 'Upstream test file', 'Line', 'Suite', 'Case', 'Declaration', 'Status', 'Rust owner crate/module', 'Rust test name or exception', 'Notes'],
+      inventory.caseRows.map((row) => [
+        row.packageId,
+        row.domain,
+        row.file,
+        row.line,
+        row.suite,
+        row.name,
+        row.declaration,
+        row.status,
+        row.owner,
+        row.rustTest,
+        row.notes,
+      ])
+    ),
+  ];
+
+  return `${lines.join('\n')}\n`;
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const inventory = buildInventory();
+  const rustTests = discoverRustTests();
+  const gaps = strictGaps(inventory.caseRows, rustTests);
+  const validationErrors = validateRows(inventory.sourceRows, inventory.caseRows);
+
+  if (inventory.manifests.length !== expectedManifestCount) {
+    validationErrors.push(
+      `expected ${expectedManifestCount} package manifests, found ${inventory.manifests.length}`
+    );
+  }
+  if (inventory.tsFiles.length !== expectedTsFileCount) {
+    validationErrors.push(
+      `expected ${expectedTsFileCount} TS/TSX files, found ${inventory.tsFiles.length}`
+    );
+  }
+  if (inventory.testFiles.length !== expectedTestFileCount) {
+    validationErrors.push(
+      `expected ${expectedTestFileCount} test files, found ${inventory.testFiles.length}`
+    );
+  }
+
+  if (options.dryRun) {
+    console.log(
+      JSON.stringify(
+        {
+          upstreamRoot,
+          upstreamHead,
+          manifests: inventory.manifests.length,
+          tsFiles: inventory.tsFiles.length,
+          sourceFiles: inventory.sourceFiles.length,
+          testFiles: inventory.testFiles.length,
+          testCases: inventory.caseRows.length,
+          strictGaps: gaps.length,
+          validationErrors,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  const markdown = renderMarkdown(inventory, rustTests, gaps);
+
+  if (options.check || options.strict) {
+    const current = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+    if (current !== markdown) {
+      validationErrors.push(
+        `${repositoryRelative(outputPath)} is stale; run node scripts/just-bash-test-inventory.mjs`
+      );
+    }
+  } else {
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, markdown);
+  }
+
+  if (validationErrors.length > 0) {
+    console.error('Just Bash inventory validation failed:');
+    for (const error of validationErrors) {
+      console.error(`  - ${error}`);
+    }
+    process.exit(1);
+  }
+
+  const summary =
+    `${inventory.manifests.length} manifests; ${inventory.tsFiles.length} TS/TSX files; ` +
+    `${inventory.sourceFiles.length} non-test source files; ${inventory.testFiles.length} test files; ` +
+    `${inventory.caseRows.length} test cases; ${gaps.length} strict gap(s)`;
+
+  if (options.strict && gaps.length > 0) {
+    console.error(`Just Bash strict inventory gate failed: ${summary}`);
+    const sample = gaps.slice(0, 20);
+    for (const gap of sample) {
+      console.error(
+        `  - ${gap.owner}: ${gap.file}:${gap.line} ${gap.declaration}(${JSON.stringify(gap.name)}) [${gap.reason}]`
+      );
+    }
+    if (gaps.length > sample.length) {
+      console.error(`  - ... ${gaps.length - sample.length} more strict gap(s)`);
+    }
+    process.exit(1);
+  }
+
+  if (options.check || options.strict) {
+    console.log(`Just Bash inventory check passed: ${summary}`);
+    return;
+  }
+
+  console.log(`Wrote ${repositoryRelative(outputPath)}: ${summary}`);
+}
+
+main();
