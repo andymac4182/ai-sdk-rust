@@ -223,6 +223,7 @@ Registered direct-provider safe compile commands:
 ```sh
 cargo test -p ai-sdk-alibaba live_alibaba_chat_generate_text_smoke_when_env_present
 cargo test -p ai-sdk-alibaba live_alibaba_video_generate_smoke_when_env_present
+cargo test live_togetherai_image_and_rerank_validate_provider_contract --all-features
 ```
 
 Alibaba live smoke commands:
@@ -230,16 +231,22 @@ Alibaba live smoke commands:
 ```sh
 ALIBABA_API_KEY=... cargo test -p ai-sdk-alibaba live_alibaba_chat_generate_text_smoke_when_env_present -- --ignored --nocapture
 ALIBABA_API_KEY=... ALIBABA_LIVE_VIDEO=1 cargo test -p ai-sdk-alibaba live_alibaba_video_generate_smoke_when_env_present -- --ignored --nocapture
+TOGETHER_API_KEY=... cargo test live_togetherai_image_and_rerank_validate_provider_contract --all-features -- --ignored --nocapture
 ```
 
-Expected behavior: the chat smoke makes one live DashScope-compatible chat call
-and asserts non-empty text. The video smoke submits one native DashScope video
-task, polls until a video URL is returned, and is additionally gated by
-`ALIBABA_LIVE_VIDEO=1` to avoid accidental media spend.
+Expected behavior: the Alibaba chat smoke makes one live DashScope-compatible
+chat call and asserts non-empty text. The Alibaba video smoke submits one native
+DashScope video task, polls until a video URL is returned, and is additionally
+gated by `ALIBABA_LIVE_VIDEO=1` to avoid accidental media spend. The TogetherAI
+smoke makes one image generation call and one reranking call, then asserts
+parsed image/ranking outputs and response metadata.
 
-Skip semantics: both Alibaba tests are `#[ignore]`. If run with `-- --ignored`
-without `ALIBABA_API_KEY`, they print a skip message and return. The video test
-also skips unless `ALIBABA_LIVE_VIDEO=1` is set.
+Skip semantics: these tests are `#[ignore]`. If run with `-- --ignored` without
+the required provider credential, they print a skip message and return. The
+Alibaba video test also skips unless `ALIBABA_LIVE_VIDEO=1` is set. The
+TogetherAI test accepts `TOGETHER_API_KEY` or deprecated `TOGETHER_AI_API_KEY`;
+optional model overrides are `AI_SDK_RUST_TOGETHER_IMAGE_MODEL`/`TOGETHER_IMAGE_MODEL`
+and `AI_SDK_RUST_TOGETHER_RERANKING_MODEL`/`TOGETHER_RERANKING_MODEL`.
 
 Credential names already used by provider constructors:
 

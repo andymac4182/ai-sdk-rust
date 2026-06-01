@@ -19,13 +19,16 @@ use crate::openai_compatible::{
     OpenAICompatibleEmbeddingModel, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
     OpenAICompatibleTransport,
 };
-use crate::provider::{NoSuchModelError, Provider, ProviderMetadata, ProviderWithRerankingModel};
+use crate::provider::{
+    NoSuchModelError, Provider, ProviderMetadata, ProviderOptions, ProviderWithRerankingModel,
+};
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
     convert_image_model_file_to_data_uri, create_json_error_response_handler,
-    create_json_response_handler, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
+    create_json_response_handler, parse_provider_options, post_json_to_api, with_user_agent_suffix,
+    without_trailing_slash,
 };
 use crate::reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
@@ -146,6 +149,10 @@ impl TogetherAIImageModel {
         }
 
         let warnings = togetherai_image_warnings(&options);
+        if let Err(error) = togetherai_validate_image_provider_options(&options.provider_options) {
+            return togetherai_image_result_from_message(&self.model_id, error, warnings);
+        }
+
         let request_body = togetherai_image_request_body(&self.model_id, &options);
         let request_headers = self.request_headers(options.headers.as_ref());
         let post_options = PostJsonToApiOptions::new(self.image_model_url(), request_body)
@@ -257,6 +264,12 @@ impl TogetherAIRerankingModel {
     }
 
     async fn do_rerank_result(&self, options: RerankingModelCallOptions) -> RerankingModelResult {
+        if let Err(error) =
+            togetherai_validate_reranking_provider_options(options.provider_options.as_ref())
+        {
+            return togetherai_reranking_result_from_message(error);
+        }
+
         let request_body = togetherai_reranking_request_body(&self.model_id, &options);
         let request_body_for_error = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -646,6 +659,92 @@ fn togetherai_image_warnings(options: &ImageModelCallOptions) -> Vec<Warning> {
     warnings
 }
 
+fn togetherai_validate_image_provider_options(
+    provider_options: &ProviderOptions,
+) -> Result<(), String> {
+    parse_provider_options(
+        "togetherai",
+        Some(provider_options),
+        togetherai_image_provider_options,
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn togetherai_image_provider_options(value: &JsonValue) -> Result<JsonObject, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "provider options must be an object".to_string())?;
+
+    optional_number_field(object, "steps")?;
+    optional_number_field(object, "guidance")?;
+    optional_string_field(object, "negative_prompt")?;
+    optional_bool_field(object, "disable_safety_checker")?;
+
+    Ok(object.clone())
+}
+
+fn togetherai_validate_reranking_provider_options(
+    provider_options: Option<&ProviderOptions>,
+) -> Result<(), String> {
+    parse_provider_options(
+        "togetherai",
+        provider_options,
+        togetherai_reranking_provider_options,
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn togetherai_reranking_provider_options(value: &JsonValue) -> Result<JsonObject, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "provider options must be an object".to_string())?;
+
+    if let Some(rank_fields) = object.get("rankFields")
+        && !rank_fields
+            .as_array()
+            .is_some_and(|fields| fields.iter().all(JsonValue::is_string))
+    {
+        return Err("rankFields must be an array of strings".to_string());
+    }
+
+    Ok(object.clone())
+}
+
+fn optional_number_field(object: &JsonObject, name: &str) -> Result<(), String> {
+    if let Some(value) = object.get(name)
+        && !value.is_null()
+        && !value.is_number()
+    {
+        return Err(format!("{name} must be a number"));
+    }
+
+    Ok(())
+}
+
+fn optional_string_field(object: &JsonObject, name: &str) -> Result<(), String> {
+    if let Some(value) = object.get(name)
+        && !value.is_null()
+        && !value.is_string()
+    {
+        return Err(format!("{name} must be a string"));
+    }
+
+    Ok(())
+}
+
+fn optional_bool_field(object: &JsonObject, name: &str) -> Result<(), String> {
+    if let Some(value) = object.get(name)
+        && !value.is_null()
+        && !value.is_boolean()
+    {
+        return Err(format!("{name} must be a boolean"));
+    }
+
+    Ok(())
+}
+
 fn togetherai_reranking_request_body(
     model_id: &str,
     options: &RerankingModelCallOptions,
@@ -669,12 +768,7 @@ fn togetherai_reranking_request_body(
         .provider_options
         .as_ref()
         .and_then(|options| options.get("togetherai"))
-        .and_then(|options| {
-            options
-                .get("rankFields")
-                .or_else(|| options.get("rank_fields"))
-                .cloned()
-        })
+        .and_then(|options| options.get("rankFields").cloned())
     {
         body.insert("rank_fields".to_string(), rank_fields);
     }
@@ -778,6 +872,24 @@ fn togetherai_image_result_from_error(
     let mut result = ImageModelResult::new(
         Vec::new(),
         togetherai_image_response_metadata(model_id, headers),
+    )
+    .with_provider_metadata(togetherai_image_error_metadata(message));
+
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
+fn togetherai_image_result_from_message(
+    model_id: &str,
+    message: String,
+    warnings: Vec<Warning>,
+) -> ImageModelResult {
+    let mut result = ImageModelResult::new(
+        Vec::new(),
+        togetherai_image_response_metadata(model_id, None),
     )
     .with_provider_metadata(togetherai_image_error_metadata(message));
 
@@ -899,6 +1011,10 @@ fn togetherai_reranking_result_from_error(
         .with_response(response)
 }
 
+fn togetherai_reranking_result_from_message(message: String) -> RerankingModelResult {
+    RerankingModelResult::new(Vec::new()).with_provider_metadata(togetherai_error_metadata(message))
+}
+
 fn with_reranking_response_headers(
     mut response: RerankingModelResponse,
     headers: Headers,
@@ -1017,7 +1133,9 @@ mod tests {
     use crate::language_model::ProviderAbortController;
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderOptions, ProviderWithRerankingModel};
+    use crate::provider::{
+        Provider, ProviderOptions, ProviderWithRerankingModel, SpecificationVersion,
+    };
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -1025,6 +1143,7 @@ mod tests {
         RerankingModel, RerankingModelCallOptions, RerankingModelDocuments,
     };
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::pin::Pin;
@@ -1318,7 +1437,9 @@ mod tests {
         let provider_options: ProviderOptions = serde_json::from_value(json!({
             "togetherai": {
                 "steps": 28,
-                "guidance": 3.5
+                "guidance": 3.5,
+                "negative_prompt": "low quality",
+                "disable_safety_checker": true
             }
         }))
         .expect("provider options deserialize");
@@ -1344,6 +1465,7 @@ mod tests {
 
         assert_eq!(model.provider(), "togetherai.image");
         assert_eq!(model.model_id(), "stabilityai/stable-diffusion-xl");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
         assert_eq!(poll_ready(model.max_images_per_call()), Some(1));
         assert_eq!(
             result.images,
@@ -1410,8 +1532,114 @@ mod tests {
                 "image_url": "https://example.com/input1.jpg",
                 "response_format": "base64",
                 "steps": 28,
-                "guidance": 3.5
+                "guidance": 3.5,
+                "negative_prompt": "low quality",
+                "disable_safety_checker": true
             }))
+        );
+    }
+
+    #[test]
+    fn togetherai_image_model_maps_file_inputs_to_image_url() {
+        let (requests, transport) = recording_transport(ProviderApiResponse::text(
+            200,
+            "OK",
+            json!({
+                "data": [
+                    {
+                        "b64_json": "together-image-data"
+                    }
+                ]
+            })
+            .to_string(),
+        ));
+        let model = TogetherAIProvider::new()
+            .with_transport(transport)
+            .image_model("black-forest-labs/FLUX.1-kontext-pro");
+
+        let calls = [
+            ImageModelFile::url(Url::parse("https://example.com/input.jpg").expect("url parses")),
+            ImageModelFile::file("image/png", FileDataContent::Bytes(vec![137, 80, 78, 71])),
+            ImageModelFile::file(
+                "image/png",
+                FileDataContent::Base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ".to_string()),
+            ),
+        ];
+
+        for file in calls {
+            let result = poll_ready(
+                model.do_generate(
+                    ImageModelCallOptions::new(1)
+                        .with_prompt("Transform this image")
+                        .with_files(vec![file]),
+                ),
+            );
+            assert_eq!(
+                result.images,
+                vec![FileDataContent::Base64("together-image-data".to_string())]
+            );
+        }
+
+        let requests = requests
+            .lock()
+            .expect("request list mutex is not poisoned")
+            .clone();
+        let image_urls = requests
+            .iter()
+            .map(|request| {
+                request_body_json(request)
+                    .get("image_url")
+                    .and_then(JsonValue::as_str)
+                    .expect("image_url is present")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(image_urls[0], "https://example.com/input.jpg");
+        assert!(
+            image_urls[1].starts_with("data:image/png;base64,"),
+            "raw bytes are converted to a data URI"
+        );
+        assert_eq!(
+            image_urls[2],
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        );
+    }
+
+    #[test]
+    fn togetherai_image_model_validates_provider_options_before_request() {
+        let (requests, transport) = recording_transport(ProviderApiResponse::text(200, "OK", "{}"));
+        let model = TogetherAIProvider::new()
+            .with_transport(transport)
+            .image_model("stabilityai/stable-diffusion-xl");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("invalid options")
+                    .with_provider_options(provider_options(
+                        "togetherai",
+                        json!({
+                            "steps": "many"
+                        }),
+                    )),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("togetherai"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("invalid togetherai provider options")
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .is_empty()
         );
     }
 
@@ -1661,6 +1889,8 @@ mod tests {
                 .and_then(|body| body.get("usage"))
                 .is_some()
         );
+        assert!(result.warnings.is_empty());
+        assert!(result.provider_metadata.is_none());
         assert_eq!(
             provider.reranking("Salesforce/Llama-Rank-v1").provider(),
             "togetherai.reranking"
@@ -1712,6 +1942,147 @@ mod tests {
                 "rank_fields": ["example"],
                 "return_documents": false
             }))
+        );
+    }
+
+    #[test]
+    fn togetherai_reranking_model_sends_text_documents_without_warnings() {
+        let (requests, transport) = recording_transport(
+            ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "rerank-response",
+                    "model": "Salesforce/Llama-Rank-v1",
+                    "object": "rerank",
+                    "results": [
+                        {
+                            "index": 0,
+                            "relevance_score": 0.6475887154399037
+                        },
+                        {
+                            "index": 1,
+                            "relevance_score": 0.6323295373206566
+                        }
+                    ],
+                    "usage": {
+                        "completion_tokens": 0,
+                        "prompt_tokens": 10,
+                        "total_tokens": 10
+                    }
+                })
+                .to_string(),
+            )
+            .with_headers(Headers::from([(
+                "content-length".to_string(),
+                "304".to_string(),
+            )])),
+        );
+        let model = TogetherAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .reranking_model("Salesforce/Llama-Rank-v1");
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    RerankingModelDocuments::text(vec![
+                        "sunny day at the beach".to_string(),
+                        "rainy day in the city".to_string(),
+                    ]),
+                    "rainy day",
+                )
+                .with_top_n(2)
+                .with_provider_options(provider_options(
+                    "togetherai",
+                    json!({
+                        "rankFields": ["example"]
+                    }),
+                )),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert!(result.provider_metadata.is_none());
+        assert_eq!(result.ranking[0].index, 0);
+        assert_eq!(result.ranking[1].index, 1);
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.id.as_deref()),
+            Some("rerank-response")
+        );
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("content-length"))
+                .map(String::as_str),
+            Some("304")
+        );
+
+        let request = requests
+            .lock()
+            .expect("request list mutex is not poisoned")
+            .first()
+            .cloned()
+            .expect("request is captured");
+        assert_eq!(
+            request_body_json(&request),
+            json!({
+                "model": "Salesforce/Llama-Rank-v1",
+                "documents": [
+                    "sunny day at the beach",
+                    "rainy day in the city"
+                ],
+                "query": "rainy day",
+                "top_n": 2,
+                "rank_fields": ["example"],
+                "return_documents": false
+            })
+        );
+    }
+
+    #[test]
+    fn togetherai_reranking_model_validates_provider_options_before_request() {
+        let (requests, transport) = recording_transport(ProviderApiResponse::text(200, "OK", "{}"));
+        let model = TogetherAIProvider::new()
+            .with_transport(transport)
+            .reranking_model("Salesforce/Llama-Rank-v1");
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    RerankingModelDocuments::text(vec![
+                        "sunny day".to_string(),
+                        "rainy city".to_string(),
+                    ]),
+                    "rainy",
+                )
+                .with_provider_options(provider_options(
+                    "togetherai",
+                    json!({
+                        "rankFields": ["example", 7]
+                    }),
+                )),
+            ),
+        );
+
+        assert!(result.ranking.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("togetherai"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("invalid togetherai provider options")
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .is_empty()
         );
     }
 
@@ -1842,6 +2213,7 @@ mod tests {
             }),
             Some("deprecated-env-key".to_string())
         );
+        assert_eq!(togetherai_api_key_from(None, |_| None), None);
     }
 
     #[test]
@@ -1894,6 +2266,104 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    #[ignore = "requires TOGETHER_API_KEY or TOGETHER_AI_API_KEY and performs live TogetherAI image/rerank calls"]
+    fn live_togetherai_image_and_rerank_validate_provider_contract() {
+        if env::var("TOGETHER_API_KEY")
+            .or_else(|_| env::var("TOGETHER_AI_API_KEY"))
+            .is_err()
+        {
+            eprintln!(
+                "skipping live TogetherAI test: TOGETHER_API_KEY/TOGETHER_AI_API_KEY is not set"
+            );
+            return;
+        }
+
+        let provider = TogetherAIProvider::new();
+        let image_model_id = env::var("AI_SDK_RUST_TOGETHER_IMAGE_MODEL")
+            .or_else(|_| env::var("TOGETHER_IMAGE_MODEL"))
+            .unwrap_or_else(|_| "black-forest-labs/FLUX.1-schnell-Free".to_string());
+        let image = poll_ready(
+            provider
+                .image_model(image_model_id.clone())
+                .do_generate(ImageModelCallOptions::new(1).with_prompt("A small blue cube")),
+        );
+
+        assert!(
+            image.provider_metadata.is_none(),
+            "live image call returned provider metadata: {:?}",
+            image.provider_metadata
+        );
+        assert!(!image.images.is_empty());
+        assert_eq!(image.response.model_id, image_model_id);
+
+        let reranking_model_id = env::var("AI_SDK_RUST_TOGETHER_RERANKING_MODEL")
+            .or_else(|_| env::var("TOGETHER_RERANKING_MODEL"))
+            .unwrap_or_else(|_| "Salesforce/Llama-Rank-v1".to_string());
+        let rerank = poll_ready(provider.reranking_model(reranking_model_id).do_rerank(
+            RerankingModelCallOptions::new(
+                RerankingModelDocuments::text(vec![
+                    "sunny day at the beach".to_string(),
+                    "rainy day in the city".to_string(),
+                ]),
+                "rainy day",
+            ),
+        ));
+
+        assert!(
+            rerank.provider_metadata.is_none(),
+            "live rerank call returned provider metadata: {:?}",
+            rerank.provider_metadata
+        );
+        assert!(!rerank.ranking.is_empty());
+        assert!(
+            rerank
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref())
+                .is_some()
+        );
+    }
+
+    fn recording_transport(
+        response: ProviderApiResponse,
+    ) -> (
+        Arc<Mutex<Vec<ProviderApiRequest>>>,
+        OpenAICompatibleTransport,
+    ) {
+        let requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                requests_for_transport
+                    .lock()
+                    .expect("request list mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(response.clone())))
+            });
+
+        (requests, transport)
+    }
+
+    fn request_body_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is valid JSON")
+    }
+
+    fn provider_options(provider: &str, value: serde_json::Value) -> ProviderOptions {
+        let mut options = ProviderOptions::new();
+        options.insert(
+            provider.to_string(),
+            serde_json::from_value(value).expect("provider options are an object"),
+        );
+        options
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {

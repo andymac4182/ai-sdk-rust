@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 94.5%
-- Portable package average: 93.2%
-- Closed package rows: 47 / 52
-- Strict portable verified rows: 37 / 42
-- In-progress rows: 5
+- Average estimated completion: 95.2%
+- Portable package average: 94.0%
+- Closed package rows: 48 / 52
+- Strict portable verified rows: 38 / 42
+- In-progress rows: 4
 - Not-started rows: 0
 
 ## 100% Closed
@@ -47,6 +47,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/prodia` | 100% | Verified | provider package |
 | `@ai-sdk/replicate` | 100% | Verified | provider package |
 | `@ai-sdk/revai` | 100% | Verified | provider package |
+| `@ai-sdk/togetherai` | 100% | Verified | provider package |
 | `@ai-sdk/vercel` | 100% | Verified | provider package |
 | `@ai-sdk/voyage` | 100% | Verified | provider package |
 | `@ai-sdk/otel` | 100% | Verified | telemetry package |
@@ -70,7 +71,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking slices cover default/raw embedding plus text/object rerank behavior; chat, prompt conversion,... |
 | `@ai-sdk/fireworks` | 45% | In progress | provider package | OpenAI-compatible chat/completion/embedding plus provider-specific image workflows now cover... |
 | `@ai-sdk/groq` | 35% | In progress | provider package | OpenAI-compatible chat plus transcription request/response behavior exists; browser-search tool, Groq-specific message... |
-| `@ai-sdk/togetherai` | 65% | In progress | provider package | Provider wrapper covers chat, completion, embeddings, custom image generation, reranking, abort propagation, and exact... |
 
 ## Not Started
 
