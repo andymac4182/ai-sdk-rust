@@ -1,6 +1,6 @@
 # TypeScript To Rust Migration Tracker
 
-This tracker coordinates the remaining work to make the Rust workspace match the
+This tracker records the completed work to make the Rust workspace match the
 public behavior and portable tests from these upstream TypeScript projects:
 
 - `vercel-labs/open-agents`
@@ -46,10 +46,10 @@ Refreshed on 2026-06-01 with `npx opensrc fetch`.
 
 | Project | Current state | Evidence | Required next proof |
 | --- | --- | --- | --- |
-| Open Agents | Current tracked rows are closed. The Rust service has Slack webhook ingress, real Vercel AI Gateway runtime config, Vercel sandbox support, deployment docs, and a generated upstream inventory covering all 6 package manifests, 461 source files, and 106 test files. OA-03B replaced the one-poll Gateway runtime path with async completion coverage and an ignored live Gateway smoke path. | `docs/open-agents/upstream-parity.md`, `scripts/open-agents-test-inventory.mjs`, `docs/open-agents/bucket-ownership.md`, `docs/open-agents/slack-remote-agent-architecture.md`, `docs/open-agents/deployment-verification.md`, `crates/open-agents-*` | Keep the Open Agents gate green and rerun the live Slack/Gateway/Vercel proof paths when credentials or upstream drift change. |
+| Open Agents | Current tracked rows are closed. The Rust service has Slack webhook ingress, native Vercel AI Gateway runtime config, Vercel sandbox support, deployment docs, and a generated upstream inventory covering all 6 package manifests, 461 source files, and 106 test files. OA-03B replaced the one-poll Gateway runtime path with async completion coverage and an ignored live Gateway smoke path. | `docs/open-agents/upstream-parity.md`, `scripts/open-agents-test-inventory.mjs`, `docs/open-agents/bucket-ownership.md`, `docs/open-agents/slack-remote-agent-architecture.md`, `docs/open-agents/deployment-verification.md`, `crates/open-agents-*` | Keep the Open Agents gate green and rerun the live Slack/Gateway/Vercel proof paths when credentials or upstream drift change. |
 | Workflow SDK | Current upstream portable rows are closed by the row-level gate. The gate currently passes with 2,679 inventory rows, 22 summary packages, and 28 ledger packages. `packages/core`/`workflow-core` is `verified`: the core inventory has 1,216 rows, 1,023 portable rows all mapped to named Rust tests, 189 `js-only-documented` rows, 4 `type-system-impossible` rows, and 0 `needs-review` rows. Core E2E specifically has 154 rows: 79 portable verified and 75 `js-only-documented`. | `node scripts/workflow-test-inventory.mjs --check && node scripts/workflow-parity-check.mjs`; `cargo test -p workflow-core` | Preserve the zero-`needs-review` invariant and rerun the drift audit whenever upstream `vercel/workflow` moves. |
 | Chat SDK | CHAT-02 closed current-upstream drift at `ffc43fcf1f7679164be0806308bea237113c7590`: package progress is restored to 100.0%, all 19 package rows are closed, and all 16 portable package rows are strictly verified with named Rust tests or existing explicit exceptions. | `docs/chat/upstream-parity.md`, `docs/chat/package-progress.md` | Rerun the Chat SDK drift audit when upstream `vercel/chat` moves; preserve the hard rule that every portable row needs a named Rust test or explicit exception before any future 100% claim. |
-| AI SDK | In progress. Package progress is 96.2% average, 49 of 52 package rows closed, 39 of 42 portable rows strictly verified, 3 in progress, and 0 not started. | `docs/upstream-parity.md`, `docs/package-progress.md` | Complete the remaining xAI, Groq, and Cohere provider packages with package-owned tests, then regenerate progress to 100% portable verified or explicitly documented JS-only/type-system exceptions. |
+| AI SDK | Current upstream package rows are closed. Package progress is 100.0%, all 52 package rows are closed, and all 42 portable rows are strictly verified with named Rust tests or explicit JavaScript-only/type-system exceptions. | `docs/upstream-parity.md`, `docs/package-progress.md`, `docs/ai-02-openai-compatible-providers.md` | Rerun the AI SDK drift audit when upstream `vercel/ai` moves; preserve the hard rule that every portable row needs a named Rust test or explicit exception before any future 100% claim. |
 
 ## Dispatch Board
 
@@ -59,23 +59,23 @@ is too large, but the parent row remains open until all child rows are merged.
 
 | ID | Status | Owner scope | Build | Verify before merge |
 | --- | --- | --- | --- | --- |
-| T2R-00 | in-progress | Master tracker and dispatch coordination | Keep this file current with upstream snapshots, thread ids, and close criteria. | `git diff --check`; relevant ledger/gate commands named in changed rows. |
+| T2R-00 | complete | Master tracker and dispatch coordination | Current tracker rows are reconciled with the generated package ledgers and gate outputs for the refreshed 2026-06-01 upstream snapshots. | `git diff --check`; `scripts/master-parity-gate.sh`; relevant ledger/gate commands named in changed rows. |
 | OA-01 | complete | Open Agents upstream inventory gate | Added `docs/open-agents/upstream-parity.md` plus `scripts/open-agents-test-inventory.mjs` to inventory packages, source files, and all 106 upstream tests. | Fresh `npx opensrc fetch https://github.com/vercel-labs/open-agents`; `node scripts/open-agents-test-inventory.mjs --check`; `cargo test -p open-agents-core -p open-agents-runtime -p open-agents-sandbox -p open-agents-slack -p open-agents-service`. |
 | OA-02 | complete | Open Agents Slack remote-agent runtime closure | Closed the local Slack runtime gaps surfaced by OA-01: durable active-run resume, question and approval block-action resumes, finish-action Slack summaries, terminal sandbox/model error reporting, and emulator approval coverage. | `node scripts/open-agents-test-inventory.mjs --check`; `cargo test -p open-agents-core -p open-agents-runtime -p open-agents-sandbox -p open-agents-slack -p open-agents-service -p chat-sdk-adapter-slack`; `scripts/open-agents-local-e2e.sh --all-local`; ignored Slack/Gateway/Vercel proof envs documented in `docs/open-agents/deployment-verification.md`. |
-| OA-03B | complete | Open Agents real Gateway runtime proof | Replaced the one-poll `poll_ready` Gateway path with a real async execution path, added deterministic Pending-then-Ready coverage, preserved fixture/durable Slack behavior, and deployed the production service with `runtime=gateway`. | `cargo test -p open-agents-service`; `scripts/master-parity-gate.sh`; ignored live Gateway smoke when credentials exist. |
+| OA-03B | complete | Open Agents real Gateway runtime proof | Replaced the one-poll `poll_ready` Gateway path with a real async execution path, switched the service runtime to the native `GatewayProvider`, added deterministic Pending-then-Ready/native-provider coverage, preserved fixture/durable Slack behavior, and deployed the production service with `runtime=gateway`. | `cargo test -p open-agents-service`; `scripts/master-parity-gate.sh`; ignored live Gateway smoke when credentials exist. |
 | WF-01 | verified | Workflow core E2E parity closure | Closed the remaining `packages/core` E2E rows: 79 portable rows mapped to named `workflow-core` Rust tests and 75 rows classified `js-only-documented`; also closed adjacent abort consistency and workflow set-attributes core rows needed before `packages/core` could be verified. | `node scripts/workflow-test-inventory.mjs --check`; `node scripts/workflow-parity-check.mjs`; `cargo test -p workflow-core`. |
 | WF-02 | complete | Workflow current-upstream drift audit | Refreshed upstream `ae3c833...`, found only `packages/core/e2e/event-log-race-repro.test.ts` diagnostic-label drift, no package/test inventory row churn, and classified all current rows so zero `needs-review` rows remain. | `node scripts/workflow-test-inventory.mjs --check`; `node scripts/workflow-parity-check.mjs`; no unclassified `needs-review` rows. |
 | CHAT-01 | complete | Chat SDK current-upstream drift audit | Reconciled refreshed upstream `ffc43fc...` with `docs/chat/upstream-parity.md`; drift found, so the prior 100% claim was retired. | `docs/chat/package-progress.md` regenerated; focused chat and affected adapter crate tests; no claim that current portable rows are all mapped. |
 | CHAT-02 | complete | Chat SDK drift closure | Closed the CHAT-01 current-upstream drift: `packages/chat`, Slack, GChat, Telegram, WhatsApp, and new Twilio all have named Rust tests for every portable drift case; no new js-only/type-system exceptions were needed. | `docs/chat/package-progress.md` regenerated to 100%; `cargo test -p chat-sdk-chat -p chat-sdk-adapter-slack -p chat-sdk-adapter-gchat -p chat-sdk-adapter-telegram -p chat-sdk-adapter-whatsapp -p chat-sdk-adapter-twilio`; final merge gate passed. |
 | AI-01 | complete | AI SDK large foundational providers | Ported and verified `@ai-sdk/anthropic`, `@ai-sdk/amazon-bedrock`, `@ai-sdk/google`, and `@ai-sdk/google-vertex` with row-level upstream mappings and package-owned tests. | Package-owned upstream test mapping; provider crate tests; progress regeneration. |
-| AI-02 | active | AI SDK OpenAI-compatible major providers | Initial provider foundations for `@ai-sdk/xai`, `@ai-sdk/groq`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, and `@ai-sdk/togetherai` landed. Fireworks and TogetherAI are verified; xAI, Groq, and Cohere remain in-progress under AI-02C through AI-02E. | Package-owned tests plus shared OpenAI-compatible regression tests where applicable; progress regeneration. |
-| AI-02B | complete | AI SDK OpenAI-compatible provider verified closure audit | Added deterministic coverage for xAI Responses/server-tool usage, Groq transcription, Cohere embed/rerank, Fireworks provider-specific image routes, and TogetherAI image/rerank abort/error mapping while keeping all five package rows honestly in-progress. | Focused tests for all five providers; regenerated `docs/package-progress.md`; `scripts/master-parity-gate.sh`; no verified claim until child rows close. |
-| AI-02C | active | xAI provider full closure | Map every portable upstream `@ai-sdk/xai` case to named Rust tests or explicit exceptions, including chat conversion/streaming/tools/usage, Responses provider-tool IDs/input/usage/streaming, Files API, image, and video surfaces. | `cargo test xai_ --all-features`; package row mapping; progress regeneration; master parity gate. |
-| AI-02D | active | Groq provider full closure | Map every portable upstream `@ai-sdk/groq` case to named Rust tests or explicit exceptions, including chat streaming/reasoning/errors/tools/usage, browser-search tool preparation, message and usage conversion helpers, and transcription edge parity. | `cargo test groq_ --all-features`; package row mapping; progress regeneration; master parity gate. |
-| AI-02E | active | Cohere provider full closure | Map every portable upstream `@ai-sdk/cohere` case to named Rust tests or explicit exceptions, including chat/prompt/tool/citation surfaces if portable plus embedding/reranking validation and error edges. | `cargo test cohere_ --all-features`; package row mapping; progress regeneration; master parity gate. |
+| AI-02 | complete | AI SDK OpenAI-compatible major providers | Closed `@ai-sdk/xai`, `@ai-sdk/groq`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, and `@ai-sdk/togetherai` with package-owned tests, shared OpenAI-compatible regression coverage, ignored live proofs where credentials are required, and explicit exceptions for non-portable rows. | Package-owned tests plus shared OpenAI-compatible regression tests where applicable; progress regeneration; `scripts/master-parity-gate.sh`. |
+| AI-02B | complete | AI SDK OpenAI-compatible provider verified closure audit | Added deterministic coverage for xAI Responses/server-tool usage, Groq transcription, Cohere embed/rerank, Fireworks provider-specific image routes, and TogetherAI image/rerank abort/error mapping before the child rows closed. | Focused tests for all five providers; regenerated `docs/package-progress.md`; `scripts/master-parity-gate.sh`; child rows AI-02C through AI-02G are now closed. |
+| AI-02C | complete | xAI provider full closure | Mapped every portable upstream `@ai-sdk/xai` case to named Rust tests or explicit exceptions, including chat conversion/streaming/tools/usage, Responses provider-tool IDs/input/usage/streaming, Files API, image, and video surfaces. | `cargo test xai_ --all-features`; package row mapping; progress regeneration; `scripts/master-parity-gate.sh`. |
+| AI-02D | complete | Groq provider full closure | Mapped every portable upstream `@ai-sdk/groq` case to named Rust tests or explicit exceptions, including chat streaming/reasoning/errors/tools/usage, browser-search tool preparation, message and usage conversion helpers, and transcription edge parity. | `cargo test groq_ --all-features`; package row mapping; progress regeneration; `scripts/master-parity-gate.sh`. |
+| AI-02E | complete | Cohere provider full closure | Mapped every portable upstream `@ai-sdk/cohere` case to named Rust tests or explicit exceptions, including chat/prompt/tool/citation surfaces plus embedding/reranking validation and error edges. | `cargo test cohere_ --all-features`; package row mapping; progress regeneration; `scripts/master-parity-gate.sh`. |
 | AI-02F | complete | Fireworks provider full closure | Closed all 43 refreshed upstream `@ai-sdk/fireworks` provider/image cases with named Rust tests or explicit JS-only/type-system/credential-gated exceptions; added provider factory split/alias coverage, image error metadata, edit input variants, async multi-poll timing, timeout/failure metadata, default live transport, and ignored live proof paths. | `cargo test fireworks_ --all-features`; 43/43 case map in `docs/ai-02-openai-compatible-providers.md`; regenerated `docs/package-progress.md`; `scripts/master-parity-gate.sh`. |
 | AI-02G | complete | TogetherAI provider full closure | Closed all 40 refreshed upstream `@ai-sdk/togetherai` provider/image/reranking cases with named Rust tests or explicit JS-only/credential-gated exceptions; added provider-option validation, image file input mapping, text rerank coverage, error metadata, and an ignored live image/rerank proof. | `cargo test togetherai_ --all-features`; 40/40 case map in `docs/ai-02-openai-compatible-providers.md`; regenerated `docs/package-progress.md`; `scripts/master-parity-gate.sh`. |
-| AI-03 | complete | AI SDK media generation providers | Ported the portable image/video media generation surface for `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, and `@ai-sdk/replicate`; kept already-green `@ai-sdk/luma` and `@ai-sdk/black-forest-labs` minimal. AI-03B owns driving these package rows from in-progress to verified or documenting exact remaining exceptions. | `cargo test -p ai-sdk-black-forest-labs -p ai-sdk-luma -p ai-sdk-replicate -p ai-sdk-fal -p ai-sdk-klingai -p ai-sdk-prodia`; `docs/ai-03-media-live-proofs.md`. |
+| AI-03 | complete | AI SDK media generation providers | Ported the portable image/video media generation surface for `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, and `@ai-sdk/replicate`; kept already-green `@ai-sdk/luma` and `@ai-sdk/black-forest-labs` minimal before AI-03B verified the row set. | `cargo test -p ai-sdk-black-forest-labs -p ai-sdk-luma -p ai-sdk-replicate -p ai-sdk-fal -p ai-sdk-klingai -p ai-sdk-prodia`; `docs/ai-03-media-live-proofs.md`. |
 | AI-03B | complete | AI SDK media provider full parity closure | Closed the remaining `@ai-sdk/black-forest-labs`, `@ai-sdk/luma`, `@ai-sdk/fal`, `@ai-sdk/klingai`, `@ai-sdk/prodia`, and `@ai-sdk/replicate` rows after AI-03's initial media slice. | Focused tests for all six provider crates; package row mapping in `docs/upstream-parity.md`; regenerated `docs/package-progress.md`; `scripts/master-parity-gate.sh`. |
 | AI-04 | complete | AI SDK speech, transcription, and audio providers | Port or close `@ai-sdk/elevenlabs`, `@ai-sdk/gladia`, `@ai-sdk/deepgram`, `@ai-sdk/hume`, `@ai-sdk/lmnt`, `@ai-sdk/revai`, `@ai-sdk/assemblyai`, and `@ai-sdk/voyage`. | Speech/transcription fixture tests, warning/error mapping tests, progress regeneration. |
 | AI-05 | complete | AI SDK remaining in-progress wrappers | Finished `@ai-sdk/azure`, `@ai-sdk/baseten`, `@ai-sdk/bytedance`, `@ai-sdk/cerebras`, `@ai-sdk/deepinfra`, `@ai-sdk/huggingface`, `@ai-sdk/moonshotai`, and `@ai-sdk/vercel`. | Package-owned tests for every row named in `docs/upstream-parity.md`; progress regenerated. |
@@ -125,8 +125,8 @@ reasoning.
 
 ## AI-01 Child Rows
 
-Created by the AI-01 inventory slice on 2026-06-01. These rows remain open
-until each package maps every portable row in
+Created by the AI-01 inventory slice on 2026-06-01. These rows are closed after
+each package mapped every portable row in
 `docs/ai-foundational-provider-inventory.md` to named Rust tests in the owning
 crate, while preserving explicit JavaScript-only and type-system exceptions.
 
@@ -141,20 +141,19 @@ crate, while preserving explicit JavaScript-only and type-system exceptions.
 
 The AI SDK is the largest open surface. Current generated progress shows:
 
-- 47 of 52 package rows closed.
-- 37 of 42 portable package rows strictly verified.
-- 5 package rows in progress.
+- 52 of 52 package rows closed.
+- 42 of 42 portable package rows strictly verified.
+- 0 package rows in progress.
 - 0 package rows not started.
 
 In-progress packages:
 
-`@ai-sdk/xai`, `@ai-sdk/cohere`, `@ai-sdk/fireworks`, `@ai-sdk/groq`,
-`@ai-sdk/togetherai`.
+None.
 
 Not-started packages:
 
-None. All AI SDK provider package rows are now at least in-progress, but
-5 package rows still require row-level closure before AI SDK parity is done.
+None. All AI SDK provider package rows are closed for the current refreshed
+upstream snapshot.
 
 ## Merge-Back Checklist
 
