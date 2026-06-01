@@ -19,7 +19,7 @@ const outputPath = path.join(
 
 const upstreamRepo = 'vercel-labs/open-agents';
 const upstreamHead = '24d679c7ba3d274aa73814c15673aeffcbe3c1c2';
-const inventoryDate = '2026-06-01';
+const inventoryDate = '2026-06-02';
 
 const expectedPackageManifestCount = 6;
 const expectedSourceFileCount = 461;
@@ -30,6 +30,7 @@ const codeFilePattern = /\.(?:d\.)?(?:ts|tsx)$/;
 const testFilePattern = /\.(?:test|spec)\.(?:ts|tsx)$/;
 const testCallPattern =
   /(?:^|[^\w$])(?:it|test)(?:\.(?:skip|only|todo|each))?\s*\(/g;
+const targetTestCalls = new Set(['it', 'test']);
 
 const validPortability = new Set([
   'portable',
@@ -105,6 +106,55 @@ function walk(directory) {
   return files;
 }
 
+function discoverRustTests() {
+  const names = new Set();
+  const roots = ['crates', 'src']
+    .map((entry) => path.join(repositoryRoot, entry))
+    .filter((entry) => fs.existsSync(entry));
+
+  for (const root of roots) {
+    for (const file of walk(root).filter((entry) => entry.endsWith('.rs'))) {
+      const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+      let pendingTestAttribute = false;
+      for (const line of lines) {
+        if (/^\s*#\[(?:tokio::)?test(?:\([^]]*\))?\]/.test(line)) {
+          pendingTestAttribute = true;
+          continue;
+        }
+        if (pendingTestAttribute && /^\s*#\[/.test(line)) {
+          continue;
+        }
+        const match =
+          /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(
+            line
+          );
+        if (pendingTestAttribute && match) {
+          names.add(match[1]);
+        }
+        pendingTestAttribute = false;
+      }
+    }
+  }
+
+  return names;
+}
+
+function splitRustTestNames(value) {
+  return String(value)
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isPendingRustTest(value) {
+  return (
+    !value ||
+    value === 'n/a' ||
+    value.startsWith('pending:') ||
+    value === 'missing'
+  );
+}
+
 function relativePath(filePath) {
   return path.relative(upstreamRoot, filePath).replaceAll(path.sep, '/');
 }
@@ -156,6 +206,228 @@ function packageName(manifestRelativePath) {
 function countTestCalls(relative) {
   const source = fs.readFileSync(path.join(upstreamRoot, relative), 'utf8');
   return [...source.matchAll(testCallPattern)].length;
+}
+
+function lineStarts(source) {
+  const starts = [0];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === '\n') {
+      starts.push(index + 1);
+    }
+  }
+  return starts;
+}
+
+function lineNumberAt(starts, index) {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (starts[middle] <= index) {
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return high + 1;
+}
+
+function isIdentifierCharacter(char) {
+  return /[\w$]/.test(char ?? '');
+}
+
+function skipWhitespace(source, index) {
+  let cursor = index;
+  while (/\s/.test(source[cursor] ?? '')) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function readStringLiteral(source, index) {
+  const quote = source[index];
+  if (quote !== '"' && quote !== "'" && quote !== '`') {
+    return undefined;
+  }
+
+  let cursor = index + 1;
+  let value = '';
+  while (cursor < source.length) {
+    const char = source[cursor];
+    if (char === '\\') {
+      const next = source[cursor + 1];
+      value += next ?? '';
+      cursor += 2;
+      continue;
+    }
+    if (char === quote) {
+      return { value, end: cursor + 1 };
+    }
+    value += char;
+    cursor += 1;
+  }
+  return undefined;
+}
+
+function skipString(source, index) {
+  return readStringLiteral(source, index)?.end ?? index + 1;
+}
+
+function skipLineComment(source, index) {
+  const next = source.indexOf('\n', index + 2);
+  return next === -1 ? source.length : next + 1;
+}
+
+function skipBlockComment(source, index) {
+  const next = source.indexOf('*/', index + 2);
+  return next === -1 ? source.length : next + 2;
+}
+
+function nextCodeCharacter(source, index, target) {
+  let cursor = index;
+  while (cursor < source.length) {
+    const char = source[cursor];
+    const next = source[cursor + 1];
+    if (char === '"' || char === "'" || char === '`') {
+      cursor = skipString(source, cursor);
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      cursor = skipLineComment(source, cursor);
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      cursor = skipBlockComment(source, cursor);
+      continue;
+    }
+    if (char === target) {
+      return cursor;
+    }
+    cursor += 1;
+  }
+  return undefined;
+}
+
+function matchingBrace(source, openIndex, openChar, closeChar) {
+  let depth = 0;
+  let cursor = openIndex;
+  while (cursor < source.length) {
+    const char = source[cursor];
+    const next = source[cursor + 1];
+    if (char === '"' || char === "'" || char === '`') {
+      cursor = skipString(source, cursor);
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      cursor = skipLineComment(source, cursor);
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      cursor = skipBlockComment(source, cursor);
+      continue;
+    }
+    if (char === openChar) {
+      depth += 1;
+    } else if (char === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return cursor;
+      }
+    }
+    cursor += 1;
+  }
+  return undefined;
+}
+
+function extractCallTitle(source, openParenIndex) {
+  const titleStart = skipWhitespace(source, openParenIndex + 1);
+  return readStringLiteral(source, titleStart);
+}
+
+function extractTestCalls(relative) {
+  const source = fs.readFileSync(path.join(upstreamRoot, relative), 'utf8');
+  const starts = lineStarts(source);
+  const calls = [];
+
+  let cursor = 0;
+  while (cursor < source.length) {
+    const char = source[cursor];
+    const next = source[cursor + 1];
+    if (char === '"' || char === "'" || char === '`') {
+      cursor = skipString(source, cursor);
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      cursor = skipLineComment(source, cursor);
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      cursor = skipBlockComment(source, cursor);
+      continue;
+    }
+
+    const match = /^(describe|it|test)\b/.exec(source.slice(cursor));
+    if (!match || isIdentifierCharacter(source[cursor - 1])) {
+      cursor += 1;
+      continue;
+    }
+
+    const name = match[1];
+    const afterName = skipWhitespace(source, cursor + name.length);
+    if (source[afterName] !== '(') {
+      cursor += name.length;
+      continue;
+    }
+
+    const title = extractCallTitle(source, afterName);
+    const line = lineNumberAt(starts, cursor);
+    const call = {
+      kind: name,
+      index: cursor,
+      line,
+      title: title?.value ?? '(dynamic title)',
+      declaration: name,
+      bodyStart: undefined,
+      bodyEnd: undefined,
+    };
+
+    if (name === 'describe') {
+      const openBrace = title ? nextCodeCharacter(source, title.end, '{') : undefined;
+      if (openBrace !== undefined) {
+        call.bodyStart = openBrace;
+        call.bodyEnd = matchingBrace(source, openBrace, '{', '}');
+      }
+    }
+
+    calls.push(call);
+    cursor += name.length;
+  }
+
+  const suites = calls
+    .filter((call) => call.kind === 'describe' && call.bodyStart !== undefined)
+    .sort((left, right) => left.bodyStart - right.bodyStart);
+
+  return calls
+    .filter((call) => targetTestCalls.has(call.kind))
+    .map((call) => {
+      const suitePath = suites
+        .filter(
+          (suite) =>
+            suite.bodyStart < call.index &&
+            suite.bodyEnd !== undefined &&
+            call.index < suite.bodyEnd
+        )
+        .map((suite) => suite.title)
+        .join(' > ');
+      return {
+        packageId: packageIdFor(relative),
+        file: relative,
+        line: call.line,
+        suitePath: suitePath || '(root)',
+        caseName: call.title,
+        declaration: call.declaration,
+      };
+    });
 }
 
 function sourceMapping(relative) {
@@ -405,6 +677,24 @@ function testMapping(relative) {
     rustTestName: '',
     note: 'No test owner rule matched this file.',
   };
+}
+
+function testCaseMapping(testCase) {
+  const mapping = testMapping(testCase.file);
+  if (mapping.portability === 'portable') {
+    const hasNamedTest =
+      mapping.rustTestName &&
+      mapping.rustTestName !== 'n/a' &&
+      !mapping.rustTestName.startsWith('pending:');
+    return {
+      ...mapping,
+      status: hasNamedTest ? 'verified' : 'in-progress',
+      note: hasNamedTest
+        ? 'Named Rust parity test is mapped at case level; strict gate also verifies the test name exists.'
+        : mapping.note,
+    };
+  }
+  return mapping;
 }
 
 function portable(owner, note) {
@@ -753,6 +1043,34 @@ function buildInventory() {
     ];
   });
 
+  const rustTestNames = discoverRustTests();
+  const testCaseRows = testFiles.flatMap((file) =>
+    extractTestCalls(file).map((testCase) => {
+      const mapping = testCaseMapping(testCase);
+      const row = [
+        testCase.packageId,
+        testCase.file,
+        testCase.line,
+        testCase.suitePath,
+        testCase.caseName,
+        testCase.declaration,
+        mapping.portability,
+        mapping.owner,
+        mapping.rustTestName,
+        mapping.status,
+        mapping.note,
+      ];
+      const missingRustTests = strictGapReason(row, rustTestNames);
+      if (missingRustTests && !isPendingRustTest(mapping.rustTestName)) {
+        row[9] = 'in-progress';
+        row[10] =
+          'Named Rust parity marker exists, but strict gate did not find every referenced Rust test in the workspace.';
+      }
+      return row;
+    })
+  );
+  const strictGapRows = buildStrictGapRows(testCaseRows, rustTestNames);
+
   return {
     allFiles,
     packageManifests,
@@ -762,6 +1080,8 @@ function buildInventory() {
     packageRows,
     sourceRows,
     testRows,
+    testCaseRows,
+    strictGapRows,
   };
 }
 
@@ -854,6 +1174,62 @@ function validateInventory(inventory) {
     }
   }
 
+  const caseCountByFile = new Map();
+  for (const row of inventory.testCaseRows) {
+    const [
+      packageId,
+      file,
+      line,
+      suite,
+      caseName,
+      declaration,
+      portability,
+      owner,
+      rustTestName,
+      status,
+      note,
+    ] = row;
+    caseCountByFile.set(file, (caseCountByFile.get(file) ?? 0) + 1);
+    if (!packageId) {
+      errors.push(`${file}:${line} has no package id`);
+    }
+    if (!Number.isInteger(Number(line)) || Number(line) < 1) {
+      errors.push(`${file} has invalid test case line ${line}`);
+    }
+    if (!suite) {
+      errors.push(`${file}:${line} has no suite path`);
+    }
+    if (!caseName) {
+      errors.push(`${file}:${line} has no case name`);
+    }
+    if (declaration !== 'it' && declaration !== 'test') {
+      errors.push(`${file}:${line} has invalid test declaration ${declaration}`);
+    }
+    if (!validPortability.has(portability)) {
+      errors.push(`${file}:${line} has invalid test-case portability ${portability}`);
+    }
+    if (!validStatus.has(status)) {
+      errors.push(`${file}:${line} has invalid test-case status ${status}`);
+    }
+    if (!owner || owner === 'unassigned') {
+      errors.push(`${file}:${line} has no Rust test owner or documented exception`);
+    }
+    if (!rustTestName) {
+      errors.push(`${file}:${line} has no named Rust test, pending owner marker, or n/a exception`);
+    }
+    if (!note) {
+      errors.push(`${file}:${line} has no test-case note`);
+    }
+  }
+
+  for (const row of inventory.testRows) {
+    const [, file, cases] = row;
+    const extracted = caseCountByFile.get(file) ?? 0;
+    if (Number(cases) !== extracted) {
+      errors.push(`${file} counted ${cases} test calls but extracted ${extracted} test case rows`);
+    }
+  }
+
   return errors;
 }
 
@@ -903,6 +1279,125 @@ function summarizeTests(testRows) {
     ]);
 }
 
+function summarizeTestCases(testCaseRows, testFiles) {
+  const summary = new Map();
+  for (const file of testFiles) {
+    const packageId = packageIdFor(file);
+    if (!summary.has(packageId)) {
+      summary.set(packageId, {
+        packageId,
+        files: 0,
+        cases: 0,
+        portable: 0,
+        mappedPortable: 0,
+        unmappedPortable: 0,
+        jsOnly: 0,
+        typeSystem: 0,
+      });
+    }
+    summary.get(packageId).files += 1;
+  }
+  for (const row of testCaseRows) {
+    const [packageId, , , , , , portability, , rustTestName] = row;
+    const entry = summary.get(packageId);
+    entry.cases += 1;
+    if (portability === 'portable') {
+      entry.portable += 1;
+      if (rustTestName && !rustTestName.startsWith('pending:')) {
+        entry.mappedPortable += 1;
+      } else {
+        entry.unmappedPortable += 1;
+      }
+    } else if (portability === 'js-only-documented') {
+      entry.jsOnly += 1;
+    } else if (portability === 'type-system-impossible') {
+      entry.typeSystem += 1;
+    }
+  }
+  return [...summary.values()]
+    .sort((left, right) => left.packageId.localeCompare(right.packageId))
+    .map((entry) => [
+      entry.packageId,
+      entry.files,
+      entry.cases,
+      entry.portable,
+      entry.mappedPortable,
+      entry.unmappedPortable,
+      entry.jsOnly,
+      entry.typeSystem,
+    ]);
+}
+
+function strictGapReason(row, rustTestNames) {
+  const [, , , , , , portability, , rustTestName] = row;
+  if (portability !== 'portable') {
+    return undefined;
+  }
+  if (isPendingRustTest(rustTestName)) {
+    return 'missing named Rust test';
+  }
+  const missingNames = splitRustTestNames(rustTestName).filter(
+    (testName) => !rustTestNames.has(testName)
+  );
+  if (missingNames.length > 0) {
+    return `named Rust test not found: ${missingNames.join(', ')}`;
+  }
+  return undefined;
+}
+
+function buildStrictGapRows(testCaseRows, rustTestNames) {
+  return testCaseRows.flatMap((row) => {
+    const [
+      packageId,
+      file,
+      line,
+      suite,
+      caseName,
+      ,
+      ,
+      owner,
+      rustTestName,
+      ,
+      note,
+    ] = row;
+    const reason = strictGapReason(row, rustTestNames);
+    if (!reason) {
+      return [];
+    }
+    return [[packageId, file, line, suite, caseName, owner, reason, rustTestName, note]];
+  });
+}
+
+function summarizeStrictGaps(strictGapRows) {
+  const summary = new Map();
+  for (const row of strictGapRows) {
+    const [, , , , , owner, reason] = row;
+    if (!summary.has(owner)) {
+      summary.set(owner, {
+        owner,
+        missingNamed: 0,
+        missingWorkspaceTest: 0,
+        total: 0,
+      });
+    }
+    const entry = summary.get(owner);
+    entry.total += 1;
+    if (reason === 'missing named Rust test') {
+      entry.missingNamed += 1;
+    } else {
+      entry.missingWorkspaceTest += 1;
+    }
+  }
+  return [...summary.values()]
+    .sort((left, right) => left.owner.localeCompare(right.owner))
+    .map((entry) => [
+      entry.owner,
+      entry.missingNamed,
+      entry.missingWorkspaceTest,
+      entry.total,
+    ]);
+}
+
 function summarizeSources(sourceRows) {
   const summary = new Map();
   for (const row of sourceRows) {
@@ -944,6 +1439,9 @@ This ledger is generated from the refreshed upstream Open Agents mirror and is
 the OA-01 gate for future Rust implementation buckets. Every current upstream
 package manifest, non-test TS/TSX source file, and test file must have a Rust
 owner, a named Rust test, or an explicit documented exception.
+The test inventory is case-level: each portable upstream \`it(...)\` or
+\`test(...)\` call maps to a named Rust test or remains a strict-gate failure
+until the owning child bucket closes it.
 
 ## Source Snapshot
 
@@ -959,7 +1457,11 @@ owner, a named Rust test, or an explicit documented exception.
 | TS/TSX files | ${inventory.codeFiles.length} |
 | Non-test source files | ${inventory.sourceFiles.length} |
 | Test files | ${inventory.testFiles.length} |
+| Test cases | ${inventory.testCaseRows.length} |
+| Strict gate gaps | ${inventory.strictGapRows.length} |
 | Gate command | \`node scripts/open-agents-test-inventory.mjs --check\` |
+| Strict gate command | \`node scripts/open-agents-parity-check.mjs --strict\` |
+| CI report command | \`node scripts/open-agents-parity-check.mjs --check\` |
 
 ## Status Rules
 
@@ -969,17 +1471,18 @@ the Slack-first Rust release, and \`type-system-impossible\` only for TypeScript
 language-service assertions that cannot become Rust runtime checks.
 
 Rows marked \`in-progress\` are not complete parity. They are owner-mapped
-inventory rows that future Open Agents buckets must close with named Rust tests
-before claiming the owning package is ported or verified. Rows marked
-\`js-only-documented\` are explicit exclusions and must carry the reason in the
-notes column.
+inventory rows that future Open Agents buckets must close with named Rust tests.
+The strict gate fails every portable case-level row that keeps an owner-only
+pending marker. Rows marked \`js-only-documented\` are explicit exclusions and
+must carry the reason in the notes column.
 
 ## Gate Rules
 
 - The refreshed upstream count is expected to be exactly ${expectedPackageManifestCount} package manifests, ${expectedSourceFileCount} non-test source files, and ${expectedTestFileCount} test files. If upstream changes, update this ledger in the same commit that explains the drift.
 - The checker fails when any source file lacks a Rust owner or documented exclusion.
-- The checker fails when any test file lacks a Rust owner, named Rust test, pending owner marker, or explicit exception.
-- Extra Rust tests are additive. They do not close a portable upstream row unless the row names the Rust test or keeps an explicit pending owner marker for a later implementation bucket.
+- The inventory checker fails when any test file or test case lacks a Rust owner, named Rust test, pending owner marker, or explicit exception.
+- The strict gate fails when any portable test case lacks a named Rust test, keeps an owner-only pending marker, or names a Rust test that is not present in the workspace.
+- Extra Rust tests are additive. They do not close a portable upstream row unless the row names the Rust test.
 
 ## Package Inventory
 
@@ -1011,6 +1514,51 @@ ${renderTable(
     summarizeTests(inventory.testRows)
   )}
 
+## Test Case Summary
+
+${renderTable(
+    [
+      'Package',
+      'Test files',
+      'Cases',
+      'Portable cases',
+      'Mapped portable cases',
+      'Unmapped portable cases',
+      'JS-only cases',
+      'Type-system cases',
+    ],
+    summarizeTestCases(inventory.testCaseRows, inventory.testFiles)
+  )}
+
+## Strict Gap Summary
+
+${renderTable(
+    [
+      'Rust owner crate/module',
+      'Missing named Rust test',
+      'Named Rust test not found',
+      'Total strict gaps',
+    ],
+    summarizeStrictGaps(inventory.strictGapRows)
+  )}
+
+## Strict Gap Handoff
+
+${renderTable(
+    [
+      'Package',
+      'Upstream test file',
+      'Line',
+      'Suite',
+      'Case',
+      'Rust owner crate/module',
+      'Gap reason',
+      'Current marker',
+      'Notes',
+    ],
+    inventory.strictGapRows
+  )}
+
 ## Source File Inventory
 
 ${renderTable(
@@ -1033,6 +1581,25 @@ ${renderTable(
     ],
     inventory.testRows
   )}
+
+## Test Case Inventory
+
+${renderTable(
+    [
+      'Package',
+      'Upstream test file',
+      'Line',
+      'Suite',
+      'Case',
+      'Declaration',
+      'Portability',
+      'Rust owner crate/module',
+      'Rust test name or exception',
+      'Status',
+      'Notes',
+    ],
+    inventory.testCaseRows
+  )}
 `;
 }
 
@@ -1050,6 +1617,14 @@ if (options.dryRun) {
         packageManifests: inventory.packageManifests.length,
         sourceFiles: inventory.sourceFiles.length,
         testFiles: inventory.testFiles.length,
+        testCases: inventory.testCaseRows.length,
+        portableTestCases: inventory.testCaseRows.filter(
+          (row) => row[6] === 'portable'
+        ).length,
+        unmappedPortableTestCases: inventory.testCaseRows.filter(
+          (row) => row[6] === 'portable' && row[8].startsWith('pending:')
+        ).length,
+        strictGateGaps: inventory.strictGapRows.length,
         tsxFiles: inventory.codeFiles.length,
         packageIds: [...new Set(inventory.packageRows.map((row) => row[0]))],
       },
@@ -1067,12 +1642,12 @@ if (options.dryRun) {
       fail(`${path.relative(repositoryRoot, outputPath)} is not up to date`);
     }
     console.log(
-      `ok: ${path.relative(repositoryRoot, outputPath)} covers ${inventory.packageManifests.length} package manifests, ${inventory.sourceFiles.length} source files, and ${inventory.testFiles.length} test files.`
+      `ok: ${path.relative(repositoryRoot, outputPath)} covers ${inventory.packageManifests.length} package manifests, ${inventory.sourceFiles.length} source files, ${inventory.testFiles.length} test files, and ${inventory.testCaseRows.length} test cases.`
     );
   } else {
     fs.writeFileSync(outputPath, markdown);
     console.log(
-      `Wrote ${path.relative(repositoryRoot, outputPath)} with ${inventory.packageManifests.length} package manifests, ${inventory.sourceFiles.length} source files, and ${inventory.testFiles.length} test files.`
+      `Wrote ${path.relative(repositoryRoot, outputPath)} with ${inventory.packageManifests.length} package manifests, ${inventory.sourceFiles.length} source files, ${inventory.testFiles.length} test files, and ${inventory.testCaseRows.length} test cases.`
     );
   }
 }
