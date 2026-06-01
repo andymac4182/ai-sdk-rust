@@ -242,7 +242,35 @@ const jb06RuntimeOnlyTestFiles = [
   'packages/just-bash/src/security/worker-defense-in-depth.test.ts',
 ];
 
+const jbc14JsDefenseSourceFiles = [
+  'packages/just-bash/src/security/blocked-globals.ts',
+  'packages/just-bash/src/security/defense-context.ts',
+  'packages/just-bash/src/security/defense-in-depth-box.ts',
+  'packages/just-bash/src/security/trusted-globals.ts',
+];
+
+const jbc14SandboxWorkerOnlyTestFiles = [
+  'packages/just-bash/src/security/sandbox/python-sqlite-information-disclosure.test.ts',
+  'packages/just-bash/src/security/sandbox/worker-protocol-runtime-desync.test.ts',
+];
+
+const jbc14SandboxEscapePortableLines = [
+  21, 28, 33, 40, 50, 60, 66, 73, 96, 102, 116, 140, 267, 276, 286, 378,
+];
+
+const jbc14InformationDisclosurePortableLines = [
+  28, 46, 65, 73, 81, 89, 97, 150, 158, 166, 174, 201, 209, 264, 272, 280,
+  287, 439, 501, 508, 517, 556, 564,
+];
+
 const jb06SourceGroups = [
+  {
+    files: jbc14JsDefenseSourceFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    notes:
+      'JBC-14 classifies Node global monkey-patching, AsyncLocalStorage defense context, and pre-captured JS globals as JavaScript host-runtime defenses; Rust maps the portable policy surfaces separately.',
+  },
   {
     files: jb06NetworkSourceFiles,
     status: 'portable-verified',
@@ -260,6 +288,51 @@ const jb06SourceGroups = [
 ];
 
 const jb06CaseGroups = [
+  {
+    file: 'packages/just-bash/src/security/sandbox/command-security.test.ts',
+    lines: [103],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::sandbox',
+    rustTest: 'just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound',
+    notes:
+      'JBC-14 verifies the PATH-hijack row by showing /bin-prefixed commands still resolve through the Rust registry and fail closed when not registered; the remaining command-family rows stay pending with command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/security/sandbox/sandbox-escape.test.ts',
+    lines: jbc14SandboxEscapePortableLines,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::sandbox',
+    rustTest:
+      'just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound; just_bash_security_sandbox_dynamic_rows_fail_closed_or_stay_in_process; just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state; just_bash_security_fuzzing_attack_oracles_are_ported_to_rust',
+    notes:
+      'JBC-14 verifies these exact portable sandbox rows with Rust executions that use the in-memory filesystem, isolated env/session state, registry-bound command resolution, and fail-closed attack probes. Parser, process-info, device, and broader command-family rows not exercised here remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/security/sandbox/information-disclosure.test.ts',
+    lines: jbc14InformationDisclosurePortableLines,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::sandbox',
+    rustTest: 'just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state',
+    notes:
+      'JBC-14 verifies these exact non-disclosure rows against Rust output and errors, including host path, env, process, network-tool, history, hostname, and source-fail-closed checks. Date, tar/stat metadata, JS object-shape, and other unexercised rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/security/sandbox/error-forwarding-runtime-leak-probe.test.ts',
+    lines: [43, 63],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    rustTest: 'just_bash_optional_runtime_security_cases_are_classified_nonportable',
+    notes:
+      'JBC-14 classifies Python and SQLite worker error-forwarding leak probes as JavaScript/WASM worker runtime behavior; the Rust backend has no Python/SQLite worker bridge, and portable redaction is verified separately.',
+  },
+  {
+    files: jbc14SandboxWorkerOnlyTestFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    rustTest: 'just_bash_optional_runtime_security_cases_are_classified_nonportable',
+    notes:
+      'JBC-14 classifies Python/SQLite information-disclosure and worker protocol desync probes as JavaScript/WASM worker runtime behavior; Rust has no worker bridge to desynchronize, while portable redaction and sandbox policy are verified separately.',
+  },
   {
     files: jb06NetworkTestFiles,
     status: 'portable-verified',

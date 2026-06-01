@@ -12,7 +12,7 @@ Local mirror inspected at `/Users/andrewmcclenaghan/.opensrc/repos/github.com/ve
 
 JB-05 owns the portable command registry and earlier high-risk built-ins/coreutils/text/search command smoke coverage implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
 
-JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. JBC-10 extends the `command:rg` slice with exact row closures for portable ripgrep-compatible virtual filesystem search, filters, output modes, context, max-count, no-filename, `--files`, and stdin behavior. JBC-11 promotes exact-pass generated conformance-corpus comparison rows to verified rows without hiding unrelated command-family failures. These slices do not claim upstream `fs/**`, remaining parser/syntax/transform rows beyond the JBC-12 mappings, security rows, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, PCRE/stats/replace/vimgrep/multiline/passthru behavior, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test or generated corpus proof below.
+JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. JBC-10 extends the `command:rg` slice with exact row closures for portable ripgrep-compatible virtual filesystem search, filters, output modes, context, max-count, no-filename, `--files`, and stdin behavior. JBC-11 promotes exact-pass generated conformance-corpus comparison rows to verified rows without hiding unrelated command-family failures. These slices do not claim remaining filesystem rows beyond the JBC-13 mappings, remaining parser/syntax/transform rows beyond the JBC-12 mappings, security rows, full AWK/JQ languages, full ripgrep compatibility, binary tests, UTF-8 byte-level tests, PCRE/stats/replace/vimgrep/multiline/passthru behavior, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test or generated corpus proof below.
 
 Mapped Rust tests:
 
@@ -69,6 +69,21 @@ Mapped Rust tests:
 | `packages/just-bash/src/commands/cp/cp.test.ts` all 14 cases | `cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual` | portable-verified | Verifies file copies, overwrites, directory targets, multi-source copies, recursive directory copies, relative paths, and common diagnostics. |
 | `packages/just-bash/src/commands/mv/mv.test.ts` all 21 cases | `cp_mv_upstream_command_directory_targets_flags_and_errors_are_virtual` | portable-verified | Verifies file and directory moves, directory targets, multi-source moves, relative paths, force/no-clobber/verbose flags, help, and diagnostics. |
 
+## JBC-14 Security and Sandbox Slice
+
+JBC-14 closes exact upstream security rows only where the Rust backend proves the same portable security behavior with named tests. It maps 40 `security:sandbox` rows to Rust tests for registry-bound command resolution, virtual filesystem isolation, environment/session non-disclosure, source/eval fail-closed behavior, output/command limits, and host marker redaction. It classifies 8 Python/SQLite worker-protocol rows as `js-only-documented`, plus 4 JavaScript host-runtime defense source files (`blocked-globals.ts`, `defense-context.ts`, `defense-in-depth-box.ts`, `trusted-globals.ts`) as JS-only source rows.
+
+Rows involving parser/interpreter behavior, broad command-family behavior, process-info/device semantics not exercised by JBC-14, and ReadWriteFs host-adapter behavior remain pending unless `docs/open-agents/just-bash-parity.md` names an exact Rust test or a narrow JS-only exception.
+
+Mapped Rust tests:
+
+| Upstream file/case | Rust test | Status | Notes |
+| --- | --- | --- | --- |
+| `packages/just-bash/src/security/sandbox/command-security.test.ts:103` | `just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound` | portable-verified | Verifies PATH hijacking does not bypass the Rust command registry. |
+| 16 exact rows in `packages/just-bash/src/security/sandbox/sandbox-escape.test.ts` | `just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound`; `just_bash_security_sandbox_dynamic_rows_fail_closed_or_stay_in_process`; `just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state`; `just_bash_security_fuzzing_attack_oracles_are_ported_to_rust` | portable-verified | Verifies virtual file writes, host file/process denial, environment isolation, registry-only execution, command-count/output caps, and per-exec state isolation. |
+| 23 exact rows in `packages/just-bash/src/security/sandbox/information-disclosure.test.ts` | `just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state` | portable-verified | Verifies host path/env/process/network/history/source diagnostics do not expose host or secret markers. |
+| Python/SQLite worker rows in `security/sandbox/{error-forwarding-runtime-leak-probe,python-sqlite-information-disclosure,worker-protocol-runtime-desync}.test.ts` | `just_bash_optional_runtime_security_cases_are_classified_nonportable` | js-only-documented | Rust has no Python/SQLite JS/WASM worker protocol to desynchronize; portable redaction and sandbox policy are mapped separately. |
+
 ## Pending JB Follow-Up Counts
 
 The upstream command package currently has 4,899 command-domain cases in the
@@ -80,9 +95,11 @@ additional text/search/structured-data rows, JBC-09 maps 55 additional
 generated comparison corpus rows. With JBC-09, JBC-10, and JBC-11 complete, the
 refreshed parent baseline is `1,359` verified / `8,461` pending / `116`
 JS-only. JBC-12 maps 43 syntax rows plus 79 transform rows to named Rust tests.
-These slices do not claim full command, syntax, or transform parity. After
-JBC-12 regeneration the full Just Bash ledger is `1,481` verified / `8,339`
-pending / `116` JS-only.
+JBC-13 maps 157 filesystem rows to named Rust tests. JBC-14 maps 40 exact
+portable security sandbox rows and 8 JS-only worker rows. These slices do not
+claim full command, filesystem, syntax, transform, or security parity. After
+regeneration the full Just Bash ledger is `1,678` verified / `8,134`
+pending / `124` JS-only.
 
 The counts below are the exact current upstream command-family case counts from
 `docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, JBC-09,

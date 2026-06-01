@@ -3,14 +3,42 @@ use std::collections::BTreeMap;
 
 use just_bash::security::ExecutionLimits;
 use just_bash::{
-    AllowedUrlEntry, CancellationState, CommandSecurityPolicy, DnsAddress, DnsLookupError,
-    HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse, ResourceObservation,
-    SecurityDiagnosticCode, StaticNetworkTransport, UpstreamRuntimeSurface,
-    classify_runtime_surface, execute_network_request, is_private_hostname, is_url_allowed,
-    matches_allow_list_entry, plan_network_request, validate_allow_list_entry,
-    validate_workspace_path,
+    AllowedUrlEntry, Bash, BashOptions, CancellationState, CommandSecurityPolicy, DnsAddress,
+    DnsLookupError, HttpMethod, JustBashExecOptions, JustBashSession, JustBashSessionOptions,
+    NetworkPolicy, NetworkRequest, NetworkResponse, ResourceObservation, SecurityDiagnosticCode,
+    StaticNetworkTransport, UpstreamRuntimeSurface, classify_runtime_surface,
+    execute_network_request, is_private_hostname, is_url_allowed, matches_allow_list_entry,
+    plan_network_request, validate_allow_list_entry, validate_workspace_path,
 };
 use url::Url;
+
+fn combined_output(result: &just_bash::JustBashExecResult) -> String {
+    format!("{}{}", result.stdout, result.stderr)
+}
+
+fn assert_no_host_or_secret_markers(output: &str) {
+    for marker in [
+        "root:x:",
+        "/bin/bash",
+        "/Users/",
+        "/private/",
+        "node:internal",
+        "file://",
+        "AWS_SECRET",
+        "AWS_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "sensitive_data_12345",
+        "[native code]",
+        "process.env",
+    ] {
+        assert!(
+            !output.contains(marker),
+            "unexpected sensitive marker {marker:?} in output: {output:?}"
+        );
+    }
+}
 
 fn public_dns(host: &str) -> Result<Vec<DnsAddress>, DnsLookupError> {
     let address = match host {
@@ -80,6 +108,214 @@ fn just_bash_security_path_validation_blocks_escape_and_nul_cases() {
     assert_eq!(
         validate_workspace_path("safe\0name").unwrap_err().code,
         SecurityDiagnosticCode::PathContainsNul
+    );
+}
+
+#[test]
+fn just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound() {
+    let bash = Bash::new();
+
+    let remove_file = bash.exec(
+        r#"
+        echo "content" > /tmp/testfile.txt
+        cat /tmp/testfile.txt
+        rm /tmp/testfile.txt
+        cat /tmp/testfile.txt 2>&1 || echo "deleted"
+        "#,
+    );
+    assert_eq!(remove_file.exit_code, 0);
+    assert!(remove_file.stdout.contains("content"));
+    assert!(remove_file.stdout.contains("deleted"));
+    assert!(!bash.file_exists("/tmp/testfile.txt"));
+
+    let remove_tree = bash.exec(
+        r#"
+        mkdir -p /tmp/testdir/subdir
+        echo "file" > /tmp/testdir/subdir/file.txt
+        rm -rf /tmp/testdir
+        ls /tmp/testdir 2>&1 || echo "removed"
+        "#,
+    );
+    assert_eq!(remove_tree.exit_code, 0);
+    assert!(remove_tree.stdout.contains("removed"));
+    assert!(!bash.file_exists("/tmp/testdir/subdir/file.txt"));
+
+    let copy_move = bash.exec(
+        r#"
+        echo "content" > /tmp/cptest1.txt
+        cp /tmp/cptest1.txt /tmp/cptest2.txt
+        mv /tmp/cptest2.txt /tmp/mvtest2.txt
+        cat /tmp/mvtest2.txt
+        "#,
+    );
+    assert_eq!(copy_move.exit_code, 0);
+    assert_eq!(copy_move.stdout, "content\n");
+    assert_eq!(bash.read_file("/tmp/cptest1.txt").unwrap(), "content\n");
+
+    let restricted = Bash::with_options(BashOptions {
+        commands: Some(vec!["echo".to_string()]),
+        ..BashOptions::default()
+    });
+    let path_hijack = restricted.exec(
+        r#"
+        export PATH=/tmp
+        /bin/ls 2>&1 || echo "registry-only"
+        "#,
+    );
+    assert_eq!(path_hijack.exit_code, 0);
+    assert!(path_hijack.stdout.contains("registry-only"));
+    assert!(path_hijack.stdout.contains("/bin/ls: command not found"));
+
+    let unknown = bash.exec("nonexistent_command 2>&1 || echo not-found");
+    assert_eq!(unknown.exit_code, 0);
+    assert!(unknown.stdout.contains("not-found"));
+    assert!(
+        unknown
+            .stdout
+            .contains("nonexistent_command: command not found")
+    );
+
+    let bin_ls = bash.exec("/bin/ls /tmp 2>&1");
+    assert_eq!(bin_ls.exit_code, 0);
+    assert_no_host_or_secret_markers(&combined_output(&bin_ls));
+
+    for command in ["chmod", "chown", "hash", "enable", "jobs", "fg", "bg"] {
+        let result = bash.exec(format!("{command} 2>&1 || echo handled"));
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("handled"));
+        assert_no_host_or_secret_markers(&combined_output(&result));
+    }
+}
+
+#[test]
+fn just_bash_security_sandbox_dynamic_rows_fail_closed_or_stay_in_process() {
+    let bash = Bash::new();
+
+    let nested = bash.exec("bash -c 'echo inner'; sh -c 'echo shell'");
+    assert_eq!(nested.exit_code, 0);
+    assert_eq!(nested.stdout, "inner\nshell\n");
+
+    let substitution = bash.exec("echo `echo safe`; echo $(echo nested)");
+    assert_eq!(substitution.exit_code, 0);
+    assert_no_host_or_secret_markers(&combined_output(&substitution));
+
+    for script in [
+        "eval 'cat /etc/passwd' 2>&1 || echo blocked",
+        "source /etc/profile 2>&1 || echo blocked",
+        ". /etc/profile 2>&1 || echo blocked",
+        "trap 'cat /etc/shadow' EXIT 2>&1 || echo blocked",
+        "alias ls='cat /etc/passwd' 2>&1 || echo blocked",
+        "cat <(echo unsafe) 2>&1 || echo blocked",
+    ] {
+        let result = bash.exec(script);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("blocked"));
+        assert_no_host_or_secret_markers(&combined_output(&result));
+    }
+
+    let prompt = bash.exec("export PS1='$(cat /etc/passwd)'; echo prompt-set");
+    assert_eq!(prompt.exit_code, 0);
+    assert_eq!(prompt.stdout, "prompt-set\n");
+    assert_no_host_or_secret_markers(&combined_output(&prompt));
+
+    let limited =
+        JustBashSession::with_options(JustBashSessionOptions::new().with_max_command_count(2));
+    let too_many = limited.exec("echo one; echo two; echo three", JustBashExecOptions::new());
+    assert_ne!(too_many.exit_code, 0);
+    assert!(too_many.stderr.contains("maximum command count"));
+    assert!(!too_many.stdout.contains("three"));
+}
+
+#[test]
+fn just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state() {
+    let bash = Bash::new();
+
+    for script in [
+        "invalid_syntax_here()))) 2>&1 || true",
+        "cat /nonexistent/path/file.txt 2>&1 || true",
+        "ls / 2>&1 || true",
+        "cat /etc/shadow 2>&1 || true",
+        "ls /etc 2>&1 || true",
+        "cat /proc/self/environ 2>&1 || true",
+        "ls ~ 2>&1 || true",
+        "hostname 2>&1 || echo hostname-handled",
+        "uname -a 2>&1 || echo uname-handled",
+        "id 2>&1 || echo id-handled",
+        "ps aux 2>&1 || echo ps-handled",
+        "ifconfig 2>&1 || echo ifconfig-handled",
+        "netstat 2>&1 || echo netstat-handled",
+        "history 2>&1 || echo history-handled",
+        "fc -l 2>&1 || echo fc-handled",
+        "echo $HISTFILE",
+        "echo $HOSTNAME",
+        "source /etc/profile 2>&1 || echo source-blocked",
+        "cat /dev/mem 2>&1 || true",
+    ] {
+        let result = bash.exec(script);
+        assert_no_host_or_secret_markers(&combined_output(&result));
+    }
+
+    let env = bash.exec("env");
+    assert_eq!(env.exit_code, 0);
+    assert!(env.stdout.lines().count() < 15);
+    assert!(env.stdout.contains("HOME=/home/user"));
+    assert!(env.stdout.contains("HOSTNAME=localhost"));
+    assert_no_host_or_secret_markers(&env.stdout);
+
+    assert_eq!(bash.exec("whoami").stdout, "user\n");
+
+    let first = Bash::new();
+    let second = Bash::new();
+    assert_eq!(
+        first
+            .exec("export SECRET=sensitive_data_12345; echo set")
+            .stdout,
+        "set\n"
+    );
+    let leaked = second.exec("echo $SECRET");
+    assert_eq!(leaked.stdout, "\n");
+    assert_no_host_or_secret_markers(&combined_output(&leaked));
+
+    let same_instance = Bash::new();
+    assert_eq!(
+        same_instance
+            .exec("export PERSIST_VAR=value; echo $PERSIST_VAR")
+            .stdout,
+        "value\n"
+    );
+    assert_eq!(same_instance.exec("echo $PERSIST_VAR").stdout, "\n");
+}
+
+#[test]
+fn just_bash_security_fuzzing_attack_oracles_are_ported_to_rust() {
+    let bash = Bash::new();
+    for attack in [
+        "cat /etc/passwd 2>&1 || true",
+        "cat ../../../etc/passwd 2>&1 || true",
+        "echo $(cat /etc/passwd) 2>&1 || true",
+        "source /etc/passwd 2>&1 || true",
+        "eval \"cat /etc/passwd\" 2>&1 || true",
+        "cat /proc/self/environ 2>&1 || true",
+        "ln -s /etc/passwd link && cat link 2>&1 || true",
+    ] {
+        let result = bash.exec(attack);
+        assert_no_host_or_secret_markers(&combined_output(&result));
+    }
+
+    let limited_output =
+        JustBashSession::with_options(JustBashSessionOptions::new().with_max_output_length(8));
+    let output = limited_output.exec("printf '0123456789abcdef'", JustBashExecOptions::new());
+    assert_eq!(output.stdout.len(), 8);
+    assert!(output.metadata.truncated);
+
+    let policy = CommandSecurityPolicy::allow_only(["echo"]).deny("curl");
+    assert!(policy.check_command("echo safe").is_ok());
+    assert_eq!(
+        policy
+            .check_command("curl http://example.com")
+            .unwrap_err()
+            .code,
+        SecurityDiagnosticCode::CommandDenied
     );
 }
 
