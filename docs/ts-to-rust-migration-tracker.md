@@ -49,7 +49,7 @@ Refreshed on 2026-06-01 with `npx opensrc fetch`.
 | Open Agents | In progress with the OA-01 inventory gate in place. The Rust service has Slack webhook ingress, real Vercel AI Gateway runtime config, Vercel sandbox support, deployment docs, and a generated upstream inventory covering all 6 package manifests, 461 source files, and 106 test files. | `docs/open-agents/upstream-parity.md`, `scripts/open-agents-test-inventory.mjs`, `docs/open-agents/bucket-ownership.md`, `docs/open-agents/slack-remote-agent-architecture.md`, `docs/open-agents/deployment-verification.md`, `crates/open-agents-*` | Close the portable `in-progress` rows surfaced by `node scripts/open-agents-test-inventory.mjs --check`, starting with durable resume, tool approvals/questions, finish actions, and real sandbox/model error handling. |
 | Workflow SDK | Current upstream portable rows are closed by the row-level gate. The gate currently passes with 2,679 inventory rows, 22 summary packages, and 28 ledger packages. `packages/core`/`workflow-core` is `verified`: the core inventory has 1,216 rows, 1,023 portable rows all mapped to named Rust tests, 189 `js-only-documented` rows, 4 `type-system-impossible` rows, and 0 `needs-review` rows. Core E2E specifically has 154 rows: 79 portable verified and 75 `js-only-documented`. | `node scripts/workflow-test-inventory.mjs --check && node scripts/workflow-parity-check.mjs`; `cargo test -p workflow-core` | Preserve the zero-`needs-review` invariant and rerun the drift audit whenever upstream `vercel/workflow` moves. |
 | Chat SDK | Current-upstream drift found at `ffc43fcf1f7679164be0806308bea237113c7590`: package progress is now 93.8% average, 13 of 19 package rows closed, 10 of 16 portable packages strictly verified, 5 rows reopened in-progress, and 1 new not-started row (`packages/adapter-twilio`). | `docs/chat/upstream-parity.md`, `docs/chat/package-progress.md` | Close the reopened drift rows (`chat`, Slack, GChat, Telegram, WhatsApp) and port or explicitly classify the new Twilio adapter package before restoring a 100% claim. |
-| AI SDK | In progress. Package progress is 73.9% average, 36 of 52 package rows closed, 26 of 42 portable rows strictly verified, 8 in progress, and 8 not started. | `docs/upstream-parity.md`, `docs/package-progress.md` | Complete every in-progress and not-started provider package with package-owned tests, then regenerate progress to 100% portable verified or explicitly documented JS-only/type-system exceptions. |
+| AI SDK | In progress. Package progress is 83.4% average, 36 of 52 package rows closed, 26 of 42 portable rows strictly verified, 16 in progress, and 0 not started. | `docs/upstream-parity.md`, `docs/package-progress.md` | Complete every in-progress and not-started provider package with package-owned tests, then regenerate progress to 100% portable verified or explicitly documented JS-only/type-system exceptions. |
 
 ## Dispatch Board
 
@@ -125,8 +125,8 @@ The AI SDK is the largest open surface. Current generated progress shows:
 
 - 36 of 52 package rows closed.
 - 26 of 42 portable package rows strictly verified.
-- 12 package rows in progress.
-- 4 package rows not started.
+- 16 package rows in progress.
+- 0 package rows not started.
 
 In-progress packages:
 

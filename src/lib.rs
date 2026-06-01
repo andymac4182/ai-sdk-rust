@@ -8,6 +8,7 @@ pub mod agent;
 pub mod baseten;
 pub mod cerebras;
 pub mod chat_transport;
+pub mod cohere;
 pub mod completion_transport;
 pub mod deepinfra;
 pub mod embed;
@@ -15,6 +16,7 @@ pub mod embedding_model;
 pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
+pub mod fireworks;
 pub mod gateway;
 pub mod gateway_error;
 pub mod gateway_tools;
@@ -24,6 +26,7 @@ pub mod generate_speech;
 pub mod generate_text;
 pub mod generate_text_output;
 pub mod generate_video;
+pub mod groq;
 pub mod headers;
 pub mod huggingface;
 pub mod image_model;
@@ -66,6 +69,7 @@ pub mod vercel_ai_gateway;
 pub mod video_model;
 pub mod voyage;
 pub mod warning;
+pub mod xai;
 
 /// Rust namespace for upstream `ai` structured-output helpers.
 ///
@@ -105,6 +109,10 @@ pub use chat_transport::{
     TextStreamChatTransport, convert_ui_messages_to_model_messages,
     convert_ui_messages_to_model_messages_with_tools,
 };
+pub use cohere::{
+    CohereEmbeddingModel, CohereProvider, CohereProviderSettings, CohereRerankingModel,
+    DEFAULT_COHERE_BASE_URL, cohere, create_cohere,
+};
 pub use completion_transport::{
     CompletionRequestOptions, CompletionStreamProtocol, CompletionTransport,
     CompletionTransportError, CompletionTransportMethod, CompletionTransportOptions,
@@ -137,6 +145,10 @@ pub use file_data::{
     ProviderReferenceError,
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
+pub use fireworks::{
+    DEFAULT_FIREWORKS_BASE_URL, FireworksProvider, FireworksProviderSettings, create_fireworks,
+    fireworks,
+};
 pub use gateway::{
     DEFAULT_GATEWAY_BASE_URL, GatewayAuthToken, GatewayCredentialType, GatewayCreditsResponse,
     GatewayEmbeddingModel, GatewayFetchMetadataResponse, GatewayGenerationInfo,
@@ -247,6 +259,7 @@ pub use generate_video::{
     GenerateVideoOptions, GenerateVideoPrompt, GenerateVideoPromptImage, GenerateVideoResult,
     experimental_generate_video, generate_video,
 };
+pub use groq::{DEFAULT_GROQ_BASE_URL, GroqProvider, GroqProviderSettings, create_groq, groq};
 pub use headers::Headers;
 pub use huggingface::{
     DEFAULT_HUGGINGFACE_BASE_URL, HuggingFaceProvider, HuggingFaceProviderSettings,
@@ -580,6 +593,7 @@ pub use voyage::{
     VoyageRerankingModel, VoyageTransport, VoyageTransportFuture, create_voyage, voyage,
 };
 pub use warning::Warning;
+pub use xai::{DEFAULT_XAI_BASE_URL, XaiProvider, XaiProviderSettings, create_xai, xai};
 
 #[cfg(test)]
 mod tests {
