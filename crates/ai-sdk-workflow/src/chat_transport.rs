@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use ai_sdk_provider::LanguageModelAbortSignal;
 use ai_sdk_rust::{Headers, JsonObject, JsonValue, UiMessage, UiMessageChunk};
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,9 @@ pub struct WorkflowChatRequest {
 
     /// Optional request headers.
     pub headers: Option<Headers>,
+
+    /// Optional abort signal for the caller-provided client.
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl WorkflowChatRequest {
@@ -53,6 +57,7 @@ impl WorkflowChatRequest {
             url: url.into(),
             body: Some(body),
             headers,
+            abort_signal: None,
         }
     }
 
@@ -62,7 +67,13 @@ impl WorkflowChatRequest {
             url: url.into(),
             body: None,
             headers,
+            abort_signal: None,
         }
+    }
+
+    fn with_abort_signal(mut self, abort_signal: Option<LanguageModelAbortSignal>) -> Self {
+        self.abort_signal = abort_signal;
+        self
     }
 }
 
@@ -147,6 +158,9 @@ pub struct SendMessagesOptions {
 
     /// Optional request headers.
     pub headers: Option<Headers>,
+
+    /// Optional abort signal passed through to the transport client.
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl SendMessagesOptions {
@@ -164,6 +178,7 @@ impl SendMessagesOptions {
             metadata: None,
             body: None,
             headers: None,
+            abort_signal: None,
         }
     }
 
@@ -190,6 +205,12 @@ impl SendMessagesOptions {
         self.headers = Some(headers);
         self
     }
+
+    /// Sets the abort signal for the POST request and any automatic reconnect.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
 }
 
 /// Options used when reconnecting to a workflow stream.
@@ -206,6 +227,9 @@ pub struct ReconnectToStreamOptions {
 
     /// Optional request headers.
     pub headers: Option<Headers>,
+
+    /// Optional abort signal passed through to reconnect requests.
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl ReconnectToStreamOptions {
@@ -216,6 +240,7 @@ impl ReconnectToStreamOptions {
             metadata: None,
             start_index: None,
             headers: None,
+            abort_signal: None,
         }
     }
 
@@ -234,6 +259,12 @@ impl ReconnectToStreamOptions {
     /// Sets request headers.
     pub fn with_headers(mut self, headers: Headers) -> Self {
         self.headers = Some(headers);
+        self
+    }
+
+    /// Sets the abort signal for reconnect requests.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 }
@@ -436,6 +467,7 @@ impl WorkflowChatTransport {
             metadata: options.metadata,
             start_index: None,
             headers: options.headers,
+            abort_signal: options.abort_signal,
         };
         let reconnect = self.reconnect_to_stream_from(
             client,
@@ -472,7 +504,8 @@ impl WorkflowChatTransport {
             self.options.api.clone(),
             send_messages_body(options)?,
             options.headers.clone(),
-        ))
+        )
+        .with_abort_signal(options.abort_signal.clone()))
     }
 
     /// Builds one reconnect request for a chat id/run id and start index.
@@ -492,6 +525,7 @@ impl WorkflowChatTransport {
             ),
             options.headers.clone(),
         )
+        .with_abort_signal(options.abort_signal.clone())
     }
 
     fn reconnect_to_stream_from<C>(
@@ -715,6 +749,7 @@ fn percent_encode_path_segment(segment: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ai_sdk_provider::LanguageModelAbortController;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -948,6 +983,30 @@ mod tests {
     }
 
     #[test]
+    fn workflow_chat_transport_reports_send_message_http_errors() {
+        let transport = WorkflowChatTransport::new();
+        let mut client = ScriptedWorkflowChatClient::new([WorkflowChatResponse::status(
+            500,
+            "Internal Server Error",
+        )]);
+
+        let error = transport
+            .send_messages(
+                &mut client,
+                SendMessagesOptions::new(WorkflowChatTrigger::SubmitMessage, "chat-1", Vec::new()),
+            )
+            .expect_err("http error propagates");
+
+        assert_eq!(
+            error,
+            WorkflowChatTransportError::Http {
+                status: 500,
+                body: "Internal Server Error".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn workflow_chat_transport_requires_workflow_run_id_for_interrupted_send() {
         let transport = WorkflowChatTransport::new();
         let mut client = ScriptedWorkflowChatClient::new([WorkflowChatResponse::ok([
@@ -991,6 +1050,67 @@ mod tests {
                 chat_id: "chat-1".to_string(),
                 chunk_index: 2,
             })
+        );
+    }
+
+    #[test]
+    fn workflow_chat_transport_passes_abort_signal_to_reconnect_requests() {
+        let transport = WorkflowChatTransport::new();
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let mut client =
+            ScriptedWorkflowChatClient::new([WorkflowChatResponse::ok([UiMessageChunk::finish()])]);
+
+        transport
+            .reconnect_to_stream(
+                &mut client,
+                ReconnectToStreamOptions::new("chat-1").with_abort_signal(abort_signal.clone()),
+            )
+            .expect("reconnect completes");
+
+        let request = client.requests.first().expect("request captured");
+        assert!(
+            request
+                .abort_signal
+                .as_ref()
+                .expect("abort signal propagated")
+                .is_same_signal(&abort_signal)
+        );
+    }
+
+    #[test]
+    fn workflow_chat_transport_reuses_abort_signal_for_reconnect_after_interrupted_send() {
+        let transport = WorkflowChatTransport::new();
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let mut client = ScriptedWorkflowChatClient::new([
+            WorkflowChatResponse::ok([UiMessageChunk::text_delta("text-1", "hello")])
+                .with_header("x-workflow-run-id", "run-1"),
+            WorkflowChatResponse::ok([UiMessageChunk::finish()]),
+        ]);
+
+        transport
+            .send_messages(
+                &mut client,
+                SendMessagesOptions::new(WorkflowChatTrigger::SubmitMessage, "chat-1", Vec::new())
+                    .with_abort_signal(abort_signal.clone()),
+            )
+            .expect("interrupted send reconnects");
+
+        assert_eq!(client.requests.len(), 2);
+        assert!(
+            client.requests[0]
+                .abort_signal
+                .as_ref()
+                .expect("send request signal propagated")
+                .is_same_signal(&abort_signal)
+        );
+        assert!(
+            client.requests[1]
+                .abort_signal
+                .as_ref()
+                .expect("reconnect request signal propagated")
+                .is_same_signal(&abort_signal)
         );
     }
 

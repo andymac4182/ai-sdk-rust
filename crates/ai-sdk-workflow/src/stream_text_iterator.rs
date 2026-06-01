@@ -7,12 +7,13 @@ use std::sync::Arc;
 
 use ai_sdk_provider::json::{JsonObject, JsonValue};
 use ai_sdk_provider::{
-    FinishReason, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
-    LanguageModelFinishReason, LanguageModelMessage, LanguageModelReasoningPart,
-    LanguageModelResponseMetadata, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolCall,
-    LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
-    LanguageModelToolResultPart, LanguageModelUsage, ProviderMetadata, ProviderOptions, Warning,
+    FinishReason, LanguageModelAbortSignal, LanguageModelAssistantContentPart,
+    LanguageModelAssistantMessage, LanguageModelFinishReason, LanguageModelMessage,
+    LanguageModelReasoningPart, LanguageModelResponseMetadata, LanguageModelStreamPart,
+    LanguageModelStreamResponseMetadata, LanguageModelSystemMessage, LanguageModelTextPart,
+    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
+    LanguageModelToolMessage, LanguageModelToolResultPart, LanguageModelUsage, ProviderMetadata,
+    ProviderOptions, Warning,
 };
 use ai_sdk_rust::{
     StopCondition, TelemetryOptions, ToolCallRepairFunction, ToolCallRepairOptions, UiMessageChunk,
@@ -271,6 +272,14 @@ pub struct DoStreamStepOptions {
     #[serde(skip, default)]
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Stream timeout in milliseconds, when configured.
+    #[serde(skip, default)]
+    pub timeout: Option<u64>,
+
+    /// Abort signal carried through to the stream executor, when configured.
+    #[serde(skip, default)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+
     /// Zero-based workflow step number.
     pub step_number: usize,
 }
@@ -287,7 +296,20 @@ impl PartialEq for DoStreamStepOptions {
             && self.on_error == other.on_error
             && self.runtime_context == other.runtime_context
             && self.tools_context == other.tools_context
+            && self.timeout == other.timeout
+            && abort_signals_eq(&self.abort_signal, &other.abort_signal)
             && self.step_number == other.step_number
+    }
+}
+
+fn abort_signals_eq(
+    left: &Option<LanguageModelAbortSignal>,
+    right: &Option<LanguageModelAbortSignal>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.is_same_signal(right),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -635,6 +657,8 @@ pub struct StreamTextIterator<E> {
     prepare_step: Option<WorkflowPrepareStepCallback>,
     include_raw_chunks: bool,
     telemetry: Option<TelemetryOptions>,
+    timeout: Option<u64>,
+    abort_signal: Option<LanguageModelAbortSignal>,
     response_format: Option<JsonValue>,
     steps: Vec<WorkflowStreamStep>,
     step_number: usize,
@@ -661,6 +685,8 @@ impl<E> StreamTextIterator<E> {
             prepare_step: None,
             include_raw_chunks: false,
             telemetry: None,
+            timeout: None,
+            abort_signal: None,
             response_format: None,
             steps: Vec::new(),
             step_number: 0,
@@ -756,6 +782,18 @@ impl<E> StreamTextIterator<E> {
     /// Sets telemetry settings.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets the stream timeout in milliseconds.
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout = Some(timeout_ms);
+        self
+    }
+
+    /// Sets the abort signal for the stream executor.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -879,6 +917,8 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
             runtime_context: self.runtime_context.clone(),
             tools_context: self.tools_context.clone(),
             telemetry: self.telemetry.clone(),
+            timeout: self.timeout,
+            abort_signal: self.abort_signal.clone(),
             step_number: self.step_number,
         };
 
@@ -1231,7 +1271,20 @@ pub fn sanitize_provider_metadata_for_tool_call(
     let sanitized: ProviderOptions = metadata
         .iter()
         .filter(|(_, provider_metadata)| !provider_metadata.is_empty())
-        .map(|(provider, provider_metadata)| (provider.clone(), provider_metadata.clone()))
+        .filter_map(|(provider, provider_metadata)| {
+            let provider_metadata = if provider == "openai" {
+                let mut provider_metadata = provider_metadata.clone();
+                provider_metadata.remove("itemId");
+                provider_metadata
+            } else {
+                provider_metadata.clone()
+            };
+            if provider_metadata.is_empty() {
+                None
+            } else {
+                Some((provider.clone(), provider_metadata))
+            }
+        })
         .collect();
 
     if sanitized.is_empty() {
@@ -2046,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_iterator_upstream_should_preserve_openai_provider_metadata_including_item_id_now_that_reasoning_is_preserved()
+    fn stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors()
      {
         let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
             .with_provider_metadata(provider_metadata(json!({
@@ -2079,16 +2132,12 @@ mod tests {
         let prompt = &iterator.executor().calls()[1].prompt;
         assert_eq!(
             assistant_tool_call_provider_options(prompt, "testTool"),
-            Some(Some(provider_metadata(json!({
-                "openai": {
-                    "itemId": "fc_0402bf2d292dd7ed00697a35fb10e0819ab0098545c4d0d7f5"
-                }
-            }))))
+            Some(None)
         );
     }
 
     #[test]
-    fn stream_text_iterator_upstream_should_preserve_all_openai_metadata_fields_including_item_id()
+    fn stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id()
     {
         let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
             .with_provider_metadata(provider_metadata(json!({
@@ -2124,7 +2173,6 @@ mod tests {
             assistant_tool_call_provider_options(prompt, "testTool"),
             Some(Some(provider_metadata(json!({
                 "openai": {
-                    "itemId": "fc_0402bf2d292dd7ed00697a35fb10e0819ab0098545c4d0d7f5",
                     "someOtherField": "should-be-preserved"
                 }
             }))))
@@ -2132,7 +2180,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_iterator_upstream_should_preserve_both_gemini_and_openai_metadata_in_mixed_provider_metadata()
+    fn stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata()
      {
         let tool_call = LanguageModelToolCall::new("call-1", "testTool", r#"{"query":"test"}"#)
             .with_provider_metadata(provider_metadata(json!({
@@ -2171,16 +2219,13 @@ mod tests {
             Some(Some(provider_metadata(json!({
                 "google": {
                     "thoughtSignature": "sig_gemini_preserved"
-                },
-                "openai": {
-                    "itemId": "fc_should_be_preserved"
                 }
             }))))
         );
     }
 
     #[test]
-    fn stream_text_iterator_preserves_openai_item_id_and_other_metadata() {
+    fn stream_text_iterator_strips_openai_item_id_and_preserves_other_metadata() {
         let tool_call = LanguageModelToolCall::new("call-1", "mixedTool", "{}")
             .with_provider_metadata(provider_metadata(json!({
                 "google": {
@@ -2221,7 +2266,6 @@ mod tests {
                     "thoughtSignature": "sig_gemini"
                 },
                 "openai": {
-                    "itemId": "fc_should_be_preserved",
                     "reasoningSummary": "keep"
                 }
             }))))
@@ -2290,7 +2334,7 @@ mod tests {
         match &assistant.content[0] {
             LanguageModelAssistantContentPart::Reasoning(reasoning) => {
                 assert_eq!(reasoning.text, "thinking");
-                assert_eq!(reasoning.provider_options, Some(reasoning_metadata));
+                assert_eq!(reasoning.provider_options, None);
             }
             _ => panic!("expected reasoning"),
         }

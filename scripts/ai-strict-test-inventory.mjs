@@ -70,6 +70,14 @@ const STRICT_PACKAGE_OVERRIDES = new Map([
       owner: 'crates/ai-sdk-mcp',
     },
   ],
+  [
+    'workflow',
+    {
+      kind: 'AI SDK workflow package',
+      ledgerStatus: 'verified',
+      owner: 'crates/ai-sdk-workflow; crates/workflow facade',
+    },
+  ],
 ]);
 
 function usage() {
@@ -1741,6 +1749,488 @@ function providerUtilsMappingValidationErrors(providerUtilsMappings) {
   return errors;
 }
 
+const WORKFLOW_MAPPING_SOURCE = 'AIS-11 workflow strict case map';
+
+const WORKFLOW_CASE_TESTS = new Map(Object.entries({
+  'packages/workflow/src/serializable-schema.test.ts:10': [
+    'serialize_tool_set_serializes_function_tools_with_description_and_input_schema',
+  ],
+  'packages/workflow/src/serializable-schema.test.ts:36': [
+    'serialize_tool_set_preserves_provider_tool_identity_and_args',
+  ],
+  'packages/workflow/src/serializable-schema.test.ts:71': [
+    'resolve_serializable_tools_reconstructs_function_tools',
+  ],
+  'packages/workflow/src/serializable-schema.test.ts:90': [
+    'resolve_serializable_tools_reconstructs_provider_tools',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:146': [
+    'stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:235': [
+    'stream_text_iterator_upstream_should_not_add_provider_options_when_provider_metadata_is_undefined',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:301': [
+    'stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:406': [
+    'stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:501': [
+    'stream_text_iterator_upstream_should_strip_openai_item_id_from_provider_metadata_to_avoid_reasoning_item_errors',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:572': [
+    'stream_text_iterator_upstream_should_preserve_other_openai_metadata_while_stripping_item_id',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:648': [
+    'stream_text_iterator_upstream_should_preserve_gemini_metadata_while_stripping_openai_item_id_in_mixed_provider_metadata',
+  ],
+  'packages/workflow/src/stream-text-iterator.test.ts:728': [
+    'stream_text_iterator_passes_contexts_to_executor_and_yields_them',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:260': [
+    'workflow_agent_compat_should_use_prepare_call_provider_options',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:289': [
+    'workflow_agent_compat_should_pass_abort_signal_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:307': [
+    'workflow_agent_compat_should_pass_timeout_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:324': [
+    'workflow_agent_upstream_should_pass_string_instructions_to_the_model',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:361': [
+    'workflow_agent_compat_should_pass_system_message_instructions',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:405': [
+    'workflow_agent_compat_should_pass_array_of_system_message_instructions',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:476': [
+    'workflow_agent_compat_should_call_experimental_on_start_from_constructor',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:499': [
+    'workflow_agent_compat_should_call_experimental_on_start_from_stream_method',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:520': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:547': [
+    'workflow_agent_compat_should_pass_experimental_on_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:656': [
+    'workflow_agent_compat_should_call_experimental_on_step_start_from_constructor',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:679': [
+    'workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:700': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:727': [
+    'workflow_agent_compat_should_pass_experimental_on_step_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:827': [
+    'workflow_agent_compat_should_call_on_step_finish_from_constructor',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:849': [
+    'workflow_agent_compat_should_call_on_step_finish_from_stream_method',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:872': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:899': [
+    'workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:942': [
+    'workflow_agent_compat_should_call_on_tool_execution_start_from_constructor',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:972': [
+    'workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1002': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1036': [
+    'workflow_agent_compat_should_pass_tool_execution_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1082': [
+    'workflow_agent_compat_should_call_on_tool_execution_end_from_constructor',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1112': [
+    'workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1142': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1176': [
+    'workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1235': [
+    'workflow_agent_compat_should_call_on_finish_from_constructor',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1257': [
+    'workflow_agent_compat_should_call_on_finish_from_stream_method',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1280': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1307': [
+    'workflow_agent_compat_should_pass_finish_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1348': [
+    'workflow_agent_telemetry_integrations_call_per_call_integration_listeners_for_all_lifecycle_events',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1402': [
+    'workflow_agent_telemetry_integrations_include_only_configured_runtime_and_tools_context_fields',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1480': [
+    'workflow_agent_telemetry_integrations_call_globally_registered_integration_listeners',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1530': [
+    'workflow_agent_telemetry_integrations_call_integration_listeners_alongside_agent_callbacks',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1591': [
+    'workflow_agent_telemetry_integrations_do_not_break_streaming_when_a_listener_throws',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1637': [
+    'workflow_agent_upstream_should_pause_when_tool_needs_approval',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1665': [
+    'workflow_agent_upstream_should_support_needs_approval_as_a_function',
+  ],
+  'packages/workflow/src/workflow-agent-compat.test.ts:1697': [
+    'workflow_agent_telemetry_integrations_emit_execute_tool_when_an_approved_tool_resumes',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:38': [
+    'workflow_agent_upstream_should_generate_basic_text_response',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:47': [
+    'workflow_agent_upstream_should_successfully_execute_tools_that_return_normally',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:54': [
+    'workflow_agent_upstream_should_pass_updated_messages_on_subsequent_tool_call_rounds',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:63': [
+    'workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:78': [
+    'workflow_agent_upstream_should_support_tool_input_schemas_across_step_boundaries',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:91': [
+    'workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:104': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:124': [
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:145': [
+    'workflow_agent_upstream_should_pass_string_instructions_to_the_model',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:158': [
+    'workflow_agent_upstream_should_complete_within_timeout',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:173': [
+    'workflow_agent_compat_should_call_experimental_on_start_from_constructor',
+    'workflow_agent_compat_should_call_experimental_on_start_from_stream_method',
+    'workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order',
+    'workflow_agent_compat_should_pass_experimental_on_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:182': [
+    'workflow_agent_compat_should_call_experimental_on_step_start_from_constructor',
+    'workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method',
+    'workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order',
+    'workflow_agent_compat_should_pass_experimental_on_step_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:191': [
+    'workflow_agent_compat_should_call_on_tool_execution_start_from_constructor',
+    'workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method',
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order',
+    'workflow_agent_compat_should_pass_tool_execution_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:200': [
+    'workflow_agent_compat_should_call_on_tool_execution_end_from_constructor',
+    'workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method',
+    'workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order',
+    'workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:211': [
+    'workflow_agent_compat_should_use_prepare_call_provider_options',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:219': [
+    'workflow_agent_upstream_should_pause_when_tool_needs_approval',
+    'workflow_agent_upstream_should_support_needs_approval_as_a_function',
+    'workflow_agent_upstream_should_execute_approved_tools_and_continue_with_results',
+    'workflow_agent_upstream_should_create_denial_results_for_denied_tools_and_continue',
+  ],
+  'packages/workflow/src/workflow-agent-e2e.integration.test.ts:230': [
+    'workflow_agent_upstream_should_flow_through_runtime_context_and_tools_context_e2e',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:58': [
+    'workflow_agent_upstream_should_expose_id_when_provided_in_constructor',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:66': [
+    'workflow_agent_upstream_should_have_undefined_id_when_not_provided',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:75': [
+    'workflow_agent_upstream_should_convert_fatal_error_to_tool_error_result',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:153': [
+    'workflow_agent_upstream_should_convert_non_fatal_error_to_tool_error_result',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:227': [
+    'workflow_agent_upstream_should_successfully_execute_tools_that_return_normally',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:297': [
+    'workflow_agent_upstream_should_skip_local_execution_for_provider_executed_tools',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:384': [
+    'workflow_agent_upstream_should_handle_mixed_provider_executed_and_local_tools',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:490': [
+    'workflow_agent_upstream_should_handle_provider_executed_tool_errors_with_is_error_flag',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:563': [
+    'workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:642': [
+    'workflow_agent_upstream_should_keep_invalid_tool_calls_on_error_path_without_executing',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:750': [
+    'workflow_agent_upstream_should_stop_the_loop_for_client_side_tools_without_execute',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:822': [
+    'workflow_agent_upstream_should_handle_mixed_executable_and_client_side_tools_in_same_step',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:930': [
+    'workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:992': [
+    'workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1063': [
+    'workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1100': [
+    'stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1146': [
+    'stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1191': [
+    'workflow_agent_upstream_should_provide_step_information_to_prepare_step_callback',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1245': [
+    'workflow_agent_upstream_should_pass_conversation_messages_to_tool_execute_function',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1328': [
+    'workflow_agent_upstream_should_pass_messages_to_multiple_tools_in_parallel_execution',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1425': [
+    'workflow_agent_upstream_should_pass_updated_messages_on_subsequent_tool_call_rounds',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1550': [
+    'workflow_agent_upstream_should_pass_generation_settings_from_constructor_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1592': [
+    'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_generation_settings',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1633': [
+    'workflow_agent_upstream_should_pass_tool_choice_from_constructor_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1667': [
+    'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_tool_choice',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1704': [
+    'workflow_agent_upstream_should_filter_tools_when_active_tools_is_specified',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1760': [
+    'workflow_agent_upstream_should_use_constructor_stop_conditions_when_not_specified_in_stream',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1794': [
+    'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_stop_conditions',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1830': [
+    'workflow_agent_upstream_should_use_constructor_active_tools_when_not_specified_in_stream',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1876': [
+    'workflow_agent_upstream_should_use_constructor_experimental_repair_tool_call_when_not_specified_in_stream',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1912': [
+    'workflow_agent_upstream_should_pass_on_error_callback_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:1948': [
+    'workflow_agent_upstream_should_convert_tool_execution_error_to_error_text_result',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2023': [
+    'workflow_agent_compat_should_pass_finish_event_information',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2095': [
+    'workflow_agent_upstream_should_call_on_abort_when_abort_signal_is_already_aborted',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2130': [
+    'workflow_agent_upstream_should_pass_step_number_to_tool_execution_start_and_use_success_union_on_end',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2214': [
+    'workflow_agent_upstream_should_pass_success_false_in_tool_execution_end_when_tool_errors',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2283': [
+    'workflow_agent_compat_should_pass_experimental_on_step_start_event_information',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2355': [
+    'workflow_agent_upstream_should_pass_per_tool_tools_context_entry_as_execute_context',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2390': [
+    'workflow_agent_upstream_should_pass_undefined_context_when_no_tools_context_entry_exists',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2419': [
+    'workflow_agent_upstream_should_validate_per_tool_context_against_context_schema',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2453': [
+    'workflow_agent_upstream_should_pass_runtime_context_to_on_finish',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2529': [
+    'workflow_agent_upstream_should_return_messages_and_steps_in_result',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2597': [
+    'workflow_agent_upstream_should_accept_a_string_prompt_in_stream',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2627': [
+    'workflow_agent_upstream_should_accept_an_array_of_messages_as_prompt',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2658': [
+    'workflow_agent_upstream_should_pass_experimental_repair_tool_call_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2698': [
+    'workflow_agent_upstream_should_pass_include_raw_chunks_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2734': [
+    'workflow_agent_upstream_should_pass_telemetry_settings_from_constructor_to_stream_text_iterator',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2774': [
+    'workflow_agent_upstream_should_allow_stream_options_to_override_constructor_telemetry',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2813': [
+    'workflow_agent_upstream_should_return_undefined_ui_messages_when_collect_ui_messages_is_false',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2843': [
+    'workflow_agent_upstream_should_return_undefined_ui_messages_when_collect_ui_messages_is_not_set',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2872': [
+    'workflow_agent_upstream_should_pass_collect_ui_chunks_when_collect_ui_messages_is_true',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2909': [
+    'workflow_agent_upstream_should_work_when_collect_ui_messages_is_true_and_send_finish_is_false',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2954': [
+    'workflow_agent_upstream_should_not_write_finish_chunk_but_still_return_ui_messages_when_send_finish_is_false',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:2993': [
+    'workflow_agent_upstream_should_execute_approved_tools_and_continue_with_results',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:3072': [
+    'workflow_agent_upstream_should_create_denial_results_for_denied_tools_and_continue',
+  ],
+  'packages/workflow/src/workflow-agent.test.ts:3145': [
+    'workflow_agent_upstream_should_pass_through_messages_without_approval_responses_unchanged',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:32': [
+    'workflow_chat_transport_sends_messages_and_reports_chat_end',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:38': [
+    'workflow_chat_transport_accepts_and_stores_callback_functions',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:54': [
+    'workflow_chat_transport_uses_default_options_and_builds_send_request',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:59': [
+    'workflow_chat_transport_accepts_custom_max_consecutive_errors',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:68': [
+    'workflow_chat_transport_uses_custom_api_endpoint_and_builds_send_request',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:139': [
+    'workflow_chat_transport_reports_send_message_http_errors',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:160': [
+    'workflow_chat_transport_uses_custom_api_endpoint_and_builds_reconnect_request',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:217': [
+    'workflow_chat_transport_passes_abort_signal_to_reconnect_requests',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:259': [
+    'workflow_chat_transport_reuses_abort_signal_for_reconnect_after_interrupted_send',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:337': [
+    'workflow_chat_transport_reconnect_uses_positive_initial_start_index_for_retries',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:391': [
+    'workflow_chat_transport_reconnect_resolves_negative_start_index_from_tail_header',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:435': [
+    'workflow_chat_transport_reconnect_falls_back_to_zero_when_tail_header_is_missing',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:484': [
+    'workflow_chat_transport_reconnect_falls_back_to_zero_for_invalid_negative_tail_header',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:570': [
+    'workflow_chat_transport_calls_on_chat_send_message_callback',
+  ],
+  'packages/workflow/src/workflow-chat-transport.test.ts:618': [
+    'workflow_chat_transport_calls_on_chat_end_callback_when_stream_ends',
+  ],
+  'packages/workflow/src/workflow-smoke.integration.test.ts:6': [
+    'workflow_smoke_should_compute_the_correct_result',
+  ],
+}));
+
+const WORKFLOW_EXCEPTIONS = new Map(Object.entries({
+  'packages/workflow/src/workflow-chat-transport.test.ts:27': {
+    status: 'js-only-documented',
+    rustTarget: 'exception: JavaScript default fetch constructor fallback',
+    notes:
+      'Upstream only checks that WorkflowChatTransport can be constructed without an explicit JavaScript fetch. Rust uses an injected WorkflowChatTransportClient for actual requests, with deterministic client behavior mapped in the adjacent chat-transport rows.',
+  },
+  'packages/workflow/src/workflow-chat-transport.test.ts:529': {
+    status: 'js-only-documented',
+    rustTarget: 'exception: JavaScript object error stringification',
+    notes:
+      'The upstream row guards against JavaScript coercing thrown plain objects to [object Object]. Rust transport errors are typed string/HTTP variants, so the object-coercion boundary is not expressible; reconnect failure formatting is covered by named Rust tests.',
+  },
+}));
+
+function classifyWorkflowCase(testCase) {
+  if (!testCase.file.startsWith('packages/workflow/')) {
+    return null;
+  }
+
+  const key = `${testCase.file}:${testCase.line}`;
+  const exception = WORKFLOW_EXCEPTIONS.get(key);
+  if (exception) {
+    return {
+      source: WORKFLOW_MAPPING_SOURCE,
+      rustTests: [],
+      ...exception,
+    };
+  }
+
+  const rustTests = WORKFLOW_CASE_TESTS.get(key);
+  if (!rustTests) {
+    return null;
+  }
+
+  return {
+    source: WORKFLOW_MAPPING_SOURCE,
+    status: 'portable-mapped',
+    rustTarget: rustTests.map(test => `test: ${test}`).join('; '),
+    rustTests,
+    notes:
+      'Mapped by AIS-11 from the refreshed upstream packages/workflow row to deterministic Rust workflow tests using fake models, fake stream executors, or in-memory chat transport clients.',
+  };
+}
+
 function defaultClassification(testCase, item) {
   if (item.area === 'packages' && item.ledgerStatus === 'js-only-documented') {
     return {
@@ -1864,6 +2354,11 @@ function classifyCase(
   const gatewayVercelMapping = gatewayVercelMappedClassification(testCase, rustTests.names);
   if (gatewayVercelMapping) {
     return gatewayVercelMapping;
+  }
+
+  const workflowMapping = classifyWorkflowCase(testCase);
+  if (workflowMapping) {
+    return workflowMapping;
   }
 
   return defaultClassification(testCase, item);

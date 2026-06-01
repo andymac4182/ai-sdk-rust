@@ -495,6 +495,13 @@ impl WorkflowAgent {
         .with_tools_context(options.tools_context)
         .with_include_raw_chunks(include_raw_chunks);
 
+        if let Some(timeout) = options.timeout {
+            iterator = iterator.with_timeout(timeout);
+        }
+        if let Some(abort_signal) = abort_signal.clone() {
+            iterator = iterator.with_abort_signal(abort_signal);
+        }
+
         if let Some(telemetry) = telemetry {
             iterator = iterator.with_telemetry(telemetry);
         }
@@ -2286,7 +2293,7 @@ mod tests {
         LanguageModelFinishReason, LanguageModelStreamFinish, LanguageModelStreamPart,
         LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
         LanguageModelToolCall, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
+        LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata, ProviderOptions,
     };
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
     use ai_sdk_rust::{
@@ -4032,6 +4039,93 @@ mod tests {
                 .options
                 .generation_settings,
             generation_settings
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_use_prepare_call_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test": {
+                "value": "from-prepareCall"
+            }
+        }))
+        .expect("provider options");
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_prepare_step(
+                WorkflowPrepareStepCallback::new(move |_| {
+                    WorkflowPrepareStepResult::default().with_generation_settings(
+                        WorkflowGenerationSettings {
+                            provider_options: Some(provider_options.clone()),
+                            ..WorkflowGenerationSettings::default()
+                        },
+                    )
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .generation_settings
+                .provider_options,
+            Some(
+                serde_json::from_value(json!({
+                    "test": {
+                        "value": "from-prepareCall"
+                    }
+                }))
+                .expect("provider options")
+            )
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_abort_signal_to_stream_text_iterator() {
+        let abort_controller = LanguageModelAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_abort_signal(abort_signal.clone()),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let calls = calls.lock().expect("calls lock succeeds");
+        assert!(
+            calls[0]
+                .options
+                .abort_signal
+                .as_ref()
+                .expect("abort signal forwarded")
+                .is_same_signal(&abort_signal)
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_timeout_to_stream_text_iterator() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let (executor, calls) = RecordingStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor).with_timeout(5000),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            calls.lock().expect("calls lock succeeds")[0]
+                .options
+                .timeout,
+            Some(5000)
         );
     }
 
