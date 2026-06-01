@@ -1,6 +1,8 @@
 # Just Bash Upstream Parity
 
-This ledger is generated from the refreshed upstream Just Bash mirror and is the JB-01 inventory gate for future Rust implementation buckets. It is intentionally inventory-only: no row is verified until a sibling implementation bucket maps it to a named Rust test or records an explicit exception.
+This ledger is generated from the refreshed upstream Just Bash mirror and is the JB-01 inventory gate for future Rust implementation buckets. It is also the JBC conformance ledger used by the JS dual-engine harness and Rust corpus runner plan in `docs/open-agents/just-bash-conformance.md`.
+
+Rows are intentionally fail-closed: no row is verified until a sibling implementation bucket maps it to a named Rust test, a named Rust corpus case, or an explicit documented exception.
 
 ## Source Snapshot
 
@@ -24,6 +26,7 @@ This ledger is generated from the refreshed upstream Just Bash mirror and is the
 | Strict gate gaps | 9124 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
+| Conformance plan | docs/open-agents/just-bash-conformance.md |
 
 ## Status Rules
 
@@ -40,6 +43,14 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 - `--check` is the non-blocking inventory gate. It fails for upstream drift, stale generated markdown, invalid statuses, missing owners, or undocumented exceptions.
 - `--strict` is the implementation gate. It additionally fails when any `portable-pending` test case remains or when a `portable-verified` row names a Rust test that does not exist in the workspace.
 - Extra Rust tests are additive. They do not close an upstream row unless the row names the Rust test.
+- `scripts/master-parity-gate.sh --check` runs this ledger in non-strict mode now; set `JUST_BASH_STRICT_GATE=1` only after JBC-08 closes every portable row.
+
+## Conformance Harness Contract
+
+- The JS dual-engine harness must execute the same upstream TypeScript Just Bash test case against the upstream TypeScript engine and the Rust-backed JS/NAPI engine, then record normalized expectations for the Rust corpus runner.
+- The Rust corpus runner must expose every portable upstream case as a named Rust test or corpus case before the row can become `portable-verified`.
+- Harness, corpus, and hand-written tests must all write back to this generated ledger by exact upstream file, line, declaration, and case title. A broad smoke test is not enough to close an exact upstream row.
+- Rows that cannot run in Rust must stay `portable-pending` until they are proven and documented as `js-only-documented` or `type-system-impossible`.
 
 ## Package Inventory
 

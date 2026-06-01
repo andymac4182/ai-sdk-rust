@@ -110,9 +110,28 @@ check_open_agents_gate() {
   esac
 }
 
+check_just_bash_gate() {
+  require_file scripts/just-bash-test-inventory.mjs
+  require_file docs/open-agents/just-bash-parity.md
+  require_file docs/open-agents/just-bash-conformance.md
+
+  local strict_gate="${JUST_BASH_STRICT_GATE:-0}"
+  case "$strict_gate" in
+    1|true|TRUE|yes|YES)
+      run_step "Just Bash strict conformance gate" node scripts/just-bash-test-inventory.mjs --strict
+      ;;
+    0|false|FALSE|no|NO|"")
+      run_step "Just Bash inventory conformance gate" node scripts/just-bash-test-inventory.mjs --check
+      ;;
+    *)
+      fail "JUST_BASH_STRICT_GATE must be 0/1, true/false, or yes/no"
+      ;;
+  esac
+}
+
 usage() {
   cat <<'USAGE'
-Usage: scripts/master-parity-gate.sh
+Usage: scripts/master-parity-gate.sh [--check]
 
 Runs the CI-safe parity gate without live credentials:
   - verifies required AI SDK, Chat SDK, and Workflow ledger/generated files exist
@@ -121,14 +140,22 @@ Runs the CI-safe parity gate without live credentials:
   - runs the Chat strict generated-inventory drift check
   - runs the Workflow generated-inventory drift check and parity gate
   - runs the Open Agents parity gate when OA-01 has landed, otherwise reports a skip
+  - runs the Just Bash conformance gate in non-strict inventory mode by default
   - runs the Open Plugin Spec conformance gate
   - runs git diff --check for whitespace/status drift
+
+Set JUST_BASH_STRICT_GATE=1 after JBC-08 closes all portable rows to make the
+Just Bash step run node scripts/just-bash-test-inventory.mjs --strict.
 USAGE
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
+fi
+
+if [ "${1:-}" = "--check" ]; then
+  shift
 fi
 
 if [ "$#" -ne 0 ]; then
@@ -149,9 +176,12 @@ require_file scripts/workflow-parity-check.mjs
 require_file scripts/chat-test-inventory.mjs
 require_file docs/chat/test-inventory.md
 require_file scripts/open-plugin-spec-gate.mjs
+require_file scripts/just-bash-test-inventory.mjs
 require_file docs/workflow-test-inventory.md
 require_file docs/workflow-upstream-parity.md
 require_file docs/open-agents/open-plugin-spec.md
+require_file docs/open-agents/just-bash-parity.md
+require_file docs/open-agents/just-bash-conformance.md
 
 run_step "AI SDK strict test inventory drift check" node scripts/ai-strict-test-inventory.mjs --check
 
@@ -173,6 +203,7 @@ run_step "Chat strict test inventory drift check" node scripts/chat-test-invento
 run_step "Workflow generated inventory drift check" node scripts/workflow-test-inventory.mjs --check
 run_step "Workflow parity gate" node scripts/workflow-parity-check.mjs
 check_open_agents_gate
+check_just_bash_gate
 run_step "Open Plugin Spec conformance gate" node scripts/open-plugin-spec-gate.mjs --check
 run_step "whitespace drift check" git diff --check
 
