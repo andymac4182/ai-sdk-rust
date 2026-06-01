@@ -40,8 +40,11 @@ impl fmt::Debug for StateStore {
 pub enum SandboxMode {
     /// Local filesystem/shell execution boundary for fixtures and local runs.
     Local { root: PathBuf },
-    /// Vercel Sandbox target. Runtime client wiring lands after the sandbox crate.
-    Vercel { base_snapshot_id: Option<String> },
+    /// Vercel Sandbox cloud backend.
+    Vercel {
+        base_snapshot_id: Option<String>,
+        sandbox_name: Option<String>,
+    },
 }
 
 impl SandboxMode {
@@ -349,6 +352,7 @@ fn parse_sandbox(
             base_snapshot_id: present(read_var(
                 open_agents_sandbox::VERCEL_SANDBOX_BASE_SNAPSHOT_ID_ENV,
             )),
+            sandbox_name: present(read_var(open_agents_sandbox::VERCEL_SANDBOX_NAME_ENV)),
         }),
         value => Err(ConfigError::InvalidVar {
             name: "OPEN_AGENTS_SANDBOX",
@@ -457,6 +461,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.state_store().label(), "postgres");
+    }
+
+    #[test]
+    fn from_reader_accepts_vercel_sandbox_selection_without_credentials() {
+        let config = load(&[
+            ("SLACK_BOT_TOKEN", "xoxb-test"),
+            ("SLACK_SIGNING_SECRET", "secret"),
+            ("OPEN_AGENTS_SANDBOX", "vercel"),
+            ("VERCEL_SANDBOX_NAME", "oa-session"),
+            ("VERCEL_SANDBOX_BASE_SNAPSHOT_ID", "snap_123"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.sandbox(),
+            &SandboxMode::Vercel {
+                base_snapshot_id: Some("snap_123".to_string()),
+                sandbox_name: Some("oa-session".to_string()),
+            }
+        );
     }
 
     #[test]

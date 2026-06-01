@@ -990,10 +990,13 @@ impl ServiceSandbox {
                     },
                 })
             }
-            SandboxMode::Vercel { base_snapshot_id } => {
+            SandboxMode::Vercel {
+                base_snapshot_id,
+                sandbox_name,
+            } => {
                 let state = SandboxState::Vercel {
                     source: None,
-                    sandbox_name: None,
+                    sandbox_name: sandbox_name.clone(),
                     sandbox_id: None,
                     snapshot_id: base_snapshot_id.clone(),
                     expires_at: None,
@@ -1007,7 +1010,7 @@ impl ServiceSandbox {
                     persisted: PersistedSandboxState {
                         provider: "vercel".to_string(),
                         sandbox_id: None,
-                        sandbox_name: None,
+                        sandbox_name: sandbox_name.clone(),
                         working_directory: Some("/vercel/sandbox".to_string()),
                         current_branch: None,
                         environment_details: None,

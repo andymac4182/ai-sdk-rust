@@ -4,6 +4,7 @@
 
 pub mod git;
 pub mod git_finish;
+pub mod vercel;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -29,6 +30,26 @@ pub const OWNER_BUCKET: u8 = 3;
 
 /// Optional base snapshot id for Vercel-backed sandboxes.
 pub const VERCEL_SANDBOX_BASE_SNAPSHOT_ID_ENV: &str = "VERCEL_SANDBOX_BASE_SNAPSHOT_ID";
+/// Optional API base URL override for Vercel Sandbox tests and private gateways.
+pub const VERCEL_SANDBOX_API_BASE_URL_ENV: &str = "VERCEL_SANDBOX_API_BASE_URL";
+/// Optional stable named sandbox to resume instead of creating a new sandbox.
+pub const VERCEL_SANDBOX_NAME_ENV: &str = "VERCEL_SANDBOX_NAME";
+/// Optional Vercel Sandbox runtime. Defaults to the upstream SDK default.
+pub const VERCEL_SANDBOX_RUNTIME_ENV: &str = "VERCEL_SANDBOX_RUNTIME";
+/// Optional Vercel Sandbox vCPU count.
+pub const VERCEL_SANDBOX_VCPUS_ENV: &str = "VERCEL_SANDBOX_VCPUS";
+/// Optional Vercel Sandbox timeout, in milliseconds.
+pub const VERCEL_SANDBOX_TIMEOUT_MS_ENV: &str = "VERCEL_SANDBOX_TIMEOUT_MS";
+/// Optional flag to enable named-sandbox persistence at creation time.
+pub const VERCEL_SANDBOX_PERSISTENT_ENV: &str = "VERCEL_SANDBOX_PERSISTENT";
+/// Vercel access-token credential used when OIDC is unavailable.
+pub const VERCEL_TOKEN_ENV: &str = "VERCEL_TOKEN";
+/// Vercel OIDC token credential, available automatically on Vercel.
+pub const VERCEL_OIDC_TOKEN_ENV: &str = "VERCEL_OIDC_TOKEN";
+/// Vercel team identifier used by the Sandbox v2 API.
+pub const VERCEL_TEAM_ID_ENV: &str = "VERCEL_TEAM_ID";
+/// Vercel project identifier used by the Sandbox v2 API.
+pub const VERCEL_PROJECT_ID_ENV: &str = "VERCEL_PROJECT_ID";
 
 pub use git::{
     CommitOutcome, DiffFileStat, DiffSummary, FileChange, FileChangeStatus, GitCredentials,
@@ -38,6 +59,11 @@ pub use git::{
 pub use git_finish::{
     GitFinishOptions, GitFinishReport, GitFinishStatus, PullRequestOptions, PullRequestOutcome,
     run_git_finish,
+};
+pub use vercel::{
+    VercelCommandData, VercelSandbox, VercelSandboxClient, VercelSandboxConfig,
+    VercelSandboxCreateRequest, VercelSandboxCredentials, VercelSandboxMetadata,
+    VercelSandboxRoute, VercelSandboxSession, VercelSandboxStatus, VercelSandboxUpstreamSource,
 };
 
 const DETACHED_QUICK_FAILURE_WINDOW_MS: u64 = 2_000;
@@ -333,10 +359,7 @@ pub fn connect_sandbox(config: SandboxConnectConfig) -> SandboxResult<Box<dyn Sa
             };
             Ok(Box::new(LocalSandbox::with_options(root, options)?))
         }
-        SandboxState::Vercel { .. } => Err(SandboxError::UnsupportedOperation {
-            operation: "connect".to_string(),
-            sandbox_type: SandboxType::Vercel,
-        }),
+        SandboxState::Vercel { .. } => Ok(Box::new(VercelSandbox::connect(config)?)),
     }
 }
 
@@ -1043,6 +1066,20 @@ pub enum SandboxError {
         /// Backend type.
         sandbox_type: SandboxType,
     },
+    /// Required configuration was absent.
+    MissingConfig {
+        /// Missing environment variable or field.
+        name: &'static str,
+    },
+    /// The Vercel Sandbox API returned an error or malformed response.
+    Api {
+        /// Operation name.
+        operation: String,
+        /// HTTP status, when a response was available.
+        status: Option<u16>,
+        /// Error details.
+        message: String,
+    },
     /// An internal invariant failed.
     Internal {
         /// Error message.
@@ -1105,6 +1142,23 @@ impl fmt::Display for SandboxError {
             Self::Stopped { sandbox_type } => {
                 write!(formatter, "sandbox backend '{sandbox_type}' has stopped")
             }
+            Self::MissingConfig { name } => {
+                write!(formatter, "missing required sandbox configuration {name}")
+            }
+            Self::Api {
+                operation,
+                status,
+                message,
+            } => match status {
+                Some(status) => write!(
+                    formatter,
+                    "Vercel Sandbox API {operation} failed with status {status}: {message}"
+                ),
+                None => write!(
+                    formatter,
+                    "Vercel Sandbox API {operation} failed: {message}"
+                ),
+            },
             Self::Internal { message } => formatter.write_str(message),
         }
     }

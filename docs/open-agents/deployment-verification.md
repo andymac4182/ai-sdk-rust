@@ -226,7 +226,15 @@ Optional production or live settings:
 - `OPEN_AGENTS_STATE=postgres`
 - `OPEN_AGENTS_STATE_URL` or `POSTGRES_URL`, required for Postgres mode
 - `OPEN_AGENTS_SANDBOX=vercel`
+- `VERCEL_TOKEN` or `VERCEL_OIDC_TOKEN`, required for live Vercel Sandbox use
+- `VERCEL_TEAM_ID`, required for live Vercel Sandbox use
+- `VERCEL_PROJECT_ID`, required for live Vercel Sandbox use
+- `VERCEL_SANDBOX_NAME`, optional named sandbox to resume
 - `VERCEL_SANDBOX_BASE_SNAPSHOT_ID`, optional Vercel sandbox base snapshot
+- `VERCEL_SANDBOX_RUNTIME`, optional Vercel runtime such as `node24`
+- `VERCEL_SANDBOX_VCPUS`, optional Vercel sandbox vCPU count
+- `VERCEL_SANDBOX_TIMEOUT_MS`, optional Vercel sandbox timeout
+- `VERCEL_SANDBOX_PERSISTENT`, optional named-sandbox persistence flag
 - `AI_GATEWAY_API_KEY` or `AI_SDK_RUST_AI_GATEWAY_API_KEY`, model credential
 - `OPEN_AGENTS_SLACK_API_URL` or `SLACK_API_URL`, optional Slack Web API base
   URL override for local emulators
@@ -237,6 +245,15 @@ Optional live smoke settings:
 
 - `SLACK_TEST_CHANNEL_ID`
 - `SLACK_TEST_USER_ID`, reserved for expanded live user-targeted checks
+
+Ignored Vercel Sandbox smoke:
+
+```sh
+cargo test -p open-agents-sandbox live_vercel_sandbox_create_exec_read_write_list_stop_smoke -- --ignored --nocapture
+```
+
+The ignored smoke requires the live Vercel variables above and creates a real
+temporary sandbox.
 
 ## Slack App Configuration
 
@@ -299,7 +316,7 @@ path through a real Slack app once live outbound assertions are available.
 | Waiting, answer, cancel | Emulator-backed question prompt plus direct signed block action payload; service cancel test | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion`; `cargo test -p open-agents-service block_action_cancel_cancels_waiting_run` | Emulator cannot simulate interactions today |
 | Outbound Slack message/update | Emulator Web API state assertions for `chat.postMessage`; Slack outbound tests cover API body shapes | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service app_mention_with_slack_api_url_posts_outbounds_to_slack_api`; `cargo test -p chat-sdk-adapter-slack slack_api_body_fixtures_cover_post_update_ephemeral_delete_reaction_and_typing` | Emulator-backed `chat.update` scenario still TODO |
 | Persistence | In-memory service route run, active-run keys, waiting state, resume, and cancel are covered | `cargo test -p open-agents-service block_action_answer_resumes_waiting_run_to_completion` | Postgres-backed persistence still TODO |
-| Sandbox command | Local service route executes `sandbox.exec pwd` through the runtime seam | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound` | Broader sandbox command and git automation proof still TODO |
+| Sandbox command | Local service route executes `sandbox.exec pwd`; Vercel backend has deterministic mocked create/exec/read/write/stat/list/stop coverage | `cargo test -p open-agents-service app_mention_accepts_persists_run_and_records_outbound`; `cargo test -p open-agents-sandbox vercel_sandbox_backend_connects_execs_reads_writes_lists_and_stops` | Live Vercel proof is ignored and credential-gated |
 | Git automation summary | Unit renderer coverage only | `cargo test -p chat-sdk-adapter-slack renderers_cover_tool_plan_error_commit_and_pr_summaries` | End-to-end auto-commit/PR summary from a run still TODO |
 | Health/readiness | Covered by service tests, manual probes, and emulator readiness polling | `scripts/open-agents-local-e2e.sh --emulator`; `cargo test -p open-agents-service healthz_and_readyz_reflect_liveness_and_readiness`; `curl -fsS /healthz /readyz /status` | Live deployment probes still TODO |
 
