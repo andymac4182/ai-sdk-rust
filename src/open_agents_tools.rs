@@ -968,7 +968,8 @@ async fn execute_web_fetch(
         FETCH_TIMEOUT_MS,
     )
     .await?;
-    if result.exit_code != 0 {
+    let curl_truncated = result.exit_code == 23;
+    if result.exit_code != 0 && !curl_truncated {
         return Ok(tool_error(format!(
             "Fetch failed: {}",
             command_error_output(&result)
@@ -981,12 +982,12 @@ async fn execute_web_fetch(
             "success": true,
             "status": JsonValue::Null,
             "body": truncate_chars(&output, OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH),
-            "truncated": output.len() > OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH
+            "truncated": curl_truncated || output.len() > OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH
         }));
     };
     let body = &output[..last_newline];
     let status = output[last_newline + 1..].trim().parse::<u16>().ok();
-    let truncated = body.len() > OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH;
+    let truncated = curl_truncated || body.len() > OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH;
 
     Ok(json!({
         "success": true,
@@ -1781,8 +1782,8 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::process::Command;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1882,6 +1883,39 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct ScriptedSandbox {
+        commands: Mutex<Vec<String>>,
+    }
+
+    impl ExperimentalSandbox for ScriptedSandbox {
+        fn description(&self) -> &str {
+            "scripted test sandbox"
+        }
+
+        fn run_command(
+            &self,
+            options: SandboxCommandOptions,
+        ) -> crate::provider_utils::SandboxRunCommandFuture {
+            self.commands
+                .lock()
+                .expect("commands mutex")
+                .push(options.command.clone());
+            let result = if options.command.starts_with("getent ahosts") {
+                SandboxCommandResult::new(0).with_stdout("93.184.216.34\n")
+            } else if options.command.contains("curl") {
+                SandboxCommandResult::new(23).with_stdout(format!(
+                    "{}\n200",
+                    "x".repeat(OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH)
+                ))
+            } else {
+                SandboxCommandResult::new(0)
+            };
+
+            Box::pin(async move { result })
+        }
+    }
+
     fn sandbox() -> Arc<dyn ExperimentalSandbox> {
         Arc::new(LocalSandbox::new("case"))
     }
@@ -1959,6 +1993,62 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(sandbox.path("src/main.rs")).expect("reads edited file"),
             "one\nTWO\nthree"
+        );
+    }
+
+    #[test]
+    fn open_agent_file_tools_reject_directories_replace_all_and_truncate_grep_matches() {
+        let sandbox = local_sandbox();
+        std::fs::create_dir_all(sandbox.path("src")).expect("creates directory");
+        sandbox.write(
+            "src/notes.txt",
+            &format!("alpha\n{}\nalpha", "x".repeat(300)),
+        );
+        let tools = open_agent_tools();
+
+        let directory_read = execute(
+            tool_by_name(&tools, READ_TOOL_NAME),
+            json!({ "filePath": "src" }),
+            sandbox.clone(),
+        );
+        assert_eq!(directory_read["success"], json!(false));
+        assert_eq!(
+            directory_read["error"],
+            json!("Cannot read a directory. Use glob or ls command instead.")
+        );
+
+        let edit_output = execute(
+            tool_by_name(&tools, EDIT_TOOL_NAME),
+            json!({
+                "filePath": "src/notes.txt",
+                "oldString": "alpha",
+                "newString": "beta",
+                "replaceAll": true
+            }),
+            sandbox.clone(),
+        );
+        assert_eq!(edit_output["success"], json!(true));
+        assert_eq!(edit_output["replacements"], json!(2));
+        assert_eq!(edit_output["startLine"], json!(1));
+
+        let grep_output = execute(
+            tool_by_name(&tools, GREP_TOOL_NAME),
+            json!({
+                "pattern": "x+",
+                "path": "src",
+                "glob": "*.txt"
+            }),
+            sandbox,
+        );
+        assert_eq!(grep_output["success"], json!(true));
+        assert_eq!(grep_output["matchCount"], json!(1));
+        assert_eq!(
+            grep_output["matches"][0]["content"]
+                .as_str()
+                .expect("content")
+                .chars()
+                .count(),
+            200
         );
     }
 
@@ -2194,6 +2284,75 @@ mod tests {
         );
         assert_eq!(output["success"], json!(false));
         assert!(output["error"].as_str().unwrap().contains("public host"));
+    }
+
+    #[test]
+    fn open_agent_web_fetch_treats_curl_exit_23_as_truncated_success() {
+        let sandbox = Arc::new(ScriptedSandbox::default());
+        let tools = open_agent_tools();
+        let output = execute(
+            tool_by_name(&tools, WEB_FETCH_TOOL_NAME),
+            json!({ "url": "https://example.com", "method": "GET" }),
+            sandbox.clone(),
+        );
+
+        assert_eq!(output["success"], json!(true));
+        assert_eq!(output["status"], json!(200));
+        assert_eq!(output["truncated"], json!(true));
+        assert_eq!(
+            output["body"].as_str().expect("body").len(),
+            OPEN_AGENT_WEB_FETCH_MAX_BODY_LENGTH
+        );
+        let commands = sandbox.commands.lock().expect("commands mutex");
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.starts_with("getent ahosts"))
+        );
+        assert!(commands.iter().any(|command| command.contains("curl")));
+    }
+
+    #[test]
+    fn open_agent_tool_utils_match_path_display_context_and_shell_escape_cases() {
+        assert_eq!(
+            WorkspacePath::resolve_file("src/index.ts").unwrap().display,
+            "src/index.ts"
+        );
+        assert!(WorkspacePath::resolve_file("../src/index.ts").is_err());
+        assert_eq!(WorkspacePath::resolve_directory(".").unwrap().display, ".");
+        assert_eq!(shell_escape("simple"), "'simple'");
+        assert_eq!(shell_escape("it's fine"), "'it'\\''s fine'");
+
+        let blocked_urls = [
+            "http://localhost",
+            "http://127.0.0.1",
+            "http://10.0.0.1",
+            "http://172.16.0.1",
+            "http://192.168.0.1",
+            "http://169.254.169.254",
+            "http://0.0.0.0",
+            "http://[::]",
+            "http://[::1]",
+            "http://[fc00::1]",
+            "http://[fe80::1]",
+            "http://[::ffff:127.0.0.1]",
+            "http://[::ffff:0a00:0001]",
+            "http://[::ffff:c0a8:0001]",
+            "http://[::ffff:ac10:0001]",
+        ];
+        for url in blocked_urls {
+            assert!(!is_allowed_web_url(url), "{url} should be blocked");
+        }
+
+        let allowed_urls = [
+            "https://example.com",
+            "http://93.184.216.34",
+            "https://[2606:2800:220:1:248:1893:25c8:1946]",
+            "https://[::ffff:5db8:d822]",
+        ];
+        for url in allowed_urls {
+            assert!(is_allowed_web_url(url), "{url} should be allowed");
+        }
     }
 
     #[test]

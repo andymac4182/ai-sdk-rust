@@ -637,15 +637,27 @@ function sourceMapping(relative) {
 }
 
 function testMapping(relative) {
-  const verified = verifiedRustTestMapping(relative);
-  if (verified) {
+  const verifiedMapping = verifiedRustTestMapping(relative);
+  if (verifiedMapping) {
     const owner = testOwner(relative);
     return {
       portability: 'portable',
       status: 'verified',
       owner,
-      rustTestName: verified,
+      rustTestName: verifiedMapping,
       note: 'All portable upstream cases for this session/persistence row are mapped to deterministic named Rust tests; no live Slack, Vercel, or browser credentials required.',
+    };
+  }
+
+  const verifiedTestName = verifiedRustTestName(relative);
+  if (verifiedTestName) {
+    const owner = testOwner(relative);
+    return {
+      portability: 'portable',
+      status: 'verified',
+      owner,
+      rustTestName: verifiedTestName,
+      note: 'Every portable upstream case in this file is mapped to named deterministic Rust tests in the owning surface.',
     };
   }
 
@@ -734,6 +746,72 @@ function unmapped(note) {
     owner: 'unassigned',
     note,
   };
+}
+
+function verifiedRustTestName(relative) {
+  const direct = new Map([
+    [
+      'apps/web/app/api/generate-title/route.test.ts',
+      'generate_title_route_matches_auth_json_validation_and_success_cases; generate_title_prompt_truncates_input_and_failure_maps_to_500',
+    ],
+    [
+      'apps/web/app/api/models/route.test.ts',
+      'models_route_enriches_filters_trials_and_recovers_gateway_errors',
+    ],
+    [
+      'apps/web/lib/assistant-file-links.test.ts',
+      'assistant_file_links_build_parse_and_document_workspace_hrefs',
+    ],
+    [
+      'apps/web/lib/model-access.test.ts',
+      'model_access_filters_and_sanitizes_managed_trial_preferences',
+    ],
+    [
+      'apps/web/lib/model-availability.test.ts',
+      'model_availability_disables_openai_gpt_pro_models',
+    ],
+    [
+      'apps/web/lib/model-options.test.ts',
+      'model_options_build_group_missing_and_default_selection',
+    ],
+    [
+      'apps/web/lib/model-variants.test.ts',
+      'model_variants_provider_options_builtins_and_resolution; model_catalog_builtin_constants_match_open_agents_defaults',
+    ],
+    [
+      'apps/web/lib/models.test.ts',
+      'model_usage_cost_uses_base_and_context_over_200k_pricing',
+    ],
+    [
+      'apps/web/lib/skills-cache.test.ts',
+      'discovers_project_claude_and_global_skills_with_skip_diagnostics; skills_cache_keys_memory_ttl_and_redis_fallback_match_upstream',
+    ],
+    [
+      'apps/web/lib/skills/global-skill-installer.test.ts',
+      'invoke_skill_injects_directory_and_substitutes_arguments; global_skill_install_commands_cover_requested_refs_and_empty_lists',
+    ],
+    [
+      'apps/web/lib/skills/global-skill-refs.test.ts',
+      'loaded_skill_allowed_tools_are_deduplicated; global_skill_refs_dedupe_validate_and_reject_invalid_payloads',
+    ],
+    [
+      'packages/agent/models.test.ts',
+      'open_agent_prepare_composes_prompt_context_model_and_tools; open_agent_generate_records_usage_from_fake_model; provider_option_defaults_cover_future_gpt_anthropic_and_attribution_cases',
+    ],
+    [
+      'packages/agent/tools/tools.test.ts',
+      'open_agent_file_tools_read_write_and_edit_with_fake_sandbox; open_agent_file_tools_reject_directories_replace_all_and_truncate_grep_matches; open_agent_search_bash_and_todo_tools_execute_with_fake_sandbox; open_agent_risky_commands_need_approval; open_agent_web_fetch_blocks_private_hosts; open_agent_web_fetch_treats_curl_exit_23_as_truncated_success; open_agent_tool_schemas_serialize_for_tool_loop_agent; open_agent_ask_user_question_formats_model_output; skill_tool_emits_status_and_final_skill_content',
+    ],
+    [
+      'packages/agent/tools/utils.test.ts',
+      'open_agent_path_security_blocks_escape_dotenv_and_symlink_escape; open_agent_tool_utils_match_path_display_context_and_shell_escape_cases',
+    ],
+    [
+      'packages/shared/lib/tool-state.test.ts',
+      'tool_state_format_tokens_matches_upstream_display_thresholds; renderers_cover_tool_plan_error_commit_and_pr_summaries; dispatcher_uses_existing_adapter_methods_with_fallback_text',
+    ],
+  ]);
+  return direct.get(relative);
 }
 
 function partialRustTestName(relative) {

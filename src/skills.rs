@@ -1045,6 +1045,186 @@ pub fn allowed_tools_for_loaded_agent_skills(
     }
 }
 
+/// Reference to a globally installable skill in `owner/repo` + skill-name form.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalSkillRef {
+    pub source: String,
+    pub skill_name: String,
+}
+
+/// Normalizes global skill refs, rejecting invalid payloads and de-duping first-wins.
+pub fn normalize_global_skill_refs(value: &JsonValue) -> Vec<GlobalSkillRef> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut refs = Vec::new();
+    for item in items {
+        let Some(source) = item
+            .get("source")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|source| is_valid_global_skill_source(source))
+        else {
+            return Vec::new();
+        };
+        let Some(skill_name) = item
+            .get("skillName")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|skill_name| is_valid_global_skill_name(skill_name))
+        else {
+            return Vec::new();
+        };
+        let key = format!("{}::{}", source.to_lowercase(), skill_name.to_lowercase());
+        if seen.insert(key) {
+            refs.push(GlobalSkillRef {
+                source: source.to_string(),
+                skill_name: skill_name.to_string(),
+            });
+        }
+    }
+
+    refs
+}
+
+/// Default Open Agents skills-cache TTL.
+pub const AGENT_SKILLS_CACHE_TTL_SECONDS: u64 = 4 * 60 * 60;
+
+/// Builds the upstream skills-cache key from session id and sandbox state.
+pub fn agent_skills_cache_key(session_id: &str, sandbox_state: Option<&JsonValue>) -> String {
+    let scope = sandbox_state
+        .and_then(|state| {
+            state
+                .get("sandboxName")
+                .and_then(JsonValue::as_str)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    state
+                        .get("snapshotId")
+                        .and_then(JsonValue::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+        })
+        .unwrap_or("local");
+    format!("skills:v1:{session_id}:{scope}")
+}
+
+/// In-memory skills-cache fallback used when Redis is unavailable.
+#[derive(Clone, Debug)]
+pub struct AgentSkillsMemoryCache {
+    ttl_ms: u64,
+    entries: std::collections::BTreeMap<String, AgentSkillsCacheEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct AgentSkillsCacheEntry {
+    skills: Vec<AgentSkillMetadata>,
+    expires_at_ms: u64,
+}
+
+impl Default for AgentSkillsMemoryCache {
+    fn default() -> Self {
+        Self::new(AGENT_SKILLS_CACHE_TTL_SECONDS)
+    }
+}
+
+impl AgentSkillsMemoryCache {
+    /// Creates a memory cache with the supplied TTL in seconds.
+    pub fn new(ttl_seconds: u64) -> Self {
+        Self {
+            ttl_ms: ttl_seconds.saturating_mul(1000),
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Reads a cache entry if present and not expired.
+    pub fn get(
+        &mut self,
+        session_id: &str,
+        sandbox_state: Option<&JsonValue>,
+        now_ms: u64,
+    ) -> Option<Vec<AgentSkillMetadata>> {
+        let key = agent_skills_cache_key(session_id, sandbox_state);
+        self.get_key(&key, now_ms)
+    }
+
+    /// Writes a cache entry, including empty skill arrays.
+    pub fn set(
+        &mut self,
+        session_id: &str,
+        sandbox_state: Option<&JsonValue>,
+        skills: Vec<AgentSkillMetadata>,
+        now_ms: u64,
+    ) {
+        let key = agent_skills_cache_key(session_id, sandbox_state);
+        self.set_key(key, skills, now_ms);
+    }
+
+    fn get_key(&mut self, key: &str, now_ms: u64) -> Option<Vec<AgentSkillMetadata>> {
+        self.prune(now_ms);
+        let Some(entry) = self.entries.get(key) else {
+            return None;
+        };
+        if entry.expires_at_ms <= now_ms {
+            self.entries.remove(key);
+            return None;
+        }
+        Some(entry.skills.clone())
+    }
+
+    fn set_key(&mut self, key: String, skills: Vec<AgentSkillMetadata>, now_ms: u64) {
+        self.entries.insert(
+            key,
+            AgentSkillsCacheEntry {
+                skills,
+                expires_at_ms: now_ms.saturating_add(self.ttl_ms),
+            },
+        );
+    }
+
+    fn prune(&mut self, now_ms: u64) {
+        self.entries.retain(|_, entry| entry.expires_at_ms > now_ms);
+    }
+}
+
+/// Reads Redis results with upstream-style memory fallback semantics.
+pub fn skills_cache_read_with_memory_fallback(
+    cache: &mut AgentSkillsMemoryCache,
+    key: &str,
+    now_ms: u64,
+    redis_result: Result<Option<Vec<AgentSkillMetadata>>, String>,
+) -> Option<Vec<AgentSkillMetadata>> {
+    match redis_result {
+        Ok(Some(skills)) => {
+            cache.set_key(key.to_string(), skills.clone(), now_ms);
+            Some(skills)
+        }
+        Ok(None) => None,
+        Err(_) => cache.get_key(key, now_ms),
+    }
+}
+
+/// Builds deterministic commands for installing global skills in a sandbox.
+pub fn build_global_skill_install_commands(
+    home_directory: &str,
+    global_skill_refs: &[GlobalSkillRef],
+) -> Vec<String> {
+    global_skill_refs
+        .iter()
+        .map(|global_skill_ref| {
+            format!(
+                "HOME={} npx skills add {} --skill {} --agent amp -g -y --copy",
+                shell_quote(home_directory),
+                shell_quote(&global_skill_ref.source),
+                shell_quote(&global_skill_ref.skill_name)
+            )
+        })
+        .collect()
+}
+
 /// Attaches discovered skill metadata to a JSON runtime context.
 pub fn attach_agent_skills_to_context(
     context: &mut JsonObject,
@@ -1467,6 +1647,25 @@ fn is_hidden_skill_name(name: &str) -> bool {
     name.starts_with('.')
 }
 
+fn is_valid_global_skill_source(source: &str) -> bool {
+    let mut parts = source.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(repo) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !owner.is_empty()
+        && !repo.is_empty()
+        && !owner.chars().any(char::is_whitespace)
+        && !repo.chars().any(char::is_whitespace)
+}
+
+fn is_valid_global_skill_name(skill_name: &str) -> bool {
+    !skill_name.is_empty() && !skill_name.chars().any(char::is_whitespace)
+}
+
 fn basename(path: &str) -> &str {
     path.trim_end_matches('/')
         .rsplit('/')
@@ -1701,7 +1900,8 @@ mod tests {
         let sandbox = LocalFsSandbox::new(home.display().to_string());
         let discovery = poll_ready(discover_agent_skills(
             &sandbox,
-            AgentSkillDiscoveryOptions::new(project.display().to_string()),
+            AgentSkillDiscoveryOptions::new(project.display().to_string())
+                .with_home_dir(home.display().to_string()),
         ));
 
         assert_eq!(
@@ -2179,6 +2379,138 @@ mod tests {
         assert_eq!(
             allowed_tools_for_loaded_agent_skills(&[instruction]),
             Some(vec!["Bash".to_string(), "Read".to_string()])
+        );
+    }
+
+    #[test]
+    fn global_skill_refs_dedupe_validate_and_reject_invalid_payloads() {
+        let refs = normalize_global_skill_refs(&json!([
+            { "source": "Owner/Repo", "skillName": "review" },
+            { "source": "owner/repo", "skillName": "Review" },
+            { "source": "acme/tools", "skillName": "commit" }
+        ]));
+
+        assert_eq!(
+            refs,
+            vec![
+                GlobalSkillRef {
+                    source: "Owner/Repo".to_string(),
+                    skill_name: "review".to_string(),
+                },
+                GlobalSkillRef {
+                    source: "acme/tools".to_string(),
+                    skill_name: "commit".to_string(),
+                },
+            ]
+        );
+        assert!(
+            normalize_global_skill_refs(&json!([
+                { "source": "missing-slash", "skillName": "review" }
+            ]))
+            .is_empty()
+        );
+        assert!(
+            normalize_global_skill_refs(&json!([
+                { "source": "owner/repo", "skillName": "bad name" }
+            ]))
+            .is_empty()
+        );
+        assert!(normalize_global_skill_refs(&json!({ "source": "owner/repo" })).is_empty());
+    }
+
+    #[test]
+    fn skills_cache_keys_memory_ttl_and_redis_fallback_match_upstream() {
+        assert_eq!(
+            agent_skills_cache_key("session-1", Some(&json!({ "sandboxName": "sbx-123" }))),
+            "skills:v1:session-1:sbx-123"
+        );
+        assert_eq!(
+            agent_skills_cache_key("session-1", Some(&json!({ "snapshotId": "legacy-456" }))),
+            "skills:v1:session-1:legacy-456"
+        );
+        assert_eq!(
+            agent_skills_cache_key("session-1", None),
+            "skills:v1:session-1:local"
+        );
+
+        let mut cache = AgentSkillsMemoryCache::new(10);
+        cache.set(
+            "session-1",
+            Some(&json!({ "sandboxName": "sbx-123" })),
+            Vec::new(),
+            1000,
+        );
+        assert_eq!(
+            cache.get(
+                "session-1",
+                Some(&json!({ "sandboxName": "sbx-123" })),
+                10_999
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            cache.get(
+                "session-1",
+                Some(&json!({ "sandboxName": "sbx-123" })),
+                11_000
+            ),
+            None
+        );
+
+        let key = agent_skills_cache_key("session-2", None);
+        let skill = AgentSkillMetadata {
+            name: "review".to_string(),
+            description: "Review".to_string(),
+            path: "/skills/review".to_string(),
+            filename: "SKILL.md".to_string(),
+            options: AgentSkillOptions::default(),
+        };
+        assert_eq!(
+            skills_cache_read_with_memory_fallback(
+                &mut cache,
+                &key,
+                20_000,
+                Ok(Some(vec![skill.clone()])),
+            ),
+            Some(vec![skill.clone()])
+        );
+        assert_eq!(
+            skills_cache_read_with_memory_fallback(
+                &mut cache,
+                &key,
+                20_500,
+                Err("redis down".to_string()),
+            ),
+            Some(vec![skill])
+        );
+    }
+
+    #[test]
+    fn global_skill_install_commands_cover_requested_refs_and_empty_lists() {
+        assert!(build_global_skill_install_commands("/home/agent", &[]).is_empty());
+
+        let commands = build_global_skill_install_commands(
+            "/home/a gent",
+            &[
+                GlobalSkillRef {
+                    source: "owner/repo".to_string(),
+                    skill_name: "review".to_string(),
+                },
+                GlobalSkillRef {
+                    source: "acme/tools".to_string(),
+                    skill_name: "commit's".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0],
+            "HOME='/home/a gent' npx skills add 'owner/repo' --skill 'review' --agent amp -g -y --copy"
+        );
+        assert_eq!(
+            commands[1],
+            "HOME='/home/a gent' npx skills add 'acme/tools' --skill 'commit'\\''s' --agent amp -g -y --copy"
         );
     }
 }

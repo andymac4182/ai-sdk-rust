@@ -7,7 +7,9 @@
 #![forbid(unsafe_code)]
 
 mod chat_state;
+mod model_catalog;
 mod open_agent;
+mod session_title;
 
 pub use chat_state::{
     CancelableReadableStream, CancelableStreamError, ChatRouteCleanupDependencies, ChatUiStatus,
@@ -21,6 +23,20 @@ pub use chat_state::{
     should_refresh_after_ready_transition, should_render_git_data_part,
     should_show_thinking_indicator, should_use_chat_list_streaming_state,
 };
+pub use model_catalog::{
+    APP_DEFAULT_MODEL_ID, AvailableModel, AvailableModelCost, AvailableModelCostTier,
+    BUILT_IN_VARIANT_ID_PREFIX, DEFAULT_MODEL_ID, GatewayAvailableModel, GatewayModelsError,
+    MODEL_VARIANT_ID_PREFIX, ModelAccessSession, ModelGroup, ModelOption, ModelUsage, ModelVariant,
+    ProviderOptionsByProvider, ResolvedModelSelection, UserModelPreferences,
+    available_models_route_models, build_model_options, built_in_variants,
+    estimate_model_usage_cost, filter_disabled_models, filter_model_variants_for_session,
+    filter_models_for_session, get_all_variants, get_default_model_option_id,
+    get_model_display_name, get_models_from_gateway_error, group_by_provider, is_built_in_variant,
+    is_model_disabled, is_restricted_model_id_for_session, resolve_available_model_id,
+    resolve_model_selection, sanitize_selected_model_id_for_session,
+    sanitize_user_preferences_for_session, to_provider_options_by_provider,
+    with_missing_model_option,
+};
 pub use open_agent::{
     DEFAULT_OPEN_AGENT_MODEL_LABEL, OpenAgent, OpenAgentCallOptions, OpenAgentError,
     OpenAgentModelVariant, OpenAgentPreparedCall, OpenAgentSettings, OpenAgentSkillMetadata,
@@ -31,6 +47,10 @@ pub use open_agent::{
 pub use open_agents_core::{AgentModelSelection, RemoteAgentIdentity};
 use open_agents_sandbox::SandboxContext;
 use serde::{Deserialize, Serialize};
+pub use session_title::{
+    GenerateTitleRouteOutput, build_session_title_prompt, handle_generate_title_request,
+    normalize_session_title_message, parse_generated_session_title,
+};
 
 pub use ai_sdk_rust::ToolLoopAgent;
 pub use ai_sdk_workflow::WorkflowAgent;

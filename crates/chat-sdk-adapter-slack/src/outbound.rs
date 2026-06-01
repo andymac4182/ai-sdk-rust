@@ -20,6 +20,9 @@ use serde_json::{Value, json};
 /// limits message updates aggressively enough that streaming should coalesce.
 pub const DEFAULT_UPDATE_INTERVAL_MS: u64 = 1000;
 
+/// Reserved assistant markdown href prefix for workspace-file links.
+pub const WORKSPACE_FILE_HREF_PREFIX: &str = "#workspace-file=";
+
 /// Context encoded into every interactive Slack action id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlackRunContext {
@@ -586,6 +589,59 @@ pub fn render_run_terminal(
     )
 }
 
+/// Builds the reserved workspace-file href used by Open Agents assistant text.
+pub fn build_workspace_file_href(file_path: &str) -> String {
+    format!(
+        "{WORKSPACE_FILE_HREF_PREFIX}{}",
+        normalize_workspace_file_path(file_path)
+    )
+}
+
+/// Parses a reserved workspace-file href back to a normalized path.
+pub fn parse_workspace_file_href(href: Option<&str>) -> Option<String> {
+    let href = href?;
+    let encoded = href.strip_prefix(WORKSPACE_FILE_HREF_PREFIX)?;
+    let file_path = normalize_workspace_file_path(&percent_decode_lossy(encoded));
+    if file_path.is_empty() {
+        None
+    } else {
+        Some(file_path)
+    }
+}
+
+/// Prompt section that teaches assistants to emit whole-file workspace links.
+pub fn assistant_file_link_prompt() -> String {
+    [
+        "When you mention a workspace file path in assistant text, render it as a markdown link using this exact format:",
+        &format!(
+            "- `[path/to/file.ts]({})`",
+            build_workspace_file_href("path/to/file.ts")
+        ),
+        "- Use the repo-relative file path as both the visible link text and the path inside the link.",
+        "- Whole-file links only for now. Do not include line numbers or ranges.",
+        "- Do not use this format for URLs or anything that is not a real workspace file path.",
+        "- If you are not sure of the exact file path, do not invent one.",
+    ]
+    .join("\n")
+}
+
+/// Formats token counts for compact Open Agents status rendering.
+pub fn format_tokens(tokens: u64) -> String {
+    if tokens >= 999_950_000_000 {
+        return format!("{:.1}t", tokens as f64 / 1_000_000_000_000.0);
+    }
+    if tokens >= 999_950_000 {
+        return format!("{:.1}b", tokens as f64 / 1_000_000_000.0);
+    }
+    if tokens >= 999_950 {
+        return format!("{:.1}m", tokens as f64 / 1_000_000.0);
+    }
+    if tokens >= 1_000 {
+        return format!("{:.1}k", tokens as f64 / 1_000.0);
+    }
+    tokens.to_string()
+}
+
 pub fn render_commit_summary(summary: &SlackCommitSummary) -> SlackOutboundMessage {
     let mut fallback = format!("Commit {}", summary.status.label());
     if let Some(message) = summary
@@ -1009,6 +1065,32 @@ fn percent_decode_segment(value: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn percent_decode_lossy(value: &str) -> String {
+    let mut out = String::new();
+    let input = value.as_bytes();
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            let decoded = input
+                .get(index + 1)
+                .zip(input.get(index + 2))
+                .and_then(|(hi, lo)| Some((hex_value(*hi)? << 4) | hex_value(*lo)?));
+            if let Some(byte) = decoded {
+                out.push(byte as char);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(input[index] as char);
+        index += 1;
+    }
+    out
+}
+
+fn normalize_workspace_file_path(file_path: &str) -> String {
+    file_path.replace('\\', "/").trim().to_string()
+}
+
 fn hex_value(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
@@ -1368,6 +1450,57 @@ mod tests {
         let err = block_on(dispatcher.post("slack:C123:1.0", &message)).unwrap_err();
         assert_eq!(err.to_string(), "Adapter parsed an invalid payload: boom");
         assert_eq!(message.text, "still available");
+    }
+
+    #[test]
+    fn assistant_file_links_build_parse_and_document_workspace_hrefs() {
+        let href = build_workspace_file_href("apps/web/app/sessions/[sessionId]/page.tsx");
+        assert_eq!(
+            href,
+            "#workspace-file=apps/web/app/sessions/[sessionId]/page.tsx"
+        );
+        assert_eq!(
+            parse_workspace_file_href(Some(&href)).as_deref(),
+            Some("apps/web/app/sessions/[sessionId]/page.tsx")
+        );
+        assert_eq!(
+            parse_workspace_file_href(Some("#workspace-file=apps%5Cweb%5Clib%5Ctest%20file.ts"))
+                .as_deref(),
+            Some("apps/web/lib/test file.ts")
+        );
+        assert_eq!(parse_workspace_file_href(Some("https://example.com")), None);
+        assert_eq!(parse_workspace_file_href(Some("#workspace-file=")), None);
+        assert_eq!(parse_workspace_file_href(None), None);
+
+        let prompt = assistant_file_link_prompt();
+        assert!(prompt.contains("[path/to/file.ts](#workspace-file=path/to/file.ts)"));
+        assert!(prompt.contains("Whole-file links only for now"));
+    }
+
+    #[test]
+    fn tool_state_format_tokens_matches_upstream_display_thresholds() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(1), "1");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1_000), "1.0k");
+        assert_eq!(format_tokens(1_200), "1.2k");
+        assert_eq!(format_tokens(15_800), "15.8k");
+        assert_eq!(format_tokens(500_000), "500.0k");
+        assert_eq!(format_tokens(1_000_000), "1.0m");
+        assert_eq!(format_tokens(1_005_000), "1.0m");
+        assert_eq!(format_tokens(2_500_000), "2.5m");
+        assert_eq!(format_tokens(150_000_000), "150.0m");
+        assert_eq!(format_tokens(1_000_000_000), "1.0b");
+        assert_eq!(format_tokens(2_500_000_000), "2.5b");
+        assert_eq!(format_tokens(10_000_000_000), "10.0b");
+        assert_eq!(format_tokens(999_950), "1.0m");
+        assert_eq!(format_tokens(999_999), "1.0m");
+        assert_eq!(format_tokens(999_950_000), "1.0b");
+        assert_eq!(format_tokens(999_999_999), "1.0b");
+        assert_eq!(format_tokens(999_949), "999.9k");
+        assert_eq!(format_tokens(999_949_999), "999.9m");
+        assert!(!format_tokens(1_000_000).contains("1000k"));
+        assert!(!format_tokens(1_000_000_000).contains("1000m"));
     }
 
     #[test]
