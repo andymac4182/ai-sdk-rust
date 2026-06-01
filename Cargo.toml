@@ -50,6 +50,7 @@ members = [
     "crates/chat-sdk-state-memory",
     "crates/chat-sdk-state-pg",
     "crates/chat-sdk-state-redis",
+    "crates/just-bash",
     "crates/open-agents-core",
     "crates/open-agents-persistence",
     "crates/open-agents-runtime",

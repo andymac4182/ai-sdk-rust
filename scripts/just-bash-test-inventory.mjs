@@ -39,6 +39,147 @@ const strictPassStatuses = new Set([
   'type-system-impossible',
 ]);
 
+const jb03CaseGroups = [
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.test.ts',
+    lines: [25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 76, 82],
+    owner: 'crates/just-bash::path',
+    rustTest: 'upstream_real_fs_utils_normalize_path_cases',
+    notes: 'JB-03 verifies portable normalizePath behavior without host filesystem access.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.test.ts',
+    lines: [91, 95, 99, 103, 110, 114, 118, 122, 130, 136],
+    owner: 'crates/just-bash::path',
+    rustTest: 'upstream_real_fs_utils_is_path_within_root_cases',
+    notes: 'JB-03 verifies boundary-safe path containment as a pure helper.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.test.ts',
+    lines: [288, 294, 298, 302, 306, 310],
+    owner: 'crates/just-bash::path',
+    rustTest: 'upstream_real_fs_utils_validate_path_cases',
+    notes: 'JB-03 verifies null-byte path rejection and sanitized virtual errors.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/interface.contract.test.ts',
+    lines: [5],
+    owner: 'crates/just-bash::fs',
+    rustTest: 'upstream_interface_contract_reads_writes_appends_stats_lists_and_removes_files',
+    notes: 'JB-03 verifies the portable in-memory filesystem interface contract.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/interface.contract.test.ts',
+    lines: [21],
+    owner: 'crates/just-bash::fs',
+    rustTest: 'upstream_interface_contract_copies_and_moves_without_content_changes',
+    notes: 'JB-03 verifies copy and move preserve file contents in the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/interface.contract.test.ts',
+    lines: [34],
+    owner: 'crates/just-bash::path',
+    rustTest: 'upstream_interface_contract_rejects_null_byte_paths',
+    notes: 'JB-03 verifies null-byte rejection for read and mutating virtual paths.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/interface.contract.test.ts',
+    lines: [45],
+    owner: 'crates/just-bash::path',
+    rustTest: 'upstream_interface_contract_clamps_traversal_above_root',
+    notes: 'JB-03 verifies traversal normalization clamps above the virtual root.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/interface.contract.test.ts',
+    lines: [54],
+    owner: 'crates/just-bash::path',
+    rustTest: 'upstream_interface_contract_resolves_relative_paths_consistently',
+    notes: 'JB-03 verifies relative path, dirname, and join behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/interface.contract.test.ts',
+    lines: [62],
+    owner: 'crates/just-bash::fs',
+    rustTest: 'upstream_interface_contract_symlinks_keep_absolute_targets_virtual',
+    notes: 'JB-03 verifies virtual symlink creation and absolute target preservation.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.test.ts',
+    lines: [
+      6, 16, 26, 35, 45, 57, 66, 76, 85, 95, 104, 114, 125, 138, 149, 162,
+      177, 187, 204, 215,
+    ],
+    owner: 'crates/just-bash::encoding',
+    rustTest: 'upstream_in_memory_binary_and_encoding_cases',
+    notes: 'JB-03 verifies binary buffers, encodings, append, large files, and symlinked reads.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.test.ts',
+    lines: [229, 252, 266, 281, 289, 299],
+    owner: 'crates/just-bash::fs',
+    rustTest: 'upstream_in_memory_readdir_with_file_types_cases',
+    notes: 'JB-03 verifies deterministic directory entries and file type metadata.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.security.test.ts',
+    lines: [14, 20, 28, 35, 43, 51, 60, 70, 80, 91, 98, 110, 120],
+    owner: 'crates/just-bash::fs',
+    rustTest: 'upstream_in_memory_symlink_path_resolution_cases',
+    notes: 'JB-03 verifies in-memory symlink resolution, loops, chained links, and clamped targets.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.security.test.ts',
+    lines: [133, 141, 149, 157, 165, 176, 187, 284, 294, 305, 312],
+    owner: 'crates/just-bash::fs',
+    rustTest: 'upstream_in_memory_lstat_stat_realpath_symlink_cases',
+    notes: 'JB-03 verifies readlink, lstat/stat, and realpath symlink semantics.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.security.test.ts',
+    lines: [
+      201, 217, 236, 250, 259, 269, 274, 353, 368, 383, 401, 414, 423, 446,
+      463, 481, 493, 503, 510,
+    ],
+    owner: 'crates/just-bash::fs',
+    rustTest:
+      'upstream_in_memory_write_append_rm_cp_link_symlink_policy_cases; upstream_real_fs_utils_normalize_path_cases; upstream_real_fs_utils_validate_path_cases; upstream_in_memory_binary_and_encoding_cases; upstream_error_sanitization_cases',
+    notes: 'JB-03 verifies in-memory write, append, rm, cp, link, path edge, encoding, and error safety cases.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/sanitize-error.test.ts',
+    lines: [5],
+    owner: 'crates/just-bash::sanitize',
+    rustTest: 'upstream_error_sanitization_cases',
+    notes: 'JB-03 verifies host path and file URL scrubbing.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.sanitize.test.ts',
+    lines: [5, 13, 20, 27, 33, 39, 46, 55, 61, 67, 71, 76, 82, 88, 94, 100, 106],
+    owner: 'crates/just-bash::sanitize',
+    rustTest: 'upstream_error_sanitization_cases',
+    notes: 'JB-03 verifies sanitizer behavior without depending on real filesystem access.',
+  },
+  {
+    file: 'packages/just-bash/src/encoding.fs-fallback.test.ts',
+    lines: [36, 54],
+    owner: 'crates/just-bash::file_reader',
+    rustTest: 'upstream_file_reader_fallback_and_concat_cases',
+    notes: 'JB-03 verifies byte-preserving file-reader fallback and ByteString round trips.',
+  },
+];
+
+const jb03CaseOverrides = new Map();
+for (const group of jb03CaseGroups) {
+  for (const line of group.lines) {
+    jb03CaseOverrides.set(`${group.file}:${line}`, {
+      status: 'portable-verified',
+      owner: group.owner,
+      rustTest: group.rustTest,
+      notes: group.notes,
+    });
+  }
+}
+
 function usage() {
   console.log(`Usage: node scripts/just-bash-test-inventory.mjs [options]
 
@@ -860,16 +1001,17 @@ function defaultCaseRow(testCase) {
 function caseRowWithOverride(testCase, existingRows) {
   const row = defaultCaseRow(testCase);
   const existing = existingRows.get(testCaseKey(testCase));
-  if (!existing) {
-    return row;
-  }
-  return {
-    ...row,
-    status: existing.Status || row.status,
-    owner: existing['Rust owner crate/module'] || row.owner,
-    rustTest: existing['Rust test name or exception'] || row.rustTest,
-    notes: existing.Notes || row.notes,
-  };
+  const merged = existing
+    ? {
+        ...row,
+        status: existing.Status || row.status,
+        owner: existing['Rust owner crate/module'] || row.owner,
+        rustTest: existing['Rust test name or exception'] || row.rustTest,
+        notes: existing.Notes || row.notes,
+      }
+    : row;
+  const jb03Override = jb03CaseOverrides.get(`${testCase.file}:${testCase.line}`);
+  return jb03Override ? { ...merged, ...jb03Override } : merged;
 }
 
 function countBy(rows, keyFn, seedFn) {
