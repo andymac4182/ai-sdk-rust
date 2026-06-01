@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 52
-- Average estimated completion: 38.0%
-- Portable package average: 23.3%
-- Closed package rows: 19 / 52
-- Strict portable verified rows: 9 / 42
-- In-progress rows: 33
+- Average estimated completion: 39.9%
+- Portable package average: 25.6%
+- Closed package rows: 20 / 52
+- Strict portable verified rows: 10 / 42
+- In-progress rows: 32
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 8762
-- Strict inventory full portable cases mapped: 2552 / 7509
-- Strict inventory full portable cases unmapped: 4957
-- Displayed-row strict portable test cases mapped: 2552 / 4293
-- Displayed-row strict portable test cases unmapped: 1741
+- Strict inventory full portable cases mapped: 2641 / 7508
+- Strict inventory full portable cases unmapped: 4867
+- Displayed-row strict portable test cases mapped: 2641 / 4292
+- Displayed-row strict portable test cases unmapped: 1651
 
 ## 100% Closed
 
@@ -28,6 +28,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/cohere` | 100% | Verified | provider package |
 | `@ai-sdk/fireworks` | 100% | Verified | provider package |
 | `@ai-sdk/groq` | 100% | Verified | provider package |
+| `@ai-sdk/klingai` | 100% | Verified | provider package |
 | `@ai-sdk/devtools` | 100% | JavaScript-only | JavaScript devtools package |
 | `@ai-sdk/codemod` | 100% | JavaScript-only | JavaScript migration tooling |
 | `@ai-sdk/angular` | 100% | JavaScript-only | JavaScript framework adapter |
@@ -62,7 +63,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/gladia` | 0% | In progress | provider package | strict test inventory: 7 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/huggingface` | 0% | In progress | provider package | strict test inventory: 37 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/hume` | 0% | In progress | provider package | strict test inventory: 9 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/klingai` | 0% | In progress | provider package | strict test inventory: 90 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/lmnt` | 0% | In progress | provider package | strict test inventory: 9 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/luma` | 0% | In progress | provider package | strict test inventory: 29 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/mistral` | 0% | In progress | provider package | strict test inventory: 72 portable upstream cases still need named Rust tests; sample failing IDs:... |

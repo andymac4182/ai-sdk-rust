@@ -26,6 +26,10 @@ const AI_02_INVENTORY_PATH = path.join(
   repositoryRoot,
   'docs/ai-02-openai-compatible-providers.md',
 );
+const AI_06_INVENTORY_PATH = path.join(
+  repositoryRoot,
+  'docs/ai-06-concrete-provider-mappings.md',
+);
 
 const UPSTREAM_REPO = 'vercel/ai';
 const UPSTREAM_HEAD = 'ab6d66482d31afe15f4973a51c5f7cfa09c92ea6';
@@ -617,7 +621,11 @@ function parseInventoryCaseName(upstreamCaseCell) {
     .trim();
 }
 
-function parseAi02Mappings(docPath) {
+function parseAi02Mappings(
+  docPath,
+  sourceLabel = relativePath(docPath, repositoryRoot),
+  defaultNote = 'Mapped by the AI-02 exact case map.',
+) {
   const mappings = new Map();
   if (!fs.existsSync(docPath)) {
     return mappings;
@@ -664,13 +672,13 @@ function parseAi02Mappings(docPath) {
       ? 'portable-mapped'
       : (exceptionStatus ?? 'portable-unmapped');
     const entry = {
-      source: 'docs/ai-02-openai-compatible-providers.md',
+      source: sourceLabel,
       status,
       rustTarget: values['Rust mapping'],
       rustTests,
       notes: exception && exception !== 'none'
         ? `${values['Remaining exception']}`
-        : 'Mapped by the AI-02 exact case map.',
+        : defaultNote,
     };
     for (const keyName of caseNameAliases(caseName)) {
       const key = `${file}|${normalizeNameKey(keyName)}`;
@@ -681,6 +689,18 @@ function parseAi02Mappings(docPath) {
   }
 
   return mappings;
+}
+
+function mergeNamedCaseMappings(...mappingSets) {
+  const merged = new Map();
+  for (const mappings of mappingSets) {
+    for (const [key, entries] of mappings) {
+      const queue = merged.get(key) ?? [];
+      queue.push(...entries);
+      merged.set(key, queue);
+    }
+  }
+  return merged;
 }
 
 function caseNameAliases(caseName) {
@@ -1068,7 +1088,14 @@ function buildInventory(args) {
 
   const ledgerPackages = parseLedgerPackages(args.ledgerPath);
   const foundationalMappings = parseFoundationalMappings(FOUNDATIONAL_INVENTORY_PATH);
-  const ai02Mappings = parseAi02Mappings(AI_02_INVENTORY_PATH);
+  const ai02Mappings = mergeNamedCaseMappings(
+    parseAi02Mappings(AI_02_INVENTORY_PATH),
+    parseAi02Mappings(
+      AI_06_INVENTORY_PATH,
+      relativePath(AI_06_INVENTORY_PATH, repositoryRoot),
+      'Mapped by the AI-06 exact case map.',
+    ),
+  );
   const rustTests = collectRustTests();
   const providerUtilsMappings = buildProviderUtilsMappings(rustTests.ordered);
   const validationErrors = [];
