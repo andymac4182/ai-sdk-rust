@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 95.2%
-- Portable package average: 94.0%
-- Closed package rows: 48 / 52
-- Strict portable verified rows: 38 / 42
-- In-progress rows: 4
+- Average estimated completion: 96.2%
+- Portable package average: 95.4%
+- Closed package rows: 49 / 52
+- Strict portable verified rows: 39 / 42
+- In-progress rows: 3
 - Not-started rows: 0
 
 ## 100% Closed
@@ -35,6 +35,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/deepseek` | 100% | Verified | provider package |
 | `@ai-sdk/elevenlabs` | 100% | Verified | provider package |
 | `@ai-sdk/fal` | 100% | Verified | provider package |
+| `@ai-sdk/fireworks` | 100% | Verified | provider package |
 | `@ai-sdk/gladia` | 100% | Verified | provider package |
 | `@ai-sdk/huggingface` | 100% | Verified | provider package |
 | `@ai-sdk/hume` | 100% | Verified | provider package |
@@ -69,7 +70,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | --- | ---: | --- | --- | --- |
 | `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, shared server/custom tool, chat, and image provider wrapper exists; files, video, xAI-specific tool... |
 | `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking slices cover default/raw embedding plus text/object rerank behavior; chat, prompt conversion,... |
-| `@ai-sdk/fireworks` | 45% | In progress | provider package | OpenAI-compatible chat/completion/embedding plus provider-specific image workflows now cover... |
 | `@ai-sdk/groq` | 35% | In progress | provider package | OpenAI-compatible chat plus transcription request/response behavior exists; browser-search tool, Groq-specific message... |
 
 ## Not Started
