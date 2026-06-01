@@ -180,6 +180,153 @@ for (const group of jb03CaseGroups) {
   }
 }
 
+const jb06NetworkSourceFiles = [
+  'packages/just-bash/src/network/allow-list.ts',
+  'packages/just-bash/src/network/allow-list/shared.ts',
+  'packages/just-bash/src/network/dns-pin.ts',
+  'packages/just-bash/src/network/fetch.ts',
+  'packages/just-bash/src/network/index.ts',
+  'packages/just-bash/src/network/types.ts',
+];
+
+const jb06NetworkTestFiles = [
+  'packages/just-bash/src/network/allow-list/bypass.test.ts',
+  'packages/just-bash/src/network/allow-list/dns-rebinding-integration.test.ts',
+  'packages/just-bash/src/network/allow-list/dns-rebinding.test.ts',
+  'packages/just-bash/src/network/allow-list/e2e.test.ts',
+  'packages/just-bash/src/network/allow-list/firewall.test.ts',
+  'packages/just-bash/src/network/allow-list/mock.test.ts',
+  'packages/just-bash/src/network/allow-list/pen-test-pocs.test.ts',
+  'packages/just-bash/src/network/allow-list/unit.test.ts',
+  'packages/just-bash/src/network/dns-pin-fetch.test.ts',
+  'packages/just-bash/src/network/dns-pin.test.ts',
+];
+
+const jb06LimitTestFiles = [
+  'packages/just-bash/src/security-limits.test.ts',
+  'packages/just-bash/src/security/limits/dos-limits.test.ts',
+  'packages/just-bash/src/security/limits/memory-exhaustion.test.ts',
+  'packages/just-bash/src/security/limits/output-size-limits.test.ts',
+  'packages/just-bash/src/security/limits/pipeline-limits.test.ts',
+  'packages/just-bash/src/security/limits/security-hardening.test.ts',
+];
+
+const jb06RuntimeOnlySourceFiles = [
+  'packages/just-bash/src/commands/js-exec/js-exec-worker.ts',
+  'packages/just-bash/src/commands/python3/worker.ts',
+  'packages/just-bash/src/commands/sqlite3/worker.ts',
+  'packages/just-bash/src/security/wasm-callback.ts',
+  'packages/just-bash/src/security/worker-defense-in-depth.ts',
+];
+
+const jb06RuntimeOnlyTestFiles = [
+  'packages/just-bash/src/browser.bundle.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.module-resolution-security.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.security.test.ts',
+  'packages/just-bash/src/commands/python3/python3.queue-desync.runtime.test.ts',
+  'packages/just-bash/src/commands/python3/python3.queue-timeout-exploit.test.ts',
+  'packages/just-bash/src/commands/python3/python3.worker-protocol-abuse.test.ts',
+  'packages/just-bash/src/commands/sqlite3/sqlite3.worker-protocol-abuse.test.ts',
+  'packages/just-bash/src/commands/sqlite3/sqlite3.worker-resolution.test.ts',
+  'packages/just-bash/src/security/wasm-callback.test.ts',
+  'packages/just-bash/src/security/worker-defense-in-depth.test.ts',
+];
+
+const jb06SourceGroups = [
+  {
+    files: jb06NetworkSourceFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::network',
+    notes:
+      'JB-06 verifies portable allow-list, DNS-pinning request planning, fake transport, redirect, timeout, method, and response-limit seams without live network.',
+  },
+  {
+    files: jb06RuntimeOnlySourceFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    notes:
+      'JB-06 classifies this optional JS/worker/WASM runtime source as not part of the portable Rust backend; portable network, limits, redaction, and diagnostics are mapped separately.',
+  },
+];
+
+const jb06CaseGroups = [
+  {
+    files: jb06NetworkTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::network',
+    rustTest:
+      'just_bash_network_allow_list_matches_origins_paths_and_bypass_cases; just_bash_network_validates_allow_list_and_defaults_to_no_network; just_bash_network_plans_allowed_request_with_fake_dns_and_header_firewall; just_bash_network_blocks_private_hosts_and_dns_rebinding_before_transport; just_bash_network_fails_closed_for_dns_errors_but_allows_enotfound_to_fetch; just_bash_network_revalidates_redirects_and_repins_each_hop; just_bash_network_blocks_disallowed_redirect_without_second_transport_call; just_bash_network_enforces_method_timeout_and_response_limits; just_bash_network_fake_transport_records_only_planned_requests',
+    notes:
+      'JB-06 maps the portable network policy surface with fake DNS and fake transport only; no live fetch or host networking is used.',
+  },
+  {
+    files: jb06LimitTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::limits',
+    rustTest:
+      'just_bash_security_resource_limits_match_upstream_limit_diagnostics; just_bash_security_timeout_and_abort_share_cancellation_contract; just_bash_security_allow_deny_policy_blocks_denied_and_unknown_commands',
+    notes:
+      'JB-06 verifies deterministic resource, timeout, cancellation, command-limit, and diagnostic seams without executing a host shell.',
+  },
+  {
+    file: 'packages/just-bash/src/sandbox/Sandbox.security.test.ts',
+    lines: [6, 22, 36, 51, 64, 76, 93],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security',
+    rustTest:
+      'just_bash_security_path_validation_blocks_escape_and_nul_cases; just_bash_security_allow_deny_policy_blocks_denied_and_unknown_commands; just_bash_security_timeout_and_abort_share_cancellation_contract',
+    notes:
+      'JB-06 verifies shell-injection-safe path/argv policy seams and consistent timeout/abort diagnostics without spawning commands.',
+  },
+  {
+    file: 'packages/just-bash/src/security/sandbox/information-disclosure.test.ts',
+    lines: [19, 54, 108, 116, 124, 132, 140, 574],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::redaction',
+    rustTest:
+      'just_bash_security_redacts_sandbox_paths_and_sensitive_env_values; just_bash_security_path_validation_blocks_escape_and_nul_cases',
+    notes:
+      'JB-06 verifies the portable path and sensitive-environment redaction seam; command-specific virtualization rows stay with their command/runtime owners.',
+  },
+  {
+    files: jb06RuntimeOnlyTestFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    rustTest: 'just_bash_optional_runtime_security_cases_are_classified_nonportable',
+    notes:
+      'JB-06 classifies browser bundle, QuickJS, Node worker, Python WASM, SQLite WASM, and WASM callback bridge behavior as not portable to this Rust backend; portable security behavior is mapped in separate JB-06 rows.',
+  },
+];
+
+function groupMatchesFile(group, file) {
+  if (group.file && group.file !== file) {
+    return false;
+  }
+  if (group.files && !group.files.includes(file)) {
+    return false;
+  }
+  return true;
+}
+
+function rowOverrideFromGroup(group) {
+  const { file: _file, files: _files, lines: _lines, ...override } = group;
+  return override;
+}
+
+function sourceOverrideFor(relativePath) {
+  const group = jb06SourceGroups.find((entry) => groupMatchesFile(entry, relativePath));
+  return group ? rowOverrideFromGroup(group) : undefined;
+}
+
+function caseOverrideFor(testCase) {
+  const group = jb06CaseGroups.find(
+    (entry) =>
+      groupMatchesFile(entry, testCase.file) &&
+      (!entry.lines || entry.lines.includes(testCase.line))
+  );
+  return group ? rowOverrideFromGroup(group) : undefined;
+}
+
 function usage() {
   console.log(`Usage: node scripts/just-bash-test-inventory.mjs [options]
 
@@ -970,15 +1117,16 @@ function defaultSourceRow(relativePath) {
 function sourceRowWithOverride(relativePath, existingRows) {
   const row = defaultSourceRow(relativePath);
   const existing = existingRows.get(relativePath);
-  if (!existing) {
-    return row;
-  }
-  return {
-    ...row,
-    status: existing.Status || row.status,
-    owner: existing['Rust owner crate/module or exception'] || row.owner,
-    notes: existing.Notes || row.notes,
-  };
+  const merged = existing
+    ? {
+        ...row,
+        status: existing.Status || row.status,
+        owner: existing['Rust owner crate/module or exception'] || row.owner,
+        notes: existing.Notes || row.notes,
+      }
+    : row;
+  const jb06Override = sourceOverrideFor(relativePath);
+  return jb06Override ? { ...merged, ...jb06Override } : merged;
 }
 
 function defaultCaseRow(testCase) {
@@ -1011,7 +1159,11 @@ function caseRowWithOverride(testCase, existingRows) {
       }
     : row;
   const jb03Override = jb03CaseOverrides.get(`${testCase.file}:${testCase.line}`);
-  return jb03Override ? { ...merged, ...jb03Override } : merged;
+  if (jb03Override) {
+    return { ...merged, ...jb03Override };
+  }
+  const jb06Override = caseOverrideFor(testCase);
+  return jb06Override ? { ...merged, ...jb06Override } : merged;
 }
 
 function countBy(rows, keyFn, seedFn) {

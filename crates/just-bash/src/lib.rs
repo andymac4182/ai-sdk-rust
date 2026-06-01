@@ -13,6 +13,7 @@ mod fs;
 mod glob;
 mod path;
 mod sanitize;
+pub mod security;
 mod session;
 mod shell;
 
@@ -39,6 +40,15 @@ pub use path::{
     resolve_symlink_target, validate_path,
 };
 pub use sanitize::{sanitize_error_message, sanitize_host_error_message};
+pub use security::{
+    AllowedUrlEntry, CancellationState, CommandSecurityPolicy, DiagnosticSeverity, DnsAddress,
+    DnsLookupError, DnsResolver, HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse,
+    NetworkTransport, PlannedNetworkRequest, RedactionPolicy, ResourceObservation,
+    RuntimePortability, SecurityDiagnostic, SecurityDiagnosticCode, SecurityResult,
+    StaticNetworkTransport, UpstreamRuntimeSurface, classify_runtime_surface,
+    execute_network_request, is_private_hostname, is_url_allowed, matches_allow_list_entry,
+    plan_network_request, validate_allow_list_entry, validate_workspace_path,
+};
 pub use session::{ExecOptions, VirtualSession};
 pub use shell::*;
 
