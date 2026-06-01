@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "vercel-labs/just-bash",
+    "commit": "d64009aef6bc1556e7c84b22ed455863275ea953",
+    "fetchedWith": "npx opensrc fetch https://github.com/vercel-labs/just-bash"
+  },
+  "defaultCwd": "/workspace",
+  "cases": [
+    {
+      "id": "packages/just-bash/src/comparison-tests/fixtures/echo.comparison.fixtures.json#d17ea61d90fa289b",
+      "status": "portable-pending",
+      "command": "echo hello",
+      "files": {},
+      "stdout": "hello\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    {
+      "id": "packages/just-bash/src/comparison-tests/fixtures/cat.comparison.fixtures.json#c84d818ff334dff2",
+      "status": "portable-pending",
+      "command": "cat test.txt",
+      "files": {
+        "test.txt": "line 1\nline 2\nline 3\n"
+      },
+      "stdout": "line 1\nline 2\nline 3\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    {
+      "id": "packages/just-bash/src/comparison-tests/fixtures/pipes-redirections.comparison.fixtures.json#45eaab46734d3047",
+      "status": "portable-pending",
+      "command": "cat test.txt | grep hello",
+      "files": {
+        "test.txt": "hello world\nfoo bar\nhello again\n"
+      },
+      "stdout": "hello world\nhello again\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    {
+      "id": "packages/just-bash/src/commands/env/env.test.ts:39",
+      "status": "portable-pending",
+      "command": "env -i ONLY=value printenv ONLY",
+      "env": {
+        "FOO": "bar"
+      },
+      "stdout": "value\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    {
+      "id": "packages/just-bash/src/commands/pwd/pwd.test.ts:12",
+      "status": "portable-pending",
+      "command": "pwd",
+      "cwd": "/",
+      "stdout": "/\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    {
+      "id": "packages/just-bash/src/commands/cat/cat.test.ts:58",
+      "status": "portable-pending",
+      "command": "cat /missing.txt",
+      "stdout": "",
+      "stderr": "cat: /missing.txt: No such file or directory\n",
+      "exitCode": 1
+    },
+    {
+      "id": "jbc-04:exec-options-cwd-env-stdin",
+      "status": "portable-pending",
+      "notes": "Compatibility seed for generated corpus execOptions support.",
+      "command": "pwd; printenv MODE; cat",
+      "cwd": "/workspace",
+      "files": {
+        "nested/.keep": ""
+      },
+      "options": {
+        "cwd": "/workspace/nested",
+        "env": {
+          "MODE": "exec-option"
+        },
+        "stdin": "from stdin\n"
+      },
+      "stdout": "/workspace/nested\nexec-option\nfrom stdin\n",
+      "stderr": "",
+      "exitCode": 0
+    },
+    {
+      "id": "packages/just-bash/src/Bash.commands.test.ts:88-custom-command-node-api",
+      "status": "js-only-documented",
+      "skipReason": "Custom commands that directly execute JavaScript APIs are outside the portable Rust Bash facade.",
+      "command": "myfetch",
+      "stdout": "custom-ok\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  ]
+}
