@@ -15,7 +15,7 @@ const overridesPath = path.join(
   repositoryRoot,
   'docs/workflow-test-overrides.json'
 );
-const sourceHead = '1ee63b870afbf9754eb1022b1bb5f02d0ab042f9';
+const sourceHead = 'ae3c833acd4f44ab84db65b44eb2ba2646eaecf9';
 const inventoryDate = '2026-06-01';
 
 const testFilePattern =
@@ -1062,6 +1062,15 @@ function jsOnly(note) {
   };
 }
 
+function portableNotStarted(note) {
+  return {
+    portability: 'portable',
+    status: 'not-started',
+    rustTestName: '',
+    note,
+  };
+}
+
 function bucket05Override(row) {
   if (row.packageName !== 'core') return undefined;
 
@@ -1584,6 +1593,73 @@ function workflowCoreWf07Override(row) {
         'Host route, CLI, bundler, or framework E2E behavior; no portable Rust core-runtime counterpart in WF07.'
       );
     }
+  }
+
+  if (file === 'packages/core/e2e/e2e.test.ts') {
+    const text = `${row.suitePath} ${row.caseName}`;
+
+    if (
+      line === 252 ||
+      line === 278 ||
+      line === 313 ||
+      line === 3299 ||
+      text.includes('react rendering') ||
+      text.includes('.well-known/agent') ||
+      text.includes('importedStepOnlyWorkflow') ||
+      text.includes('getter functions with "use step"')
+    ) {
+      return jsOnly(
+        'Framework-specific discovery, bundling, or React rendering E2E behavior; Rust core runtime does not claim host app transforms.'
+      );
+    }
+
+    if (
+      text.includes('public webhook endpoint') ||
+      text.includes('webhookWorkflow') ||
+      text.includes('webhook route')
+    ) {
+      return jsOnly(
+        'HTTP webhook route behavior belongs to JavaScript host adapters and deployment integration, not the portable Rust core runtime.'
+      );
+    }
+
+    if (
+      text.includes('writableForwardedFrom') ||
+      line === 939 ||
+      text.includes('fetchWorkflow') ||
+      text.includes('static workflow method') ||
+      text.includes('static step methods') ||
+      text.includes('using `this`') ||
+      text.includes('invoked with .call() and .apply()') ||
+      text.includes('custom class serialization') ||
+      text.includes('instance methods with "use step"') ||
+      text.includes('classes defined in step code') ||
+      text.includes('first-class Error subclasses') ||
+      text.includes('step function reference passed as start() argument') ||
+      text.includes('step function references can be passed') ||
+      text.includes('step function with closure variables') ||
+      text.includes('nested step functions with closure variables')
+    ) {
+      return jsOnly(
+        'JavaScript function, class, closure, this-binding, WHATWG stream, fetch, or cross-realm identity behavior; Rust ports only the typed portable data contracts.'
+      );
+    }
+
+    if (text.includes('cancelRun via CLI')) {
+      return jsOnly(
+        'CLI-driven cancellation E2E behavior is JavaScript host tooling; portable cancellation remains tracked separately for workflow-core.'
+      );
+    }
+
+    return portableNotStarted(
+      'Portable core E2E workflow/runtime behavior classified by WF-02; implementation remains owned by the workflow-core E2E parity bucket.'
+    );
+  }
+
+  if (file === 'packages/core/e2e/event-log-race-repro.test.ts') {
+    return portableNotStarted(
+      'Portable event-log concurrency stress behavior classified by WF-02; current upstream drift only relabeled CI diagnostics.'
+    );
   }
 
   return {};
@@ -2138,9 +2214,9 @@ This file is the case-level gate for the Rust Workflow SDK port. Every portable
 upstream test case must gain a named Rust test in the owning crate before its
 package can be marked ported or verified. Extra Rust tests are additive only.
 
-Rows marked needs-review are blocking classification work: a future bucket must
-convert them to portable, js-only-documented, or type-system-impossible before
-claiming completion for the owning package.
+The generated inventory should not contain needs-review rows. Current-upstream
+drift must be classified as portable, js-only-documented, or
+type-system-impossible before this file is checked in.
 
 ## Summary
 
