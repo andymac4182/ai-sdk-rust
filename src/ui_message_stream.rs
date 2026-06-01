@@ -8164,6 +8164,35 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
     }
 
     #[test]
+    fn validate_ui_messages_should_preserve_provider_references_on_file_parts() {
+        let messages = json!([
+            {
+                "id": "1",
+                "role": "user",
+                "parts": [{
+                    "type": "file",
+                    "mediaType": "text/csv",
+                    "filename": "sample.csv",
+                    "url": "data:text/csv;base64,bW9udGgscmV2ZW51ZQ==",
+                    "providerReference": {
+                        "anthropic": "file_abc123"
+                    },
+                    "providerMetadata": {
+                        "anthropic": {
+                            "containerUpload": true
+                        }
+                    }
+                }]
+            }
+        ]);
+
+        assert_eq!(
+            validate_messages(messages.clone()).unwrap(),
+            messages.as_array().unwrap().clone()
+        );
+    }
+
+    #[test]
     fn validate_ui_messages_should_validate_an_assistant_message_with_a_step_start_part() {
         let messages = json!([
             {

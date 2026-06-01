@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 50.9%
-- Portable package average: 39.8%
+- Average estimated completion: 51.1%
+- Portable package average: 40.0%
 - Closed package rows: 18 / 54
 - Strict portable verified rows: 8 / 44
 - In-progress rows: 36
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 4583 / 7687
-- Strict inventory full portable cases unmapped: 3104
-- Displayed-row strict portable test cases mapped: 4404 / 7282
-- Displayed-row strict portable test cases unmapped: 2878
+- Strict inventory full portable cases mapped: 4858 / 7673
+- Strict inventory full portable cases unmapped: 2815
+- Displayed-row strict portable test cases mapped: 4679 / 7268
+- Displayed-row strict portable test cases unmapped: 2589
 
 ## 100% Closed
 
@@ -42,7 +42,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `ai` | 19% | In progress | root core SDK package | strict test inventory: 1915 portable upstream cases still need named Rust tests; sample failing IDs:... |
+| `ai` | 31% | In progress | root core SDK package | strict test inventory: 1626 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/provider-utils` | 98% | In progress | provider support library | strict test inventory: 8 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/gateway` | 73% | In progress | provider package | strict test inventory: 107 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/openai` | 98% | In progress | provider package | strict test inventory: 6 portable upstream cases still need named Rust tests; sample failing IDs:... |
