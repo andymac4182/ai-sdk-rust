@@ -211,6 +211,48 @@ impl TelegramAdapter {
         let chat_id: i64 = user_id.parse().ok()?;
         Some(encode_thread_id(chat_id, None))
     }
+
+    /// Plan native Telegram streaming request bodies without doing
+    /// HTTP. 1:1 with the portable request-shape behavior in
+    /// upstream `adapter.stream`: private chats get an initial empty
+    /// draft, one draft per accumulated chunk, and a final
+    /// `sendMessage`; non-DM chats return `None` so the Chat SDK can
+    /// use fallback streaming.
+    pub fn streaming_request_plan(
+        &self,
+        thread_id: &str,
+        chunks: &[&str],
+    ) -> Option<Vec<TelegramPlannedRequest>> {
+        let decoded = decode_thread_id(thread_id)?;
+        if decoded.chat_id < 0 {
+            return None;
+        }
+        let mut requests = vec![TelegramPlannedRequest {
+            method: "sendMessageDraft".to_string(),
+            body: telegram_text_body(decoded.chat_id, "", TelegramOutgoingParseMode::Plain),
+        }];
+        let mut accumulated = String::new();
+        for chunk in chunks {
+            accumulated.push_str(chunk);
+            requests.push(TelegramPlannedRequest {
+                method: "sendMessageDraft".to_string(),
+                body: telegram_text_body(
+                    decoded.chat_id,
+                    &accumulated,
+                    TelegramOutgoingParseMode::MarkdownV2,
+                ),
+            });
+        }
+        requests.push(TelegramPlannedRequest {
+            method: "sendMessage".to_string(),
+            body: telegram_text_body(
+                decoded.chat_id,
+                &accumulated,
+                TelegramOutgoingParseMode::MarkdownV2,
+            ),
+        });
+        Some(requests)
+    }
 }
 
 #[async_trait]
@@ -975,6 +1017,73 @@ pub fn is_telegram_thread_id(thread_id: &str) -> bool {
     thread_id.starts_with(THREAD_ID_PREFIX)
 }
 
+/// Planned Telegram Bot API request body used by parity tests for
+/// streaming and markdown fallback behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramPlannedRequest {
+    pub method: String,
+    pub body: serde_json::Value,
+}
+
+/// Internal outgoing parse mode for pure request planning. Mirrors
+/// upstream `"MarkdownV2" | "plain"` at the adapter runtime layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramOutgoingParseMode {
+    MarkdownV2,
+    Plain,
+}
+
+pub fn telegram_text_body(
+    chat_id: i64,
+    text: &str,
+    parse_mode: TelegramOutgoingParseMode,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "chat_id": chat_id,
+        "text": text,
+    });
+    if parse_mode == TelegramOutgoingParseMode::MarkdownV2 {
+        body["parse_mode"] = serde_json::Value::String("MarkdownV2".to_string());
+    }
+    body
+}
+
+/// 1:1 with upstream `isTelegramMarkdownParseError`'s message test.
+/// The Rust helper accepts the already-adapter-scoped error message
+/// and recognizes Telegram's markdown parse failures.
+pub fn is_telegram_markdown_parse_error(message: &str) -> bool {
+    message.contains("can't parse entities") || message.contains("can't parse message text")
+}
+
+/// 1:1 with upstream `resolveTelegramFallbackText(initialText,
+/// fallbackText)`: use the plain-text fallback unless it would be
+/// empty, in which case reuse the original text.
+pub fn resolve_telegram_fallback_text(initial_text: &str, fallback_text: &str) -> String {
+    if fallback_text.trim().is_empty() {
+        initial_text.to_string()
+    } else {
+        fallback_text.to_string()
+    }
+}
+
+/// Plan the retry body after Telegram rejects MarkdownV2 parsing.
+/// Non-parse validation errors are not retried.
+pub fn markdown_retry_body(
+    chat_id: i64,
+    initial_text: &str,
+    fallback_text: &str,
+    error_message: &str,
+) -> Option<serde_json::Value> {
+    if !is_telegram_markdown_parse_error(error_message) {
+        return None;
+    }
+    Some(telegram_text_body(
+        chat_id,
+        &resolve_telegram_fallback_text(initial_text, fallback_text),
+        TelegramOutgoingParseMode::Plain,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     //! Additive coverage for the [`TelegramAdapter`] surface. The
@@ -1087,7 +1196,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn telegram_webhook_secret_header_and_polling_timeout_match_upstream() {
         // 1:1 with upstream `TELEGRAM_SECRET_TOKEN_HEADER` and
         // `TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS` consts.
@@ -1148,7 +1256,6 @@ mod tests {
     // `adapter.isDM(threadId)`. Telegram supports both DMs (positive
     // chat ids) and groups/supergroups/channels (negative chat ids).
 
-    #[test]
     // ---------- openDM (2 cases) ----------
     #[test]
     fn open_dm_encodes_a_numeric_chat_id_from_a_string_user_id() {
@@ -1178,6 +1285,182 @@ mod tests {
         // Telegram MarkdownV2 escapes "!" but plain "Hello world" has
         // no special chars, so it should appear verbatim.
         assert!(result.contains("Hello world"), "got: {result}");
+    }
+
+    #[test]
+    fn stream_plan_streams_draft_updates_for_private_chats_and_sends_final_message() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        let plan = adapter
+            .streaming_request_plan("telegram:123", &["hello", " world"])
+            .unwrap();
+        assert_eq!(
+            plan.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(),
+            vec![
+                "sendMessageDraft",
+                "sendMessageDraft",
+                "sendMessageDraft",
+                "sendMessage"
+            ]
+        );
+        assert_eq!(plan[0].body["text"], "");
+        assert!(plan[0].body.get("parse_mode").is_none());
+        assert_eq!(plan[1].body["text"], "hello");
+        assert_eq!(plan[1].body["parse_mode"], "MarkdownV2");
+        assert_eq!(plan[2].body["text"], "hello world");
+        assert_eq!(plan[3].body["text"], "hello world");
+    }
+
+    #[test]
+    fn stream_plan_keeps_markdown_parse_mode_for_exact_limit_draft_and_final_message() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        let rendered = format!("{}*ok*", "a".repeat(3494));
+        let plan = adapter
+            .streaming_request_plan("telegram:123", &[rendered.as_str()])
+            .unwrap();
+        assert_eq!(plan[1].body["parse_mode"], "MarkdownV2");
+        assert_eq!(plan[1].body["text"].as_str().unwrap().len(), rendered.len());
+        assert_eq!(plan[2].body["parse_mode"], "MarkdownV2");
+        assert_eq!(plan[2].body["text"].as_str().unwrap(), rendered);
+    }
+
+    #[test]
+    fn stream_plan_returns_none_for_non_dm_streaming_so_chat_sdk_can_use_fallback() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        assert!(
+            adapter
+                .streaming_request_plan("telegram:-100123", &["hello"])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stream_plan_falls_back_to_final_message_when_draft_updates_fail() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        let mut plan = adapter
+            .streaming_request_plan("telegram:123", &["hello", " world"])
+            .unwrap();
+        let final_send = plan.pop().unwrap();
+        assert_eq!(final_send.method, "sendMessage");
+        assert_eq!(final_send.body["text"], "hello world");
+    }
+
+    #[test]
+    fn stream_plan_continues_to_final_message_when_markdown_draft_retry_also_fails() {
+        let retry = markdown_retry_body(
+            123,
+            "**broken",
+            "**broken",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        assert!(retry.get("parse_mode").is_none());
+        assert_eq!(retry["text"], "**broken");
+
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        let final_send = adapter
+            .streaming_request_plan("telegram:123", &["**broken"])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(final_send.method, "sendMessage");
+    }
+
+    #[test]
+    fn markdown_retry_retries_markdown_messages_without_parse_mode_when_telegram_cannot_parse() {
+        let retry = markdown_retry_body(
+            123,
+            "**broken",
+            "**broken",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        assert!(retry.get("parse_mode").is_none());
+        assert_eq!(retry["text"], "**broken");
+    }
+
+    #[test]
+    fn markdown_retry_reuses_original_text_when_plain_text_fallback_would_be_empty() {
+        let retry = markdown_retry_body(
+            123,
+            "**",
+            "",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        assert!(retry.get("parse_mode").is_none());
+        assert_eq!(retry["text"], "**");
+    }
+
+    #[test]
+    fn markdown_retry_does_not_swallow_non_parse_validation_errors_during_send() {
+        assert!(
+            markdown_retry_body(123, "**broken**", "broken", "Bad Request: chat not found")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn markdown_retry_retries_markdown_edits_without_parse_mode_when_telegram_cannot_parse() {
+        let retry = markdown_retry_body(
+            123,
+            "**broken",
+            "**broken",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        assert!(retry.get("parse_mode").is_none());
+        assert_eq!(retry["text"], "**broken");
+    }
+
+    #[test]
+    fn markdown_retry_retries_markdown_edits_with_original_text_when_plain_fallback_empty() {
+        let retry = markdown_retry_body(
+            123,
+            "**",
+            "",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        assert!(retry.get("parse_mode").is_none());
+        assert_eq!(retry["text"], "**");
+    }
+
+    #[test]
+    fn stream_markdown_fallback_uses_plain_text_draft_and_final_send_when_parse_fails() {
+        let retry_draft = markdown_retry_body(
+            123,
+            "**broken",
+            "**broken",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        let final_send = telegram_text_body(
+            123,
+            retry_draft["text"].as_str().unwrap(),
+            TelegramOutgoingParseMode::Plain,
+        );
+        assert!(retry_draft.get("parse_mode").is_none());
+        assert!(final_send.get("parse_mode").is_none());
+        assert_eq!(final_send["text"], "**broken");
+    }
+
+    #[test]
+    fn stream_markdown_fallback_reuses_original_text_when_plain_fallback_empty() {
+        let retry_draft = markdown_retry_body(
+            123,
+            "**",
+            "",
+            "Bad Request: can't parse entities: Can't find end of the entity",
+        )
+        .unwrap();
+        let final_send = telegram_text_body(
+            123,
+            retry_draft["text"].as_str().unwrap(),
+            TelegramOutgoingParseMode::Plain,
+        );
+        assert_eq!(retry_draft["text"], "**");
+        assert!(final_send.get("parse_mode").is_none());
+        assert_eq!(final_send["text"], "**");
     }
 
     #[test]

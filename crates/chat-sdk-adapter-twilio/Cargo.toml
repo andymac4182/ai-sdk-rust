@@ -1,0 +1,33 @@
+[package]
+name = "chat-sdk-adapter-twilio"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Rust port of the Vercel Chat SDK `adapter-twilio` package (Twilio SMS/MMS and voice helpers)."
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/ai-sdk-rust"
+readme = "../../README.md"
+
+[lib]
+name = "chat_sdk_adapter_twilio"
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+async-trait = "0.1.89"
+base64 = "0.22"
+chat-sdk-adapter-shared = { path = "../chat-sdk-adapter-shared" }
+chat-sdk-chat = { path = "../chat-sdk-chat" }
+hmac = "0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha1 = "0.10"
+subtle = "2.5"
+
+[dev-dependencies]
+futures-executor = "0.3.32"

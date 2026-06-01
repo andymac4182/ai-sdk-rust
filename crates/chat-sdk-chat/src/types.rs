@@ -969,6 +969,20 @@ pub struct PostedChannelMessage {
     pub raw: serde_json::Value,
 }
 
+/// Result returned by an adapter-native streaming implementation.
+/// 1:1 with upstream `adapter.stream(threadId, stream, options)`
+/// returning `{ id, threadId?, raw? } | null`: callers map
+/// `Ok(None)` to the upstream `null` branch and fall back to
+/// post+edit streaming.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedStreamMessage {
+    pub id: String,
+    #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub raw: serde_json::Value,
+}
+
 /// Result of posting an ephemeral message. 1:1 port of upstream
 /// `interface EphemeralMessage`. Ephemeral messages are visible only to a
 /// specific user and typically cannot be edited or deleted (platform-dependent).
@@ -1634,6 +1648,23 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
         _text: &str,
     ) -> AdapterResult<PostedChannelMessage> {
         Err(AdapterError::Unsupported("post_channel_message_sent"))
+    }
+
+    /// Optional adapter-native streaming dispatch. 1:1 with upstream
+    /// optional `stream(threadId, stream, options)` where the adapter
+    /// may return a sent-message descriptor or `null`. Returning
+    /// `Ok(None)` means "decline native streaming" and lets
+    /// [`crate::thread::Thread::post_stream`] use its post+edit
+    /// fallback. The Rust port passes a normalized vector of
+    /// [`crate::from_full_stream::StreamYield`] entries; async
+    /// adapters can preserve streaming behavior internally.
+    async fn stream_message(
+        &self,
+        _thread_id: &str,
+        _stream: &[crate::from_full_stream::StreamYield],
+        _options: &StreamOptions,
+    ) -> AdapterResult<Option<PostedStreamMessage>> {
+        Err(AdapterError::Unsupported("stream_message"))
     }
 
     /// Optional native scheduled-message dispatch. 1:1 with upstream

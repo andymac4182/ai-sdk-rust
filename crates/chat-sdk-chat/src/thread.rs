@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use crate::postable_object::{PostableDispatchError, post_postable_object};
 use crate::types::{
-    Adapter, AdapterError, AdapterResult, Author, EphemeralMessage, PostEphemeralOptions,
-    StateAdapter, StateResult, THREAD_STATE_TTL_MS,
+    Adapter, AdapterError, AdapterResult, Author, BotStatus, EphemeralMessage,
+    PostEphemeralOptions, StateAdapter, StateResult, StreamOptions, THREAD_STATE_TTL_MS,
 };
 
 /// 1:1 with upstream's private
@@ -341,6 +341,101 @@ impl Thread {
     /// `Thread.post(text)`. Returns the platform-assigned message id.
     pub async fn post(&self, text: &str) -> AdapterResult<String> {
         self.adapter.post_message(&self.thread_id, text).await
+    }
+
+    /// 1:1 port of upstream `Thread.post(asyncIterable)` streaming
+    /// branch. Prefers adapter-native streaming via
+    /// [`Adapter::stream_message`]. If the adapter method is absent
+    /// (`Unsupported`) or explicitly returns `Ok(None)` (the
+    /// upstream `null` branch), falls back to `post_message("...")`
+    /// followed by `edit_message(..., { markdown: accumulated })`.
+    pub async fn post_stream<I, S>(&self, chunks: I) -> AdapterResult<SentMessage>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.post_stream_with_options(
+            chunks,
+            StreamOptions {
+                update_interval_ms: Some(500),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Same as [`Self::post_stream`] with caller-provided
+    /// [`StreamOptions`]. Mirrors upstream's merge of constructor
+    /// defaults with caller options.
+    pub async fn post_stream_with_options<I, S>(
+        &self,
+        chunks: I,
+        options: StreamOptions,
+    ) -> AdapterResult<SentMessage>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let stream: Vec<crate::from_full_stream::StreamYield> = chunks
+            .into_iter()
+            .map(|chunk| crate::from_full_stream::StreamYield::Text(chunk.as_ref().to_string()))
+            .collect();
+        let accumulated = accumulated_stream_text(&stream);
+
+        match self
+            .adapter
+            .stream_message(&self.thread_id, &stream, &options)
+            .await
+        {
+            Ok(Some(sent)) => {
+                let thread_id = sent.thread_id.unwrap_or_else(|| self.thread_id.clone());
+                Ok(self.sent_message_from_parts(sent.id, thread_id, accumulated, sent.raw))
+            }
+            Ok(None) | Err(AdapterError::Unsupported(_)) => {
+                let message_id = self.adapter.post_message(&self.thread_id, "...").await?;
+                let edited_id = self
+                    .adapter
+                    .edit_message(&self.thread_id, &message_id, &accumulated)
+                    .await?;
+                Ok(self.sent_message_from_parts(
+                    edited_id,
+                    self.thread_id.clone(),
+                    accumulated,
+                    serde_json::json!({}),
+                ))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn sent_message_from_parts(
+        &self,
+        id: String,
+        thread_id: String,
+        text: String,
+        raw: serde_json::Value,
+    ) -> SentMessage {
+        let message = crate::message::Message::new(
+            id,
+            thread_id,
+            text,
+            crate::markdown::root(vec![]),
+            raw,
+            Author {
+                user_id: String::new(),
+                user_name: "bot".to_string(),
+                full_name: "Bot".to_string(),
+                is_bot: BotStatus::Known(true),
+                is_me: true,
+            },
+            crate::types::MessageMetadata {
+                date_sent: "1970-01-01T00:00:00.000Z".to_string(),
+                edited: false,
+                edited_at: None,
+            },
+            Vec::new(),
+        );
+        SentMessage::new(message, self.adapter.clone())
     }
 
     /// Post a postable envelope to this thread. 1:1 with upstream
@@ -666,6 +761,27 @@ impl Thread {
         };
         state.set(&key, merged, Some(THREAD_STATE_TTL_MS)).await
     }
+}
+
+fn accumulated_stream_text(stream: &[crate::from_full_stream::StreamYield]) -> String {
+    let mut accumulated = String::new();
+    for chunk in stream {
+        match chunk {
+            crate::from_full_stream::StreamYield::Text(text) => accumulated.push_str(text),
+            crate::from_full_stream::StreamYield::Chunk(value) => {
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("markdown_text") {
+                    if let Some(text) = value
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| value.get("value").and_then(serde_json::Value::as_str))
+                    {
+                        accumulated.push_str(text);
+                    }
+                }
+            }
+        }
+    }
+    accumulated
 }
 
 /// 1:1 port of upstream `interface SentMessage<TRawMessage>`. Wraps
@@ -1133,6 +1249,98 @@ mod tests {
         let calls = adapter.post_message.lock().unwrap();
         assert_eq!(calls[0].0, "T1");
         assert_eq!(calls[0].1, "hello");
+    }
+
+    #[derive(Debug, Default)]
+    struct NullStreamingAdapter {
+        stream_calls: Mutex<
+            Vec<(
+                String,
+                Vec<crate::from_full_stream::StreamYield>,
+                StreamOptions,
+            )>,
+        >,
+        post_message: Mutex<Vec<(String, String)>>,
+        edit_message: Mutex<Vec<(String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for NullStreamingAdapter {
+        fn name(&self) -> &str {
+            "null-stream"
+        }
+
+        async fn stream_message(
+            &self,
+            thread_id: &str,
+            stream: &[crate::from_full_stream::StreamYield],
+            options: &StreamOptions,
+        ) -> AdapterResult<Option<crate::types::PostedStreamMessage>> {
+            self.stream_calls.lock().unwrap().push((
+                thread_id.to_string(),
+                stream.to_vec(),
+                options.clone(),
+            ));
+            Ok(None)
+        }
+
+        async fn post_message(&self, thread_id: &str, text: &str) -> AdapterResult<String> {
+            self.post_message
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), text.to_string()));
+            Ok("msg-1".to_string())
+        }
+
+        async fn edit_message(
+            &self,
+            thread_id: &str,
+            message_id: &str,
+            text: &str,
+        ) -> AdapterResult<String> {
+            self.edit_message.lock().unwrap().push((
+                thread_id.to_string(),
+                message_id.to_string(),
+                text.to_string(),
+            ));
+            Ok(message_id.to_string())
+        }
+    }
+
+    #[test]
+    fn thread_post_stream_falls_back_when_adapter_stream_returns_null() {
+        // 1:1 with upstream `thread.test.ts > streaming > "should
+        // fall back when adapter.stream returns null"`. The native
+        // stream call returns `None`, so Thread posts the placeholder
+        // then edits it to the accumulated markdown text.
+        let adapter = Arc::new(NullStreamingAdapter::default());
+        let thread = Thread::new(adapter.clone() as Arc<dyn Adapter>, "slack:C123:1234.5678");
+
+        let sent = block_on(thread.post_stream(["Hello", " ", "World"])).unwrap();
+
+        assert_eq!(sent.id(), "msg-1");
+        assert_eq!(sent.text(), "Hello World");
+
+        let stream_calls = adapter.stream_calls.lock().unwrap();
+        assert_eq!(stream_calls.len(), 1);
+        assert_eq!(stream_calls[0].0, "slack:C123:1234.5678");
+        assert_eq!(stream_calls[0].2.update_interval_ms, Some(500));
+
+        let post_calls = adapter.post_message.lock().unwrap();
+        assert_eq!(
+            post_calls.as_slice(),
+            &[("slack:C123:1234.5678".to_string(), "...".to_string())]
+        );
+
+        let edit_calls = adapter.edit_message.lock().unwrap();
+        assert_eq!(
+            edit_calls.as_slice(),
+            &[(
+                "slack:C123:1234.5678".to_string(),
+                "msg-1".to_string(),
+                "Hello World".to_string()
+            )]
+        );
     }
 
     #[test]

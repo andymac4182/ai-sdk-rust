@@ -194,6 +194,24 @@ impl WhatsappAdapter {
         crate::markdown::WhatsAppFormatConverter::new().from_ast(ast)
     }
 
+    /// Build the Graph API typing-indicator request from persisted
+    /// thread history. 1:1 with upstream `startTyping(threadId)`:
+    /// find the latest inbound message (author.isMe == false), mark
+    /// that message as read, and attach `typing_indicator: {type:
+    /// "text"}`. Returns `None` when no inbound history exists.
+    pub fn typing_indicator_request_from_history(
+        &self,
+        thread_id: &str,
+        history: &[chat_sdk_chat::message::Message],
+    ) -> Option<WhatsappTypingIndicatorRequest> {
+        let message_id = latest_inbound_message_id(history)?;
+        Some(WhatsappTypingIndicatorRequest {
+            url: self.send_url(),
+            thread_id: thread_id.to_string(),
+            body: build_typing_indicator_body(&message_id),
+        })
+    }
+
     /// Open a Direct Message with `user_id` (E.164 customer phone).
     /// 1:1 with upstream `adapter.openDM(userId)` which returns
     /// `encodeThreadId({phoneNumberId: this.phoneNumberId, userWaId:
@@ -795,6 +813,38 @@ pub fn is_whatsapp_thread_id(thread_id: &str) -> bool {
     thread_id.starts_with(THREAD_ID_PREFIX)
 }
 
+/// Planned Graph API request emitted by
+/// [`WhatsappAdapter::typing_indicator_request_from_history`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsappTypingIndicatorRequest {
+    pub url: String,
+    pub thread_id: String,
+    pub body: serde_json::Value,
+}
+
+/// Find the latest inbound message id. 1:1 with upstream
+/// `resolveTypingTargetMessageId`: iterate from newest to oldest and
+/// return the first message whose `author.isMe` is false.
+pub fn latest_inbound_message_id(history: &[chat_sdk_chat::message::Message]) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .find(|message| !message.author.is_me)
+        .map(|message| message.id.clone())
+}
+
+/// Build the WhatsApp Cloud API typing indicator body. 1:1 with
+/// upstream `startTyping`: `{ messaging_product: "whatsapp",
+/// status: "read", message_id, typing_indicator: { type: "text" } }`.
+pub fn build_typing_indicator_body(message_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+        "typing_indicator": { "type": "text" },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! ---------- upstream js-only-documented cases (9) ----------
@@ -969,7 +1019,6 @@ mod tests {
     // 1:1 with upstream `adapter.channelIdFromThreadId(_) -> threadId`
     // and `adapter.isDM(_) -> true`. WhatsApp is DM-only.
 
-    #[test]
     // ---------- splitMessage (8 upstream cases) ----------
     // 1:1 with upstream `packages/adapter-whatsapp/src/index.test.ts`
     // `describe("splitMessage")` describe block.
@@ -1215,7 +1264,75 @@ mod tests {
         assert!(block_on(adapter.start_typing("anything", Some("s"))).is_ok());
     }
 
+    fn history_message(id: &str, thread_id: &str, is_me: bool) -> chat_sdk_chat::message::Message {
+        use chat_sdk_chat::markdown::root;
+        use chat_sdk_chat::types::{Author, BotStatus, MessageMetadata};
+        chat_sdk_chat::message::Message::new(
+            id,
+            thread_id,
+            if is_me { "Hello" } else { "Hi" },
+            root(vec![]),
+            serde_json::json!({}),
+            Author {
+                user_id: if is_me { "123456789" } else { "15551234567" }.to_string(),
+                user_name: if is_me { "bot" } else { "User" }.to_string(),
+                full_name: if is_me { "bot" } else { "User" }.to_string(),
+                is_bot: BotStatus::Known(is_me),
+                is_me,
+            },
+            MessageMetadata {
+                date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+                edited: false,
+                edited_at: None,
+            },
+            Vec::new(),
+        )
+    }
+
     #[test]
+    fn start_typing_resolves_latest_inbound_message_id_and_sends_typing_indicator() {
+        // 1:1 with upstream `index.test.ts > startTyping >
+        // "resolves latest inbound message ID and sends typing
+        // indicator"`. Rust maps the HTTP fetch assertion to a
+        // package-owned request-plan helper.
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("123456789", "a", "v"));
+        let thread_id = "whatsapp:123456789:15551234567";
+        let history = vec![
+            history_message("wamid.inbound123", thread_id, false),
+            history_message("wamid.outbound456", thread_id, true),
+        ];
+
+        let request = adapter
+            .typing_indicator_request_from_history(thread_id, &history)
+            .expect("latest inbound message should produce a request");
+
+        assert!(request.url.contains("/123456789/messages"));
+        assert_eq!(request.thread_id, thread_id);
+        assert_eq!(request.body["status"], "read");
+        assert_eq!(request.body["message_id"], "wamid.inbound123");
+        assert_eq!(request.body["typing_indicator"]["type"], "text");
+    }
+
+    #[test]
+    fn start_typing_does_nothing_if_no_inbound_message_is_found_in_history() {
+        // 1:1 with upstream `index.test.ts > startTyping >
+        // "does nothing if no inbound message is found in history"`.
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("123456789", "a", "v"));
+        let thread_id = "whatsapp:123456789:15551234567";
+        assert!(
+            adapter
+                .typing_indicator_request_from_history(thread_id, &[])
+                .is_none()
+        );
+
+        let outbound_only = vec![history_message("wamid.outbound456", thread_id, true)];
+        assert!(
+            adapter
+                .typing_indicator_request_from_history(thread_id, &outbound_only)
+                .is_none()
+        );
+    }
+
     #[test]
     fn default_api_version_matches_upstream() {
         // 1:1 with upstream's private `DEFAULT_API_VERSION = "v21.0"`.

@@ -209,6 +209,42 @@ pub struct SlackResponseUrlPayload {
     pub thread_ts: Option<String>,
 }
 
+/// 1:1 with upstream `SlackThreadRepliesOptions`.
+#[derive(Debug, Default, Clone)]
+pub struct SlackThreadRepliesOptions {
+    pub channel: String,
+    pub cursor: Option<String>,
+    pub include_all_metadata: Option<bool>,
+    pub inclusive: Option<bool>,
+    pub latest: Option<String>,
+    pub limit: Option<u32>,
+    pub oldest: Option<String>,
+    pub ts: String,
+}
+
+/// 1:1 with upstream `SlackThreadRepliesResult`.
+#[derive(Debug, Clone)]
+pub struct SlackThreadRepliesResult {
+    pub messages: Vec<serde_json::Value>,
+    pub next_cursor: Option<String>,
+    pub raw: SlackApiResponse,
+}
+
+/// 1:1 with upstream `SlackOpenViewOptions`.
+#[derive(Debug, Default, Clone)]
+pub struct SlackOpenViewOptions {
+    pub interactivity_pointer: Option<String>,
+    pub trigger_id: Option<String>,
+    pub view: serde_json::Value,
+}
+
+/// 1:1 with upstream `SlackOpenViewResult`.
+#[derive(Debug, Clone)]
+pub struct SlackOpenViewResult {
+    pub raw: SlackApiResponse,
+    pub view: Option<serde_json::Value>,
+}
+
 /// Build a Slack Web API endpoint URL the way upstream does:
 /// `new URL(method, apiUrl ?? "https://slack.com/api/")`. The URL
 /// constructor resolves `method` relative to `api_url`; we mirror that
@@ -368,6 +404,117 @@ pub fn response_url_body(
         );
     }
     body
+}
+
+/// Build the `conversations.replies` body. 1:1 with upstream
+/// `fetchSlackThreadReplies`, minus the HTTP fetch wrapper.
+pub fn slack_thread_replies_body(
+    options: &SlackThreadRepliesOptions,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "channel".to_string(),
+        serde_json::Value::String(options.channel.clone()),
+    );
+    if let Some(cursor) = &options.cursor {
+        body.insert(
+            "cursor".to_string(),
+            serde_json::Value::String(cursor.clone()),
+        );
+    }
+    if let Some(include_all_metadata) = options.include_all_metadata {
+        body.insert(
+            "include_all_metadata".to_string(),
+            serde_json::Value::Bool(include_all_metadata),
+        );
+    }
+    if let Some(inclusive) = options.inclusive {
+        body.insert("inclusive".to_string(), serde_json::Value::Bool(inclusive));
+    }
+    if let Some(latest) = &options.latest {
+        body.insert(
+            "latest".to_string(),
+            serde_json::Value::String(latest.clone()),
+        );
+    }
+    if let Some(limit) = options.limit {
+        body.insert("limit".to_string(), serde_json::Value::from(limit));
+    }
+    if let Some(oldest) = &options.oldest {
+        body.insert(
+            "oldest".to_string(),
+            serde_json::Value::String(oldest.clone()),
+        );
+    }
+    body.insert(
+        "ts".to_string(),
+        serde_json::Value::String(options.ts.clone()),
+    );
+    body
+}
+
+/// Parse a `conversations.replies` response. 1:1 with upstream:
+/// `messages` defaults to `[]`; `nextCursor` is pulled from
+/// `response_metadata.next_cursor` only when it is a non-empty string.
+pub fn parse_slack_thread_replies(
+    raw: SlackApiResponse,
+) -> Result<SlackThreadRepliesResult, SlackApiError> {
+    assert_slack_ok("conversations.replies", &raw)?;
+    let messages = raw
+        .other
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let next_cursor = raw
+        .other
+        .get("response_metadata")
+        .and_then(|v| v.get("next_cursor"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_string);
+    Ok(SlackThreadRepliesResult {
+        messages,
+        next_cursor,
+        raw,
+    })
+}
+
+/// Build the `views.open` body. 1:1 with upstream `openSlackView`.
+pub fn slack_open_view_body(
+    options: &SlackOpenViewOptions,
+) -> Result<serde_json::Map<String, serde_json::Value>, SlackApiError> {
+    if options.trigger_id.is_none() && options.interactivity_pointer.is_none() {
+        return Err(SlackApiError {
+            method: "views.open".to_string(),
+            message: "triggerId or interactivityPointer is required".to_string(),
+            status: None,
+            error_code: None,
+        });
+    }
+    let mut body = serde_json::Map::new();
+    if let Some(interactivity_pointer) = &options.interactivity_pointer {
+        body.insert(
+            "interactivity_pointer".to_string(),
+            serde_json::Value::String(interactivity_pointer.clone()),
+        );
+    }
+    if let Some(trigger_id) = &options.trigger_id {
+        body.insert(
+            "trigger_id".to_string(),
+            serde_json::Value::String(trigger_id.clone()),
+        );
+    }
+    body.insert("view".to_string(), options.view.clone());
+    Ok(body)
+}
+
+/// Parse a `views.open` response. 1:1 with upstream `openSlackView`
+/// returning `{ raw, view: raw.view }`.
+pub fn parse_slack_open_view(raw: SlackApiResponse) -> Result<SlackOpenViewResult, SlackApiError> {
+    assert_slack_ok("views.open", &raw)?;
+    let view = raw.other.get("view").cloned();
+    Ok(SlackOpenViewResult { raw, view })
 }
 
 /// Posted Slack message — the typed return of `postSlackMessage` /
@@ -904,6 +1051,87 @@ mod tests {
         // xoxb"`, which is purely the bearer-header shape that the
         // pure helper produces.
         assert_eq!(slack_bearer_header("xoxb"), "Bearer xoxb");
+    }
+
+    #[test]
+    fn fetch_slack_thread_replies_fetches_thread_replies_with_cursor_metadata() {
+        // 1:1 with upstream `fetches thread replies with cursor
+        // metadata`. Rust maps the HTTP request to URL/body planning
+        // plus response parsing.
+        assert_eq!(
+            slack_api_url("conversations.replies", None),
+            "https://slack.com/api/conversations.replies"
+        );
+        let opts = SlackThreadRepliesOptions {
+            channel: "C123".to_string(),
+            limit: Some(50),
+            ts: "1.23".to_string(),
+            ..Default::default()
+        };
+        let body = slack_thread_replies_body(&opts);
+        let encoded = encode_slack_api_body(&body, SlackApiBodyEncoding::Form);
+        let pairs = parsed_form_body(&encoded.body);
+        assert_eq!(form_get(&pairs, "ts").map(String::as_str), Some("1.23"));
+
+        let mut other = serde_json::Map::new();
+        other.insert(
+            "messages".to_string(),
+            serde_json::json!([{ "text": "root", "ts": "1.23" }]),
+        );
+        other.insert(
+            "response_metadata".to_string(),
+            serde_json::json!({ "next_cursor": "next" }),
+        );
+        let result = parse_slack_thread_replies(SlackApiResponse {
+            ok: true,
+            error: None,
+            needed: None,
+            provided: None,
+            other,
+        })
+        .unwrap();
+        assert_eq!(
+            result.messages,
+            vec![serde_json::json!({ "text": "root", "ts": "1.23" })]
+        );
+        assert_eq!(result.next_cursor.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn open_slack_view_opens_slack_views_with_trigger_ids() {
+        // 1:1 with upstream `opens Slack views with trigger ids`.
+        // Rust maps the fetch call to URL/body planning plus response
+        // parsing.
+        assert_eq!(
+            slack_api_url("views.open", None),
+            "https://slack.com/api/views.open"
+        );
+        let opts = SlackOpenViewOptions {
+            trigger_id: Some("trigger".to_string()),
+            view: serde_json::json!({ "type": "modal" }),
+            ..Default::default()
+        };
+        let body = slack_open_view_body(&opts).unwrap();
+        assert_eq!(body["trigger_id"], "trigger");
+        assert_eq!(body["view"], serde_json::json!({ "type": "modal" }));
+
+        let mut other = serde_json::Map::new();
+        other.insert(
+            "view".to_string(),
+            serde_json::json!({ "id": "V123", "type": "modal" }),
+        );
+        let result = parse_slack_open_view(SlackApiResponse {
+            ok: true,
+            error: None,
+            needed: None,
+            provided: None,
+            other,
+        })
+        .unwrap();
+        assert_eq!(
+            result.view,
+            Some(serde_json::json!({ "id": "V123", "type": "modal" }))
+        );
     }
 
     // Tiny URL decoder for the test — supports the subset our encoder

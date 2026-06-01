@@ -187,6 +187,18 @@ fn node_to_gchat(node: &Node, list_depth: usize) -> String {
                 .concat();
             if label == l.url || label.is_empty() {
                 l.url.clone()
+            } else if let Some(bare) = l.url.strip_prefix("mailto:") {
+                if bare == label {
+                    bare.to_string()
+                } else {
+                    format!("<{}|{}>", l.url, label)
+                }
+            } else if let Some(bare) = l.url.strip_prefix("tel:") {
+                if bare == label {
+                    bare.to_string()
+                } else {
+                    format!("<{}|{}>", l.url, label)
+                }
             } else {
                 format!("<{}|{}>", l.url, label)
             }
@@ -301,6 +313,51 @@ mod tests {
         let ast = c.to_ast("[click here](https://example.com)").unwrap();
         let result = c.from_ast(&ast);
         assert!(result.contains("<https://example.com|click here>"));
+    }
+
+    #[test]
+    fn collapses_mailto_autolink_for_plain_email_text() {
+        // 1:1 with upstream `markdown.test.ts > fromAst >
+        // "collapses mailto autolink for plain email text"`.
+        let c = GoogleChatFormatConverter::new();
+        let ast = c.to_ast("hello@example.com").unwrap();
+        assert_eq!(c.from_ast(&ast), "hello@example.com");
+    }
+
+    #[test]
+    fn preserves_custom_label_for_mailto_links() {
+        // 1:1 with upstream `markdown.test.ts > fromAst >
+        // "preserves custom label for mailto links"`.
+        let c = GoogleChatFormatConverter::new();
+        let ast = c.to_ast("[contact](mailto:hello@example.com)").unwrap();
+        assert_eq!(c.from_ast(&ast), "<mailto:hello@example.com|contact>");
+    }
+
+    #[test]
+    fn formats_http_links_correctly() {
+        // 1:1 with upstream `markdown.test.ts > fromAst >
+        // "formats http links correctly"`.
+        let c = GoogleChatFormatConverter::new();
+        let ast = c.to_ast("https://example.com").unwrap();
+        assert_eq!(c.from_ast(&ast), "https://example.com");
+    }
+
+    #[test]
+    fn keeps_phone_numbers_as_plain_text() {
+        // 1:1 with upstream `markdown.test.ts > fromAst >
+        // "keeps phone numbers as plain text"`.
+        let c = GoogleChatFormatConverter::new();
+        let ast = c.to_ast("+1555123456").unwrap();
+        assert_eq!(c.from_ast(&ast), "+1555123456");
+    }
+
+    #[test]
+    fn collapses_tel_autolink_for_plain_phone_text() {
+        // 1:1 with upstream `markdown.test.ts > fromAst >
+        // "collapses tel autolink for plain phone text"`.
+        let c = GoogleChatFormatConverter::new();
+        let ast = c.to_ast("[+1555123456](tel:+1555123456)").unwrap();
+        assert_eq!(c.from_ast(&ast), "+1555123456");
     }
 
     #[test]

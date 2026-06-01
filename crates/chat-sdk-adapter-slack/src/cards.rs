@@ -15,18 +15,16 @@ use chat_sdk_adapter_shared::card_utils::{
 };
 use chat_sdk_chat::cards::{
     ActionsChild, ActionsElement, ButtonElement, CardChild, CardElement, DividerElement,
-    FieldsElement, ImageElement, LinkButtonElement, LinkElement, SectionElement, TableElement,
-    TextElement, TextStyle,
+    FieldsElement, ImageElement, LinkButtonElement, LinkElement, SectionElement, TableAlignment,
+    TableElement, TextElement, TextStyle,
 };
-use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
-use chat_sdk_chat::markdown::table_element_to_ascii;
 use chat_sdk_chat::modals::{RadioSelectElement, SelectElement, SelectOptionElement};
 use serde_json::{Value, json};
 
 /// Convert emoji placeholders for Slack mrkdwn (`{{emoji:wave}}` ->
 /// `:wave:`). 1:1 with upstream's `createEmojiConverter("slack")`.
-fn convert_emoji(text: &str) -> String {
-    convert_emoji_placeholders(text, PlaceholderPlatform::Slack, None)
+fn default_convert_emoji(text: &str) -> String {
+    convert_slack_emoji_placeholders_literal(text)
 }
 
 /// 1:1 with upstream's inline `markdownToMrkdwn(text)` —
@@ -40,13 +38,50 @@ fn markdown_to_mrkdwn(text: &str) -> String {
 /// { block_id?; type; [key: string]: unknown }`.
 pub type SlackBlock = Value;
 
+pub const SLACK_BLOCK_LIMIT: usize = 50;
+const SLACK_ACTION_ID_LIMIT: usize = 255;
+const SLACK_ACTIONS_ELEMENTS_LIMIT: usize = 25;
+const SLACK_BUTTON_TEXT_LIMIT: usize = 75;
+const SLACK_BUTTON_URL_LIMIT: usize = 3000;
+const SLACK_BUTTON_VALUE_LIMIT: usize = 2000;
+const SLACK_FIELDS_LIMIT: usize = 10;
+const SLACK_FIELD_TEXT_LIMIT: usize = 2000;
+const SLACK_HEADER_TEXT_LIMIT: usize = 150;
+const SLACK_IMAGE_ALT_LIMIT: usize = 2000;
+const SLACK_IMAGE_URL_LIMIT: usize = 3000;
+const SLACK_OPTION_DESCRIPTION_LIMIT: usize = 75;
+const SLACK_OPTION_TEXT_LIMIT: usize = 75;
+const SLACK_OPTION_VALUE_LIMIT: usize = 150;
+const SLACK_OPTIONS_LIMIT: usize = 100;
+const SLACK_PLACEHOLDER_LIMIT: usize = 150;
+const SLACK_RADIO_OPTIONS_LIMIT: usize = 10;
+const SLACK_SECTION_TEXT_LIMIT: usize = 3000;
+const SLACK_TABLE_MAX_ROWS: usize = 100;
+const SLACK_TABLE_MAX_COLS: usize = 20;
+const SLACK_TEXT_OBJECT_LIMIT: usize = 3000;
+
+pub struct SlackBlockKitOptions<'a> {
+    pub convert_emoji: Option<&'a dyn Fn(&str) -> String>,
+    pub max_blocks: Option<usize>,
+}
+
+impl<'a> Default for SlackBlockKitOptions<'a> {
+    fn default() -> Self {
+        Self {
+            convert_emoji: None,
+            max_blocks: None,
+        }
+    }
+}
+
 /// Per-card renderer state. 1:1 with upstream's inline `state = {
 /// usedNativeTable: false }` flag — Slack allows at most one
 /// `table` block per message, so the second and subsequent tables
 /// must fall back to ASCII inside a code block.
-#[derive(Debug, Default, Clone, Copy)]
-struct RenderState {
+#[derive(Clone, Copy)]
+struct RenderState<'a> {
     used_native_table: bool,
+    convert_emoji: &'a dyn Fn(&str) -> String,
 }
 
 /// 1:1 port of upstream `cardToBlockKit(card)`. Handles title /
@@ -54,6 +89,15 @@ struct RenderState {
 /// / Fields / Link / Table children. Select / RadioSelect children
 /// inside Actions are deferred to a follow-up slice.
 pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
+    card_to_block_kit_with_options(card, SlackBlockKitOptions::default())
+}
+
+pub fn card_to_block_kit_with_options(
+    card: &CardElement,
+    options: SlackBlockKitOptions<'_>,
+) -> Vec<SlackBlock> {
+    let convert_emoji = options.convert_emoji.unwrap_or(&default_convert_emoji);
+    let max_blocks = options.max_blocks.unwrap_or(SLACK_BLOCK_LIMIT);
     let mut blocks: Vec<SlackBlock> = Vec::new();
 
     if let Some(title) = card.title.as_deref().filter(|t| !t.is_empty()) {
@@ -61,7 +105,7 @@ pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": convert_emoji(title),
+                "text": slack_text(title, convert_emoji, SLACK_HEADER_TEXT_LIMIT),
                 "emoji": true,
             },
         }));
@@ -70,8 +114,8 @@ pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
     if let Some(subtitle) = card.subtitle.as_deref().filter(|s| !s.is_empty()) {
         blocks.push(json!({
             "type": "context",
-            "elements": [
-                { "type": "mrkdwn", "text": convert_emoji(subtitle) }
+                "elements": [
+                { "type": "mrkdwn", "text": slack_text(subtitle, convert_emoji, SLACK_TEXT_OBJECT_LIMIT) }
             ],
         }));
     }
@@ -84,16 +128,20 @@ pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
             .unwrap_or("Card image");
         blocks.push(json!({
             "type": "image",
-            "image_url": image_url,
-            "alt_text": alt,
+            "image_url": truncate_text(image_url, SLACK_IMAGE_URL_LIMIT),
+            "alt_text": slack_text(alt, convert_emoji, SLACK_IMAGE_ALT_LIMIT),
         }));
     }
 
-    let mut state = RenderState::default();
+    let mut state = RenderState {
+        used_native_table: false,
+        convert_emoji,
+    };
     for child in &card.children {
         blocks.extend(convert_child_to_blocks(child, &mut state));
     }
 
+    blocks.truncate(max_blocks);
     blocks
 }
 
@@ -101,15 +149,15 @@ pub fn card_to_block_kit(card: &CardElement) -> Vec<SlackBlock> {
 /// Returns an empty Vec for any child whose renderer branch is
 /// still deferred (Select / RadioSelect inside Actions handled by
 /// `convertActionsToBlock` directly).
-fn convert_child_to_blocks(child: &CardChild, state: &mut RenderState) -> Vec<SlackBlock> {
+fn convert_child_to_blocks(child: &CardChild, state: &mut RenderState<'_>) -> Vec<SlackBlock> {
     match child {
-        CardChild::Text(t) => vec![convert_text_to_block(t)],
-        CardChild::Image(i) => vec![convert_image_to_block(i)],
+        CardChild::Text(t) => vec![convert_text_to_block_with(t, state.convert_emoji)],
+        CardChild::Image(i) => vec![convert_image_to_block(i, state.convert_emoji)],
         CardChild::Divider(d) => vec![convert_divider_to_block(d)],
-        CardChild::Actions(a) => vec![convert_actions_to_block(a)],
+        CardChild::Actions(a) => vec![convert_actions_to_block(a, state.convert_emoji)],
         CardChild::Section(s) => convert_section_to_blocks(s, state),
-        CardChild::Fields(f) => vec![convert_fields_to_block(f)],
-        CardChild::Link(l) => vec![convert_link_to_block(l)],
+        CardChild::Fields(f) => vec![convert_fields_to_block_with(f, state.convert_emoji)],
+        CardChild::Link(l) => vec![convert_link_to_block(l, state.convert_emoji)],
         CardChild::Table(t) => convert_table_to_blocks(t, state),
     }
 }
@@ -120,32 +168,42 @@ fn convert_child_to_blocks(child: &CardChild, state: &mut RenderState) -> Vec<Sl
 /// approximation); `style: "bold"` wraps the converted text in
 /// Slack-mrkdwn single-asterisk bold.
 pub fn convert_text_to_block(element: &TextElement) -> SlackBlock {
+    convert_text_to_block_with(element, &default_convert_emoji)
+}
+
+fn convert_text_to_block_with(
+    element: &TextElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> SlackBlock {
     let text = markdown_to_mrkdwn(&convert_emoji(&element.content));
     match element.style {
         Some(TextStyle::Muted) => json!({
             "type": "context",
             "elements": [
-                { "type": "mrkdwn", "text": text }
+                { "type": "mrkdwn", "text": nonempty_text(&truncate_text(&text, SLACK_TEXT_OBJECT_LIMIT)) }
             ],
         }),
         Some(TextStyle::Bold) => json!({
             "type": "section",
-            "text": { "type": "mrkdwn", "text": format!("*{text}*") },
+            "text": { "type": "mrkdwn", "text": nonempty_text(&truncate_text(&format!("*{text}*"), SLACK_SECTION_TEXT_LIMIT)) },
         }),
         _ => json!({
             "type": "section",
-            "text": { "type": "mrkdwn", "text": text },
+            "text": { "type": "mrkdwn", "text": nonempty_text(&truncate_text(&text, SLACK_SECTION_TEXT_LIMIT)) },
         }),
     }
 }
 
 /// 1:1 with upstream `convertImageToBlock(element)`. `alt` defaults
 /// to the literal `"Image"` when missing.
-fn convert_image_to_block(element: &ImageElement) -> SlackBlock {
+fn convert_image_to_block(
+    element: &ImageElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> SlackBlock {
     json!({
         "type": "image",
-        "image_url": element.url,
-        "alt_text": element.alt.as_deref().unwrap_or("Image"),
+        "image_url": truncate_text(&element.url, SLACK_IMAGE_URL_LIMIT),
+        "alt_text": slack_text(element.alt.as_deref().unwrap_or("Image"), convert_emoji, SLACK_IMAGE_ALT_LIMIT),
     })
 }
 
@@ -156,12 +214,16 @@ fn convert_divider_to_block(_element: &DividerElement) -> SlackBlock {
 
 /// 1:1 with upstream `convertLinkToBlock(element)`. Emits a
 /// `section` mrkdwn block with Slack's `<url|label>` link syntax.
-fn convert_link_to_block(element: &LinkElement) -> SlackBlock {
+fn convert_link_to_block(
+    element: &LinkElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> SlackBlock {
+    let text = format!("<{}|{}>", element.url, convert_emoji(&element.label));
     json!({
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": format!("<{}|{}>", element.url, convert_emoji(&element.label)),
+            "text": nonempty_text(&truncate_text(&text, SLACK_SECTION_TEXT_LIMIT)),
         },
     })
 }
@@ -169,15 +231,19 @@ fn convert_link_to_block(element: &LinkElement) -> SlackBlock {
 /// 1:1 with upstream `convertActionsToBlock(element)`. Iterates the
 /// children union (Button / LinkButton / Select / RadioSelect) and
 /// dispatches per `child.type`.
-fn convert_actions_to_block(element: &ActionsElement) -> SlackBlock {
+fn convert_actions_to_block(
+    element: &ActionsElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> SlackBlock {
     let elements: Vec<Value> = element
         .children
         .iter()
+        .take(SLACK_ACTIONS_ELEMENTS_LIMIT)
         .map(|child| match child {
-            ActionsChild::Button(b) => convert_button_to_element(b),
-            ActionsChild::LinkButton(b) => convert_link_button_to_element(b),
-            ActionsChild::Select(s) => convert_select_to_element(s),
-            ActionsChild::RadioSelect(r) => convert_radio_select_to_element(r),
+            ActionsChild::Button(b) => convert_button_to_element(b, convert_emoji),
+            ActionsChild::LinkButton(b) => convert_link_button_to_element(b, convert_emoji),
+            ActionsChild::Select(s) => convert_select_to_element(s, convert_emoji),
+            ActionsChild::RadioSelect(r) => convert_radio_select_to_element(r, convert_emoji),
         })
         .collect();
 
@@ -190,19 +256,22 @@ fn convert_actions_to_block(element: &ActionsElement) -> SlackBlock {
 /// 1:1 with upstream `convertButtonToElement(button)`. Always emits
 /// `type: "button"`, `text: { type: "plain_text", emoji: true }`,
 /// and `action_id`. `value` and `style` are only present when set.
-fn convert_button_to_element(button: &ButtonElement) -> Value {
+fn convert_button_to_element(
+    button: &ButtonElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> Value {
     let mut element = json!({
         "type": "button",
         "text": {
             "type": "plain_text",
-            "text": convert_emoji(&button.label),
+            "text": slack_text(&button.label, convert_emoji, SLACK_BUTTON_TEXT_LIMIT),
             "emoji": true,
         },
-        "action_id": button.id,
+        "action_id": truncate_text(&button.id, SLACK_ACTION_ID_LIMIT),
     });
 
     if let Some(value) = button.value.as_deref().filter(|v| !v.is_empty()) {
-        element["value"] = Value::String(value.to_string());
+        element["value"] = Value::String(truncate_text(value, SLACK_BUTTON_VALUE_LIMIT));
     }
 
     if let Some(style) = map_button_style(button.style, PlatformName::Slack) {
@@ -216,17 +285,20 @@ fn convert_button_to_element(button: &ButtonElement) -> Value {
 /// `action_id` as `link-<first 200 chars of url>` (Slack's `action_id`
 /// is capped at 255 chars; upstream uses 200 to leave room for the
 /// `link-` prefix and emoji escaping).
-fn convert_link_button_to_element(button: &LinkButtonElement) -> Value {
-    let url_slice: String = button.url.chars().take(200).collect();
+fn convert_link_button_to_element(
+    button: &LinkButtonElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> Value {
+    let action_id = truncate_text(&format!("link-{}", button.url), SLACK_ACTION_ID_LIMIT);
     let mut element = json!({
         "type": "button",
         "text": {
             "type": "plain_text",
-            "text": convert_emoji(&button.label),
+            "text": slack_text(&button.label, convert_emoji, SLACK_BUTTON_TEXT_LIMIT),
             "emoji": true,
         },
-        "action_id": format!("link-{url_slice}"),
-        "url": button.url,
+        "action_id": action_id,
+        "url": truncate_text(&button.url, SLACK_BUTTON_URL_LIMIT),
     });
 
     if let Some(style) = map_button_style(button.style, PlatformName::Slack) {
@@ -241,28 +313,33 @@ fn convert_link_button_to_element(button: &LinkButtonElement) -> Value {
 /// `placeholder` is set only when provided. `initial_option` is set
 /// when `initialOption` (the option value) matches one of the
 /// options.
-fn convert_select_to_element(select: &SelectElement) -> Value {
+fn convert_select_to_element(
+    select: &SelectElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> Value {
     let options: Vec<Value> = select
         .options
         .iter()
-        .map(|opt| build_option(opt, OptionTextKind::PlainText))
+        .take(SLACK_OPTIONS_LIMIT)
+        .map(|opt| build_option(opt, OptionTextKind::PlainText, convert_emoji))
         .collect();
 
     let mut element = json!({
         "type": "static_select",
-        "action_id": select.id,
+        "action_id": truncate_text(&select.id, SLACK_ACTION_ID_LIMIT),
         "options": options,
     });
 
     if let Some(placeholder) = select.placeholder.as_deref().filter(|p| !p.is_empty()) {
         element["placeholder"] = json!({
             "type": "plain_text",
-            "text": convert_emoji(placeholder),
+            "text": slack_text(placeholder, convert_emoji, SLACK_PLACEHOLDER_LIMIT),
         });
     }
 
     if let Some(initial_value) = select.initial_option.as_deref() {
-        if let Some(initial) = options.iter().find(|o| o["value"] == *initial_value) {
+        let initial_value = truncate_text(initial_value, SLACK_OPTION_VALUE_LIMIT);
+        if let Some(initial) = options.iter().find(|o| o["value"] == initial_value) {
             element["initial_option"] = initial.clone();
         }
     }
@@ -273,21 +350,29 @@ fn convert_select_to_element(select: &SelectElement) -> Value {
 /// 1:1 with upstream `convertRadioSelectToElement(radioSelect)`.
 /// Slices options to at most 10 (Slack's `radio_buttons` cap), then
 /// emits `mrkdwn`-typed option labels and descriptions.
-fn convert_radio_select_to_element(radio: &RadioSelectElement) -> Value {
-    let limited: Vec<&SelectOptionElement> = radio.options.iter().take(10).collect();
+fn convert_radio_select_to_element(
+    radio: &RadioSelectElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> Value {
+    let limited: Vec<&SelectOptionElement> = radio
+        .options
+        .iter()
+        .take(SLACK_RADIO_OPTIONS_LIMIT)
+        .collect();
     let options: Vec<Value> = limited
         .iter()
-        .map(|opt| build_option(opt, OptionTextKind::Mrkdwn))
+        .map(|opt| build_option(opt, OptionTextKind::Mrkdwn, convert_emoji))
         .collect();
 
     let mut element = json!({
         "type": "radio_buttons",
-        "action_id": radio.id,
+        "action_id": truncate_text(&radio.id, SLACK_ACTION_ID_LIMIT),
         "options": options,
     });
 
     if let Some(initial_value) = radio.initial_option.as_deref() {
-        if let Some(initial) = options.iter().find(|o| o["value"] == *initial_value) {
+        let initial_value = truncate_text(initial_value, SLACK_OPTION_VALUE_LIMIT);
+        if let Some(initial) = options.iter().find(|o| o["value"] == initial_value) {
             element["initial_option"] = initial.clone();
         }
     }
@@ -316,15 +401,19 @@ impl OptionTextKind {
 /// 1:1 with upstream's inline `options.map((opt) => ...)` builders
 /// in both Select and RadioSelect converters. Common shape:
 /// `{ text: { type, text }, value, description? }`.
-fn build_option(opt: &SelectOptionElement, kind: OptionTextKind) -> Value {
+fn build_option(
+    opt: &SelectOptionElement,
+    kind: OptionTextKind,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> Value {
     let mut option = json!({
-        "text": { "type": kind.as_str(), "text": convert_emoji(&opt.label) },
-        "value": opt.value,
+        "text": { "type": kind.as_str(), "text": slack_text(&opt.label, convert_emoji, SLACK_OPTION_TEXT_LIMIT) },
+        "value": truncate_text(&opt.value, SLACK_OPTION_VALUE_LIMIT),
     });
     if let Some(desc) = opt.description.as_deref().filter(|d| !d.is_empty()) {
         option["description"] = json!({
             "type": kind.as_str(),
-            "text": convert_emoji(desc),
+            "text": slack_text(desc, convert_emoji, SLACK_OPTION_DESCRIPTION_LIMIT),
         });
     }
     option
@@ -332,18 +421,16 @@ fn build_option(opt: &SelectOptionElement, kind: OptionTextKind) -> Value {
 
 /// 1:1 with upstream `convertSectionToBlocks(element, state)`.
 /// Recursively flattens section children into the parent block list.
-fn convert_section_to_blocks(element: &SectionElement, state: &mut RenderState) -> Vec<SlackBlock> {
+fn convert_section_to_blocks(
+    element: &SectionElement,
+    state: &mut RenderState<'_>,
+) -> Vec<SlackBlock> {
     let mut blocks: Vec<SlackBlock> = Vec::new();
     for child in &element.children {
         blocks.extend(convert_child_to_blocks(child, state));
     }
     blocks
 }
-
-/// Slack Block Kit table limits — 100 rows, 20 columns. 1:1 with
-/// upstream's `MAX_ROWS = 100` / `MAX_COLS = 20` literals.
-const SLACK_TABLE_MAX_ROWS: usize = 100;
-const SLACK_TABLE_MAX_COLS: usize = 20;
 
 /// 1:1 with upstream `convertTableToBlocks(element, state)`. Emits
 /// a native `table` block when within Slack's limits AND no native
@@ -352,19 +439,19 @@ const SLACK_TABLE_MAX_COLS: usize = 20;
 /// at most one native `table` block per message). Empty cells
 /// become a single space character to satisfy the Slack API
 /// (rejects empty `text` fields).
-fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> Vec<SlackBlock> {
+fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState<'_>) -> Vec<SlackBlock> {
     if state.used_native_table
-        || element.rows.len() > SLACK_TABLE_MAX_ROWS
+        || element.rows.len() + 1 > SLACK_TABLE_MAX_ROWS
         || element.headers.len() > SLACK_TABLE_MAX_COLS
     {
         return vec![json!({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": format!(
+                "text": nonempty_text(&truncate_text(&format!(
                     "```\n{}\n```",
-                    table_element_to_ascii(&element.headers, &element.rows),
-                ),
+                    slack_table_to_ascii(element),
+                ), SLACK_SECTION_TEXT_LIMIT)),
             },
         })];
     }
@@ -375,7 +462,7 @@ fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> V
         .headers
         .iter()
         .map(|h| {
-            let converted = convert_emoji(h);
+            let converted = (state.convert_emoji)(h);
             let text = if converted.is_empty() {
                 " ".to_string()
             } else {
@@ -391,7 +478,7 @@ fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> V
         let cells: Vec<Value> = row
             .iter()
             .map(|cell| {
-                let converted = convert_emoji(cell);
+                let converted = (state.convert_emoji)(cell);
                 let text = if converted.is_empty() {
                     " ".to_string()
                 } else {
@@ -403,10 +490,19 @@ fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> V
         rows.push(Value::Array(cells));
     }
 
-    vec![json!({
-        "type": "table",
-        "rows": rows,
-    })]
+    let mut block = serde_json::Map::new();
+    block.insert("type".to_string(), json!("table"));
+    block.insert("rows".to_string(), Value::Array(rows));
+    if let Some(align) = &element.align {
+        let settings: Vec<Value> = align
+            .iter()
+            .take(SLACK_TABLE_MAX_COLS)
+            .map(|align| json!({ "align": table_alignment_as_str(*align) }))
+            .collect();
+        block.insert("column_settings".to_string(), Value::Array(settings));
+    }
+
+    vec![Value::Object(block)]
 }
 
 /// 1:1 with upstream `convertFieldsToBlock(element)`. Emits a single
@@ -414,15 +510,23 @@ fn convert_table_to_blocks(element: &TableElement, state: &mut RenderState) -> V
 /// `*label*\nvalue` (label/value both run through
 /// `markdownToMrkdwn(convertEmoji(...))`).
 pub fn convert_fields_to_block(element: &FieldsElement) -> SlackBlock {
+    convert_fields_to_block_with(element, &default_convert_emoji)
+}
+
+fn convert_fields_to_block_with(
+    element: &FieldsElement,
+    convert_emoji: &dyn Fn(&str) -> String,
+) -> SlackBlock {
     let fields: Vec<Value> = element
         .children
         .iter()
+        .take(SLACK_FIELDS_LIMIT)
         .map(|field| {
             let label = markdown_to_mrkdwn(&convert_emoji(&field.label));
             let value = markdown_to_mrkdwn(&convert_emoji(&field.value));
             json!({
                 "type": "mrkdwn",
-                "text": format!("*{label}*\n{value}"),
+                "text": nonempty_text(&truncate_text(&format!("*{label}*\n{value}"), SLACK_FIELD_TEXT_LIMIT)),
             })
         })
         .collect();
@@ -431,6 +535,93 @@ pub fn convert_fields_to_block(element: &FieldsElement) -> SlackBlock {
         "type": "section",
         "fields": fields,
     })
+}
+
+fn truncate_text(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect()
+}
+
+fn nonempty_text(text: &str) -> String {
+    if text.is_empty() {
+        " ".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn slack_text(text: &str, convert_emoji: &dyn Fn(&str) -> String, limit: usize) -> String {
+    nonempty_text(&truncate_text(&convert_emoji(text), limit))
+}
+
+fn convert_slack_emoji_placeholders_literal(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("{{emoji:") {
+        output.push_str(&rest[..start]);
+        let after_open = &rest[start + "{{emoji:".len()..];
+        let Some(end) = after_open.find("}}") else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let name = &after_open[..end];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-'))
+        {
+            output.push(':');
+            output.push_str(name);
+            output.push(':');
+        } else {
+            output.push_str(&rest[start..start + "{{emoji:".len() + end + 2]);
+        }
+        rest = &after_open[end + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn slack_table_to_ascii(element: &TableElement) -> String {
+    let rows: Vec<&[String]> = std::iter::once(element.headers.as_slice())
+        .chain(element.rows.iter().map(Vec::as_slice))
+        .collect();
+    let widths: Vec<usize> = element
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(column, _)| {
+            rows.iter()
+                .map(|row| row.get(column).map(|cell| cell.len()).unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+
+    rows.iter()
+        .map(|row| {
+            element
+                .headers
+                .iter()
+                .enumerate()
+                .map(|(column, _)| {
+                    let cell = row.get(column).map(String::as_str).unwrap_or("");
+                    format!("{cell:<width$}", width = widths[column])
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn table_alignment_as_str(align: TableAlignment) -> &'static str {
+    match align {
+        TableAlignment::Left => "left",
+        TableAlignment::Center => "center",
+        TableAlignment::Right => "right",
+    }
 }
 
 /// Render a [`CardElement`] as Slack mrkdwn fallback text. 1:1 port
