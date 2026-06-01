@@ -17,6 +17,8 @@ const USER_ID = "U000000001";
 const BOT_USER_ID = "UOPENAGENT";
 const BOT_ID = "BOPENAGENT";
 const APP_ID = "AOPENAGENT";
+const SLACK_ACTION_ANSWER = "open_agents_answer";
+const SLACK_ACTION_CANCEL = "open_agents_cancel";
 
 const SLACK_SCOPES = [
   "chat:write",
@@ -70,7 +72,7 @@ async function main() {
         tokens: [
           {
             token: SLACK_TOKEN,
-            user_id: USER_ID,
+            user_id: BOT_USER_ID,
             scopes: SLACK_SCOPES,
             app_id: APP_ID,
             bot_id: BOT_ID,
@@ -111,34 +113,71 @@ async function main() {
       channel: CHANNEL_ID,
       text: firstText,
     });
-    await postSlackEvent(serviceUrl, firstText, first.ts, "EvLOCAL001");
+    await postAppMentionEvent(serviceUrl, firstText, first.ts, "EvLOCAL001", CHANNEL_ID);
     const final = await waitForThreadMessage(
       slack.url,
+      CHANNEL_ID,
       first.ts,
       "Fixture agent finished with local sandbox proof",
     );
     console.log(`ok: app mention completed in Slack thread ${first.ts}: ${final.text}`);
+
+    const dm = await slackApi(slack.url, "conversations.open", {
+      users: USER_ID,
+    });
+    const dmChannelId = dm.channel.id;
+    const dmText = "inspect the repo from a direct message";
+    const dmMessage = await slackApi(slack.url, "chat.postMessage", {
+      channel: dmChannelId,
+      text: dmText,
+    });
+    await postDirectMessageEvent(serviceUrl, dmText, dmMessage.ts, "EvLOCALDM001", dmChannelId);
+    const dmFinal = await waitForThreadMessage(
+      slack.url,
+      dmChannelId,
+      dmMessage.ts,
+      "Fixture agent finished with local sandbox proof",
+    );
+    console.log(`ok: DM message completed in Slack thread ${dmMessage.ts}: ${dmFinal.text}`);
 
     const questionText = `<@${BOT_USER_ID}> ask a question before continuing`;
     const question = await slackApi(slack.url, "chat.postMessage", {
       channel: CHANNEL_ID,
       text: questionText,
     });
-    await postSlackEvent(serviceUrl, questionText, question.ts, "EvLOCAL002");
+    await postAppMentionEvent(serviceUrl, questionText, question.ts, "EvLOCAL002", CHANNEL_ID);
     const prompt = await waitForThreadMessage(
       slack.url,
+      CHANNEL_ID,
       question.ts,
       "Should the local fixture continue?",
     );
     console.log(`ok: question prompt posted in Slack thread ${question.ts}: ${prompt.text}`);
 
-    await postSlackInteraction(serviceUrl, question.ts, "ship it");
+    await postSlackInteraction(serviceUrl, CHANNEL_ID, question.ts, SLACK_ACTION_ANSWER, "ship it");
     const answered = await waitForThreadMessage(
       slack.url,
+      CHANNEL_ID,
       question.ts,
       "Fixture agent finished after answer",
     );
     console.log(`ok: direct interaction payload resumed the run: ${answered.text}`);
+
+    const cancelText = `<@${BOT_USER_ID}> ask a question and then cancel`;
+    const cancel = await slackApi(slack.url, "chat.postMessage", {
+      channel: CHANNEL_ID,
+      text: cancelText,
+    });
+    await postAppMentionEvent(serviceUrl, cancelText, cancel.ts, "EvLOCAL003", CHANNEL_ID);
+    await waitForThreadMessage(
+      slack.url,
+      CHANNEL_ID,
+      cancel.ts,
+      "Should the local fixture continue?",
+    );
+    await postSlackInteraction(serviceUrl, CHANNEL_ID, cancel.ts, SLACK_ACTION_CANCEL, "cancel");
+    const canceled = await waitForThreadMessage(slack.url, CHANNEL_ID, cancel.ts, "Run canceled");
+    console.log(`ok: direct interaction payload canceled the run: ${canceled.text}`);
   } finally {
     await stopService();
     await slack.close();
@@ -191,21 +230,37 @@ async function stopService() {
   });
 }
 
-async function postSlackEvent(serviceUrl, text, ts, eventId) {
+async function postAppMentionEvent(serviceUrl, text, ts, eventId, channelId) {
+  await postSlackEvent(serviceUrl, eventId, {
+    type: "app_mention",
+    user: USER_ID,
+    text,
+    channel: channelId,
+    team: TEAM_ID,
+    ts,
+  });
+}
+
+async function postDirectMessageEvent(serviceUrl, text, ts, eventId, channelId) {
+  await postSlackEvent(serviceUrl, eventId, {
+    type: "message",
+    channel_type: "im",
+    user: USER_ID,
+    text,
+    channel: channelId,
+    team: TEAM_ID,
+    ts,
+  });
+}
+
+async function postSlackEvent(serviceUrl, eventId, event) {
   const payload = {
     type: "event_callback",
     team_id: TEAM_ID,
     api_app_id: APP_ID,
     event_id: eventId,
     event_time: Math.floor(Date.now() / 1000),
-    event: {
-      type: "app_mention",
-      user: USER_ID,
-      text,
-      channel: CHANNEL_ID,
-      team: TEAM_ID,
-      ts,
-    },
+    event,
   };
   const body = JSON.stringify(payload);
   const response = await fetch(`${serviceUrl}/slack/events`, {
@@ -218,16 +273,16 @@ async function postSlackEvent(serviceUrl, text, ts, eventId) {
   }
 }
 
-async function postSlackInteraction(serviceUrl, threadTs, value) {
+async function postSlackInteraction(serviceUrl, channelId, threadTs, actionId, value) {
   const payload = {
     type: "block_actions",
     user: { id: USER_ID, username: "admin" },
-    channel: { id: CHANNEL_ID },
+    channel: { id: channelId },
     message: { ts: threadTs, thread_ts: threadTs },
     actions: [
       {
         type: "button",
-        action_id: "open_agents_answer",
+        action_id: actionId,
         value,
       },
     ],
@@ -273,11 +328,11 @@ async function slackApi(slackUrl, method, body) {
   return json;
 }
 
-async function waitForThreadMessage(slackUrl, threadTs, expectedText) {
+async function waitForThreadMessage(slackUrl, channelId, threadTs, expectedText) {
   return waitFor(
     async () => {
       const response = await slackApi(slackUrl, "conversations.replies", {
-        channel: CHANNEL_ID,
+        channel: channelId,
         ts: threadTs,
       });
       return response.messages.find((message) => message.text?.includes(expectedText));

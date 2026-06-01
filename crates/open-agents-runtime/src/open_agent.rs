@@ -916,6 +916,8 @@ Leave working tree changes in place and report verification."#;
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
     use std::future::{Future, ready};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -928,9 +930,10 @@ mod tests {
         OpenAgentSettings, OpenAgentSkillMetadata, OpenAgentSkillOptions,
     };
     use ai_sdk_rust::{
-        FinishReason, GenerateTextTool, InputTokenUsage, Instructions, JsonSchema, LanguageModel,
-        LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
-        LanguageModelText, LanguageModelUsage, MockLanguageModel, OutputTokenUsage, Tool,
+        FinishReason, GatewayProvider, GenerateTextTool, InputTokenUsage, Instructions, JsonSchema,
+        LanguageModel, LanguageModelContent, LanguageModelFinishReason,
+        LanguageModelGenerateResult, LanguageModelText, LanguageModelUsage, MockLanguageModel,
+        OutputTokenUsage, Tool, ToolLoopAgentModelSettings,
     };
     use open_agents_core::AgentModelSelection;
     use open_agents_sandbox::SandboxContext;
@@ -1017,6 +1020,41 @@ mod tests {
             Instructions::Message(message) => &message.content,
             Instructions::Messages(messages) => &messages[0].content,
         }
+    }
+
+    fn live_gateway_api_key() -> Option<String> {
+        env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY")
+            .or_else(|_| env::var("AI_GATEWAY_API_KEY"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(load_gateway_api_key_from_dotenv)
+    }
+
+    fn load_gateway_api_key_from_dotenv() -> Option<String> {
+        let contents = fs::read_to_string(".env.local").ok()?;
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            if matches!(
+                name.trim(),
+                "AI_SDK_RUST_AI_GATEWAY_API_KEY" | "AI_GATEWAY_API_KEY"
+            ) {
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+        None
     }
 
     #[test]
@@ -1162,5 +1200,45 @@ mod tests {
         assert_eq!(events[0].model_id, DEFAULT_OPEN_AGENT_MODEL_LABEL);
         assert_eq!(events[0].usage, usage);
         assert_eq!(events[0].finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live Open Agents model call"]
+    fn live_open_agent_gateway_generate_text_smoke() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Open Agents Gateway smoke because no API key is configured");
+            return;
+        };
+        let model_id = env::var("OPEN_AGENTS_LIVE_GATEWAY_MODEL")
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id.clone());
+        let agent = OpenAgent::new(
+            OpenAgentSettings::new(&model)
+                .with_model_id(model_id)
+                .with_model_settings(
+                    ToolLoopAgentModelSettings::new()
+                        .with_max_output_tokens(32)
+                        .with_temperature(0.0),
+                ),
+        );
+
+        let result = poll_ready(agent.generate(OpenAgentCallOptions::from_prompt(
+            "Reply with exactly: open-agents-gateway-ok",
+            sandbox_context(),
+        )))
+        .expect("live Open Agents Gateway generation succeeds");
+
+        assert!(
+            result
+                .text
+                .to_lowercase()
+                .contains("open-agents-gateway-ok"),
+            "gateway response did not contain expected marker: {:?}",
+            result.text
+        );
     }
 }

@@ -20,6 +20,7 @@ Commands:
   --fixture        Run the deterministic open-agents-service fixture.
   --emulator       Run the Slack emulator-backed local E2E proof.
   --test           Run cargo test -p open-agents-service.
+  --live-gateway   Run the ignored Open Agents live AI Gateway smoke.
   --all-local      Run --check-config, --fixture, --emulator, and --test.
 USAGE
 }
@@ -30,15 +31,16 @@ print_matrix() {
 | --- | --- | --- |
 | URL verification | Signed service route and Slack ingress unit tests | Live Slack app proof still TODO |
 | App mention | Emulator-backed signed service path and service route tests | Live model runtime proof still TODO |
-| DM | Slack router tests | Emulator-backed DM scenario still TODO |
-| Thread routing | Emulator-backed app mention thread replay; parser/router tests | Broader DM/thread matrix still TODO |
-| Durable run completion | Service route scripted runtime completes and clears active state | Live model runtime proof still TODO |
-| Waiting, answer, cancel | Emulator-backed question prompt plus direct signed block action payload; service cancel test | Emulator cannot simulate interactions today |
+| DM | Emulator-backed DM event plus Slack router tests | Live Slack DM proof still TODO |
+| Thread routing | Emulator-backed app mention and DM thread replay; parser/router tests | Broader thread mutation matrix still TODO |
+| Durable run completion | Service route scripted runtime completes and clears active state; ignored live Gateway OpenAgent smoke available | Deployed live Slack + Gateway proof still TODO |
+| Waiting, answer, cancel | Emulator-backed question prompt plus direct signed answer/cancel block action payloads | Live Slack interaction proof still TODO |
 | Outbound Slack message/update | Emulator Web API state assertions for postMessage; Slack outbound body tests cover post/update shapes | Emulator-backed chat.update scenario still TODO |
 | Persistence | In-memory service route run and active-run keys | Postgres-backed persistence still TODO |
 | Sandbox command | Service route records sandbox.exec pwd proof | Broader sandbox and git automation proof still TODO |
 | Git automation summary | Slack renderer unit coverage only | End-to-end auto-commit/PR summary still TODO |
 | Health/readiness | Service health/readiness tests, manual probes, and emulator readiness polling | Live deployment probes still TODO |
+| Live model | Ignored OpenAgent + Vercel AI Gateway smoke via --live-gateway | Requires AI_GATEWAY_API_KEY or AI_SDK_RUST_AI_GATEWAY_API_KEY |
 MATRIX
 }
 
@@ -52,8 +54,12 @@ cargo test -p open-agents-service
 
 The emulator lane starts emulate@0.6.0 programmatically, starts
 open-agents-service, posts an app mention through the emulator Web API, sends a
-signed Events API payload to the service route, and verifies the service replies
-through conversations.replies.
+signed Events API payload to the service route, verifies DM routing, verifies
+direct signed answer/cancel interaction payloads, and confirms replies through
+conversations.replies.
+
+Credential-gated live model smoke:
+AI_GATEWAY_API_KEY=... scripts/open-agents-local-e2e.sh --live-gateway
 PLAN
 }
 
@@ -80,6 +86,13 @@ run_tests() {
   (
     cd "$repo_root"
     cargo test -p open-agents-service
+  )
+}
+
+run_live_gateway() {
+  (
+    cd "$repo_root"
+    cargo test -p open-agents-runtime live_open_agent_gateway_generate_text_smoke -- --ignored --nocapture
   )
 }
 
@@ -115,6 +128,9 @@ case "$command" in
     ;;
   --test)
     run_tests
+    ;;
+  --live-gateway)
+    run_live_gateway
     ;;
   --all-local)
     run_check_config

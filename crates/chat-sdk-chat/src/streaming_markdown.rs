@@ -327,8 +327,8 @@ fn wrap_tables_for_append(text: &str, close_fences: bool) -> String {
             // Wrap only if this block contains a separator
             // (confirmed table).
             let mut has_separator = false;
-            for j in i..lines.len() {
-                let t = lines[j].trim();
+            for line in lines.iter().skip(i) {
+                let t = line.trim();
                 if is_table_separator(t) {
                     has_separator = true;
                     break;

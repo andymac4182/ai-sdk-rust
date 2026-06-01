@@ -2032,9 +2032,9 @@ pub struct MessageMetadata {
 /// **Layered port.** Upstream's `message: Message` field references
 /// the not-yet-ported `interface Message` from `chat::types`. The Rust
 /// port uses `serde_json::Value` as the placeholder until [the
-/// `Message` layer lands](../../docs/chat/upstream-parity.md). Adapter
-/// + state-backend tests treat the field as opaque, so the placeholder
-/// preserves wire-shape parity without forcing a Message port.
+/// `Message` layer lands](../../docs/chat/upstream-parity.md). Adapter and
+/// state-backend tests treat the field as opaque, so the placeholder preserves
+/// wire-shape parity without forcing a Message port.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueEntry {
     /// Unix-ms timestamp when this entry was enqueued.

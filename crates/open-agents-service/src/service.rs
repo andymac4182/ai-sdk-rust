@@ -619,7 +619,7 @@ impl LocalRuntimeRouter {
                 .get_slack_thread_mapping_by_chat(&record.chat_id)
                 .await
                 .map_err(ServiceError::Persistence)?
-                .ok_or_else(|| ServiceError::NotFound(record.chat_id));
+                .ok_or(ServiceError::NotFound(record.chat_id));
         }
         Err(ServiceError::MissingSlackTarget)
     }
