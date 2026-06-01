@@ -4,16 +4,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, FileDataContent, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
-    ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
+    DelayOptions, FetchErrorInfo, FileDataContent, GetFromApiOptions, HandledFetchError, Headers,
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, LoadApiKeyError,
     LoadApiKeyOptions, ModelType, NoSuchModelError, OpenAICompatibleChatLanguageModel,
-    OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderAbortSignal,
+    ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, Warning, combine_headers,
     create_binary_response_handler, create_json_error_response_handler,
-    create_json_response_handler, create_status_code_error_response_handler, delay, get_from_api,
-    load_api_key, parse_provider_options, post_json_to_api, with_user_agent_suffix,
+    create_json_response_handler, create_status_code_error_response_handler, delay_with_options,
+    get_from_api, load_api_key, parse_provider_options, post_json_to_api, with_user_agent_suffix,
     without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
@@ -265,6 +265,7 @@ impl LumaImageModel {
 
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings, poll_overrides) =
             match luma_image_request_body(&self.model_id, &options) {
                 Ok(args) => args,
@@ -292,7 +293,8 @@ impl LumaImageModel {
         };
         let submit_options = PostJsonToApiOptions::new(self.generations_url(None), request_body)
             .with_headers(request_headers.clone())
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(abort_signal.clone());
         let transport = Arc::clone(&self.transport);
         let submit = match post_json_to_api(
             submit_options,
@@ -329,7 +331,12 @@ impl LumaImageModel {
         };
 
         let image_url = match self
-            .poll_for_image_url(&submit.value.id, request_headers, poll_overrides)
+            .poll_for_image_url(
+                &submit.value.id,
+                request_headers,
+                poll_overrides,
+                abort_signal.clone(),
+            )
             .await
         {
             Ok(image_url) => image_url,
@@ -345,7 +352,9 @@ impl LumaImageModel {
         };
         let transport = Arc::clone(&self.transport);
         let image = match get_from_api(
-            GetFromApiOptions::new(image_url).with_environment(RuntimeEnvironment::unknown()),
+            GetFromApiOptions::new(image_url)
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal),
             move |request| (transport)(request),
             |request, response| {
                 create_binary_response_handler(response.binary_response_handler_options(request))
@@ -389,6 +398,7 @@ impl LumaImageModel {
         generation_id: &str,
         headers: BTreeMap<String, Option<String>>,
         overrides: LumaPollOverrides,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<String, String> {
         let poll_interval_millis = overrides
             .poll_interval_millis
@@ -402,7 +412,8 @@ impl LumaImageModel {
             let response = get_from_api(
                 GetFromApiOptions::new(self.generations_url(Some(generation_id)))
                     .with_headers(headers.clone())
-                    .with_environment(RuntimeEnvironment::unknown()),
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
                 move |request| (transport)(request),
                 |request, response| {
                     create_json_response_handler(
@@ -433,7 +444,13 @@ impl LumaImageModel {
                 }
                 Err(LumaGenerationStatus::Pending) => {
                     if attempt + 1 < max_poll_attempts {
-                        delay(Some(poll_interval_millis as i64)).await;
+                        let mut delay_options = DelayOptions::new();
+                        if let Some(abort_signal) = abort_signal.clone() {
+                            delay_options = delay_options.with_abort_signal(abort_signal);
+                        }
+                        delay_with_options(Some(poll_interval_millis as i64), delay_options)
+                            .await
+                            .map_err(|error| error.to_string())?;
                     }
                 }
             }
@@ -1070,18 +1087,21 @@ fn luma_provider_api_response(
 mod tests {
     use super::{
         DEFAULT_LUMA_BASE_URL, LumaProviderSettings, LumaTransport, LumaTransportFuture,
-        create_luma, luma,
+        create_luma, luma, luma_generation_response, luma_image_request_body,
     };
     use ai_sdk_rust::{
         FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile, ModelType, Provider,
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderOptions, Warning,
+        ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, Warning,
     };
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
     use url::Url;
 
@@ -1106,6 +1126,29 @@ mod tests {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures use ready transports"),
+        }
+    }
+
+    fn poll_until_ready<F>(future: F, timeout: Duration) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        let start = Instant::now();
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => {
+                    assert!(
+                        start.elapsed() <= timeout,
+                        "future did not complete within {timeout:?}"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
         }
     }
 
@@ -1171,6 +1214,307 @@ mod tests {
         };
 
         serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    fn luma_provider_options(value: serde_json::Value) -> ProviderOptions {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "luma".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        provider_options
+    }
+
+    fn assert_luma_completed_response_parses(request: serde_json::Value) {
+        let response = luma_generation_response(&json!({
+            "id": "generation-123",
+            "generation_type": "image",
+            "state": "completed",
+            "created_at": "2024-01-01T00:00:00Z",
+            "assets": {
+                "image": "https://api.example.com/image.png"
+            },
+            "model": "photon-1",
+            "request": request
+        }))
+        .expect("response schema accepts upstream reference payload");
+
+        assert_eq!(response.id, "generation-123");
+        assert_eq!(
+            response.into_image_url().expect("completed image URL"),
+            "https://api.example.com/image.png"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires LUMA_API_KEY and performs live Luma image generation"]
+    fn live_luma_image_generation_validates_provider_contract() {
+        if env::var("LUMA_API_KEY").is_err() {
+            eprintln!("skipping live Luma test: LUMA_API_KEY is not set");
+            return;
+        }
+
+        let result = poll_until_ready(
+            luma()
+                .image("photon-1")
+                .do_generate(ImageModelCallOptions::new(1).with_prompt("A small blue cube")),
+            Duration::from_secs(180),
+        );
+
+        assert!(!result.images.is_empty());
+        assert_eq!(result.response.model_id, "photon-1");
+    }
+
+    #[test]
+    fn luma_image_model_sends_image_by_default_when_url_file_is_provided() {
+        let (body, warnings, _poll) = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("Reference")
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/ref.jpg").expect("valid URL"),
+                )]),
+        )
+        .expect("request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "image": [{
+                    "url": "https://example.com/ref.jpg",
+                    "weight": 0.85
+                }],
+                "model": "photon-1",
+                "prompt": "Reference"
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn luma_image_model_sends_style_and_modify_image_reference_modes() {
+        let (style_body, _warnings, _poll) = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1)
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/style.jpg").expect("valid URL"),
+                )])
+                .with_provider_options(luma_provider_options(json!({
+                    "referenceType": "style"
+                }))),
+        )
+        .expect("style request body maps");
+        let (modify_body, _warnings, _poll) = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1)
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/source.jpg").expect("valid URL"),
+                )])
+                .with_provider_options(luma_provider_options(json!({
+                    "referenceType": "modify_image"
+                }))),
+        )
+        .expect("modify image request body maps");
+
+        assert_eq!(
+            style_body["style"],
+            json!([{
+                "url": "https://example.com/style.jpg",
+                "weight": 0.8
+            }])
+        );
+        assert_eq!(
+            modify_body["modify_image"],
+            json!({
+                "url": "https://example.com/source.jpg",
+                "weight": 1.0
+            })
+        );
+    }
+
+    #[test]
+    fn luma_image_model_uses_custom_reference_weights_and_character_identities() {
+        let (body, _warnings, _poll) = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1)
+                .with_files(vec![
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/a.jpg").expect("valid URL"),
+                    ),
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/b.jpg").expect("valid URL"),
+                    ),
+                ])
+                .with_provider_options(luma_provider_options(json!({
+                    "referenceType": "character",
+                    "images": [
+                        {"id": "hero", "weight": 0.2},
+                        {"id": "villain", "weight": 0.9}
+                    ]
+                }))),
+        )
+        .expect("character request body maps");
+
+        assert_eq!(
+            body["character"],
+            json!({
+                "hero": {
+                    "images": ["https://example.com/a.jpg"]
+                },
+                "villain": {
+                    "images": ["https://example.com/b.jpg"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images() {
+        let mask_error = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1).with_mask(ImageModelFile::url(
+                Url::parse("https://example.com/mask.png").expect("valid URL"),
+            )),
+        )
+        .expect_err("mask is rejected");
+        let base64_error = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1).with_files(vec![ImageModelFile::file(
+                "image/png",
+                FileDataContent::Base64("iVBORw==".to_string()),
+            )]),
+        )
+        .expect_err("base64 files are rejected");
+        let too_many_error = luma_image_request_body(
+            "photon-1",
+            &ImageModelCallOptions::new(1).with_files(vec![
+                ImageModelFile::url(Url::parse("https://example.com/1.jpg").expect("valid URL")),
+                ImageModelFile::url(Url::parse("https://example.com/2.jpg").expect("valid URL")),
+                ImageModelFile::url(Url::parse("https://example.com/3.jpg").expect("valid URL")),
+                ImageModelFile::url(Url::parse("https://example.com/4.jpg").expect("valid URL")),
+                ImageModelFile::url(Url::parse("https://example.com/5.jpg").expect("valid URL")),
+            ]),
+        )
+        .expect_err("too many image references rejected");
+
+        assert!(mask_error.contains("does not support mask-based image editing"));
+        assert!(base64_error.contains("only supports URL-based images"));
+        assert!(too_many_error.contains("supports up to 4 reference images"));
+    }
+
+    #[test]
+    fn luma_image_model_parses_response_with_image_references() {
+        assert_luma_completed_response_parses(json!({
+            "generation_type": "image",
+            "model": "photon-1",
+            "prompt": "A scene",
+            "image_ref": [{
+                "url": "https://example.com/ref1.jpg",
+                "weight": 0.85
+            }]
+        }));
+    }
+
+    #[test]
+    fn luma_image_model_parses_response_with_style_references() {
+        assert_luma_completed_response_parses(json!({
+            "generation_type": "image",
+            "model": "photon-1",
+            "prompt": "A scene",
+            "style_ref": [{
+                "url": "https://example.com/style.jpg",
+                "weight": 0.8
+            }]
+        }));
+    }
+
+    #[test]
+    fn luma_image_model_parses_response_with_character_references() {
+        assert_luma_completed_response_parses(json!({
+            "generation_type": "image",
+            "model": "photon-1",
+            "prompt": "A scene",
+            "character_ref": {
+                "identity0": {
+                    "images": ["https://example.com/character.jpg"]
+                }
+            }
+        }));
+    }
+
+    #[test]
+    fn luma_image_model_parses_response_with_modify_image_and_multiple_reference_types() {
+        assert_luma_completed_response_parses(json!({
+            "generation_type": "image",
+            "model": "photon-1",
+            "prompt": "A scene",
+            "image_ref": [{
+                "url": "https://example.com/ref1.jpg",
+                "weight": 0.85
+            }],
+            "style_ref": [{
+                "url": "https://example.com/style.jpg",
+                "weight": 0.8
+            }],
+            "character_ref": {
+                "identity0": {
+                    "images": ["https://example.com/character.jpg"]
+                }
+            },
+            "modify_image_ref": {
+                "url": "https://example.com/source.jpg",
+                "weight": 1.0
+            }
+        }));
+    }
+
+    #[test]
+    fn luma_image_model_respects_abort_signal_before_submit() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: LumaTransport = Arc::new(move |request| -> LumaTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request);
+            Box::pin(ready(Ok(json_response(json!({
+                "id": "generation-123",
+                "state": "queued"
+            })))))
+        });
+        let provider = create_luma(
+            LumaProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com"),
+        )
+        .with_transport(transport);
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(
+            provider.image("photon-1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Abort")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("luma"))
+                .and_then(|metadata| metadata.extra.get("errorMessage")),
+            Some(&json!("Aborted"))
+        );
     }
 
     #[test]

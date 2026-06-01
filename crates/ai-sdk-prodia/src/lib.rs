@@ -8,8 +8,8 @@ use ai_sdk_rust::{
     ImageModelCallOptions, ImageModelProviderMetadata, ImageModelProviderMetadataEntry,
     ImageModelResponse, ImageModelResult, JsonObject, JsonValue, LoadApiKeyError,
     LoadApiKeyOptions, ModelType, NoSuchModelError, OpenAICompatibleChatLanguageModel,
-    OpenAICompatibleEmbeddingModel, PostToApiOptions, Provider, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    OpenAICompatibleEmbeddingModel, PostToApiOptions, Provider, ProviderAbortSignal,
+    ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithVideoModel,
     ResponseHandlerResult, RuntimeEnvironment, VideoModel, VideoModelCallOptions, VideoModelFile,
     VideoModelResponse, VideoModelResult, VideoModelVideoData, Warning, combine_headers,
@@ -299,6 +299,7 @@ impl ProdiaImageModel {
 
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings) = match prodia_image_request_body(&self.model_id, &options) {
             Ok(args) => args,
             Err(error) => {
@@ -333,7 +334,8 @@ impl ProdiaImageModel {
                 request_body,
             )
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown()),
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(abort_signal),
             move |request| (transport)(request),
             |request, response| prodia_image_multipart_response(request, response),
             |request, response| {
@@ -466,6 +468,7 @@ impl ProdiaVideoModel {
 
     async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings) = match prodia_video_request_body(&self.model_id, &options) {
             Ok(args) => args,
             Err(error) => {
@@ -492,7 +495,12 @@ impl ProdiaVideoModel {
         };
         let post_options = if let Some(image) = options.image.as_ref() {
             match self
-                .multipart_video_post_options(request_body.clone(), image, request_headers)
+                .multipart_video_post_options(
+                    request_body.clone(),
+                    image,
+                    request_headers,
+                    abort_signal.clone(),
+                )
                 .await
             {
                 Ok(options) => options,
@@ -514,6 +522,7 @@ impl ProdiaVideoModel {
             )
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(abort_signal.clone())
         };
         let transport = Arc::clone(&self.transport);
         let result = match post_to_api(
@@ -573,8 +582,11 @@ impl ProdiaVideoModel {
         request_body: JsonValue,
         image: &VideoModelFile,
         mut request_headers: BTreeMap<String, Option<String>>,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<PostToApiOptions, String> {
-        let image_data = self.resolve_video_file_data(image).await?;
+        let image_data = self
+            .resolve_video_file_data(image, abort_signal.clone())
+            .await?;
         let boundary = "ai-sdk-rust-prodia-boundary";
         let body = encode_prodia_video_multipart(boundary, &request_body, &image_data);
         request_headers.insert(
@@ -588,12 +600,14 @@ impl ProdiaVideoModel {
             request_body,
         )
         .with_headers(request_headers)
-        .with_environment(RuntimeEnvironment::unknown()))
+        .with_environment(RuntimeEnvironment::unknown())
+        .with_optional_abort_signal(abort_signal))
     }
 
     async fn resolve_video_file_data(
         &self,
         file: &VideoModelFile,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<ProdiaInputFileData, String> {
         match file {
             VideoModelFile::File {
@@ -611,7 +625,8 @@ impl ProdiaVideoModel {
                 let transport = Arc::clone(&self.transport);
                 let response = get_from_api(
                     GetFromApiOptions::new(url.as_str())
-                        .with_environment(RuntimeEnvironment::unknown()),
+                        .with_environment(RuntimeEnvironment::unknown())
+                        .with_optional_abort_signal(abort_signal),
                     move |request| (transport)(request),
                     |request, response| {
                         create_binary_response_handler(
@@ -1409,13 +1424,17 @@ fn prodia_provider_api_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProdiaProviderSettings, ProdiaTransport, ProdiaTransportFuture, create_prodia};
+    use super::{
+        ProdiaProviderSettings, ProdiaTransport, ProdiaTransportFuture, create_prodia,
+        prodia_image_request_body, prodia_provider_metadata, prodia_video_request_body,
+    };
     use ai_sdk_rust::{
-        FileDataContent, ImageModel, ImageModelCallOptions, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
-        VideoModel, VideoModelCallOptions, VideoModelFile,
+        FileDataContent, ImageModel, ImageModelCallOptions, ProviderAbortController,
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        ProviderOptions, VideoModel, VideoModelCallOptions, VideoModelFile,
     };
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::sync::{Arc, Mutex};
@@ -1486,6 +1505,190 @@ mod tests {
             panic!("expected text request body");
         };
         serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    fn prodia_provider_options(value: serde_json::Value) -> ProviderOptions {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "prodia".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        provider_options
+    }
+
+    #[test]
+    #[ignore = "requires PRODIA_TOKEN and performs live Prodia image/video generation"]
+    fn live_prodia_image_and_video_generation_validate_provider_contract() {
+        if env::var("PRODIA_TOKEN").is_err() {
+            eprintln!("skipping live Prodia test: PRODIA_TOKEN is not set");
+            return;
+        }
+
+        let provider = create_prodia(ProdiaProviderSettings::new());
+        let image = poll_ready(
+            provider
+                .image("inference.sd3.txt2img.v2")
+                .do_generate(ImageModelCallOptions::new(1).with_prompt("A small blue cube")),
+        );
+        let video = poll_ready(
+            provider
+                .video("inference.wan2-2.lightning.txt2vid.v0")
+                .do_generate(VideoModelCallOptions::new(1).with_prompt("A small blue cube")),
+        );
+
+        assert!(!image.images.is_empty());
+        assert!(!video.videos.is_empty());
+    }
+
+    #[test]
+    fn prodia_image_model_maps_size_provider_options_loras_progressive_and_warnings() {
+        let (body, warnings) = prodia_image_request_body(
+            "inference.sd3.txt2img.v2",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("A castle")
+                .with_size("1024x768")
+                .with_provider_options(prodia_provider_options(json!({
+                    "width": 512,
+                    "height": 512,
+                    "stylePreset": "anime",
+                    "loras": ["detail", "lighting"],
+                    "progressive": true,
+                    "steps": 4
+                }))),
+        )
+        .expect("image body maps");
+        let (_invalid_body, invalid_warnings) = prodia_image_request_body(
+            "inference.sd3.txt2img.v2",
+            &ImageModelCallOptions::new(1).with_size("wide"),
+        )
+        .expect("invalid size only warns");
+
+        assert_eq!(
+            body,
+            json!({
+                "type": "inference.sd3.txt2img.v2",
+                "config": {
+                    "prompt": "A castle",
+                    "width": 512,
+                    "height": 512,
+                    "steps": 4,
+                    "style_preset": "anime",
+                    "loras": ["detail", "lighting"],
+                    "progressive": true
+                }
+            })
+        );
+        assert!(warnings.is_empty());
+        assert!(matches!(
+            &invalid_warnings[0],
+            ai_sdk_rust::Warning::Unsupported { feature, .. } if feature == "size"
+        ));
+    }
+
+    #[test]
+    fn prodia_video_model_maps_prompt_seed_resolution_and_json_shape() {
+        let (body, warnings) = prodia_video_request_body(
+            "inference.wan2-2.lightning.txt2vid.v0",
+            &VideoModelCallOptions::new(1)
+                .with_prompt("A wave")
+                .with_seed(42)
+                .with_provider_options(prodia_provider_options(json!({
+                    "resolution": "720p"
+                }))),
+        )
+        .expect("video body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "type": "inference.wan2-2.lightning.txt2vid.v0",
+                "config": {
+                    "prompt": "A wave",
+                    "seed": 42,
+                    "resolution": "720p"
+                }
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn prodia_provider_metadata_includes_and_omits_dollars_like_upstream() {
+        let with_price = prodia_provider_metadata(
+            serde_json::from_value(json!({
+                "id": "job-with-price",
+                "price": {"dollars": 0.01},
+                "config": {"seed": 42},
+                "metrics": {"elapsed": 1.5, "ips": 2.0}
+            }))
+            .expect("job result parses"),
+        );
+        let without_price = prodia_provider_metadata(
+            serde_json::from_value(json!({
+                "id": "job-without-price",
+                "price": {}
+            }))
+            .expect("job result parses"),
+        );
+        let null_price = prodia_provider_metadata(
+            serde_json::from_value(json!({
+                "id": "job-null-price",
+                "price": {"dollars": null}
+            }))
+            .expect("job result parses"),
+        );
+
+        assert_eq!(with_price.get("dollars"), Some(&json!(0.01)));
+        assert_eq!(with_price.get("seed"), Some(&json!(42)));
+        assert_eq!(with_price.get("iterationsPerSecond"), Some(&json!(2.0)));
+        assert!(!without_price.contains_key("dollars"));
+        assert!(!null_price.contains_key("dollars"));
+    }
+
+    #[test]
+    fn prodia_image_model_respects_abort_signal_before_submit() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: ProdiaTransport = Arc::new(move |request| -> ProdiaTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request);
+            Box::pin(ready(Ok(multipart_response(
+                "boundary",
+                "image/png",
+                &[1, 2, 3],
+            ))))
+        });
+        let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-token"))
+            .with_transport(transport);
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(
+            provider.image("inference.sd3.txt2img.v2").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Abort")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("prodia"))
+                .and_then(|metadata| metadata.extra.get("errorMessage")),
+            Some(&json!("Aborted"))
+        );
     }
 
     #[test]

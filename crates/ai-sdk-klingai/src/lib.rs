@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, JsonObject, JsonValue,
-    LoadSettingError, LoadSettingOptions, ModelType, NoSuchModelError,
+    DelayOptions, FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, JsonObject,
+    JsonValue, LoadSettingError, LoadSettingOptions, ModelType, NoSuchModelError,
     OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
-    PostJsonToApiOptions, Provider, ProviderApiRequest, ProviderApiRequestBody,
-    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
-    ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment, VideoModel,
-    VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
+    PostJsonToApiOptions, Provider, ProviderAbortSignal, ProviderApiRequest,
+    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment,
+    VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
     VideoModelVideoData, Warning, combine_headers, convert_to_base64,
-    create_json_error_response_handler, create_json_response_handler, delay, get_from_api,
-    load_setting, parse_provider_options, post_json_to_api, with_user_agent_suffix,
+    create_json_error_response_handler, create_json_response_handler, delay_with_options,
+    get_from_api, load_setting, parse_provider_options, post_json_to_api, with_user_agent_suffix,
     without_trailing_slash,
 };
 use base64::Engine;
@@ -292,6 +292,7 @@ impl KlingAIVideoModel {
 
     async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (endpoint_path, request_body, warnings, poll_overrides) =
             match klingai_video_request_body(&self.model_id, &options) {
                 Ok(args) => args,
@@ -322,7 +323,8 @@ impl KlingAIVideoModel {
         let create_response = match post_json_to_api(
             PostJsonToApiOptions::new(create_url, request_body)
                 .with_headers(request_headers.clone())
-                .with_environment(RuntimeEnvironment::unknown()),
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
             move |request| (transport)(request),
             |request, response| {
                 create_json_response_handler(
@@ -365,7 +367,13 @@ impl KlingAIVideoModel {
         };
 
         let final_response = match self
-            .poll_task_status(&endpoint_path, &task_id, request_headers, poll_overrides)
+            .poll_task_status(
+                &endpoint_path,
+                &task_id,
+                request_headers,
+                poll_overrides,
+                abort_signal,
+            )
             .await
         {
             Ok(response) => response,
@@ -396,6 +404,7 @@ impl KlingAIVideoModel {
         task_id: &str,
         headers: BTreeMap<String, Option<String>>,
         overrides: KlingAIPollOverrides,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<ai_sdk_rust::ResponseHandlerResult<KlingAITaskStatusResponse>, String> {
         let poll_interval_millis = overrides
             .poll_interval_millis
@@ -411,7 +420,13 @@ impl KlingAIVideoModel {
         );
 
         loop {
-            delay(Some(poll_interval_millis as i64)).await;
+            let mut delay_options = DelayOptions::new();
+            if let Some(abort_signal) = abort_signal.clone() {
+                delay_options = delay_options.with_abort_signal(abort_signal);
+            }
+            delay_with_options(Some(poll_interval_millis as i64), delay_options)
+                .await
+                .map_err(|error| error.to_string())?;
 
             if start.elapsed().as_millis() > u128::from(poll_timeout_millis) {
                 return Err(format!(
@@ -423,7 +438,8 @@ impl KlingAIVideoModel {
             let response = get_from_api(
                 GetFromApiOptions::new(status_url.clone())
                     .with_headers(headers.clone())
-                    .with_environment(RuntimeEnvironment::unknown()),
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
                 move |request| (transport)(request),
                 |request, response| {
                     create_json_response_handler(
@@ -1355,14 +1371,18 @@ fn klingai_provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        KlingAIProviderSettings, KlingAITransport, KlingAITransportFuture, create_klingai,
+        KlingAIProviderSettings, KlingAITransport, KlingAITransportFuture, URL_SAFE_NO_PAD,
+        create_klingai, generate_klingai_auth_token, klingai_video_request_body,
     };
     use ai_sdk_rust::{
         FileDataContent, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
         ProviderApiResponse, ProviderOptions, VideoModel, VideoModelCallOptions, VideoModelFile,
         Warning,
     };
+    use base64::Engine;
+    use hmac::Mac;
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::sync::{Arc, Mutex};
@@ -1406,6 +1426,251 @@ mod tests {
             panic!("expected text request body");
         };
         serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    fn decode_jwt_part(token: &str, index: usize) -> serde_json::Value {
+        let part = token
+            .split('.')
+            .nth(index)
+            .expect("JWT contains requested part");
+        let bytes = URL_SAFE_NO_PAD.decode(part).expect("JWT part decodes");
+        serde_json::from_slice(&bytes).expect("JWT part is JSON")
+    }
+
+    #[test]
+    #[ignore = "requires KLINGAI_ACCESS_KEY/KLINGAI_SECRET_KEY and performs live KlingAI video generation"]
+    fn live_klingai_video_generation_validates_provider_contract() {
+        if env::var("KLINGAI_ACCESS_KEY").is_err() || env::var("KLINGAI_SECRET_KEY").is_err() {
+            eprintln!(
+                "skipping live KlingAI test: KLINGAI_ACCESS_KEY/KLINGAI_SECRET_KEY is not set"
+            );
+            return;
+        }
+
+        let result = block_on(
+            create_klingai(KlingAIProviderSettings::new())
+                .video("kling-v2.6-t2v")
+                .do_generate(VideoModelCallOptions::new(1).with_prompt("A small blue cube")),
+        );
+
+        assert!(!result.videos.is_empty());
+        assert_eq!(result.response.model_id, "kling-v2.6-t2v");
+    }
+
+    #[test]
+    fn klingai_auth_generates_valid_hs256_jwt_structure() {
+        let token = generate_klingai_auth_token(
+            &KlingAIProviderSettings::new()
+                .with_access_key("access-key")
+                .with_secret_key("secret-key"),
+        )
+        .expect("token generated");
+
+        assert_eq!(token.split('.').count(), 3);
+        assert_eq!(
+            decode_jwt_part(&token, 0),
+            json!({
+                "alg": "HS256",
+                "typ": "JWT"
+            })
+        );
+    }
+
+    #[test]
+    fn klingai_auth_includes_issuer_exp_and_nbf_claims() {
+        let token = generate_klingai_auth_token(
+            &KlingAIProviderSettings::new()
+                .with_access_key("access-key")
+                .with_secret_key("secret-key"),
+        )
+        .expect("token generated");
+        let payload = decode_jwt_part(&token, 1);
+
+        assert_eq!(payload["iss"], json!("access-key"));
+        let exp = payload["exp"].as_i64().expect("exp claim");
+        let nbf = payload["nbf"].as_i64().expect("nbf claim");
+        assert_eq!(exp - nbf, 1805);
+    }
+
+    #[test]
+    fn klingai_auth_signs_with_secret_and_changes_for_different_secret() {
+        let settings = KlingAIProviderSettings::new()
+            .with_access_key("access-key")
+            .with_secret_key("secret-one");
+        let token = generate_klingai_auth_token(&settings).expect("token generated");
+        let mut parts = token.split('.');
+        let header = parts.next().expect("header");
+        let payload = parts.next().expect("payload");
+        let signature = parts.next().expect("signature");
+        let signing_input = format!("{header}.{payload}");
+        let mut mac = super::HmacSha256::new_from_slice("secret-one".as_bytes()).expect("HMAC key");
+        mac.update(signing_input.as_bytes());
+        let expected_signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+
+        let different_secret_token = generate_klingai_auth_token(
+            &KlingAIProviderSettings::new()
+                .with_access_key("access-key")
+                .with_secret_key("secret-two"),
+        )
+        .expect("token generated with different secret");
+
+        assert_eq!(signature, expected_signature);
+        assert_ne!(
+            token.split('.').nth(2),
+            different_secret_token.split('.').nth(2)
+        );
+    }
+
+    #[test]
+    fn klingai_auth_reports_missing_explicit_credentials() {
+        assert!(generate_klingai_auth_token(&KlingAIProviderSettings::new()).is_err());
+        assert!(
+            generate_klingai_auth_token(
+                &KlingAIProviderSettings::new().with_access_key("access-only")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn klingai_t2v_model_maps_extended_provider_options_without_element_list() {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "klingai".to_string(),
+            serde_json::from_value(json!({
+                "negativePrompt": "rain",
+                "sound": "on",
+                "cfgScale": 0.5,
+                "cameraControl": {"type": "simple", "config": {"horizontal": 10}},
+                "multiShot": true,
+                "shotType": "intelligence",
+                "multiPrompt": ["wide", "close"],
+                "elementList": [{"id": "ignored-for-t2v"}],
+                "voiceList": [{"voice_id": "voice-1"}],
+                "watermarkEnabled": true
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let (_endpoint, body, warnings, _poll) = klingai_video_request_body(
+            "kling-v3.0-t2v",
+            &VideoModelCallOptions::new(1)
+                .with_prompt("A city")
+                .with_aspect_ratio("16:9")
+                .with_duration(5.0)
+                .with_provider_options(provider_options),
+        )
+        .expect("request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "model_name": "kling-v3",
+                "prompt": "A city",
+                "negative_prompt": "rain",
+                "sound": "on",
+                "cfg_scale": 0.5,
+                "camera_control": {"type": "simple", "config": {"horizontal": 10}},
+                "aspect_ratio": "16:9",
+                "duration": "5",
+                "multi_shot": true,
+                "shot_type": "intelligence",
+                "multi_prompt": ["wide", "close"],
+                "voice_list": [{"voice_id": "voice-1"}],
+                "watermark_info": {"enabled": true}
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn klingai_i2v_model_maps_tail_masks_multishot_voice_and_watermark_options() {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "klingai".to_string(),
+            serde_json::from_value(json!({
+                "imageTail": "https://example.com/tail.png",
+                "staticMask": "https://example.com/static.png",
+                "dynamicMasks": [{"url": "https://example.com/dynamic.png"}],
+                "multiShot": true,
+                "multiPrompt": ["first", "second"],
+                "elementList": [{"id": "element-1"}],
+                "voiceList": [{"voice_id": "voice-1"}],
+                "watermarkEnabled": false,
+                "negativePrompt": "blur"
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let (_endpoint, body, warnings, _poll) = klingai_video_request_body(
+            "kling-v3.0-i2v",
+            &VideoModelCallOptions::new(1)
+                .with_prompt("Move")
+                .with_duration(10.0)
+                .with_image(VideoModelFile::url(
+                    url::Url::parse("https://example.com/input.png").expect("valid URL"),
+                ))
+                .with_provider_options(provider_options),
+        )
+        .expect("request body maps");
+
+        assert_eq!(body["model_name"], json!("kling-v3"));
+        assert_eq!(body["image"], json!("https://example.com/input.png"));
+        assert_eq!(body["image_tail"], json!("https://example.com/tail.png"));
+        assert_eq!(body["static_mask"], json!("https://example.com/static.png"));
+        assert_eq!(
+            body["dynamic_masks"],
+            json!([{"url": "https://example.com/dynamic.png"}])
+        );
+        assert_eq!(body["multi_shot"], json!(true));
+        assert_eq!(body["multi_prompt"], json!(["first", "second"]));
+        assert_eq!(body["element_list"], json!([{"id": "element-1"}]));
+        assert_eq!(body["voice_list"], json!([{"voice_id": "voice-1"}]));
+        assert_eq!(body["watermark_info"], json!({"enabled": false}));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn klingai_motion_control_maps_required_provider_options_and_image_url() {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "klingai".to_string(),
+            serde_json::from_value(json!({
+                "videoUrl": "https://example.com/source.mp4",
+                "characterOrientation": "forward",
+                "mode": "pro",
+                "keepOriginalSound": "true",
+                "elementList": [{"id": "element-1"}]
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let (endpoint, body, warnings, _poll) = klingai_video_request_body(
+            "kling-v3.0-motion-control",
+            &VideoModelCallOptions::new(1)
+                .with_prompt("Dance")
+                .with_image(VideoModelFile::url(
+                    url::Url::parse("https://example.com/reference.png").expect("valid URL"),
+                ))
+                .with_provider_options(provider_options),
+        )
+        .expect("request body maps");
+
+        assert_eq!(endpoint, "/v1/videos/motion-control");
+        assert_eq!(
+            body,
+            json!({
+                "model_name": "kling-v3",
+                "video_url": "https://example.com/source.mp4",
+                "character_orientation": "forward",
+                "mode": "pro",
+                "prompt": "Dance",
+                "image_url": "https://example.com/reference.png",
+                "keep_original_sound": "true",
+                "element_list": [{"id": "element-1"}]
+            })
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]

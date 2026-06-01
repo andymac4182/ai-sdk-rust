@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 87.6%
-- Portable package average: 84.6%
-- Closed package rows: 39 / 52
-- Strict portable verified rows: 29 / 42
-- In-progress rows: 13
+- Average estimated completion: 90.9%
+- Portable package average: 88.7%
+- Closed package rows: 45 / 52
+- Strict portable verified rows: 35 / 42
+- In-progress rows: 7
 - Not-started rows: 0
 
 ## 100% Closed
@@ -25,19 +25,25 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
 | `@ai-sdk/azure` | 100% | Verified | provider package |
 | `@ai-sdk/baseten` | 100% | Verified | provider package |
+| `@ai-sdk/black-forest-labs` | 100% | Verified | provider package |
 | `@ai-sdk/bytedance` | 100% | Verified | provider package |
 | `@ai-sdk/cerebras` | 100% | Verified | provider package |
 | `@ai-sdk/deepgram` | 100% | Verified | provider package |
 | `@ai-sdk/deepinfra` | 100% | Verified | provider package |
 | `@ai-sdk/deepseek` | 100% | Verified | provider package |
 | `@ai-sdk/elevenlabs` | 100% | Verified | provider package |
+| `@ai-sdk/fal` | 100% | Verified | provider package |
 | `@ai-sdk/gladia` | 100% | Verified | provider package |
 | `@ai-sdk/huggingface` | 100% | Verified | provider package |
 | `@ai-sdk/hume` | 100% | Verified | provider package |
+| `@ai-sdk/klingai` | 100% | Verified | provider package |
 | `@ai-sdk/lmnt` | 100% | Verified | provider package |
+| `@ai-sdk/luma` | 100% | Verified | provider package |
 | `@ai-sdk/mistral` | 100% | Verified | provider package |
 | `@ai-sdk/moonshotai` | 100% | Verified | provider package |
 | `@ai-sdk/perplexity` | 100% | Verified | provider package |
+| `@ai-sdk/prodia` | 100% | Verified | provider package |
+| `@ai-sdk/replicate` | 100% | Verified | provider package |
 | `@ai-sdk/revai` | 100% | Verified | provider package |
 | `@ai-sdk/vercel` | 100% | Verified | provider package |
 | `@ai-sdk/voyage` | 100% | Verified | provider package |
@@ -61,15 +67,9 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/amazon-bedrock` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/xai` | 35% | In progress | provider package | Initial Responses, chat, and image provider wrapper exists; files, video, xAI server tools, custom usage/message... |
-| `@ai-sdk/black-forest-labs` | 80% | In progress | provider package | Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures... |
 | `@ai-sdk/cohere` | 35% | In progress | provider package | Embedding and reranking model slices exist; chat, prompt conversion, tool prep, streaming, citations, and full current... |
-| `@ai-sdk/fal` | 65% | In progress | provider package | Image and video media generation landed with request/response, queue polling, warning, download, and error metadata... |
 | `@ai-sdk/fireworks` | 45% | In progress | provider package | OpenAI-compatible chat, completion, embedding, and image wrapper exists with Fireworks option transform; custom image... |
 | `@ai-sdk/groq` | 35% | In progress | provider package | Initial OpenAI-compatible chat wrapper exists; transcription, browser-search tool, Groq-specific message and usage... |
-| `@ai-sdk/klingai` | 75% | In progress | provider package | Video generation landed with auth/header, task polling, warning, response metadata, and error metadata fixtures; JWT... |
-| `@ai-sdk/luma` | 70% | In progress | provider package | Initial provider crate exists with deterministic image request/response, polling, warning, and error metadata fixtures... |
-| `@ai-sdk/prodia` | 65% | In progress | provider package | Image and video media generation landed with JSON/multipart request, binary response, URL media download, and error... |
-| `@ai-sdk/replicate` | 75% | In progress | provider package | Image and video media generation landed with prediction request, polling/wait headers, downloads, warning, response... |
 | `@ai-sdk/togetherai` | 65% | In progress | provider package | Provider wrapper covers chat, completion, embeddings, custom image generation, and reranking; exact per-case upstream... |
 
 ## Not Started

@@ -4,16 +4,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, FileDataContent, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
-    ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
+    DelayOptions, FetchErrorInfo, FileDataContent, GetFromApiOptions, HandledFetchError, Headers,
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, LoadApiKeyError,
     LoadApiKeyOptions, ModelType, NoSuchModelError, OpenAICompatibleChatLanguageModel,
-    OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderAbortSignal,
+    ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, Warning, combine_headers,
     convert_to_base64, create_binary_response_handler, create_json_error_response_handler,
-    create_json_response_handler, create_status_code_error_response_handler, delay, get_from_api,
-    load_api_key, parse_provider_options, post_json_to_api, with_user_agent_suffix,
+    create_json_response_handler, create_status_code_error_response_handler, delay_with_options,
+    get_from_api, load_api_key, parse_provider_options, post_json_to_api, with_user_agent_suffix,
     without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
@@ -292,6 +292,7 @@ impl BlackForestLabsImageModel {
 
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings, poll_overrides) =
             match black_forest_labs_image_request_body(&options) {
                 Ok(args) => args,
@@ -319,7 +320,8 @@ impl BlackForestLabsImageModel {
         };
         let submit_options = PostJsonToApiOptions::new(self.image_model_url(), request_body)
             .with_headers(request_headers.clone())
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         let submit = match post_json_to_api(
@@ -362,6 +364,7 @@ impl BlackForestLabsImageModel {
                 &submit.value.id,
                 request_headers.clone(),
                 poll_overrides,
+                abort_signal.clone(),
             )
             .await
         {
@@ -379,7 +382,8 @@ impl BlackForestLabsImageModel {
         let transport = Arc::clone(&self.transport);
         let image_options = GetFromApiOptions::new(poll.image_url.clone())
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(abort_signal);
         let image = match get_from_api(
             image_options,
             move |request| (transport)(request),
@@ -434,6 +438,7 @@ impl BlackForestLabsImageModel {
         request_id: &str,
         headers: BTreeMap<String, Option<String>>,
         overrides: BlackForestLabsPollOverrides,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<BlackForestLabsPollReady, String> {
         let poll_interval_millis = overrides
             .poll_interval_millis
@@ -456,7 +461,8 @@ impl BlackForestLabsImageModel {
             let transport = Arc::clone(&self.transport);
             let options = GetFromApiOptions::new(url.as_str())
                 .with_headers(headers.clone())
-                .with_environment(RuntimeEnvironment::unknown());
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone());
             let response = get_from_api(
                 options,
                 move |request| (transport)(request),
@@ -483,7 +489,13 @@ impl BlackForestLabsImageModel {
                 Ok(ready) => return Ok(ready),
                 Err(BlackForestLabsPollStatus::Pending) => {
                     if attempt + 1 < max_poll_attempts {
-                        delay(Some(poll_interval_millis as i64)).await;
+                        let mut delay_options = DelayOptions::new();
+                        if let Some(abort_signal) = abort_signal.clone() {
+                            delay_options = delay_options.with_abort_signal(abort_signal);
+                        }
+                        delay_with_options(Some(poll_interval_millis as i64), delay_options)
+                            .await
+                            .map_err(|error| error.to_string())?;
                     }
                 }
                 Err(BlackForestLabsPollStatus::Failed) => {
@@ -1222,10 +1234,11 @@ mod tests {
     };
     use ai_sdk_rust::{
         FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile, ModelType, Provider,
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderOptions, Warning,
+        ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, Warning,
     };
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::pin::Pin;
@@ -1362,6 +1375,63 @@ mod tests {
         };
 
         serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    #[test]
+    #[ignore = "requires BFL_API_KEY and performs live Black Forest Labs image generation"]
+    fn live_black_forest_labs_image_generation_validates_provider_contract() {
+        if env::var("BFL_API_KEY").is_err() {
+            eprintln!("skipping live BFL test: BFL_API_KEY is not set");
+            return;
+        }
+
+        let provider = black_forest_labs();
+        let model = provider.image("flux-pro-1.1");
+        let mut future = Box::pin(
+            model.do_generate(ImageModelCallOptions::new(1).with_prompt("A small blue cube")),
+        );
+        let result = poll_pinned_until_ready(future.as_mut(), Duration::from_secs(180));
+
+        assert!(!result.images.is_empty());
+        assert_eq!(result.response.model_id, "flux-pro-1.1");
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_respects_abort_signal_before_submit() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport);
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Abort")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("blackForestLabs"))
+                .and_then(|metadata| metadata.extra.get("errorMessage")),
+            Some(&json!("Aborted"))
+        );
     }
 
     #[test]

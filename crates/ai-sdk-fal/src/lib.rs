@@ -6,17 +6,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
+    DelayOptions, FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
     ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, JsonObject, JsonValue,
     LoadApiKeyError, ModelType, NoSuchModelError, OpenAICompatibleChatLanguageModel,
-    OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderAbortSignal,
+    ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment,
     VideoModel, VideoModelCallOptions, VideoModelResponse, VideoModelResult, VideoModelVideoData,
     Warning, combine_headers, convert_image_model_file_to_data_uri, create_binary_response_handler,
-    create_json_error_response_handler, create_json_response_handler, delay, get_from_api,
-    parse_provider_options, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
+    create_json_error_response_handler, create_json_response_handler, delay_with_options,
+    get_from_api, parse_provider_options, post_json_to_api, with_user_agent_suffix,
+    without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -297,6 +298,7 @@ impl FalImageModel {
 
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings) = match fal_image_request_body(&options) {
             Ok(args) => args,
             Err(error) => {
@@ -325,7 +327,8 @@ impl FalImageModel {
         let response = match post_json_to_api(
             PostJsonToApiOptions::new(self.image_model_url(), request_body)
                 .with_headers(request_headers)
-                .with_environment(RuntimeEnvironment::unknown()),
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
             move |request| (transport)(request),
             |request, response| {
                 create_json_response_handler(
@@ -371,7 +374,8 @@ impl FalImageModel {
             let transport = Arc::clone(&self.transport);
             match get_from_api(
                 GetFromApiOptions::new(image.url.clone())
-                    .with_environment(RuntimeEnvironment::unknown()),
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
                 move |request| (transport)(request),
                 |request, response| {
                     create_binary_response_handler(
@@ -519,6 +523,7 @@ impl FalVideoModel {
 
     async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings, poll_overrides) = match fal_video_request_body(&options) {
             Ok(args) => args,
             Err(error) => {
@@ -547,7 +552,8 @@ impl FalVideoModel {
         let queue_response = match post_json_to_api(
             PostJsonToApiOptions::new(self.queue_url(), request_body)
                 .with_headers(request_headers.clone())
-                .with_environment(RuntimeEnvironment::unknown()),
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
             move |request| (transport)(request),
             |request, response| {
                 create_json_response_handler(
@@ -590,7 +596,7 @@ impl FalVideoModel {
         };
 
         let final_response = match self
-            .poll_video_response(response_url, request_headers, poll_overrides)
+            .poll_video_response(response_url, request_headers, poll_overrides, abort_signal)
             .await
         {
             Ok(response) => response,
@@ -619,6 +625,7 @@ impl FalVideoModel {
         response_url: String,
         headers: BTreeMap<String, Option<String>>,
         overrides: FalPollOverrides,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<ai_sdk_rust::ResponseHandlerResult<FalVideoResponse>, String> {
         let poll_interval_millis = overrides
             .poll_interval_millis
@@ -633,7 +640,8 @@ impl FalVideoModel {
             match get_from_api(
                 GetFromApiOptions::new(response_url.clone())
                     .with_headers(headers.clone())
-                    .with_environment(RuntimeEnvironment::unknown()),
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
                 move |request| (transport)(request),
                 |request, response| {
                     create_json_response_handler(
@@ -668,7 +676,13 @@ impl FalVideoModel {
                 ));
             }
 
-            delay(Some(poll_interval_millis as i64)).await;
+            let mut delay_options = DelayOptions::new();
+            if let Some(abort_signal) = abort_signal.clone() {
+                delay_options = delay_options.with_abort_signal(abort_signal);
+            }
+            delay_with_options(Some(poll_interval_millis as i64), delay_options)
+                .await
+                .map_err(|error| error.to_string())?;
         }
     }
 
@@ -1632,17 +1646,24 @@ fn fal_provider_api_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{FalProviderSettings, FalTransport, FalTransportFuture, create_fal};
+    use super::{
+        FalProviderSettings, FalTransport, FalTransportFuture, create_fal, fal_image_metadata,
+        fal_image_request_body, fal_image_response, fal_video_request_body,
+    };
     use ai_sdk_rust::{
-        FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
-        VideoModel, VideoModelCallOptions, Warning,
+        FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile,
+        ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, VideoModel,
+        VideoModelCallOptions, Warning,
     };
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
     use url::Url;
 
@@ -1666,6 +1687,29 @@ mod tests {
         }
     }
 
+    fn poll_until_ready<F>(future: F, timeout: Duration) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        let start = Instant::now();
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => {
+                    assert!(
+                        start.elapsed() <= timeout,
+                        "future did not complete within {timeout:?}"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
     fn fixed_timestamp() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
     }
@@ -1679,6 +1723,264 @@ mod tests {
             panic!("expected text request body");
         };
         serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    fn fal_provider_options(value: serde_json::Value) -> ProviderOptions {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "fal".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        provider_options
+    }
+
+    #[test]
+    #[ignore = "requires FAL_API_KEY or FAL_KEY and performs live fal image/video generation"]
+    fn live_fal_image_and_video_generation_validate_provider_contract() {
+        if env::var("FAL_API_KEY")
+            .or_else(|_| env::var("FAL_KEY"))
+            .is_err()
+        {
+            eprintln!("skipping live fal test: FAL_API_KEY/FAL_KEY is not set");
+            return;
+        }
+
+        let provider = create_fal(FalProviderSettings::new());
+        let image = poll_until_ready(
+            provider
+                .image("fal-ai/qwen-image")
+                .do_generate(ImageModelCallOptions::new(1).with_prompt("A small blue cube")),
+            Duration::from_secs(180),
+        );
+        let video = poll_until_ready(
+            provider
+                .video("fal-ai/minimax/video-01")
+                .do_generate(VideoModelCallOptions::new(1).with_prompt("A small blue cube")),
+            Duration::from_secs(240),
+        );
+
+        assert!(!image.images.is_empty());
+        assert!(!video.videos.is_empty());
+    }
+
+    #[test]
+    fn fal_image_model_converts_camel_case_provider_options_to_snake_case_for_api() {
+        let (body, warnings) = fal_image_request_body(
+            &ImageModelCallOptions::new(2)
+                .with_prompt("A sketch")
+                .with_provider_options(fal_provider_options(json!({
+                    "guidanceScale": 7.5,
+                    "numInferenceSteps": 30,
+                    "enableSafetyChecker": true,
+                    "outputFormat": "png",
+                    "syncMode": true,
+                    "safetyTolerance": "5",
+                    "customOption": "kept"
+                }))),
+        )
+        .expect("request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "prompt": "A sketch",
+                "num_images": 2,
+                "guidance_scale": 7.5,
+                "num_inference_steps": 30,
+                "enable_safety_checker": true,
+                "output_format": "png",
+                "sync_mode": true,
+                "safety_tolerance": "5",
+                "customOption": "kept"
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn fal_image_model_accepts_deprecated_snake_case_provider_options_with_warning() {
+        let (body, warnings) = fal_image_request_body(
+            &ImageModelCallOptions::new(1).with_provider_options(fal_provider_options(json!({
+                "guidance_scale": 3.5,
+                "num_inference_steps": 10,
+                "output_format": "jpeg"
+            }))),
+        )
+        .expect("request body maps");
+
+        assert_eq!(body["guidance_scale"], json!(3.5));
+        assert_eq!(body["num_inference_steps"], json!(10));
+        assert_eq!(body["output_format"], json!("jpeg"));
+        assert!(
+            matches!(&warnings[0], Warning::Other { message } if message.contains("deprecated snake_case"))
+        );
+    }
+
+    #[test]
+    fn fal_image_model_maps_edit_files_masks_urls_base64_and_multiple_images() {
+        let (single_body, single_warnings) = fal_image_request_body(
+            &ImageModelCallOptions::new(1)
+                .with_files(vec![ImageModelFile::file(
+                    "image/png",
+                    FileDataContent::Bytes(vec![1, 2, 3]),
+                )])
+                .with_mask(ImageModelFile::url(
+                    Url::parse("https://example.com/mask.png").expect("valid URL"),
+                )),
+        )
+        .expect("single image edit maps");
+        let (multi_body, multi_warnings) = fal_image_request_body(
+            &ImageModelCallOptions::new(1)
+                .with_files(vec![
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/a.png").expect("valid URL"),
+                    ),
+                    ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("iVBORw==".to_string()),
+                    ),
+                ])
+                .with_provider_options(fal_provider_options(json!({
+                    "useMultipleImages": true
+                }))),
+        )
+        .expect("multiple image edit maps");
+
+        assert_eq!(
+            single_body["image_url"],
+            json!("data:image/png;base64,AQID")
+        );
+        assert_eq!(
+            single_body["mask_url"],
+            json!("https://example.com/mask.png")
+        );
+        assert!(single_warnings.is_empty());
+        assert_eq!(
+            multi_body["image_urls"],
+            json!([
+                "https://example.com/a.png",
+                "data:image/png;base64,iVBORw=="
+            ])
+        );
+        assert!(multi_warnings.is_empty());
+    }
+
+    #[test]
+    fn fal_image_model_parses_single_multiple_null_and_empty_metadata_responses() {
+        let single = fal_image_response(&json!({
+            "image": {
+                "url": "https://fal.example/single.png",
+                "file_name": null,
+                "file_size": null
+            }
+        }))
+        .expect("single image response parses");
+        let multiple = fal_image_response(&json!({
+            "images": [
+                {"url": "https://fal.example/a.png", "width": null, "height": null},
+                {"url": "https://fal.example/b.png", "content_type": "image/png"}
+            ],
+            "timings": {}
+        }))
+        .expect("multiple image response parses");
+        let metadata = fal_image_metadata(single.images[0].clone(), None);
+
+        assert_eq!(single.images.len(), 1);
+        assert_eq!(multiple.images.len(), 2);
+        assert!(metadata.get("fileName").is_none());
+        assert!(metadata.get("fileSize").is_none());
+        assert_eq!(multiple.extra.get("timings"), Some(&json!({})));
+    }
+
+    #[test]
+    fn fal_video_model_maps_provider_options_poll_overrides_and_custom_passthrough() {
+        let (body, warnings, poll) = fal_video_request_body(
+            &VideoModelCallOptions::new(1)
+                .with_prompt("A river")
+                .with_aspect_ratio("16:9")
+                .with_duration(5.0)
+                .with_seed(42)
+                .with_image(ai_sdk_rust::VideoModelFile::file(
+                    "image/png",
+                    FileDataContent::Bytes(vec![1, 2, 3]),
+                ))
+                .with_provider_options(fal_provider_options(json!({
+                    "loop": true,
+                    "motionStrength": 0.7,
+                    "resolution": "720p",
+                    "negativePrompt": "rain",
+                    "promptOptimizer": true,
+                    "pollIntervalMs": 11,
+                    "pollTimeoutMs": 22,
+                    "custom": "value"
+                }))),
+        )
+        .expect("video request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "prompt": "A river",
+                "image_url": "data:image/png;base64,AQID",
+                "aspect_ratio": "16:9",
+                "duration": "5s",
+                "seed": 42,
+                "loop": true,
+                "motion_strength": 0.7,
+                "resolution": "720p",
+                "negative_prompt": "rain",
+                "prompt_optimizer": true,
+                "custom": "value"
+            })
+        );
+        assert!(warnings.is_empty());
+        assert_eq!(poll.poll_interval_millis, Some(11));
+        assert_eq!(poll.poll_timeout_millis, Some(22));
+    }
+
+    #[test]
+    fn fal_video_model_respects_abort_signal_before_queue_submit() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: FalTransport = Arc::new(move |request| -> FalTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request);
+            Box::pin(ready(Ok(json_response(json!({
+                "request_id": "request-123",
+                "response_url": "https://queue.example/request-123"
+            })))))
+        });
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
+            .with_transport(transport);
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(
+            provider.video("luma-dream-machine").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Abort")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("fal"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Aborted"))
+        );
     }
 
     #[test]

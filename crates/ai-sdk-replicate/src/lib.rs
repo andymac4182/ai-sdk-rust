@@ -5,17 +5,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
+    DelayOptions, FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
     ImageModelCallOptions, ImageModelFile, ImageModelResponse, ImageModelResult, JsonObject,
     JsonValue, LoadApiKeyError, LoadApiKeyOptions, ModelType, NoSuchModelError,
     OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, PostJsonToApiOptions,
-    Provider, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
-    ProviderApiResponse, ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithVideoModel,
-    RuntimeEnvironment, VideoModel, VideoModelCallOptions, VideoModelResponse, VideoModelResult,
-    VideoModelVideoData, Warning, combine_headers, convert_image_model_file_to_data_uri,
-    create_binary_response_handler, create_json_error_response_handler,
-    create_json_response_handler, delay, get_from_api, load_api_key, parse_provider_options,
-    post_json_to_api, with_user_agent_suffix, without_trailing_slash,
+    Provider, ProviderAbortSignal, ProviderApiRequest, ProviderApiRequestBody,
+    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
+    ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment, VideoModel,
+    VideoModelCallOptions, VideoModelResponse, VideoModelResult, VideoModelVideoData, Warning,
+    combine_headers, convert_image_model_file_to_data_uri, create_binary_response_handler,
+    create_json_error_response_handler, create_json_response_handler, delay_with_options,
+    get_from_api, load_api_key, parse_provider_options, post_json_to_api, with_user_agent_suffix,
+    without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -302,6 +303,7 @@ impl ReplicateImageModel {
 
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings, prefer_header) =
             match replicate_image_request_body(&self.model_id, &options) {
                 Ok(args) => args,
@@ -331,7 +333,8 @@ impl ReplicateImageModel {
         let response = match post_json_to_api(
             PostJsonToApiOptions::new(self.prediction_url(), request_body)
                 .with_headers(request_headers)
-                .with_environment(RuntimeEnvironment::unknown()),
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
             move |request| (transport)(request),
             |request, response| {
                 create_json_response_handler(
@@ -370,7 +373,9 @@ impl ReplicateImageModel {
         for image_url in urls {
             let transport = Arc::clone(&self.transport);
             match get_from_api(
-                GetFromApiOptions::new(image_url).with_environment(RuntimeEnvironment::unknown()),
+                GetFromApiOptions::new(image_url)
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
                 move |request| (transport)(request),
                 |request, response| {
                     create_binary_response_handler(
@@ -504,6 +509,7 @@ impl ReplicateVideoModel {
 
     async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
         let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
         let (request_body, warnings, prefer_header, poll_overrides) =
             match replicate_video_request_body(&self.model_id, &options) {
                 Ok(args) => args,
@@ -533,7 +539,8 @@ impl ReplicateVideoModel {
         let prediction = match post_json_to_api(
             PostJsonToApiOptions::new(self.prediction_url(), request_body)
                 .with_headers(request_headers.clone())
-                .with_environment(RuntimeEnvironment::unknown()),
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
             move |request| (transport)(request),
             |request, response| {
                 create_json_response_handler(
@@ -568,7 +575,12 @@ impl ReplicateVideoModel {
 
         let response_headers = prediction.response_headers.clone();
         let final_prediction = match self
-            .poll_prediction_if_needed(prediction.value, request_headers, poll_overrides)
+            .poll_prediction_if_needed(
+                prediction.value,
+                request_headers,
+                poll_overrides,
+                abort_signal,
+            )
             .await
         {
             Ok(prediction) => prediction,
@@ -597,6 +609,7 @@ impl ReplicateVideoModel {
         mut prediction: ReplicatePredictionResponse,
         headers: BTreeMap<String, Option<String>>,
         overrides: ReplicatePollOverrides,
+        abort_signal: Option<ProviderAbortSignal>,
     ) -> Result<ReplicatePredictionResponse, String> {
         if !prediction.is_pending() {
             return Ok(prediction);
@@ -617,13 +630,20 @@ impl ReplicateVideoModel {
                 ));
             }
 
-            delay(Some(poll_interval_millis as i64)).await;
+            let mut delay_options = DelayOptions::new();
+            if let Some(abort_signal) = abort_signal.clone() {
+                delay_options = delay_options.with_abort_signal(abort_signal);
+            }
+            delay_with_options(Some(poll_interval_millis as i64), delay_options)
+                .await
+                .map_err(|error| error.to_string())?;
 
             let transport = Arc::clone(&self.transport);
             prediction = get_from_api(
                 GetFromApiOptions::new(prediction.urls.get.clone())
                     .with_headers(headers.clone())
-                    .with_environment(RuntimeEnvironment::unknown()),
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
                 move |request| (transport)(request),
                 |request, response| {
                     create_json_response_handler(
@@ -1427,17 +1447,23 @@ fn replicate_provider_api_response(
 mod tests {
     use super::{
         ReplicateProviderSettings, ReplicateTransport, ReplicateTransportFuture, create_replicate,
+        replicate_image_request_body, replicate_prediction_response, replicate_video_request_body,
+        replicate_video_result_from_prediction,
     };
     use ai_sdk_rust::{
-        FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions,
-        VideoModel, VideoModelCallOptions, Warning,
+        FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile,
+        ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, VideoModel,
+        VideoModelCallOptions, Warning,
     };
     use serde_json::json;
+    use std::env;
     use std::future::Future;
     use std::future::ready;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
     use url::Url;
 
@@ -1461,6 +1487,29 @@ mod tests {
         }
     }
 
+    fn poll_until_ready<F>(future: F, timeout: Duration) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        let start = Instant::now();
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => {
+                    assert!(
+                        start.elapsed() <= timeout,
+                        "future did not complete within {timeout:?}"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
     fn fixed_timestamp() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
     }
@@ -1475,6 +1524,292 @@ mod tests {
         };
 
         serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    fn replicate_provider_options(value: serde_json::Value) -> ProviderOptions {
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "replicate".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        provider_options
+    }
+
+    #[test]
+    #[ignore = "requires REPLICATE_API_TOKEN and performs live Replicate image/video generation"]
+    fn live_replicate_image_and_video_generation_validate_provider_contract() {
+        if env::var("REPLICATE_API_TOKEN").is_err() {
+            eprintln!("skipping live Replicate test: REPLICATE_API_TOKEN is not set");
+            return;
+        }
+
+        let provider = create_replicate(ReplicateProviderSettings::new());
+        let image = poll_until_ready(
+            provider
+                .image("black-forest-labs/flux-schnell")
+                .do_generate(ImageModelCallOptions::new(1).with_prompt("A small blue cube")),
+            Duration::from_secs(180),
+        );
+        let video = poll_until_ready(
+            provider
+                .video("minimax/video-01")
+                .do_generate(VideoModelCallOptions::new(1).with_prompt("A small blue cube")),
+            Duration::from_secs(240),
+        );
+
+        assert!(!image.images.is_empty());
+        assert!(!video.videos.is_empty());
+    }
+
+    #[test]
+    fn replicate_image_model_maps_version_wait_header_and_editing_options() {
+        let (body, warnings, prefer) = replicate_image_request_body(
+            "owner/model:version-123",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("A portrait")
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/input.png").expect("valid URL"),
+                )])
+                .with_mask(ImageModelFile::file(
+                    "image/png",
+                    FileDataContent::Bytes(vec![1, 2, 3]),
+                ))
+                .with_provider_options(replicate_provider_options(json!({
+                    "maxWaitTimeInSeconds": 12,
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 28,
+                    "negative_prompt": "blur",
+                    "output_format": "png",
+                    "output_quality": 80,
+                    "strength": 0.4
+                }))),
+        )
+        .expect("image request body maps");
+
+        assert_eq!(prefer, "wait=12");
+        assert!(warnings.is_empty());
+        assert_eq!(
+            body,
+            json!({
+                "input": {
+                    "prompt": "A portrait",
+                    "num_outputs": 1,
+                    "image": "https://example.com/input.png",
+                    "mask": "data:image/png;base64,AQID",
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 28,
+                    "negative_prompt": "blur",
+                    "output_format": "png",
+                    "output_quality": 80,
+                    "strength": 0.4
+                },
+                "version": "version-123"
+            })
+        );
+    }
+
+    #[test]
+    fn replicate_image_model_warns_for_flux2_image_limit_and_mask() {
+        let files = (0..9)
+            .map(|index| {
+                ImageModelFile::url(
+                    Url::parse(&format!("https://example.com/{index}.png")).expect("valid URL"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let (body, warnings, prefer) = replicate_image_request_body(
+            "black-forest-labs/flux-2-dev",
+            &ImageModelCallOptions::new(1)
+                .with_files(files)
+                .with_mask(ImageModelFile::url(
+                    Url::parse("https://example.com/mask.png").expect("valid URL"),
+                )),
+        )
+        .expect("Flux-2 request body maps");
+
+        assert_eq!(prefer, "wait");
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(
+            body["input"]["input_image"],
+            json!("https://example.com/0.png")
+        );
+        assert_eq!(
+            body["input"]["input_image_8"],
+            json!("https://example.com/7.png")
+        );
+        assert!(body["input"].get("input_image_9").is_none());
+        assert!(body["input"].get("mask").is_none());
+    }
+
+    #[test]
+    fn replicate_video_model_maps_prediction_body_provider_options_and_wait_headers() {
+        let (body, warnings, prefer, poll) = replicate_video_request_body(
+            "minimax/video-01:version-id",
+            &VideoModelCallOptions::new(1)
+                .with_prompt("A rocket launch")
+                .with_aspect_ratio("9:16")
+                .with_resolution("720p")
+                .with_duration(5.0)
+                .with_fps(24.0)
+                .with_seed(42)
+                .with_image(ai_sdk_rust::VideoModelFile::file(
+                    "image/png",
+                    FileDataContent::Base64("iVBORw==".to_string()),
+                ))
+                .with_provider_options(replicate_provider_options(json!({
+                    "maxWaitTimeInSeconds": 5,
+                    "pollIntervalMs": 11,
+                    "pollTimeoutMs": 22,
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 20,
+                    "motion_bucket_id": 127,
+                    "prompt_optimizer": true,
+                    "custom": "value"
+                }))),
+        )
+        .expect("video body maps");
+
+        assert_eq!(prefer, "wait=5");
+        assert!(warnings.is_empty());
+        assert_eq!(poll.poll_interval_millis, Some(11));
+        assert_eq!(poll.poll_timeout_millis, Some(22));
+        assert_eq!(
+            body,
+            json!({
+                "input": {
+                    "prompt": "A rocket launch",
+                    "image": "data:image/png;base64,iVBORw==",
+                    "aspect_ratio": "9:16",
+                    "size": "720p",
+                    "duration": 5.0,
+                    "fps": 24.0,
+                    "seed": 42,
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 20,
+                    "motion_bucket_id": 127,
+                    "prompt_optimizer": true,
+                    "custom": "value"
+                },
+                "version": "version-id"
+            })
+        );
+    }
+
+    #[test]
+    fn replicate_video_model_maps_failed_canceled_and_missing_output_predictions() {
+        let failed = replicate_video_result_from_prediction(
+            "minimax/video-01",
+            replicate_prediction_response(&json!({
+                "id": "prediction-failed",
+                "status": "failed",
+                "error": "bad prompt",
+                "urls": {"get": "https://api.example.com/prediction-failed"}
+            }))
+            .expect("prediction parses"),
+            None,
+            Vec::new(),
+            fixed_timestamp(),
+        );
+        let canceled = replicate_video_result_from_prediction(
+            "minimax/video-01",
+            replicate_prediction_response(&json!({
+                "id": "prediction-canceled",
+                "status": "canceled",
+                "urls": {"get": "https://api.example.com/prediction-canceled"}
+            }))
+            .expect("prediction parses"),
+            None,
+            Vec::new(),
+            fixed_timestamp(),
+        );
+        let missing = replicate_video_result_from_prediction(
+            "minimax/video-01",
+            replicate_prediction_response(&json!({
+                "id": "prediction-empty",
+                "status": "succeeded",
+                "urls": {"get": "https://api.example.com/prediction-empty"}
+            }))
+            .expect("prediction parses"),
+            None,
+            Vec::new(),
+            fixed_timestamp(),
+        );
+
+        assert_eq!(
+            failed
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("replicate"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Video generation failed: bad prompt"))
+        );
+        assert_eq!(
+            canceled
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("replicate"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Video generation was canceled"))
+        );
+        assert_eq!(
+            missing
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("replicate"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("No video URL in response"))
+        );
+    }
+
+    #[test]
+    fn replicate_video_model_respects_abort_signal_before_prediction_submit() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_transport = Arc::clone(&requests);
+        let transport: ReplicateTransport = Arc::new(move |request| -> ReplicateTransportFuture {
+            requests_for_transport
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request);
+            Box::pin(ready(Ok(json_response(json!({
+                "id": "prediction-123",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.mp4",
+                "urls": {"get": "https://api.example.com/v1/predictions/prediction-123"}
+            })))))
+        });
+        let provider = create_replicate(
+            ReplicateProviderSettings::new()
+                .with_api_token("test-token")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport);
+        let abort_controller = ProviderAbortController::new();
+        abort_controller.abort();
+
+        let result = poll_ready(
+            provider.video("minimax/video-01").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Abort")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .len(),
+            0
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("replicate"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Aborted"))
+        );
     }
 
     fn replicate_image_transport() -> (Arc<Mutex<Vec<ProviderApiRequest>>>, ReplicateTransport) {
