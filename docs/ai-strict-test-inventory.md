@@ -10,11 +10,11 @@ Generated from upstream `vercel/ai` after `npx opensrc fetch github:vercel/ai`.
 | Local upstream source | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` |
 | Test files scanned | 546 |
 | Upstream cases scanned | 8762 |
-| Portable cases mapped to named Rust tests | 2145 |
-| Portable cases still missing named Rust tests | 5384 |
+| Portable cases mapped to named Rust tests | 2146 |
+| Portable cases still missing named Rust tests | 5383 |
 | JavaScript-only exceptions | 833 |
 | Type-system-impossible exceptions | 400 |
-| Portable mapped denominator | 2145 / 7529 |
+| Portable mapped denominator | 2146 / 7529 |
 
 This inventory is intentionally stricter than package-level progress. A package can only claim case-level parity after every portable upstream row below is either `portable-mapped` to a named Rust test or explicitly classified as `js-only-documented` or `type-system-impossible`.
 
@@ -46,7 +46,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages/gladia` | `@ai-sdk/gladia` | provider package | `verified` | `crates/ai-sdk-gladia` | 2 | 7 | 0 | 7 | 0 | 0 | `packages-gladia-0001`; `packages-gladia-0002`; `packages-gladia-0003`; `packages-gladia-0004`; `packages-gladia-0005` |
 | `packages/google` | `@ai-sdk/google` | provider package | `verified` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | 21 | 568 | 566 | 0 | 0 | 2 | none |
 | `packages/google-vertex` | `@ai-sdk/google-vertex` | provider package | `verified` | `crates/ai-sdk-google-vertex`; `docs/ai-foundational-provider-inventory.md` | 17 | 204 | 201 | 0 | 3 | 0 | none |
-| `packages/groq` | `@ai-sdk/groq` | provider package | `verified` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | 6 | 95 | 94 | 1 | 0 | 0 | `packages-groq-0067` |
+| `packages/groq` | `@ai-sdk/groq` | provider package | `verified` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | 6 | 95 | 95 | 0 | 0 | 0 | none |
 | `packages/huggingface` | `@ai-sdk/huggingface` | provider package | `verified` | `src/huggingface.rs` | 2 | 37 | 0 | 37 | 0 | 0 | `packages-huggingface-0001`; `packages-huggingface-0002`; `packages-huggingface-0003`; `packages-huggingface-0004`; `packages-huggingface-0005` |
 | `packages/hume` | `@ai-sdk/hume` | provider package | `verified` | `crates/ai-sdk-hume` | 2 | 9 | 0 | 9 | 0 | 0 | `packages-hume-0001`; `packages-hume-0002`; `packages-hume-0003`; `packages-hume-0004`; `packages-hume-0005` |
 | `packages/klingai` | `@ai-sdk/klingai` | provider package | `verified` | `crates/ai-sdk-klingai` | 3 | 90 | 0 | 90 | 0 | 0 | `packages-klingai-0001`; `packages-klingai-0002`; `packages-klingai-0003`; `packages-klingai-0004`; `packages-klingai-0005` |
@@ -5497,7 +5497,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages-groq-0064` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1221` it should not duplicate tool calls when there is an additional empty chunk after the tool call has been completed | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_do_stream_maps_text_reasoning_tools_usage_raw_chunks_and_errors` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-groq-0065` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1357` it should stream tool call that is sent in one chunk | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_do_stream_maps_text_reasoning_tools_usage_raw_chunks_and_errors` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-groq-0066` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1451` it should handle error stream parts | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_do_stream_maps_text_reasoning_tools_usage_raw_chunks_and_errors` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
-| `packages-groq-0067` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1502` it.skipIf should handle unparsable stream parts | `portable-unmapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | missing | strict inventory default | Portable upstream case still needs a named Rust test or an explicit non-portable exception. |
+| `packages-groq-0067` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1502` it.skipIf should handle unparsable stream parts | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_streaming_maps_unparsable_stream_parts` | docs/ai-02-openai-compatible-providers.md | Rust emits a provider-v4 error stream part and error finish reason instead of a JavaScript `ParseResult` rejection |
 | `packages-groq-0068` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1551` it should expose the raw response headers | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_do_stream_maps_text_reasoning_tools_usage_raw_chunks_and_errors` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-groq-0069` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1570` it should send correct streaming request body | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_do_stream_maps_text_reasoning_tools_usage_raw_chunks_and_errors` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-groq-0070` | `packages/groq` | `packages/groq/src/groq-chat-language-model.test.ts:1591` it should pass headers | `portable-mapped` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | `groq_chat_do_stream_maps_text_reasoning_tools_usage_raw_chunks_and_errors` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |

@@ -4,16 +4,16 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 - Displayed package rows: 52
 - Average estimated completion: 36.1%
-- Portable package average: 20.8%
-- Closed package rows: 17 / 52
-- Strict portable verified rows: 7 / 42
-- In-progress rows: 35
+- Portable package average: 20.9%
+- Closed package rows: 18 / 52
+- Strict portable verified rows: 8 / 42
+- In-progress rows: 34
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 8762
-- Strict inventory full portable cases mapped: 2145 / 7529
-- Strict inventory full portable cases unmapped: 5384
-- Displayed-row strict portable test cases mapped: 2145 / 4313
-- Displayed-row strict portable test cases unmapped: 2168
+- Strict inventory full portable cases mapped: 2146 / 7529
+- Strict inventory full portable cases unmapped: 5383
+- Displayed-row strict portable test cases mapped: 2146 / 4313
+- Displayed-row strict portable test cases unmapped: 2167
 
 ## 100% Closed
 
@@ -26,6 +26,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/xai` | 100% | Verified | provider package |
 | `@ai-sdk/cohere` | 100% | Verified | provider package |
 | `@ai-sdk/fireworks` | 100% | Verified | provider package |
+| `@ai-sdk/groq` | 100% | Verified | provider package |
 | `@ai-sdk/devtools` | 100% | JavaScript-only | JavaScript devtools package |
 | `@ai-sdk/codemod` | 100% | JavaScript-only | JavaScript migration tooling |
 | `@ai-sdk/angular` | 100% | JavaScript-only | JavaScript framework adapter |
@@ -59,7 +60,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/elevenlabs` | 0% | In progress | provider package | strict test inventory: 15 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/fal` | 0% | In progress | provider package | strict test inventory: 71 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/gladia` | 0% | In progress | provider package | strict test inventory: 7 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/groq` | 98% | In progress | provider package | strict test inventory: 1 portable upstream cases still need named Rust tests; sample failing IDs: `packages-groq-0067` |
 | `@ai-sdk/huggingface` | 0% | In progress | provider package | strict test inventory: 37 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/hume` | 0% | In progress | provider package | strict test inventory: 9 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/klingai` | 0% | In progress | provider package | strict test inventory: 90 portable upstream cases still need named Rust tests; sample failing IDs:... |

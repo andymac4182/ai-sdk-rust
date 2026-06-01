@@ -2483,6 +2483,38 @@ mod tests {
     }
 
     #[test]
+    fn groq_chat_streaming_maps_unparsable_stream_parts() {
+        let (model, _captured_requests) =
+            groq_model_with_stream("gemma2-9b-it", "data: {unparsable}\n\ndata: [DONE]\n\n");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(groq_prompt())));
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(result.stream.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::Error(error)
+                if error
+                    .error
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|message| message.contains("JSON parsing failed"))
+        )));
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("finish part is emitted");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Error);
+        assert_eq!(finish.usage, Default::default());
+    }
+
+    #[test]
     fn groq_provider_uses_default_base_url_and_function_alias() {
         let model = groq("llama-3.1-8b-instant");
 
