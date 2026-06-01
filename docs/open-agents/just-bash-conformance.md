@@ -21,6 +21,14 @@ Rust-specific tests may add coverage, but they never replace the upstream case
 inventory. Strict parity closes only when every portable upstream row in
 `docs/open-agents/just-bash-parity.md` is verified or explicitly excepted.
 
+## Current Status
+
+Just Bash is now part of the parent TypeScript-to-Rust parity goal and tracked
+alongside Open Agents, AI SDK, Chat SDK, Workflow SDK, and Open Plugin Spec.
+The current parity ledger maps 1,481 upstream rows to named Rust tests or generated corpus proofs, leaves
+8,339 rows `portable-pending`, documents 116 JS-only exceptions, and has 8,339 strict gate gaps. The next closure rows are coordinated in
+`docs/ts-to-rust-migration-tracker.md`.
+
 ## Source Snapshot
 
 | Field | Value |

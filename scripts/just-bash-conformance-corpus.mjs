@@ -2021,6 +2021,35 @@ function renderTable(headers, rows) {
   return lines.join('\n');
 }
 
+function readParityLedgerSummary() {
+  const markdown = fs.readFileSync(parityPath, 'utf8');
+  const fields = new Map();
+
+  for (const line of markdown.split('\n')) {
+    const match = line.match(/^\| ([^|]+) \| ([^|]+) \|$/);
+    if (!match) {
+      continue;
+    }
+    fields.set(match[1].trim(), match[2].trim());
+  }
+
+  return {
+    portablePending: fields.get('Portable pending cases') ?? 'unknown',
+    portableVerified: fields.get('Portable verified cases') ?? 'unknown',
+    jsOnlyDocumented: fields.get('JS-only documented cases') ?? 'unknown',
+    typeSystemImpossible: fields.get('Type-system impossible cases') ?? 'unknown',
+    strictGateGaps: fields.get('Strict gate gaps') ?? 'unknown',
+  };
+}
+
+function formatSummaryCount(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) {
+    return value;
+  }
+  return parsed.toLocaleString('en-US');
+}
+
 function renderDocs(corpus) {
   const kindRows = Object.entries(corpus.summary.byKind)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -2037,6 +2066,7 @@ function renderDocs(corpus) {
   const rustRunnerRows = Object.entries(countCasesBy(rustRunnerCases, 'domain'))
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([domain, count]) => [domain, count]);
+  const parityLedgerSummary = readParityLedgerSummary();
 
   return `# Just Bash Conformance Plan
 
@@ -2060,6 +2090,22 @@ engines:
 Rust-specific tests may add coverage, but they never replace the upstream case
 inventory. Strict parity closes only when every portable upstream row in
 \`docs/open-agents/just-bash-parity.md\` is verified or explicitly excepted.
+
+## Current Status
+
+Just Bash is now part of the parent TypeScript-to-Rust parity goal and tracked
+alongside Open Agents, AI SDK, Chat SDK, Workflow SDK, and Open Plugin Spec.
+The current parity ledger maps ${formatSummaryCount(
+    parityLedgerSummary.portableVerified
+  )} upstream rows to named Rust tests or generated corpus proofs, leaves
+${formatSummaryCount(
+    parityLedgerSummary.portablePending
+  )} rows \`portable-pending\`, documents ${formatSummaryCount(
+    parityLedgerSummary.jsOnlyDocumented
+  )} JS-only exceptions, and has ${formatSummaryCount(
+    parityLedgerSummary.strictGateGaps
+  )} strict gate gaps. The next closure rows are coordinated in
+\`docs/ts-to-rust-migration-tracker.md\`.
 
 ## Source Snapshot
 
