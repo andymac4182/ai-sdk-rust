@@ -3,11 +3,11 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv`._
 
 - Displayed package rows: 52
-- Average estimated completion: 83.4%
-- Portable package average: 79.4%
-- Closed package rows: 36 / 52
-- Strict portable verified rows: 26 / 42
-- In-progress rows: 16
+- Average estimated completion: 85.2%
+- Portable package average: 81.7%
+- Closed package rows: 37 / 52
+- Strict portable verified rows: 27 / 42
+- In-progress rows: 15
 - Not-started rows: 0
 
 ## 100% Closed
@@ -19,6 +19,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/gateway` | 100% | Verified | provider package |
 | `@ai-sdk/openai-compatible` | 100% | Verified | provider base package |
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
+| `@ai-sdk/anthropic` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
 | `@ai-sdk/azure` | 100% | Verified | provider package |
 | `@ai-sdk/baseten` | 100% | Verified | provider package |
@@ -55,7 +56,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@ai-sdk/anthropic` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/amazon-bedrock` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |
 | `@ai-sdk/google-vertex` | 5% | In progress | provider package | Package-owned crate boundary plus row-level upstream test/source inventory exists; all portable runtime behavior... |

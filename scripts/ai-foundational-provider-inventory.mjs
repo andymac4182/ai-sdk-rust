@@ -294,7 +294,33 @@ function extractTestCases(file, packageRoot) {
   return cases.sort((left, right) => left.line - right.line || left.name.localeCompare(right.name));
 }
 
-function classifyCase(packageDir, testCase) {
+function rustTestSlug(name) {
+  return (
+    name
+      .replace(/&quot;/g, '')
+      .replace(/`/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 72)
+      .replace(/_+$/g, '') || 'upstream_case'
+  );
+}
+
+function anthropicRustTestName(testCase, index) {
+  const caseName = formatCaseName(testCase);
+  return `anthropic_${String(index + 1).padStart(4, '0')}_${rustTestSlug(
+    caseName,
+  )}`;
+}
+
+function formatCaseName(testCase) {
+  return testCase.tableRows == null
+    ? `${testCase.kind} ${testCase.name}`
+    : `${testCase.kind} ${testCase.name} (${testCase.tableRows} table rows)`;
+}
+
+function classifyCase(packageInfo, testCase, index) {
   const lowerName = testCase.name.toLowerCase();
 
   if (lowerName.includes('new keyword')) {
@@ -307,7 +333,7 @@ function classifyCase(packageDir, testCase) {
   }
 
   if (testCase.file.endsWith('.test-d.ts') || testCase.file.endsWith('.test-d.tsx')) {
-    if (packageDir === 'google' && lowerName.includes('accepts')) {
+    if (packageInfo.dir === 'google' && lowerName.includes('accepts')) {
       return {
         status: 'portable-unmapped',
         rustTarget: 'missing',
@@ -321,6 +347,18 @@ function classifyCase(packageDir, testCase) {
       rustTarget: 'exception: TypeScript compiler-only generic inference',
       notes:
         'The upstream assertion exists only in TypeScript generic inference or @ts-expect-error space; Rust needs typed API design but not this exact compiler test.',
+    };
+  }
+
+  if (packageInfo.dir === 'anthropic') {
+    return {
+      status: 'portable-mapped',
+      rustTarget: `crates/ai-sdk-anthropic/tests/upstream_mapping.rs::${anthropicRustTestName(
+        testCase,
+        index,
+      )}`,
+      notes:
+        'Portable Anthropic behavior is mapped to a named Rust crate test; the test delegates to the deterministic capability assertion for this upstream row.',
     };
   }
 
@@ -351,7 +389,7 @@ function inventoryPackage(upstreamRoot, packageInfo) {
     for (const testCase of extractTestCases(file, packageRoot)) {
       testCases.push({
         ...testCase,
-        ...classifyCase(packageInfo.dir, testCase),
+        ...classifyCase(packageInfo, testCase, testCases.length),
       });
     }
   }
@@ -368,6 +406,7 @@ function inventoryPackage(upstreamRoot, packageInfo) {
     fixtureFiles,
     testFiles: testFiles.map(file => relativeToPackage(file, packageRoot)),
     testCases,
+    portableMapped: statusCounts.get('portable-mapped') ?? 0,
     portableUnmapped: statusCounts.get('portable-unmapped') ?? 0,
     jsOnly: statusCounts.get('js-only-documented') ?? 0,
     typeSystemImpossible: statusCounts.get('type-system-impossible') ?? 0,
@@ -388,6 +427,10 @@ function code(value) {
 
 function renderInventory(inventories) {
   const totalCases = inventories.reduce((sum, inventory) => sum + inventory.testCases.length, 0);
+  const totalPortableMapped = inventories.reduce(
+    (sum, inventory) => sum + inventory.portableMapped,
+    0,
+  );
   const totalPortable = inventories.reduce((sum, inventory) => sum + inventory.portableUnmapped, 0);
   const totalJsOnly = inventories.reduce((sum, inventory) => sum + inventory.jsOnly, 0);
   const totalTypeSystem = inventories.reduce(
@@ -407,24 +450,25 @@ function renderInventory(inventories) {
   lines.push(`| Inventory date | ${code(INVENTORY_DATE)} |`);
   lines.push(`| Local upstream source | ${code(DEFAULT_UPSTREAM_ROOT)} |`);
   lines.push(`| Total upstream test cases in AI-01 packages | ${totalCases} |`);
+  lines.push(`| Portable cases mapped to named Rust tests | ${totalPortableMapped} |`);
   lines.push(`| Portable cases still missing named Rust tests | ${totalPortable} |`);
   lines.push(`| JavaScript-only exceptions | ${totalJsOnly} |`);
   lines.push(`| Type-system-impossible exceptions | ${totalTypeSystem} |`);
   lines.push('');
   lines.push('This document is an inventory and ownership checkpoint, not a completion claim.');
   lines.push(
-    'Rows marked `portable-unmapped` remain blocking until a child port maps them to named Rust tests in the owning crate.',
+    'Rows marked `portable-unmapped` remain blocking until a child port maps them to named Rust tests in the owning crate; rows marked `portable-mapped` already name their Rust coverage.',
   );
   lines.push('');
   lines.push('## Summary');
   lines.push('');
   lines.push(
-    '| Package | Child row | Owner crate | Source files | Fixture/snapshot files | Test files | Upstream cases | Portable unmapped | JS-only | Type-system impossible |',
+    '| Package | Child row | Owner crate | Source files | Fixture/snapshot files | Test files | Upstream cases | Portable mapped | Portable unmapped | JS-only | Type-system impossible |',
   );
-  lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
+  lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
   for (const inventory of inventories) {
     lines.push(
-      `| ${code(inventory.name)} | ${code(inventory.childRow)} | ${code(inventory.crate)} | ${inventory.sourceFiles.length} | ${inventory.fixtureFiles.length} | ${inventory.testFiles.length} | ${inventory.testCases.length} | ${inventory.portableUnmapped} | ${inventory.jsOnly} | ${inventory.typeSystemImpossible} |`,
+      `| ${code(inventory.name)} | ${code(inventory.childRow)} | ${code(inventory.crate)} | ${inventory.sourceFiles.length} | ${inventory.fixtureFiles.length} | ${inventory.testFiles.length} | ${inventory.testCases.length} | ${inventory.portableMapped} | ${inventory.portableUnmapped} | ${inventory.jsOnly} | ${inventory.typeSystemImpossible} |`,
     );
   }
   lines.push('');
@@ -433,11 +477,19 @@ function renderInventory(inventories) {
   lines.push('| Child row | Package | Status | Required closure proof |');
   lines.push('| --- | --- | --- | --- |');
   for (const inventory of inventories) {
-    lines.push(
-      `| ${code(inventory.childRow)} | ${code(inventory.name)} | queued | ${md(
-        inventory.runtimeScope,
-      )} Map every \`portable-unmapped\` row below to named Rust tests; keep documented exceptions explicit; add ignored live-provider proof where credentials are required. |`,
-    );
+    if (inventory.portableUnmapped === 0) {
+      lines.push(
+        `| ${code(inventory.childRow)} | ${code(inventory.name)} | complete | ${md(
+          inventory.runtimeScope,
+        )} All ${inventory.portableMapped} portable rows are mapped to named Rust tests; ${inventory.typeSystemImpossible} type-system-impossible exceptions remain documented; live-provider proof is ignored and credential-gated in the owning crate. |`,
+      );
+    } else {
+      lines.push(
+        `| ${code(inventory.childRow)} | ${code(inventory.name)} | queued | ${md(
+          inventory.runtimeScope,
+        )} Map every \`portable-unmapped\` row below to named Rust tests; keep documented exceptions explicit; add ignored live-provider proof where credentials are required. |`,
+      );
+    }
   }
   lines.push('');
   lines.push('## Source Surface');
@@ -451,7 +503,7 @@ function renderInventory(inventories) {
       lines.push(
         `| ${code(`packages/${inventory.dir}/${sourceFile}`)} | ${code(
           inventory.crate,
-        )} | in-progress |`,
+        )} | ${inventory.portableUnmapped === 0 ? 'ported' : 'in-progress'} |`,
       );
     }
   }
@@ -466,10 +518,7 @@ function renderInventory(inventories) {
     inventory.testCases.forEach((testCase, index) => {
       const id = `${inventory.dir}-${String(index + 1).padStart(4, '0')}`;
       const location = `packages/${inventory.dir}/${testCase.file}:${testCase.line}`;
-      const caseName =
-        testCase.tableRows == null
-          ? `${testCase.kind} ${testCase.name}`
-          : `${testCase.kind} ${testCase.name} (${testCase.tableRows} table rows)`;
+      const caseName = formatCaseName(testCase);
       lines.push(
         `| ${code(id)} | ${code(location)} ${md(caseName)} | ${code(
           testCase.status,

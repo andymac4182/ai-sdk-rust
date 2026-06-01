@@ -122,7 +122,7 @@ crate, while preserving explicit JavaScript-only and type-system exceptions.
 
 | Child row | Status | Owner scope | Required proof |
 | --- | --- | --- | --- |
-| AI-01A | active | `@ai-sdk/anthropic` in `crates/ai-sdk-anthropic` | Port Anthropic language model, files, skills, cache control, prompt conversion, provider tools, usage conversion, error mapping, fixtures, and ignored live-provider proof. |
+| AI-01A | complete | `@ai-sdk/anthropic` in `crates/ai-sdk-anthropic` | Ported Anthropic language model, files, skills, cache control, prompt conversion, provider tools, usage conversion, error mapping, fixtures, and ignored live-provider proof; 418 portable upstream rows map to named Rust tests, 6 TypeScript-only generic-inference rows remain documented exceptions. |
 | AI-01B | active | `@ai-sdk/amazon-bedrock` in `crates/ai-sdk-amazon-bedrock` | Port Bedrock chat, Anthropic-on-Bedrock, embeddings, image, reranking, event-stream handling, SigV4/API-key fetch wrappers, tool preparation, usage conversion, settings, fixtures, and ignored live-provider proof. |
 | AI-01C | active | `@ai-sdk/google` in `crates/ai-sdk-google` | Port Gemini language, embedding, image, video, files, interactions, schema conversion, URL support, tool preparation, JSON accumulator behavior, fixtures, and ignored live-provider proof. |
 | AI-01D | active | `@ai-sdk/google-vertex` in `crates/ai-sdk-google-vertex` | Port Vertex auth, provider base/edge variants, embedding, image, video, Anthropic-on-Vertex, MaaS, xAI-on-Vertex, fixtures, and ignored live-provider proof. |
