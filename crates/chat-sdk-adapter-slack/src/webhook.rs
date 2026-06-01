@@ -567,7 +567,7 @@ fn classify_json_payload(raw: serde_json::Value, retry: Option<SlackRetry>) -> S
         .get("channel_type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if event_type == "message" && channel_type == "im" {
+    if event_type == "message" && matches!(channel_type, "im" | "mpim") {
         let base = parse_message_event_base(&raw, &event_val, retry);
         let bot_id = optional_string(event_val.get("bot_id").unwrap_or(&serde_json::Value::Null))
             .map(str::to_string);
@@ -1518,6 +1518,34 @@ mod tests {
                 assert_eq!(p.bot_id.as_deref(), Some("B123"));
                 assert_eq!(p.base.channel_id, "D123");
                 assert_eq!(p.subtype.as_deref(), Some("bot_message"));
+            }
+            _ => panic!("expected direct_message"),
+        }
+    }
+
+    #[test]
+    fn parse_slack_webhook_body_parses_mpim_message_events() {
+        let body = serde_json::json!({
+            "event": {
+                "channel": "G123",
+                "channel_type": "mpim",
+                "text": "hello group",
+                "ts": "1710000000.000003",
+                "type": "message",
+                "user": "U123",
+            },
+            "team_id": "T123",
+            "type": "event_callback",
+        })
+        .to_string();
+
+        let payload = parse_slack_webhook_body(&body, &SlackParseOptions::default()).unwrap();
+
+        match payload {
+            SlackWebhookPayload::DirectMessage(p) => {
+                assert_eq!(p.base.channel_id, "G123");
+                assert_eq!(p.base.text, "hello group");
+                assert_eq!(p.base.thread_ts, "1710000000.000003");
             }
             _ => panic!("expected direct_message"),
         }

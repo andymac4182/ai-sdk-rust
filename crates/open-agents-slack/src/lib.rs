@@ -506,6 +506,12 @@ impl SlackIngress {
         request: SlackHttpRequest,
     ) -> SlackHttpResponse {
         if let Err(error) = self.verify_request(&request) {
+            if route == SlackIngressRoute::EventsApi
+                && error == SlackWebhookVerificationError::MissingHeaders
+                && let Some(response) = url_verification_response(&request)
+            {
+                return response;
+            }
             return SlackHttpResponse::text(
                 401,
                 error.to_string(),
@@ -722,6 +728,21 @@ impl SlackIngress {
         self.state
             .set_if_not_exists(dedupe_key, value, Some(self.options.dedupe_ttl_ms))
             .await
+    }
+}
+
+fn url_verification_response(request: &SlackHttpRequest) -> Option<SlackHttpResponse> {
+    let parse_options = SlackParseOptions {
+        content_type: request.header("content-type"),
+        headers: Some(&request.headers),
+    };
+    match parse_slack_webhook_body(&request.body, &parse_options).ok()? {
+        SlackWebhookPayload::UrlVerification(payload) => Some(SlackHttpResponse::text(
+            200,
+            payload.challenge,
+            SlackIngressOutcome::UrlVerified,
+        )),
+        _ => None,
     }
 }
 
@@ -1022,6 +1043,38 @@ mod tests {
     }
 
     #[test]
+    fn events_api_url_verification_without_signature_returns_challenge() {
+        let (service, router) = service();
+        let body = r#"{"type":"url_verification","challenge":"manifest-challenge"}"#;
+        let request = SlackHttpRequest::new(body).with_header("content-type", "application/json");
+
+        let response = block_on(service.handle_events_api(request));
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "manifest-challenge");
+        assert_eq!(response.outcome, SlackIngressOutcome::UrlVerified);
+        assert!(router.starts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn events_api_rejects_unsigned_app_mentions() {
+        let (service, router) = service();
+        let body = r#"{"type":"event_callback","team_id":"T123","event_id":"EvUnsigned","event_time":1700000000,"event":{"type":"app_mention","user":"U123","text":"<@UBOT> ship it","ts":"1700000000.000100","channel":"C123","team":"T123"}}"#;
+        let request = SlackHttpRequest::new(body).with_header("content-type", "application/json");
+
+        let response = block_on(service.handle_events_api(request));
+
+        assert_eq!(response.status, 401);
+        assert_eq!(
+            response.outcome,
+            SlackIngressOutcome::SignatureRejected {
+                error: SlackWebhookVerificationError::MissingHeaders
+            }
+        );
+        assert!(router.starts.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn events_api_rejects_invalid_signature_before_parse() {
         let (service, router) = service();
         let request = SlackHttpRequest::new("not-json")
@@ -1112,6 +1165,24 @@ mod tests {
             starts[0].target.slack_thread_id,
             "slack:D123:1700000000.000300"
         );
+    }
+
+    #[test]
+    fn mpim_event_starts_run_and_routes_as_group_dm_thread() {
+        let (service, router) = service();
+        let body = r#"{"type":"event_callback","team_id":"T123","event_id":"EvMpim","event_time":1700000000,"event":{"type":"message","channel_type":"mpim","user":"U123","text":"help the group","ts":"1700000000.000350","channel":"G123","team":"T123"}}"#;
+
+        let response = block_on(service.handle_events_api(signed_json(body)));
+
+        assert_eq!(response.status, 200);
+        let starts = router.starts.lock().unwrap();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].source, SlackRunStartSource::DirectMessage);
+        assert_eq!(
+            starts[0].target.slack_thread_id,
+            "slack:G123:1700000000.000350"
+        );
+        assert_eq!(starts[0].text, "help the group");
     }
 
     #[test]
