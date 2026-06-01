@@ -81,6 +81,9 @@ cargo clippy -p open-agents-service --all-targets -- -D warnings
 scripts/open-agents-local-e2e.sh --all-local
 ```
 
+The full ignored live-test and emulator proof registry is
+`docs/live-integration-proof-registry.md`.
+
 Ignored live sandbox smoke:
 
 ```sh

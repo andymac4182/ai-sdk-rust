@@ -1373,10 +1373,18 @@ mod tests {
     #[test]
     #[ignore = "requires live Slack credentials and SLACK_TEST_CHANNEL_ID/SLACK_TEST_USER_ID"]
     fn live_slack_outbound_post_update_react_ephemeral_typing_and_delete() {
-        let bot_token = std::env::var("SLACK_BOT_TOKEN").expect("SLACK_BOT_TOKEN");
-        let signing_secret = std::env::var("SLACK_SIGNING_SECRET").expect("SLACK_SIGNING_SECRET");
-        let channel_id = std::env::var("SLACK_TEST_CHANNEL_ID").expect("SLACK_TEST_CHANNEL_ID");
-        let user_id = std::env::var("SLACK_TEST_USER_ID").expect("SLACK_TEST_USER_ID");
+        let Some(bot_token) = live_slack_env("SLACK_BOT_TOKEN") else {
+            return;
+        };
+        let Some(signing_secret) = live_slack_env("SLACK_SIGNING_SECRET") else {
+            return;
+        };
+        let Some(channel_id) = live_slack_env("SLACK_TEST_CHANNEL_ID") else {
+            return;
+        };
+        let Some(user_id) = live_slack_env("SLACK_TEST_USER_ID") else {
+            return;
+        };
         let adapter = SlackAdapter::new(SlackAdapterOptions::new(bot_token, signing_secret));
         let dispatcher = SlackOutboundDispatcher::new(&adapter);
         let channel_thread_id = encode_thread_id(&channel_id, "");
@@ -1406,5 +1414,15 @@ mod tests {
         let delete_result = block_on(dispatcher.delete(&thread_id, &message_id));
         result.unwrap();
         delete_result.unwrap();
+    }
+
+    fn live_slack_env(name: &'static str) -> Option<String> {
+        match std::env::var(name) {
+            Ok(value) if !value.trim().is_empty() => Some(value),
+            _ => {
+                eprintln!("skipping live Slack outbound smoke because {name} is missing");
+                None
+            }
+        }
     }
 }

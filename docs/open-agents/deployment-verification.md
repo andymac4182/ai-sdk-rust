@@ -67,6 +67,9 @@ cargo test -p open-agents-service
 starts the local Slack emulator and service together. `--matrix` prints the
 coverage table from this guide for CI logs and local handoffs.
 
+The cross-surface live and emulator command registry lives in
+`docs/live-integration-proof-registry.md`.
+
 ## Runtime Selection
 
 `OPEN_AGENTS_RUNTIME=auto` is the default. It selects `gateway` when
