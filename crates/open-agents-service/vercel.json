@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/slack/events.rs": {
+      "maxDuration": 60
+    },
+    "api/slack/interactions.rs": {
+      "maxDuration": 60
+    },
+    "api/slack/commands.rs": {
+      "maxDuration": 60
+    }
+  }
+}
