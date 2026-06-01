@@ -121,6 +121,7 @@ Runs the CI-safe parity gate without live credentials:
   - runs the Chat strict generated-inventory drift check
   - runs the Workflow generated-inventory drift check and parity gate
   - runs the Open Agents parity gate when OA-01 has landed, otherwise reports a skip
+  - runs the Open Plugin Spec conformance gate
   - runs git diff --check for whitespace/status drift
 USAGE
 }
@@ -147,8 +148,10 @@ require_file scripts/workflow-test-inventory.mjs
 require_file scripts/workflow-parity-check.mjs
 require_file scripts/chat-test-inventory.mjs
 require_file docs/chat/test-inventory.md
+require_file scripts/open-plugin-spec-gate.mjs
 require_file docs/workflow-test-inventory.md
 require_file docs/workflow-upstream-parity.md
+require_file docs/open-agents/open-plugin-spec.md
 
 run_step "AI SDK strict test inventory drift check" node scripts/ai-strict-test-inventory.mjs --check
 
@@ -170,6 +173,7 @@ run_step "Chat strict test inventory drift check" node scripts/chat-test-invento
 run_step "Workflow generated inventory drift check" node scripts/workflow-test-inventory.mjs --check
 run_step "Workflow parity gate" node scripts/workflow-parity-check.mjs
 check_open_agents_gate
+run_step "Open Plugin Spec conformance gate" node scripts/open-plugin-spec-gate.mjs --check
 run_step "whitespace drift check" git diff --check
 
 log "PASS: master parity gate completed without live credentials"

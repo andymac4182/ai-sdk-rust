@@ -1505,11 +1505,14 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use crate::provider_utils::{SandboxCommandResult, SandboxRunCommandFuture};
+
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1591,9 +1594,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
+        let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "ai-sdk-rust-agent-skills-{}-{nanos}",
-            std::process::id()
+            "ai-sdk-rust-agent-skills-{}-{nanos}-{counter}",
+            std::process::id(),
         ));
         fs::create_dir_all(&path).expect("temp root created");
         path

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod open_plugin;
+pub mod plugin;
 
 use serde::{Deserialize, Serialize};
 
