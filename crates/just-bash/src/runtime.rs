@@ -874,6 +874,156 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn agent_examples_portable_file_search_text_and_state_workflows_use_virtual_backend() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/project/package.json".to_string(),
+                    r#"{"scripts":{"test":"vitest"},"dependencies":{"left-pad":"1.0.0"}}"#
+                        .to_string(),
+                ),
+                (
+                    "/project/src/index.ts".to_string(),
+                    "import { helper } from './helper';\n// TODO: handle retries\nexport function main() { return helper(); }\n".to_string(),
+                ),
+                (
+                    "/project/src/helper.ts".to_string(),
+                    "export function helper() { return 'ok'; }\n".to_string(),
+                ),
+                (
+                    "/project/src/legacy.ts".to_string(),
+                    "// FIXME: remove legacy path\nexport const legacy = true;\n".to_string(),
+                ),
+                (
+                    "/project/logs/app.log".to_string(),
+                    "INFO boot\nERROR failed request\nWARN retry\n".to_string(),
+                ),
+                (
+                    "/project/users.csv".to_string(),
+                    "name,id,role\nAlice,1,admin\nBob,2,user\n".to_string(),
+                ),
+                (
+                    "/project/.env.example".to_string(),
+                    "API_URL=http://localhost\nFEATURE_FLAG=true\n".to_string(),
+                ),
+            ]),
+            cwd: Some("/project".to_string()),
+            ..BashOptions::default()
+        });
+
+        assert!(env.exec("ls /project").stdout.contains("package.json"));
+        assert_eq!(env.exec("cat package.json").exit_code, 0);
+        let todos = env.exec("grep -r TODO src");
+        assert_eq!(todos.exit_code, 0);
+        assert!(todos.stdout.contains("src/index.ts"));
+        let fixmes = env.exec("grep -rn FIXME src");
+        assert_eq!(fixmes.exit_code, 0);
+        assert!(fixmes.stdout.contains("legacy.ts"));
+        assert_eq!(env.exec("grep -c ERROR logs/app.log").stdout, "1\n");
+        assert_eq!(
+            env.exec("find src -type f -name '*.ts' | wc -l").stdout,
+            "3\n"
+        );
+        assert_eq!(
+            env.exec("awk -F, 'NR>1 {print $3}' users.csv").stdout,
+            "admin\nuser\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/FEATURE_FLAG=true/FEATURE_FLAG=false/' .env.example")
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.exec("head -2 logs/app.log").stdout,
+            "INFO boot\nERROR failed request\n"
+        );
+        assert_eq!(env.exec("tail -1 logs/app.log").stdout, "WARN retry\n");
+
+        let stateful = env.exec(
+            "mkdir -p reports && printf 'alpha' > reports/summary.txt && printf '\\nbeta' >> reports/summary.txt",
+        );
+        assert_eq!(stateful.exit_code, 0);
+        assert_eq!(env.exec("cat reports/summary.txt").stdout, "alpha\nbeta");
+        assert_eq!(
+            env.exec("cp src/index.ts src/index.ts.bak && mv src/index.ts.bak src/index.ts.saved")
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.read_file("/project/src/index.ts.saved").unwrap(),
+            env.read_file("/project/src/index.ts").unwrap()
+        );
+
+        let missing = env.exec("cat reports/missing.txt");
+        assert_eq!(missing.exit_code, 1);
+        assert!(missing.stderr.contains("No such file or directory"));
+        let host = env.exec("/bin/bash -lc 'printf host'");
+        assert_eq!(host.exit_code, 127);
+        assert!(!host.stdout.contains("host"));
+    }
+
+    #[test]
+    fn agent_examples_python_scripting_rows_fail_closed_without_host_runtime() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/scripts/analyze.py".to_string(),
+                    "print('host-python')\n".to_string(),
+                ),
+                (
+                    "/data/sales.csv".to_string(),
+                    "item,amount\nalpha,10\nbeta,20\n".to_string(),
+                ),
+            ]),
+            cwd: Some("/data".to_string()),
+            ..BashOptions::default()
+        });
+
+        let python = env.exec("python3 /scripts/analyze.py");
+        assert_eq!(python.exit_code, 127);
+        assert!(python.stderr.contains("command not found"));
+        assert!(!python.stdout.contains("host-python"));
+        let host_shell = env.exec("/bin/bash -lc 'python3 /scripts/analyze.py'");
+        assert_eq!(host_shell.exit_code, 127);
+        assert!(!host_shell.stdout.contains("host-python"));
+    }
+
+    #[test]
+    fn agent_examples_host_metadata_rows_fail_closed_without_host_runtime() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/project/dist/app.js".to_string(),
+                    "console.log('bundle');\n".to_string(),
+                ),
+                (
+                    "/server/bin/start.sh".to_string(),
+                    "#!/bin/sh\necho start\n".to_string(),
+                ),
+                (
+                    "/server/config/secret.txt".to_string(),
+                    "token=secret\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        let du = env.exec("du -sh /project/dist");
+        assert_eq!(du.exit_code, 127);
+        assert!(du.stderr.contains("command not found"));
+        let writable = env.exec("find /server -type f -perm -600");
+        assert_eq!(writable.exit_code, 0);
+        assert!(writable.stdout.contains("/server/bin/start.sh"));
+        assert!(writable.stdout.contains("/server/config/secret.txt"));
+        let executable = env.exec("find /server -type f -perm -100");
+        assert_eq!(executable.exit_code, 0);
+        assert_eq!(executable.stdout, "");
+        let host_shell = env.exec("/bin/bash -lc 'du -sh /project/dist'");
+        assert_eq!(host_shell.exit_code, 127);
+        assert!(!host_shell.stdout.contains("/project/dist"));
+    }
+
+    #[test]
     fn cat_upstream_command_covers_files_numbering_stdin_and_errors() {
         // maps packages/just-bash/src/commands/cat/cat.test.ts
         let env = Bash::with_options(BashOptions {

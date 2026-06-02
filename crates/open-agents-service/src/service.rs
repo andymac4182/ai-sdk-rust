@@ -2169,6 +2169,40 @@ fn run_just_bash_conformance_probe(
         }));
     }
 
+    let agent_example_corpus = [
+        (
+            "agent-search-count",
+            "mkdir -p src && printf 'TODO: fix\\nready\\n' > src/app.ts && grep -r TODO src | wc -l",
+            "1\n",
+        ),
+        (
+            "agent-csv-filter",
+            "printf 'name,role\\nAlice,admin\\nBob,user\\n' > users.csv && awk -F, 'NR>1 {print $2}' users.csv",
+            "admin\nuser\n",
+        ),
+        (
+            "agent-stateful-report",
+            "mkdir -p reports && printf 'one' > reports/agent.txt && printf '\\ntwo' >> reports/agent.txt && cat reports/agent.txt",
+            "one\ntwo",
+        ),
+    ];
+    let mut agent_example_cases = Vec::new();
+    for (name, command, expected_stdout) in agent_example_corpus {
+        let result = run_probe_command(scenario, command, &cwd);
+        expect_probe_success(name, &result)?;
+        if result.stdout != expected_stdout {
+            return Err(DurableRunAgentError::new(format!(
+                "Just Bash agent-example case {name} stdout mismatch: {:?}",
+                result.stdout
+            )));
+        }
+        agent_example_cases.push(json!({
+            "name": name,
+            "command": command,
+            "stdout": result.stdout,
+        }));
+    }
+
     let false_result = run_probe_command(scenario, "false", &cwd);
     if false_result.exit_code != 1 || !false_result.stdout.is_empty() {
         return Err(DurableRunAgentError::new(format!(
@@ -2193,6 +2227,7 @@ fn run_just_bash_conformance_probe(
         "hostShellExitCode": host_shell.exit_code,
         "hostShellStdout": host_shell.stdout,
         "corpusCases": corpus_cases,
+        "agentExampleCases": agent_example_cases,
         "adapter": "ServiceExperimentalSandbox",
     }))
 }
@@ -3351,6 +3386,62 @@ mod tests {
             .exec(SandboxExecOptions::new("pwd; echo $TEMP_VALUE"))
             .unwrap();
         assert_eq!(reset.stdout, "/workspace\n\n");
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn slack_app_mention_runs_agent_example_just_bash_workflow_through_service_adapter() {
+        let server = TestServer::start().await;
+        let thread_ts = "1710000000.000107";
+        let thread_id = SlackThreadAddress::new("C123", thread_ts).chat_thread_id();
+
+        let response = post(
+            server.addr,
+            SLACK_EVENTS_PATH,
+            &app_mention_body(
+                "run just bash conformance for agent examples",
+                "EvJustBashAgentExamples",
+                thread_ts,
+            ),
+            "application/json",
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        let runtime = server.service.local_runtime();
+        let mapping = runtime
+            .mapping_for_slack_thread_id(&thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let session = runtime
+            .persistence
+            .get_session(&mapping.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let sandbox_state = session.sandbox_state.expect("sandbox state");
+        assert_eq!(sandbox_state.provider, "just-bash");
+
+        let run = runtime.run_for_thread(&thread_id).await.unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Finished);
+        let messages = runtime
+            .persistence
+            .list_chat_messages(&mapping.chat_id)
+            .await
+            .unwrap();
+        let assistant_json = serde_json::to_string(&messages[1].parts).unwrap();
+        assert!(assistant_json.contains("agentExampleCases"));
+        assert!(assistant_json.contains("agent-search-count"));
+        assert!(assistant_json.contains("agent-csv-filter"));
+        assert!(assistant_json.contains("agent-stateful-report"));
+        assert!(assistant_json.contains("hostShellExitCode"));
+        assert!(!assistant_json.contains("host-fallback"));
+
+        let state: SandboxState = serde_json::from_value(sandbox_state.raw).unwrap();
+        let sandbox = connect_sandbox(SandboxConnectConfig::new(state)).unwrap();
+        assert_eq!(sandbox.read_file("reports/agent.txt").unwrap(), "one\ntwo");
 
         server.stop().await;
     }

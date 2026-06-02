@@ -1459,6 +1459,64 @@ const jbc28CaseGroups = [
   },
 ];
 
+const jbc30AgentExampleTestFiles = [
+  'packages/just-bash/src/agent-examples/bug-investigation.test.ts',
+  'packages/just-bash/src/agent-examples/code-review.test.ts',
+  'packages/just-bash/src/agent-examples/codebase-exploration.test.ts',
+  'packages/just-bash/src/agent-examples/config-analysis.test.ts',
+  'packages/just-bash/src/agent-examples/debugging-workflow.test.ts',
+  'packages/just-bash/src/agent-examples/dependency-analysis.test.ts',
+  'packages/just-bash/src/agent-examples/feature-implementation.test.ts',
+  'packages/just-bash/src/agent-examples/log-analysis.test.ts',
+  'packages/just-bash/src/agent-examples/multi-file-migration.test.ts',
+  'packages/just-bash/src/agent-examples/python-scripting.test.ts',
+  'packages/just-bash/src/agent-examples/refactoring-workflow.test.ts',
+  'packages/just-bash/src/agent-examples/security-audit.test.ts',
+  'packages/just-bash/src/agent-examples/text-processing-workflows.test.ts',
+];
+
+const jbc30AgentExampleCaseGroups = [
+  {
+    file: 'packages/just-bash/src/agent-examples/codebase-exploration.test.ts',
+    lines: [232, 240, 247, 255, 266, 273, 281, 291, 301, 308, 320],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::agent-examples::runtime-classification',
+    rustTest:
+      'agent_examples_host_metadata_rows_fail_closed_without_host_runtime; slack_app_mention_runs_agent_example_just_bash_workflow_through_service_adapter',
+    notes:
+      'JBC-30 classifies human-readable ls/du size rows as upstream JS object-file/host-metadata examples. Rust Just Bash does not register du or fall back to a host shell; the service adapter proof keeps those rows closed as documented exclusions.',
+  },
+  {
+    file: 'packages/just-bash/src/agent-examples/security-audit.test.ts',
+    lines: [309, 320, 332, 341, 348, 357, 365, 376, 388, 399, 409, 423],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::agent-examples::runtime-classification',
+    rustTest:
+      'agent_examples_host_metadata_rows_fail_closed_without_host_runtime; slack_app_mention_runs_agent_example_just_bash_workflow_through_service_adapter',
+    notes:
+      'JBC-30 classifies host/object-file permission audit rows as nonportable host metadata examples. Rust Just Bash keeps find -perm inside virtual file metadata and the Open Agents service proof blocks host shell fallback.',
+  },
+  {
+    file: 'packages/just-bash/src/agent-examples/python-scripting.test.ts',
+    lines: [46, 60, 70, 112, 123, 134, 175, 188, 224, 236, 274, 286, 356, 368, 379, 430, 442, 473],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::agent-examples::runtime-classification',
+    rustTest:
+      'agent_examples_python_scripting_rows_fail_closed_without_host_runtime; slack_app_mention_runs_agent_example_just_bash_workflow_through_service_adapter',
+    notes:
+      'JBC-30 classifies python:true rows as optional upstream JS/Python runtime examples. Rust Just Bash has no python3 backend for Open Agents and fails closed without host /bin/bash fallback.',
+  },
+  {
+    files: jbc30AgentExampleTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::agent-examples',
+    rustTest:
+      'agent_examples_portable_file_search_text_and_state_workflows_use_virtual_backend; slack_app_mention_runs_agent_example_just_bash_workflow_through_service_adapter',
+    notes:
+      'JBC-30 maps portable agent-example rows to a Rust virtual-filesystem/search/text/state workflow corpus plus an Open Agents Slack service adapter proof for crate-backed multi-command execution with no host shell fallback.',
+  },
+];
+
 const jbc17ExecutorJsOnlySourceFiles = [
   'packages/just-bash-executor/src/create-executor.ts',
   'packages/just-bash-executor/src/executor-discovery-plugin.ts',
@@ -2392,6 +2450,7 @@ function caseOverrideFor(testCase) {
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
     ...jbc27CaseGroups,
+    ...jbc30AgentExampleCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
