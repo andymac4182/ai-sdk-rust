@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1333,
-      "portable-verified": 338
+      "portable-pending": 1322,
+      "portable-verified": 349
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -75227,13 +75227,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:101:it:should handle unicode \\u escape",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75276,13 +75276,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:107:it:should handle unicode \\U escape for emoji",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75329,9 +75329,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:113:it:should handle hex escape \\x",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75374,13 +75374,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:121:it:should handle width specifier",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75423,13 +75423,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:127:it:should handle precision for floats",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75476,9 +75476,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:13:it:should format integer with %d",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75526,13 +75526,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:133:it:should handle zero-padding",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75575,13 +75575,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:139:it:should handle left-justify with -",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75624,13 +75624,13 @@
         "stderr": null,
         "exitCode": 2
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:147:it:should error with no arguments",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75678,13 +75678,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:155:it:should handle missing arguments gracefully",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75732,13 +75732,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:162:it:should handle non-numeric for %d",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -75791,13 +75791,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:173:it:should display help",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76011,9 +76011,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:20:it:should format float with %f",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76173,9 +76173,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:28:it:should format hex with %x",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76227,9 +76227,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:35:it:should format octal with %o",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76281,9 +76281,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:42:it:should handle literal %%",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76335,9 +76335,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:49:it:should handle multiple arguments",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76389,9 +76389,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:58:it:should handle newline \\n",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76438,9 +76438,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:6:it:should format string with %s",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76492,9 +76492,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:64:it:should handle tab \\t",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76537,13 +76537,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:70:it:should handle backslash \\\\",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-printf",
-        "rustTest": "pending:just-bash-command-printf",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::text-stream",
+        "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76590,9 +76590,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:77:it:should handle carriage return \\r",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76639,9 +76639,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:83:it:should handle octal escape sequences",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76688,9 +76688,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:89:it:should handle escape character \\e for ANSI codes",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [
@@ -76737,9 +76737,9 @@
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/printf/printf.test.ts:95:it:should handle \\E as alias for \\e",
         "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
+        "owner": "crates/just-bash::runtime::text-stream",
         "rustTest": "printf_upstream_command_formats_core_specifiers_and_escapes",
-        "notes": "JB-05 maps the portable printf row to a named Rust test through the runtime/commands module; printf backslash/unicode/remaining rows stay pending.",
+        "notes": "JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.",
         "found": true
       },
       "assertions": [

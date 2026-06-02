@@ -934,10 +934,7 @@ fn command_echo(args: &[String]) -> CommandResult {
     }
     let mut output = args[index..].join(" ");
     if escapes {
-        output = output
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\r", "\r");
+        output = process_backslash_escapes(&output, EscapeMode::Echo);
     }
     if newline {
         output.push('\n');
@@ -946,23 +943,56 @@ fn command_echo(args: &[String]) -> CommandResult {
 }
 
 fn command_printf(args: &[String]) -> CommandResult {
+    if args.first().is_some_and(|arg| arg == "--help") {
+        return stdout_result("printf FORMAT [ARGUMENT]...\n");
+    }
     let Some(format) = args.first() else {
-        return CommandResult::default();
+        return stderr_result(2, "printf: usage: printf FORMAT [ARGUMENT]...\n");
     };
     let mut output = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
     let mut arg_index = 1;
     let placeholder_count = count_printf_conversions(format);
     if placeholder_count == 0 {
-        output.push_str(&render_printf_format(format, &[], &mut arg_index));
-        return stdout_result(output);
+        output.push_str(&render_printf_format(
+            format,
+            &[],
+            &mut arg_index,
+            &mut stderr,
+            &mut exit_code,
+        ));
+        return CommandResult {
+            stdout: output,
+            stderr,
+            exit_code,
+            ..CommandResult::default()
+        };
     }
     while arg_index < args.len() {
-        output.push_str(&render_printf_format(format, args, &mut arg_index));
+        output.push_str(&render_printf_format(
+            format,
+            args,
+            &mut arg_index,
+            &mut stderr,
+            &mut exit_code,
+        ));
     }
-    stdout_result(output)
+    CommandResult {
+        stdout: output,
+        stderr,
+        exit_code,
+        ..CommandResult::default()
+    }
 }
 
-fn render_printf_format(format: &str, args: &[String], arg_index: &mut usize) -> String {
+fn render_printf_format(
+    format: &str,
+    args: &[String],
+    arg_index: &mut usize,
+    stderr: &mut String,
+    exit_code: &mut i32,
+) -> String {
     let mut output = String::new();
     let mut chars = format.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -972,63 +1002,43 @@ fn render_printf_format(format: &str, args: &[String], arg_index: &mut usize) ->
                 output.push('%');
             }
             '%' => {
-                let specifier = chars.next().unwrap_or('%');
+                let directive = parse_printf_directive(&mut chars);
                 let value = args.get(*arg_index).map(String::as_str).unwrap_or("");
-                if matches!(specifier, 's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o') {
+                if matches!(directive.specifier, 's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o') {
                     *arg_index += usize::from(*arg_index < args.len());
                 }
-                match specifier {
-                    's' => output.push_str(value),
-                    'd' | 'i' => output.push_str(&value.parse::<i64>().unwrap_or(0).to_string()),
-                    'f' => output.push_str(&format!("{:.6}", value.parse::<f64>().unwrap_or(0.0))),
-                    'x' => output.push_str(&format!("{:x}", value.parse::<i64>().unwrap_or(0))),
-                    'X' => output.push_str(&format!("{:X}", value.parse::<i64>().unwrap_or(0))),
-                    'o' => output.push_str(&format!("{:o}", value.parse::<i64>().unwrap_or(0))),
+                let rendered = match directive.specifier {
+                    's' => apply_printf_width(value.to_string(), &directive, false),
+                    'd' | 'i' => {
+                        let number = parse_printf_i64(value, stderr, exit_code);
+                        apply_printf_width(number.to_string(), &directive, true)
+                    }
+                    'f' => {
+                        let number = parse_printf_f64(value, stderr, exit_code);
+                        let precision = directive.precision.unwrap_or(6);
+                        apply_printf_width(format!("{number:.precision$}"), &directive, true)
+                    }
+                    'x' => {
+                        let number = parse_printf_i64(value, stderr, exit_code);
+                        apply_printf_width(format!("{number:x}"), &directive, true)
+                    }
+                    'X' => {
+                        let number = parse_printf_i64(value, stderr, exit_code);
+                        apply_printf_width(format!("{number:X}"), &directive, true)
+                    }
+                    'o' => {
+                        let number = parse_printf_i64(value, stderr, exit_code);
+                        apply_printf_width(format!("{number:o}"), &directive, true)
+                    }
                     other => {
-                        output.push('%');
-                        output.push(other);
+                        let mut raw = String::from("%");
+                        raw.push(other);
+                        raw
                     }
-                }
+                };
+                output.push_str(&rendered);
             }
-            '\\' => match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('t') => output.push('\t'),
-                Some('r') => output.push('\r'),
-                Some('e') | Some('E') => output.push('\u{001b}'),
-                Some('x') => {
-                    let mut hex = String::new();
-                    for _ in 0..2 {
-                        if let Some(next) = chars.peek().copied()
-                            && next.is_ascii_hexdigit()
-                        {
-                            hex.push(next);
-                            chars.next();
-                        }
-                    }
-                    if let Ok(value) = u8::from_str_radix(&hex, 16) {
-                        output.push(value as char);
-                    }
-                }
-                Some(first @ '0'..='7') => {
-                    let mut octal = String::from(first);
-                    for _ in 0..2 {
-                        if let Some(next) = chars.peek().copied()
-                            && matches!(next, '0'..='7')
-                        {
-                            octal.push(next);
-                            chars.next();
-                        }
-                    }
-                    if let Ok(value) = u8::from_str_radix(&octal, 8) {
-                        output.push(value as char);
-                    }
-                }
-                Some(other) => {
-                    output.push('\\');
-                    output.push(other);
-                }
-                None => output.push('\\'),
-            },
+            '\\' => output.push_str(&render_escape(&mut chars, EscapeMode::Printf)),
             _ => output.push(ch),
         }
     }
@@ -1044,11 +1054,218 @@ fn count_printf_conversions(format: &str) -> usize {
         }
         match chars.next() {
             Some('%') | None => {}
-            Some('s' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o') => count += 1,
-            Some(_) => {}
+            Some(ch) => {
+                if matches!(ch, '-' | '0' | '1'..='9' | '.') {
+                    while matches!(chars.peek(), Some('-' | '0'..='9' | '.')) {
+                        chars.next();
+                    }
+                    if matches!(chars.next(), Some('s' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o')) {
+                        count += 1;
+                    }
+                } else if matches!(ch, 's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o') {
+                    count += 1;
+                }
+            }
         }
     }
     count
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EscapeMode {
+    Echo,
+    Printf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrintfDirective {
+    left_justify: bool,
+    zero_pad: bool,
+    width: Option<usize>,
+    precision: Option<usize>,
+    specifier: char,
+}
+
+fn process_backslash_escapes(input: &str, mode: EscapeMode) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            output.push_str(&render_escape(&mut chars, mode));
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn render_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, mode: EscapeMode) -> String {
+    let Some(ch) = chars.next() else {
+        return "\\".to_string();
+    };
+    match ch {
+        'n' => "\n".to_string(),
+        't' => "\t".to_string(),
+        'r' => "\r".to_string(),
+        '\\' => "\\".to_string(),
+        'a' => "\x07".to_string(),
+        'b' => "\x08".to_string(),
+        'f' => "\x0c".to_string(),
+        'v' => "\x0b".to_string(),
+        'e' | 'E' => "\u{001b}".to_string(),
+        'x' => take_radix_escape(chars, 2, 16).unwrap_or_else(|| "\\x".to_string()),
+        'u' if mode == EscapeMode::Printf => {
+            take_radix_escape(chars, 4, 16).unwrap_or_else(|| "\\u".to_string())
+        }
+        'U' if mode == EscapeMode::Printf => {
+            take_radix_escape(chars, 8, 16).unwrap_or_else(|| "\\U".to_string())
+        }
+        first @ '0'..='7' => {
+            let remaining_digits = if mode == EscapeMode::Echo && first == '0' {
+                3
+            } else {
+                2
+            };
+            let mut digits = String::from(first);
+            for _ in 0..remaining_digits {
+                if let Some(next @ '0'..='7') = chars.peek().copied() {
+                    digits.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            u32::from_str_radix(&digits, 8)
+                .ok()
+                .and_then(char::from_u32)
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        }
+        other => {
+            let mut escaped = String::from("\\");
+            escaped.push(other);
+            escaped
+        }
+    }
+}
+
+fn take_radix_escape(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    max_digits: usize,
+    radix: u32,
+) -> Option<String> {
+    let mut digits = String::new();
+    for _ in 0..max_digits {
+        if let Some(next) = chars.peek().copied()
+            && next.is_digit(radix)
+        {
+            digits.push(next);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    u32::from_str_radix(&digits, radix)
+        .ok()
+        .and_then(char::from_u32)
+        .map(|value| value.to_string())
+}
+
+fn parse_printf_directive(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> PrintfDirective {
+    let mut left_justify = false;
+    let mut zero_pad = false;
+    loop {
+        match chars.peek().copied() {
+            Some('-') => {
+                left_justify = true;
+                chars.next();
+            }
+            Some('0') => {
+                zero_pad = true;
+                chars.next();
+            }
+            _ => break,
+        }
+    }
+    let width = take_decimal(chars);
+    let precision = if matches!(chars.peek(), Some('.')) {
+        chars.next();
+        Some(take_decimal(chars).unwrap_or(0))
+    } else {
+        None
+    };
+    let specifier = chars.next().unwrap_or('%');
+    PrintfDirective {
+        left_justify,
+        zero_pad,
+        width,
+        precision,
+        specifier,
+    }
+}
+
+fn take_decimal(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<usize> {
+    let mut digits = String::new();
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn apply_printf_width(mut value: String, directive: &PrintfDirective, numeric: bool) -> String {
+    if directive.specifier == 's'
+        && let Some(precision) = directive.precision
+    {
+        value = value.chars().take(precision).collect();
+    }
+    let Some(width) = directive.width else {
+        return value;
+    };
+    let current = value.chars().count();
+    if current >= width {
+        return value;
+    }
+    let padding = width - current;
+    if directive.left_justify {
+        value.push_str(&" ".repeat(padding));
+        return value;
+    }
+    let pad = if directive.zero_pad && numeric {
+        '0'
+    } else {
+        ' '
+    };
+    let mut output = pad.to_string().repeat(padding);
+    output.push_str(&value);
+    output
+}
+
+fn parse_printf_i64(value: &str, stderr: &mut String, exit_code: &mut i32) -> i64 {
+    value.parse::<i64>().unwrap_or_else(|_| {
+        if !value.is_empty() {
+            stderr.push_str(&format!("printf: {value}: invalid number\n"));
+            *exit_code = 1;
+        }
+        0
+    })
+}
+
+fn parse_printf_f64(value: &str, stderr: &mut String, exit_code: &mut i32) -> f64 {
+    value.parse::<f64>().unwrap_or_else(|_| {
+        if !value.is_empty() {
+            stderr.push_str(&format!("printf: {value}: invalid number\n"));
+            *exit_code = 1;
+        }
+        0.0
+    })
 }
 
 fn command_printenv(state: &ExecState<'_>, args: &[String]) -> CommandResult {
@@ -1242,6 +1459,12 @@ fn command_grep(
     let mut files_with_matches = false;
     let mut recursive = false;
     let mut word_regexp = false;
+    let mut line_regexp = false;
+    let mut only_matching = false;
+    let mut no_filename = false;
+    let mut before_context = 0usize;
+    let mut after_context = 0usize;
+    let mut max_count: Option<usize> = None;
     let mut pattern = None;
     let mut paths = Vec::new();
     let mut index = 0;
@@ -1254,13 +1477,56 @@ fn command_grep(
             "-l" | "--files-with-matches" => files_with_matches = true,
             "-r" | "-R" | "--recursive" => recursive = true,
             "-w" | "--word-regexp" => word_regexp = true,
+            "-x" | "--line-regexp" => line_regexp = true,
+            "-o" | "--only-matching" => only_matching = true,
+            "-h" | "--no-filename" => no_filename = true,
+            "-E" | "--extended-regexp" => {}
             "-e" => {
                 pattern = args.get(index + 1).cloned();
                 index += 2;
                 break;
             }
+            "-A" | "-B" | "-C" | "-m" => {
+                let value = args
+                    .get(index + 1)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                match arg.as_str() {
+                    "-A" => after_context = value,
+                    "-B" => before_context = value,
+                    "-C" => {
+                        before_context = value;
+                        after_context = value;
+                    }
+                    "-m" => max_count = Some(value),
+                    _ => {}
+                }
+                index += 2;
+                continue;
+            }
+            _ if arg.starts_with("--max-count=") => {
+                max_count = arg["--max-count=".len()..].parse().ok();
+            }
+            "--max-count" => {
+                max_count = args.get(index + 1).and_then(|value| value.parse().ok());
+                index += 2;
+                continue;
+            }
+            _ if arg.starts_with("--after-context=") => {
+                after_context = arg["--after-context=".len()..].parse().unwrap_or(0);
+            }
+            _ if arg.starts_with("--before-context=") => {
+                before_context = arg["--before-context=".len()..].parse().unwrap_or(0);
+            }
+            _ if arg.starts_with("--context=") => {
+                let value = arg["--context=".len()..].parse().unwrap_or(0);
+                before_context = value;
+                after_context = value;
+            }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                for flag in arg[1..].chars() {
+                let flags = arg[1..].chars().collect::<Vec<_>>();
+                let mut flag_index = 0usize;
+                while let Some(flag) = flags.get(flag_index).copied() {
                     match flag {
                         'i' => ignore_case = true,
                         'v' => invert = true,
@@ -1269,9 +1535,37 @@ fn command_grep(
                         'l' => files_with_matches = true,
                         'r' | 'R' => recursive = true,
                         'w' => word_regexp = true,
+                        'x' => line_regexp = true,
+                        'o' => only_matching = true,
+                        'h' => no_filename = true,
                         'E' | 'F' => {}
+                        'A' | 'B' | 'C' | 'm' => {
+                            let tail = flags[flag_index + 1..].iter().collect::<String>();
+                            let value = if tail.is_empty() {
+                                args.get(index + 1)
+                                    .and_then(|value| value.parse::<usize>().ok())
+                                    .unwrap_or(0)
+                            } else {
+                                tail.parse::<usize>().unwrap_or(0)
+                            };
+                            match flag {
+                                'A' => after_context = value,
+                                'B' => before_context = value,
+                                'C' => {
+                                    before_context = value;
+                                    after_context = value;
+                                }
+                                'm' => max_count = Some(value),
+                                _ => {}
+                            }
+                            if tail.is_empty() {
+                                index += 1;
+                            }
+                            break;
+                        }
                         _ => {}
                     }
+                    flag_index += 1;
                 }
             }
             _ => {
@@ -1298,26 +1592,64 @@ fn command_grep(
             Err(error) => return stderr_result(2, format!("grep: {error}\n")),
         }
     };
-    let matcher = match LineMatcher::new(&pattern, ignore_case, word_regexp, mode) {
+    let matcher = match LineMatcher::new_with_line_regexp(
+        &pattern,
+        ignore_case,
+        word_regexp,
+        line_regexp,
+        mode,
+    ) {
         Ok(matcher) => matcher,
         Err(error) => return stderr_result(2, format!("grep: {error}\n")),
     };
     let mut stdout = String::new();
     let mut matches = 0;
-    let show_filename = paths.len() > 1 || recursive;
+    let show_filename = !no_filename && (paths.len() > 1 || recursive);
     for input in inputs {
         let mut file_matched = false;
         let mut file_matches = 0;
-        for (line_index, line) in input.text.lines().enumerate() {
+        let lines = input.text.lines().collect::<Vec<_>>();
+        let mut matched_indexes = Vec::new();
+        for (line_index, line) in lines.iter().enumerate() {
             let matched = matcher.is_match(line);
             if matched ^ invert {
                 matches += 1;
                 file_matches += 1;
                 file_matched = true;
+                matched_indexes.push(line_index);
                 if files_with_matches {
                     continue;
                 }
                 if count_only {
+                    if max_count.is_some_and(|limit| file_matches >= limit) {
+                        break;
+                    }
+                    continue;
+                }
+                if before_context > 0 || after_context > 0 {
+                    if max_count.is_some_and(|limit| file_matches >= limit) {
+                        break;
+                    }
+                    continue;
+                }
+                if only_matching && !invert {
+                    let prefix = GrepOutputPrefix {
+                        label: &input.label,
+                        show_filename,
+                        line_number,
+                    };
+                    for matched_text in matcher.match_texts(line) {
+                        push_grep_line(
+                            &mut stdout,
+                            prefix,
+                            Some(line_index + 1),
+                            &matched_text,
+                            ':',
+                        );
+                    }
+                    if max_count.is_some_and(|limit| file_matches >= limit) {
+                        break;
+                    }
                     continue;
                 }
                 if show_filename && !input.label.is_empty() {
@@ -1330,6 +1662,9 @@ fn command_grep(
                 }
                 stdout.push_str(line);
                 stdout.push('\n');
+                if max_count.is_some_and(|limit| file_matches >= limit) {
+                    break;
+                }
             }
         }
         if files_with_matches && file_matched {
@@ -1341,12 +1676,91 @@ fn command_grep(
                 stdout.push(':');
             }
             stdout.push_str(&format!("{file_matches}\n"));
+        } else if (before_context > 0 || after_context > 0) && file_matched {
+            push_grep_context(
+                &mut stdout,
+                GrepOutputPrefix {
+                    label: &input.label,
+                    show_filename,
+                    line_number,
+                },
+                &lines,
+                &matched_indexes,
+                before_context,
+                after_context,
+            );
         }
     }
     CommandResult {
         exit_code: if matches == 0 { 1 } else { 0 },
         stdout,
         ..CommandResult::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GrepOutputPrefix<'a> {
+    label: &'a str,
+    show_filename: bool,
+    line_number: bool,
+}
+
+fn push_grep_line(
+    stdout: &mut String,
+    prefix: GrepOutputPrefix<'_>,
+    line_number_value: Option<usize>,
+    text: &str,
+    separator: char,
+) {
+    if prefix.show_filename && !prefix.label.is_empty() {
+        stdout.push_str(prefix.label);
+        stdout.push(separator);
+    }
+    if prefix.line_number
+        && let Some(line_number_value) = line_number_value
+    {
+        stdout.push_str(&line_number_value.to_string());
+        stdout.push(separator);
+    }
+    stdout.push_str(text);
+    stdout.push('\n');
+}
+
+fn push_grep_context(
+    stdout: &mut String,
+    prefix: GrepOutputPrefix<'_>,
+    lines: &[&str],
+    matched_indexes: &[usize],
+    before_context: usize,
+    after_context: usize,
+) {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for index in matched_indexes {
+        let start = index.saturating_sub(before_context);
+        let end = (*index + after_context).min(lines.len().saturating_sub(1));
+        if let Some((_, previous_end)) = ranges.last_mut()
+            && start <= *previous_end + 1
+        {
+            *previous_end = (*previous_end).max(end);
+            continue;
+        }
+        ranges.push((start, end));
+    }
+
+    let mut first_range = true;
+    for (start, end) in ranges {
+        if !first_range {
+            stdout.push_str("--\n");
+        }
+        first_range = false;
+        for (index, line) in lines.iter().enumerate().take(end + 1).skip(start) {
+            let separator = if matched_indexes.contains(&index) {
+                ':'
+            } else {
+                '-'
+            };
+            push_grep_line(stdout, prefix, Some(index + 1), line, separator);
+        }
     }
 }
 
@@ -1432,15 +1846,6 @@ enum LineMatcher {
 }
 
 impl LineMatcher {
-    fn new(
-        pattern: &str,
-        ignore_case: bool,
-        word_regexp: bool,
-        mode: GrepMode,
-    ) -> Result<Self, String> {
-        Self::new_with_line_regexp(pattern, ignore_case, word_regexp, false, mode)
-    }
-
     fn new_with_line_regexp(
         pattern: &str,
         ignore_case: bool,
@@ -4927,7 +5332,7 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                     if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
                         continue;
                     }
-                    let replacement = replacement.replace('&', "$0");
+                    let replacement = sed_replacement_to_regex(&replacement);
                     *line = if global {
                         regex.replace_all(line, replacement.as_str()).into_owned()
                     } else {
@@ -5247,6 +5652,34 @@ fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
         global: flags.contains('g'),
         ignore_case: flags.contains('i'),
     })
+}
+
+fn sed_replacement_to_regex(replacement: &str) -> String {
+    let mut output = String::new();
+    let mut chars = replacement.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '&' => output.push_str("$0"),
+            '\\' => match chars.next() {
+                Some('&') => push_regex_replacement_literal(&mut output, '&'),
+                Some(next) => {
+                    push_regex_replacement_literal(&mut output, '\\');
+                    push_regex_replacement_literal(&mut output, next);
+                }
+                None => push_regex_replacement_literal(&mut output, '\\'),
+            },
+            other => push_regex_replacement_literal(&mut output, other),
+        }
+    }
+    output
+}
+
+fn push_regex_replacement_literal(output: &mut String, ch: char) {
+    if ch == '$' {
+        output.push_str("$$");
+    } else {
+        output.push(ch);
+    }
 }
 
 fn split_sed_address_and_command(script: &str) -> (Option<SedAddress>, String) {
@@ -6341,18 +6774,21 @@ fn command_uniq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
     let mut count = false;
     let mut duplicates_only = false;
     let mut unique_only = false;
+    let mut ignore_case = false;
     let mut paths = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-c" | "--count" => count = true,
             "-d" | "--repeated" => duplicates_only = true,
             "-u" | "--unique" => unique_only = true,
+            "-i" | "--ignore-case" => ignore_case = true,
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 for flag in arg[1..].chars() {
                     match flag {
                         'c' => count = true,
                         'd' => duplicates_only = true,
                         'u' => unique_only = true,
+                        'i' => ignore_case = true,
                         _ => {}
                     }
                 }
@@ -6365,33 +6801,47 @@ fn command_uniq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
         Err(error) => return stderr_result(1, format!("uniq: {error}\n")),
     };
     let mut stdout = String::new();
-    let mut previous: Option<String> = None;
+    let mut previous_line: Option<String> = None;
+    let mut previous_key: Option<String> = None;
     let mut group_count = 0;
     for line in input.lines().map(ToString::to_string) {
-        if previous.as_ref().is_some_and(|previous| previous == &line) {
+        let key = uniq_compare_key(&line, ignore_case);
+        if previous_key
+            .as_ref()
+            .is_some_and(|previous| previous == &key)
+        {
             group_count += 1;
         } else {
             emit_uniq_group(
                 &mut stdout,
-                previous.take(),
+                previous_line.take(),
                 group_count,
                 count,
                 duplicates_only,
                 unique_only,
             );
-            previous = Some(line);
+            previous_line = Some(line);
+            previous_key = Some(key);
             group_count = 1;
         }
     }
     emit_uniq_group(
         &mut stdout,
-        previous,
+        previous_line,
         group_count,
         count,
         duplicates_only,
         unique_only,
     );
     stdout_result(stdout)
+}
+
+fn uniq_compare_key(line: &str, ignore_case: bool) -> String {
+    if ignore_case {
+        line.to_lowercase()
+    } else {
+        line.to_string()
+    }
 }
 
 fn emit_uniq_group(
@@ -6531,11 +6981,23 @@ fn command_tr(args: &[String], stdin: &str) -> CommandResult {
     }
     let mut delete = false;
     let mut squeeze = false;
+    let mut complement = false;
     let mut operands = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-d" | "--delete" => delete = true,
             "-s" | "--squeeze-repeats" => squeeze = true,
+            "-c" | "-C" | "--complement" => complement = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'd' => delete = true,
+                        's' => squeeze = true,
+                        'c' | 'C' => complement = true,
+                        _ => {}
+                    }
+                }
+            }
             _ => operands.push(arg.clone()),
         }
     }
@@ -6544,37 +7006,67 @@ fn command_tr(args: &[String], stdin: &str) -> CommandResult {
     };
     let set1 = expand_tr_set(set1);
     if delete {
-        let output = stdin
+        let mut output = stdin
             .chars()
-            .filter(|ch| !set1.contains(ch))
+            .filter(|ch| !tr_set_matches(*ch, &set1, complement))
             .collect::<String>();
-        return stdout_result(output);
-    }
-    if squeeze {
-        let mut output = String::new();
-        let mut previous = None;
-        for ch in stdin.chars() {
-            if Some(ch) == previous && set1.contains(&ch) {
-                continue;
-            }
-            output.push(ch);
-            previous = Some(ch);
+        if squeeze && let Some(set2) = operands.get(1) {
+            let set2 = expand_tr_set(set2);
+            output = squeeze_tr_chars(&output, &set2, false);
         }
         return stdout_result(output);
     }
     let Some(set2) = operands.get(1) else {
+        if squeeze {
+            return stdout_result(squeeze_tr_chars(stdin, &set1, complement));
+        }
         return stderr_result(1, "tr: missing operand after SET1\n");
     };
     let set2 = expand_tr_set(set2);
     let mut output = String::new();
+    let mut previous_translated = None;
     for ch in stdin.chars() {
-        if let Some(index) = set1.iter().position(|candidate| *candidate == ch) {
-            output.push(*set2.get(index).or_else(|| set2.last()).unwrap_or(&ch));
+        if tr_set_matches(ch, &set1, complement) {
+            let replacement = if complement {
+                set2.first().copied().unwrap_or(ch)
+            } else {
+                let index = set1
+                    .iter()
+                    .position(|candidate| *candidate == ch)
+                    .unwrap_or_default();
+                set2.get(index)
+                    .or_else(|| set2.last())
+                    .copied()
+                    .unwrap_or(ch)
+            };
+            if squeeze && Some(replacement) == previous_translated {
+                continue;
+            }
+            output.push(replacement);
+            previous_translated = Some(replacement);
         } else {
             output.push(ch);
+            previous_translated = None;
         }
     }
     stdout_result(output)
+}
+
+fn tr_set_matches(ch: char, set: &[char], complement: bool) -> bool {
+    set.contains(&ch) ^ complement
+}
+
+fn squeeze_tr_chars(input: &str, set: &[char], complement: bool) -> String {
+    let mut output = String::new();
+    let mut previous = None;
+    for ch in input.chars() {
+        if Some(ch) == previous && tr_set_matches(ch, set, complement) {
+            continue;
+        }
+        output.push(ch);
+        previous = Some(ch);
+    }
+    output
 }
 
 fn expand_tr_set(value: &str) -> Vec<char> {
@@ -6582,6 +7074,11 @@ fn expand_tr_set(value: &str) -> Vec<char> {
     let mut expanded = Vec::new();
     let mut index = 0;
     while index < chars.len() {
+        if let Some((class, next_index)) = parse_tr_posix_class(&chars, index) {
+            expanded.extend(class);
+            index = next_index;
+            continue;
+        }
         if index + 2 < chars.len() && chars[index + 1] == '-' {
             let start = chars[index] as u32;
             let end = chars[index + 2] as u32;
@@ -6599,6 +7096,54 @@ fn expand_tr_set(value: &str) -> Vec<char> {
         index += 1;
     }
     expanded
+}
+
+fn parse_tr_posix_class(chars: &[char], index: usize) -> Option<(Vec<char>, usize)> {
+    if chars.get(index) != Some(&'[') || chars.get(index + 1) != Some(&':') {
+        return None;
+    }
+    let mut end = index + 2;
+    while end + 1 < chars.len() {
+        if chars[end] == ':' && chars[end + 1] == ']' {
+            let name = chars[index + 2..end].iter().collect::<String>();
+            return tr_posix_class_chars(&name).map(|class| (class, end + 2));
+        }
+        end += 1;
+    }
+    None
+}
+
+fn tr_posix_class_chars(name: &str) -> Option<Vec<char>> {
+    let ranges = match name {
+        "alnum" => vec![('0', '9'), ('A', 'Z'), ('a', 'z')],
+        "alpha" => vec![('A', 'Z'), ('a', 'z')],
+        "digit" => vec![('0', '9')],
+        "lower" => vec![('a', 'z')],
+        "upper" => vec![('A', 'Z')],
+        "xdigit" => vec![('0', '9'), ('A', 'F'), ('a', 'f')],
+        _ => return tr_named_posix_class_chars(name),
+    };
+    Some(
+        ranges
+            .into_iter()
+            .flat_map(|(start, end)| (start as u32..=end as u32).filter_map(char::from_u32))
+            .collect(),
+    )
+}
+
+fn tr_named_posix_class_chars(name: &str) -> Option<Vec<char>> {
+    let chars = match name {
+        "blank" => vec!['\t', ' '],
+        "space" => vec!['\t', '\n', '\x0b', '\x0c', '\r', ' '],
+        "punct" => (b'!'..=b'/')
+            .chain(b':'..=b'@')
+            .chain(b'['..=b'`')
+            .chain(b'{'..=b'~')
+            .map(char::from)
+            .collect(),
+        _ => return None,
+    };
+    Some(chars)
 }
 
 fn unescape_tr_set(value: &str) -> String {

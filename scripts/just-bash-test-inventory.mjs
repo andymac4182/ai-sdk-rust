@@ -1533,6 +1533,149 @@ const jbc22CaseGroups = [
   },
 ];
 
+const jbc23CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/echo/echo.binary.test.ts',
+    lines: [6, 20, 29, 42, 54, 66],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-stream',
+    rustTest: 'echo_upstream_command_handles_newline_and_escape_flags',
+    notes:
+      'JBC-23 verifies portable echo -e binary hex/octal escapes, null bytes, virtual-file redirects, and cat round trips without host echo.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/printf/printf.test.ts',
+    lines: [
+      6, 13, 20, 28, 35, 42, 49, 58, 64, 70, 77, 83, 89, 95, 101, 107,
+      113, 121, 127, 133, 139, 147, 155, 162, 173,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-stream',
+    rustTest: 'printf_upstream_command_formats_core_specifiers_and_escapes',
+    notes:
+      'JBC-23 verifies portable printf specifiers, escapes, width/precision, usage errors, missing args, invalid numeric warnings, and help output.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/printf/escapes.test.ts',
+    lines: [
+      6, 10, 14, 18, 22, 26, 30, 34, 40, 44, 48, 54, 58, 62, 71, 75, 79,
+      85, 89, 93, 97, 103, 107, 111, 115, 121, 127, 136, 140, 144, 148,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-stream',
+    rustTest: 'printf_upstream_command_formats_core_specifiers_and_escapes',
+    notes:
+      'JBC-23 verifies printf escape processing plus the user-visible width and precision behavior backed by the upstream escape helpers.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/printf/printf.binary.test.ts',
+    lines: [6, 20, 29, 42, 54, 66],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-stream',
+    rustTest: 'printf_upstream_command_formats_core_specifiers_and_escapes',
+    notes:
+      'JBC-23 verifies portable printf binary hex/octal escapes, null bytes, virtual-file redirects, and cat round trips; base64 remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.advanced.test.ts',
+    lines: [
+      7, 27, 37, 50, 59, 68, 80, 89, 111, 118, 125, 132, 139, 146, 158,
+      171, 180, 189, 198, 207, 218, 227, 236, 256, 268, 280, 292,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_grep_rg_sed_and_awk_close_upstream_rows',
+    notes:
+      'JBC-23 verifies portable grep pipe chains, only-matching, context, max-count, whole-line matching, no-filename, and recursive no-filename rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.test.ts',
+    lines: [118, 126, 135, 143, 156, 164, 172, 180, 198, 208, 218, 232, 243, 254],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_grep_rg_sed_and_awk_close_upstream_rows',
+    notes:
+      'JBC-23 verifies portable sed empty replacements, delete/substitute ranges, case-insensitive substitutions, multiple -e scripts, and ampersand replacement escaping.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/head/head.test.ts',
+    lines: [99],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes: 'JBC-23 verifies the remaining portable head -n 1 first-line row.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tail/tail.test.ts',
+    lines: [91],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes: 'JBC-23 verifies the remaining portable tail -n 1 last-line row.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/wc/wc.test.ts',
+    lines: [48, 77, 116],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-23 verifies portable wc combined -lw, empty-file counts, and newline-terminated line counts.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sort/sort.test.ts',
+    lines: [99, 108, 120, 129, 138, 149, 158],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-23 verifies portable sort combined numeric/reverse flags, ignore-case variants, case-folded unique count, field sort, and help output.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/cut/cut.utf8-stdin.test.ts',
+    lines: [5, 13],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes: 'JBC-23 verifies cut UTF-8 stdin codepoint slicing and delimiter field preservation.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tr/tr.utf8-stdin.test.ts',
+    lines: [5, 12],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes: 'JBC-23 verifies tr UTF-8 stdin translation and multibyte pass-through.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tr/tr.complement.test.ts',
+    lines: [6, 14, 23, 29, 35, 43, 50, 61, 70],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-23 verifies tr complement delete/translate/squeeze behavior plus POSIX alnum/alpha classes.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/uniq/uniq.utf8-stdin.test.ts',
+    lines: [5, 12],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-23 verifies uniq UTF-8 stdin preservation and Unicode-aware case folding without corrupting surviving output.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/uniq/uniq.binary.test.ts',
+    lines: [5, 24],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows',
+    notes:
+      'JBC-23 verifies uniq binary-style line dedupe and UTF-8 leading-byte preservation under -i.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1575,6 +1718,7 @@ function caseOverrideFor(testCase) {
     ...jbc19CaseGroups,
     ...jbc20CaseGroups,
     ...jbc22CaseGroups,
+    ...jbc23CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

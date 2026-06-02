@@ -409,6 +409,50 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(env.exec("echo \"hello\" 'world'").stdout, "hello world\n");
         assert_eq!(env.exec("echo -e 'a\\nb\\nc'").stdout, "a\nb\nc\n");
         assert_eq!(env.exec("echo -- -n").stdout, "-- -n\n");
+
+        let hex = env.exec("echo -ne '\\x80\\x90\\xa0\\xb0\\xff'");
+        assert_eq!(hex.exit_code, 0);
+        assert_eq!(
+            hex.stdout.chars().map(|ch| ch as u32).collect::<Vec<_>>(),
+            vec![0x80, 0x90, 0xa0, 0xb0, 0xff]
+        );
+        assert_eq!(env.exec("echo -ne 'A\\x00B\\x00C'").stdout, "A\0B\0C");
+        env.exec("echo -ne '\\x80\\xff\\x90' > /echo-hex.bin");
+        assert_eq!(
+            env.exec("cat /echo-hex.bin")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0x80, 0xff, 0x90]
+        );
+        assert_eq!(
+            env.exec("echo -ne '\\0200\\0220\\0240'")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0o200, 0o220, 0o240]
+        );
+        env.exec("echo -ne '\\0200\\0377' > /echo-octal.bin");
+        assert_eq!(
+            env.exec("cat /echo-octal.bin")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0o200, 0o377]
+        );
+        env.exec("echo -ne '\\x80\\xff\\x00\\x90' > /echo-input.bin");
+        env.exec("cat /echo-input.bin > /echo-output.bin");
+        assert_eq!(
+            env.exec("cat /echo-output.bin")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0x80, 0xff, 0x00, 0x90]
+        );
     }
 
     #[test]
@@ -442,6 +486,95 @@ and exhibited clearly, with a label attached.\n";
             "\u{001b}[1mbold\u{001b}[0m"
         );
         assert_eq!(env.exec("printf '\\x41\\x42\\x43'").stdout, "ABC");
+        assert_eq!(env.exec("printf 'x\\\\y'").stdout, "x\\y");
+        assert_eq!(env.exec("printf '\\a\\b\\f\\v'").stdout, "\x07\x08\x0c\x0b");
+        assert_eq!(env.exec("printf 'a\\0b'").stdout, "a\0b");
+        assert_eq!(env.exec("printf '\\0101'").stdout, "\x081");
+        assert_eq!(env.exec("printf '\\077'").stdout, "?");
+        assert_eq!(env.exec("printf '\\x61\\x62\\x63'").stdout, "abc");
+        assert_eq!(env.exec("printf '\\xAa'").stdout, "\u{00aa}");
+        assert_eq!(env.exec("printf '\\u2764'").stdout, "\u{2764}");
+        assert_eq!(env.exec("printf '\\u41'").stdout, "A");
+        assert_eq!(env.exec("printf '\\u2714'").stdout, "\u{2714}");
+        assert_eq!(env.exec("printf '\\uXYZ'").stdout, "\\uXYZ");
+        assert_eq!(env.exec("printf '\\U0001F600'").stdout, "\u{1f600}");
+        assert_eq!(env.exec("printf '\\U1F4C4'").stdout, "\u{1f4c4}");
+        assert_eq!(env.exec("printf '\\U1F680'").stdout, "\u{1f680}");
+        assert_eq!(env.exec("printf '\\UXYZ'").stdout, "\\UXYZ");
+        assert_eq!(
+            env.exec("printf '\\e[31m\\u2764\\e[0m\\n'").stdout,
+            "\x1b[31m\u{2764}\x1b[0m\n"
+        );
+        assert_eq!(
+            env.exec("printf '\\U1F4C1 folder\\t\\U1F4C4 file'").stdout,
+            "\u{1f4c1} folder\t\u{1f4c4} file"
+        );
+        assert_eq!(env.exec("printf '%10s' hi").stdout, "        hi");
+        assert_eq!(env.exec("printf '%.2f' 3.14159").stdout, "3.14");
+        assert_eq!(env.exec("printf '%05d' 42").stdout, "00042");
+        assert_eq!(env.exec("printf '%-10s|' hi").stdout, "hi        |");
+        assert_eq!(env.exec("printf '%.3s' hello").stdout, "hel");
+        assert_eq!(env.exec("printf '%-10.3s' hello").stdout, "hel       ");
+        let no_args = env.exec("printf");
+        assert!(no_args.stderr.contains("usage"));
+        assert_eq!(no_args.exit_code, 2);
+        assert_eq!(env.exec("printf '%s %s' only").stdout, "only ");
+        let invalid_number = env.exec("printf '%d' notanumber");
+        assert_eq!(invalid_number.stdout, "0");
+        assert!(invalid_number.stderr.contains("invalid number"));
+        assert_eq!(invalid_number.exit_code, 1);
+        let help = env.exec("printf --help");
+        assert!(help.stdout.contains("printf"));
+        assert!(help.stdout.contains("FORMAT"));
+        assert_eq!(help.exit_code, 0);
+
+        let binary = env.exec("printf '\\x80\\x90\\xa0\\xb0\\xff'");
+        assert_eq!(binary.exit_code, 0);
+        assert_eq!(
+            binary
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0x80, 0x90, 0xa0, 0xb0, 0xff]
+        );
+        assert_eq!(env.exec("printf 'A\\x00B\\x00C'").stdout, "A\0B\0C");
+        env.exec("printf '\\x80\\xff\\x90' > /printf-hex.bin");
+        assert_eq!(
+            env.exec("cat /printf-hex.bin")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0x80, 0xff, 0x90]
+        );
+        assert_eq!(
+            env.exec("printf '\\200\\220\\240'")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0o200, 0o220, 0o240]
+        );
+        env.exec("printf '\\200\\377' > /printf-octal.bin");
+        assert_eq!(
+            env.exec("cat /printf-octal.bin")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0o200, 0o377]
+        );
+        env.exec("printf '\\x80\\xff\\x00\\x90' > /printf-input.bin");
+        env.exec("cat /printf-input.bin > /printf-output.bin");
+        assert_eq!(
+            env.exec("cat /printf-output.bin")
+                .stdout
+                .chars()
+                .map(|ch| ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0x80, 0xff, 0x00, 0x90]
+        );
     }
 
     #[test]
@@ -1317,9 +1450,40 @@ and exhibited clearly, with a label attached.\n";
                     "hello world\nfoo bar\nhello again\n".to_string(),
                 ),
                 ("/case.txt".to_string(), "Hello\nhello\nHELLO\n".to_string()),
+                (
+                    "/grep-advanced.txt".to_string(),
+                    "hello world hello\nfoo bar\nprice: 100 and 200 dollars\n".to_string(),
+                ),
+                (
+                    "/grep-context.txt".to_string(),
+                    "line1\nline2\nmatch\nline4\nline5\n".to_string(),
+                ),
+                (
+                    "/grep-context-multi.txt".to_string(),
+                    "a\nmatch1\nb\nc\nmatch2\nd\n".to_string(),
+                ),
+                (
+                    "/grep-context-overlap.txt".to_string(),
+                    "a\nmatch1\nb\nmatch2\nc\n".to_string(),
+                ),
+                (
+                    "/grep-max.txt".to_string(),
+                    "line1\nline2\nline3\nline4\nline5\n".to_string(),
+                ),
+                (
+                    "/grep-exact.txt".to_string(),
+                    "foo\nfoobar\nfoo\n".to_string(),
+                ),
                 ("/a.txt".to_string(), "found here\nmatch\n".to_string()),
                 ("/b.txt".to_string(), "nothing\nmatch\n".to_string()),
                 ("/c.txt".to_string(), "also found\n".to_string()),
+                (
+                    "/grep-hn-a.txt".to_string(),
+                    "line1\nmatch\nline3\n".to_string(),
+                ),
+                ("/grep-hn-b.txt".to_string(), "match\n".to_string()),
+                ("/grep-rh/a.txt".to_string(), "content\n".to_string()),
+                ("/grep-rh/b.txt".to_string(), "content\n".to_string()),
                 ("/dir/root.txt".to_string(), "needle here\n".to_string()),
                 (
                     "/dir/sub/file.txt".to_string(),
@@ -1332,6 +1496,10 @@ and exhibited clearly, with a label attached.\n";
                 (
                     "/sed/numbers.txt".to_string(),
                     "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+                ),
+                (
+                    "/sed/case.txt".to_string(),
+                    "Hello HELLO hello\n".to_string(),
                 ),
                 (
                     "/data.txt".to_string(),
@@ -1400,6 +1568,121 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(
             env.exec("grep -E \"hello|foo\" /grep.txt").stdout,
             "hello world\nfoo bar\nhello again\n"
+        );
+        assert_eq!(
+            env.exec("cat /grep.txt | grep hello | head -n 2").stdout,
+            "hello world\nhello again\n"
+        );
+        assert_eq!(env.exec("grep hello /grep.txt | wc -l").stdout.trim(), "2");
+        assert_eq!(
+            env.exec("cat /grep.txt | grep hello | grep again").stdout,
+            "hello again\n"
+        );
+        assert_eq!(
+            env.exec("grep -o hello /grep-advanced.txt").stdout,
+            "hello\nhello\n"
+        );
+        assert_eq!(
+            env.exec("grep --only-matching hello /grep-advanced.txt")
+                .stdout,
+            "hello\nhello\n"
+        );
+        assert_eq!(
+            env.exec("grep -o hello /grep-advanced.txt /grep.txt")
+                .stdout,
+            "/grep-advanced.txt:hello\n/grep-advanced.txt:hello\n/grep.txt:hello\n/grep.txt:hello\n"
+        );
+        assert_eq!(
+            env.exec("grep -Eo '[0-9]+' /grep-advanced.txt").stdout,
+            "100\n200\n"
+        );
+        assert_eq!(
+            env.exec("grep -oh hello /grep-advanced.txt /grep.txt")
+                .stdout,
+            "hello\nhello\nhello\nhello\n"
+        );
+        assert_eq!(
+            env.exec("grep -A2 match /grep-context.txt").stdout,
+            "match\nline4\nline5\n"
+        );
+        assert_eq!(
+            env.exec("grep -B2 match /grep-context.txt").stdout,
+            "line1\nline2\nmatch\n"
+        );
+        assert_eq!(
+            env.exec("grep -C1 match /grep-context.txt").stdout,
+            "line2\nmatch\nline4\n"
+        );
+        assert_eq!(
+            env.exec("grep -A 1 match /grep-context.txt").stdout,
+            "match\nline4\n"
+        );
+        assert_eq!(
+            env.exec("grep -n -B1 -A1 match /grep-context.txt").stdout,
+            "2-line2\n3:match\n4-line4\n"
+        );
+        assert_eq!(
+            env.exec("grep -A1 match /grep-context-multi.txt").stdout,
+            "match1\nb\n--\nmatch2\nd\n"
+        );
+        assert_eq!(
+            env.exec("grep -C1 match /grep-context-overlap.txt").stdout,
+            "a\nmatch1\nb\nmatch2\nc\n"
+        );
+        assert_eq!(
+            env.exec("grep -m 2 line /grep-max.txt").stdout,
+            "line1\nline2\n"
+        );
+        assert_eq!(
+            env.exec("grep --max-count=1 '[a-z]' /grep-max.txt").stdout,
+            "line1\n"
+        );
+        assert_eq!(
+            env.exec("grep -m3 line /grep-max.txt").stdout,
+            "line1\nline2\nline3\n"
+        );
+        assert_eq!(
+            env.exec("grep -m 1 -A1 match /grep-context-multi.txt")
+                .stdout,
+            "match1\nb\n"
+        );
+        assert_eq!(
+            env.exec("grep -n -m 2 '[a-e]' /grep-max.txt").stdout,
+            "1:line1\n2:line2\n"
+        );
+        assert_eq!(env.exec("grep -x foo /grep-exact.txt").stdout, "foo\nfoo\n");
+        assert_eq!(
+            env.exec("grep --line-regexp foo /grep-exact.txt").stdout,
+            "foo\nfoo\n"
+        );
+        assert_eq!(
+            env.exec("grep -Ex 'f.o' /grep-exact.txt").stdout,
+            "foo\nfoo\n"
+        );
+        assert_eq!(
+            env.exec("grep -h match /a.txt /b.txt").stdout,
+            "match\nmatch\n"
+        );
+        assert_eq!(
+            env.exec("grep --no-filename match /a.txt /b.txt").stdout,
+            "match\nmatch\n"
+        );
+        assert_eq!(
+            env.exec("grep -hn match /a.txt /b.txt").stdout,
+            "2:match\n2:match\n"
+        );
+        assert_eq!(
+            env.exec("grep -hn match /grep-hn-a.txt /grep-hn-b.txt")
+                .stdout,
+            "2:match\n1:match\n"
+        );
+        assert_eq!(
+            env.exec("grep -rh needle /dir").stdout,
+            "needle here\nanother needle\n"
+        );
+        assert_eq!(
+            env.exec("grep -rh content /grep-rh").stdout,
+            "content\ncontent\n"
         );
 
         let rg_env = Bash::with_options(BashOptions {
@@ -1503,6 +1786,61 @@ and exhibited clearly, with a label attached.\n";
             env.exec("sed 's/a/b/' /missing.txt").stderr,
             "sed: /missing.txt: No such file or directory\n"
         );
+        assert_eq!(
+            env.exec("sed 's/world//' /sed/file.txt").stdout,
+            "hello \nhello universe\ngoodbye \n"
+        );
+        assert_eq!(
+            env.exec("sed '2,4d' /sed/numbers.txt").stdout,
+            "line 1\nline 5\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/HELLO/hi/i' /sed/file.txt").stdout,
+            "hi world\nhi universe\ngoodbye world\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/hello/hi/gi' /sed/case.txt").stdout,
+            "hi hi hi\n"
+        );
+        assert_eq!(
+            env.exec("sed '1s/line/LINE/' /sed/numbers.txt").stdout,
+            "LINE 1\nline 2\nline 3\nline 4\nline 5\n"
+        );
+        assert_eq!(
+            env.exec("sed '2s/line/LINE/' /sed/numbers.txt").stdout,
+            "line 1\nLINE 2\nline 3\nline 4\nline 5\n"
+        );
+        assert_eq!(
+            env.exec("sed '$ s/line/LINE/' /sed/numbers.txt").stdout,
+            "line 1\nline 2\nline 3\nline 4\nLINE 5\n"
+        );
+        assert_eq!(
+            env.exec("sed '2,4s/line/LINE/' /sed/numbers.txt").stdout,
+            "line 1\nLINE 2\nLINE 3\nLINE 4\nline 5\n"
+        );
+        assert_eq!(
+            env.exec("sed '$d' /sed/numbers.txt").stdout,
+            "line 1\nline 2\nline 3\nline 4\n"
+        );
+        assert_eq!(
+            env.exec("sed -e 's/hello/hi/' -e 's/world/there/' /sed/file.txt")
+                .stdout,
+            "hi there\nhi universe\ngoodbye there\n"
+        );
+        assert_eq!(
+            env.exec("sed -e 's/line/LINE/' -e 's/1/one/' -e 's/2/two/' /sed/numbers.txt")
+                .stdout,
+            "LINE one\nLINE two\nLINE 3\nLINE 4\nLINE 5\n"
+        );
+        assert_eq!(
+            env.exec("echo 'hello' | sed 's/hello/[&]/'").stdout,
+            "[hello]\n"
+        );
+        assert_eq!(
+            env.exec("echo 'world' | sed 's/world/&-&-&/'").stdout,
+            "world-world-world\n"
+        );
+        assert_eq!(env.exec("echo 'hello' | sed 's/hello/\\&/'").stdout, "&\n");
 
         assert_eq!(
             env.exec("awk '{print $0}' /data.txt").stdout,
@@ -3150,6 +3488,30 @@ and exhibited clearly, with a label attached.\n";
                     "/text.txt".to_string(),
                     "hello world\nabcdefghij\n".to_string(),
                 ),
+                (
+                    "/first-third.txt".to_string(),
+                    "first\nsecond\nthird\n".to_string(),
+                ),
+                (
+                    "/newline-lines.txt".to_string(),
+                    "line1\nline2\nline3\n".to_string(),
+                ),
+                ("/unicode.txt".to_string(), "漢字\n".to_string()),
+                (
+                    "/unicode-fields.txt".to_string(),
+                    "한글:café:漢字\n".to_string(),
+                ),
+                (
+                    "/unicode-uniq.txt".to_string(),
+                    "한글\n한글\ncafé\n".to_string(),
+                ),
+                ("/unicode-case.txt".to_string(), "café\nCAFÉ\n".to_string()),
+                ("/binary-uniq.txt".to_string(), "a\na\nb\n".to_string()),
+                ("/binary-case.txt".to_string(), "É\né\n".to_string()),
+                (
+                    "/sort-case-dupes.txt".to_string(),
+                    "zebra\nAlpha\nalpha\nZebra\n".to_string(),
+                ),
             ]),
             ..BashOptions::default()
         });
@@ -3177,6 +3539,7 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(env.exec("head /empty.txt").exit_code, 0);
         assert_eq!(env.exec("head -n 1 /single.txt").stdout, "only line\n");
         assert_eq!(env.exec("head -n 1 /no-newline.txt").stdout, "no newline\n");
+        assert_eq!(env.exec("head -n 1 /first-third.txt").stdout, "first\n");
 
         assert_eq!(
             env.exec("tail /twenty.txt").stdout,
@@ -3213,6 +3576,7 @@ and exhibited clearly, with a label attached.\n";
                 .stdout,
             "c\nd\ne\n"
         );
+        assert_eq!(env.exec("tail -n 1 /first-third.txt").stdout, "third\n");
 
         assert!(env.exec("wc /wc.txt").stdout.contains("2 4 20 /wc.txt"));
         assert_eq!(env.exec("wc -l /short.txt").stdout.trim(), "5 /short.txt");
@@ -3232,6 +3596,19 @@ and exhibited clearly, with a label attached.\n";
             "6 /hello.txt"
         );
         assert_eq!(env.exec("wc -w /spaces.txt").stdout.trim(), "3 /spaces.txt");
+        assert_eq!(
+            env.exec("wc -lw /words.txt").stdout.trim(),
+            "2 3 /words.txt"
+        );
+        assert!(
+            env.exec("wc /empty.txt")
+                .stdout
+                .contains("0 0 0 /empty.txt")
+        );
+        assert_eq!(
+            env.exec("wc -l /newline-lines.txt").stdout.trim(),
+            "3 /newline-lines.txt"
+        );
 
         assert_eq!(
             env.exec("sort /names.txt").stdout,
@@ -3247,6 +3624,10 @@ and exhibited clearly, with a label attached.\n";
             "20\n10\n5\n2\n1\n"
         );
         assert_eq!(
+            env.exec("sort -nr /numbers.txt").stdout,
+            "20\n10\n5\n2\n1\n"
+        );
+        assert_eq!(
             env.exec("sort -u /duplicates.txt").stdout,
             "apple\nbanana\ncherry\n"
         );
@@ -3259,6 +3640,47 @@ and exhibited clearly, with a label attached.\n";
             env.exec("sort /case-mixed.txt").stdout,
             "alpha\nAlpha\nzebra\nZebra\n"
         );
+        assert_eq!(
+            env.exec("sort -f /case-mixed.txt").stdout,
+            "alpha\nAlpha\nzebra\nZebra\n"
+        );
+        assert_eq!(
+            env.exec("sort --ignore-case /case-mixed.txt").stdout,
+            "alpha\nAlpha\nzebra\nZebra\n"
+        );
+        assert_eq!(
+            env.exec("echo -e 'Banana\\napple\\nCherry' | sort --ignore-case")
+                .stdout,
+            "apple\nBanana\nCherry\n"
+        );
+        assert_eq!(
+            env.exec("sort -fr /case-mixed.txt").stdout,
+            "zebra\nZebra\nalpha\nAlpha\n"
+        );
+        assert_eq!(
+            env.exec("echo -e 'apple\\nBanana\\ncherry' | sort -fr")
+                .stdout,
+            "cherry\nBanana\napple\n"
+        );
+        assert_eq!(
+            env.exec("sort -fu /sort-case-dupes.txt")
+                .stdout
+                .lines()
+                .count(),
+            2
+        );
+        assert_eq!(
+            env.exec("sort -k2 -f /columns.txt").stdout,
+            "Bob 20\nJohn 25\nAlice 30\nDavid 35\n"
+        );
+        assert_eq!(
+            env.exec("echo -e '1 Zebra\\n2 apple\\n3 BANANA' | sort -f -k2")
+                .stdout,
+            "2 apple\n3 BANANA\n1 Zebra\n"
+        );
+        let sort_help = env.exec("sort --help");
+        assert!(sort_help.stdout.contains("Usage: sort"));
+        assert_eq!(sort_help.exit_code, 0);
         assert_eq!(
             env.exec("sort /missing.txt").stderr,
             "sort: /missing.txt: No such file or directory\n"
@@ -3288,6 +3710,13 @@ and exhibited clearly, with a label attached.\n";
             "uniq: /missing.txt: No such file or directory\n"
         );
         assert_eq!(env.exec("echo -n \"\" | uniq").stdout, "");
+        assert_eq!(
+            env.exec("cat /unicode-uniq.txt | uniq").stdout,
+            "한글\ncafé\n"
+        );
+        assert_eq!(env.exec("cat /unicode-case.txt | uniq -i").stdout, "café\n");
+        assert_eq!(env.exec("uniq /binary-uniq.txt").stdout, "a\nb\n");
+        assert_eq!(env.exec("uniq -i /binary-case.txt").stdout, "É\n");
 
         assert_eq!(env.exec("cut -d: -f1 /passwd.txt").stdout, "root\nuser\n");
         assert_eq!(
@@ -3317,6 +3746,11 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(
             env.exec("cut /text.txt").stderr,
             "cut: you must specify a list of bytes, characters, or fields\n"
+        );
+        assert_eq!(env.exec("cat /unicode.txt | cut -c 1-2").stdout, "漢字\n");
+        assert_eq!(
+            env.exec("cat /unicode-fields.txt | cut -d: -f2").stdout,
+            "café\n"
         );
 
         assert_eq!(
@@ -3359,6 +3793,46 @@ and exhibited clearly, with a label attached.\n";
         );
         assert_eq!(env.exec("echo 'aabbcc' | tr 'abc' 'x'").stdout, "xxxxxx\n");
         assert_eq!(env.exec("echo 'abc' | tr 'a-c' 'A-C'").stdout, "ABC\n");
+        assert_eq!(
+            env.exec("cat /unicode-fields.txt | tr 'é' 'X'").stdout,
+            "한글:cafX:漢字\n"
+        );
+        assert_eq!(
+            env.exec("echo '한글 abc' | tr 'a-z' 'A-Z'").stdout,
+            "한글 ABC\n"
+        );
+        assert_eq!(
+            env.exec("echo 'abc123def456' | tr -cd '0-9'").stdout,
+            "123456"
+        );
+        assert_eq!(
+            env.exec("echo 'hello, world! 123' | tr -cd '[:alnum:]'")
+                .stdout,
+            "helloworld123"
+        );
+        assert_eq!(env.exec("echo 'a1b2c3' | tr -cd '[:alpha:]'").stdout, "abc");
+        assert_eq!(env.exec("echo 'abc123' | tr -Cd '0-9'").stdout, "123");
+        assert_eq!(
+            env.exec("echo 'abc123' | tr --complement -d '0-9'").stdout,
+            "123"
+        );
+        assert_eq!(
+            env.exec("echo 'abc123def' | tr -c '0-9' 'X'").stdout,
+            "XXX123XXXX"
+        );
+        assert_eq!(
+            env.exec("echo 'hello world!' | tr -c '[:alnum:]' '-'")
+                .stdout,
+            "hello-world--"
+        );
+        assert_eq!(
+            env.exec("echo 'aaa111bbb222' | tr -cs '0-9' 'X'").stdout,
+            "X111X222X"
+        );
+        assert_eq!(
+            env.exec("echo 'test123test' | tr -cd '[:alpha:]'").stdout,
+            "testtest"
+        );
     }
 
     #[test]
