@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use regex::Regex;
+
 pub type ShellResult<T> = Result<T, ShellError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +97,15 @@ pub struct Redirection {
     pub fd: Option<u8>,
     pub operator: RedirectionOperator,
     pub target: Word,
+    pub here_doc: Option<HereDoc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HereDoc {
+    pub delimiter: String,
+    pub content: String,
+    pub quoted: bool,
+    pub strip_tabs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +222,37 @@ impl WordPart {
     }
 }
 
+fn here_doc_delimiter(word: &Word) -> Option<(String, bool)> {
+    let mut delimiter = String::new();
+    let mut quoted = false;
+    for part in &word.parts {
+        match part {
+            WordPart::Literal(value) => delimiter.push_str(value),
+            WordPart::Escaped(value) => {
+                quoted = true;
+                delimiter.push_str(value);
+            }
+            WordPart::SingleQuoted(value) => {
+                quoted = true;
+                delimiter.push_str(value);
+            }
+            WordPart::DoubleQuoted(parts) => {
+                quoted = true;
+                for part in parts {
+                    match part {
+                        WordPart::Literal(value)
+                        | WordPart::Escaped(value)
+                        | WordPart::SingleQuoted(value) => delimiter.push_str(value),
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    (!delimiter.is_empty()).then_some((delimiter, quoted))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterExpansion {
     pub parameter: String,
@@ -255,6 +297,7 @@ struct Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TokenKind {
     Word(Word),
+    HereDocTarget { target: Word, here_doc: HereDoc },
     Semicolon,
     Newline,
     DoubleSemicolon,
@@ -288,11 +331,309 @@ pub fn collect_command_names(script: &Script) -> Vec<String> {
     names.into_iter().collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TransformMetadata {
+    pub commands: Vec<String>,
+    pub tee_files: Vec<TeeFileInfo>,
+    pub custom: BTreeMap<String, bool>,
+}
+
+impl TransformMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty() && self.tee_files.is_empty() && self.custom.is_empty()
+    }
+
+    fn merge(&mut self, other: Self) {
+        if !other.commands.is_empty() {
+            self.commands = other.commands;
+        }
+        self.tee_files.extend(other.tee_files);
+        self.custom.extend(other.custom);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeeFileInfo {
+    pub command_index: usize,
+    pub command_name: String,
+    pub command: String,
+    pub stdout_file: String,
+}
+
+pub struct TransformContext<'a> {
+    pub ast: &'a Script,
+    pub metadata: &'a TransformMetadata,
+}
+
+pub struct TransformResult {
+    pub ast: Script,
+    pub metadata: TransformMetadata,
+}
+
+pub trait TransformPlugin {
+    fn name(&self) -> &str;
+    fn transform(&mut self, context: TransformContext<'_>) -> ShellResult<TransformResult>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashTransformResult {
+    pub script: String,
+    pub ast: Script,
+    pub metadata: TransformMetadata,
+}
+
+#[derive(Default)]
+pub struct BashTransformPipeline {
+    plugins: Vec<Box<dyn TransformPlugin>>,
+}
+
+impl BashTransformPipeline {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn use_plugin(mut self, plugin: impl TransformPlugin + 'static) -> Self {
+        self.plugins.push(Box::new(plugin));
+        self
+    }
+
+    pub fn transform(&mut self, source: &str) -> ShellResult<BashTransformResult> {
+        let mut ast = parse(source)?;
+        let mut metadata = TransformMetadata::default();
+        for plugin in &mut self.plugins {
+            let result = plugin.transform(TransformContext {
+                ast: &ast,
+                metadata: &metadata,
+            })?;
+            ast = result.ast;
+            metadata.merge(result.metadata);
+        }
+        Ok(BashTransformResult {
+            script: serialize(&ast),
+            ast,
+            metadata,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CommandCollectorPlugin;
+
+impl TransformPlugin for CommandCollectorPlugin {
+    fn name(&self) -> &str {
+        "command-collector"
+    }
+
+    fn transform(&mut self, context: TransformContext<'_>) -> ShellResult<TransformResult> {
+        Ok(TransformResult {
+            ast: context.ast.clone(),
+            metadata: TransformMetadata {
+                commands: collect_command_names(context.ast),
+                ..TransformMetadata::default()
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TeePlugin {
+    output_dir: String,
+    timestamp: String,
+    target_command_pattern: Option<Regex>,
+    counter: usize,
+}
+
+impl TeePlugin {
+    pub fn new(output_dir: impl Into<String>, timestamp: impl Into<String>) -> Self {
+        Self {
+            output_dir: output_dir.into(),
+            timestamp: timestamp.into().replace(':', "-"),
+            target_command_pattern: None,
+            counter: 0,
+        }
+    }
+
+    pub fn with_target_command_pattern(mut self, pattern: Regex) -> Self {
+        self.target_command_pattern = Some(pattern);
+        self
+    }
+
+    fn transform_script(&mut self, script: &Script, tee_files: &mut Vec<TeeFileInfo>) -> Script {
+        Script {
+            statements: script
+                .statements
+                .iter()
+                .flat_map(|statement| self.transform_statement(statement, tee_files))
+                .collect(),
+        }
+    }
+
+    fn transform_statement(
+        &mut self,
+        statement: &Statement,
+        tee_files: &mut Vec<TeeFileInfo>,
+    ) -> Vec<Statement> {
+        let mut transformed: Vec<Statement> = Vec::new();
+        for (index, pipeline) in statement.pipelines.iter().enumerate() {
+            let (pipeline, original_indices, negated) =
+                self.transform_pipeline(pipeline, tee_files);
+            let operator = index
+                .checked_sub(1)
+                .and_then(|idx| statement.operators.get(idx));
+            if let Some(operator) = operator
+                && let Some(previous) = transformed.last_mut()
+            {
+                previous.operators.push(*operator);
+                previous.pipelines.push(pipeline);
+            } else {
+                transformed.push(Statement {
+                    pipelines: vec![pipeline],
+                    operators: Vec::new(),
+                    background: statement.background && index + 1 == statement.pipelines.len(),
+                });
+            }
+
+            if let Some(original_indices) = original_indices {
+                transformed.push(Statement {
+                    pipelines: vec![make_pipestatus_save(&original_indices)],
+                    operators: Vec::new(),
+                    background: false,
+                });
+                transformed.push(Statement {
+                    pipelines: vec![make_pipestatus_restore(original_indices.len(), negated)],
+                    operators: Vec::new(),
+                    background: false,
+                });
+            }
+        }
+        transformed
+    }
+
+    fn transform_pipeline(
+        &mut self,
+        pipeline: &Pipeline,
+        tee_files: &mut Vec<TeeFileInfo>,
+    ) -> (Pipeline, Option<Vec<usize>>, bool) {
+        if pipeline.commands.len() <= 1 {
+            return (pipeline.clone(), None, false);
+        }
+
+        let mut commands = Vec::new();
+        let mut pipe_stderr = Vec::new();
+        let mut original_indices = Vec::new();
+        let mut any_wrapped = false;
+
+        for (index, command) in pipeline.commands.iter().enumerate() {
+            let is_last = index + 1 == pipeline.commands.len();
+            let Some(simple) = simple_command_for_tee(command) else {
+                original_indices.push(commands.len());
+                commands.push(command.clone());
+                if !is_last {
+                    pipe_stderr.push(pipeline.pipe_stderr.get(index).copied().unwrap_or_default());
+                }
+                continue;
+            };
+
+            if !self.should_target(simple) {
+                original_indices.push(commands.len());
+                commands.push(command.clone());
+                if !is_last {
+                    pipe_stderr.push(pipeline.pipe_stderr.get(index).copied().unwrap_or_default());
+                }
+                continue;
+            }
+
+            let command_name = extract_literal_command_name(simple.name.as_ref().expect("name"))
+                .unwrap_or("unknown")
+                .to_string();
+            let command_index = self.counter;
+            self.counter += 1;
+            let stdout_file = format!(
+                "{}/{}-{command_index:03}-{command_name}.stdout.txt",
+                self.output_dir, self.timestamp
+            );
+            tee_files.push(TeeFileInfo {
+                command_index,
+                command_name,
+                command: serialize_simple_command_without_redirections(simple),
+                stdout_file: stdout_file.clone(),
+            });
+
+            original_indices.push(commands.len());
+            commands.push(command.clone());
+            pipe_stderr.push(pipeline.pipe_stderr.get(index).copied().unwrap_or_default());
+            commands.push(Command::Simple(SimpleCommand {
+                assignments: Vec::new(),
+                name: Some(Word::literal("tee")),
+                args: vec![Word::literal(stdout_file)],
+                redirections: Vec::new(),
+            }));
+            if !is_last {
+                pipe_stderr.push(false);
+            }
+            any_wrapped = true;
+        }
+
+        if !any_wrapped {
+            return (pipeline.clone(), None, false);
+        }
+
+        (
+            Pipeline {
+                commands,
+                negated: false,
+                pipe_stderr,
+            },
+            Some(original_indices),
+            pipeline.negated,
+        )
+    }
+
+    fn should_target(&self, command: &SimpleCommand) -> bool {
+        let Some(pattern) = &self.target_command_pattern else {
+            return true;
+        };
+        command
+            .name
+            .as_ref()
+            .and_then(extract_literal_command_name)
+            .is_some_and(|name| pattern.is_match(name))
+    }
+}
+
+impl TransformPlugin for TeePlugin {
+    fn name(&self) -> &str {
+        "tee"
+    }
+
+    fn transform(&mut self, context: TransformContext<'_>) -> ShellResult<TransformResult> {
+        let mut tee_files = Vec::new();
+        let ast = self.transform_script(context.ast, &mut tee_files);
+        Ok(TransformResult {
+            ast,
+            metadata: TransformMetadata {
+                tee_files,
+                ..TransformMetadata::default()
+            },
+        })
+    }
+}
+
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
     line: usize,
     column: usize,
+    pending_here_doc_operator: Option<RedirectionOperator>,
+    pending_here_docs: Vec<PendingHereDoc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingHereDoc {
+    token_index: usize,
+    delimiter: String,
+    quoted: bool,
+    strip_tabs: bool,
 }
 
 impl Lexer {
@@ -302,6 +643,8 @@ impl Lexer {
             pos: 0,
             line: 1,
             column: 1,
+            pending_here_doc_operator: None,
+            pending_here_docs: Vec::new(),
         }
     }
 
@@ -323,6 +666,7 @@ impl Lexer {
                     line,
                     column,
                 });
+                self.read_pending_here_docs(&mut tokens, line, column)?;
                 continue;
             }
 
@@ -352,16 +696,44 @@ impl Lexer {
             }
 
             if let Some(kind) = self.read_operator() {
+                if let TokenKind::Redirection(operator) = &kind
+                    && matches!(
+                        operator,
+                        RedirectionOperator::HereDoc | RedirectionOperator::HereDocStripTabs
+                    )
+                {
+                    self.pending_here_doc_operator = Some(*operator);
+                }
                 tokens.push(Token { kind, line, column });
                 continue;
             }
 
             let word = self.read_word(line, column)?;
+            let pending_here_doc_operator = self.pending_here_doc_operator.take();
+            let token_index = tokens.len();
             tokens.push(Token {
                 kind: TokenKind::Word(word),
                 line,
                 column,
             });
+            if let Some(operator) = pending_here_doc_operator {
+                let TokenKind::Word(word) = &tokens[token_index].kind else {
+                    unreachable!("just pushed a word token");
+                };
+                let (delimiter, quoted) = here_doc_delimiter(word).ok_or_else(|| {
+                    ShellError::new("invalid here-document delimiter", line, column)
+                })?;
+                self.pending_here_docs.push(PendingHereDoc {
+                    token_index,
+                    delimiter,
+                    quoted,
+                    strip_tabs: operator == RedirectionOperator::HereDocStripTabs,
+                });
+            }
+        }
+
+        if !self.pending_here_docs.is_empty() {
+            self.read_pending_here_docs(&mut tokens, self.line, self.column)?;
         }
 
         tokens.push(Token {
@@ -412,6 +784,91 @@ impl Lexer {
             }
             self.advance();
         }
+    }
+
+    fn read_pending_here_docs(
+        &mut self,
+        tokens: &mut [Token],
+        line: usize,
+        column: usize,
+    ) -> ShellResult<()> {
+        let pending = std::mem::take(&mut self.pending_here_docs);
+        for here_doc in pending {
+            let content = self.read_here_doc_content(&here_doc, line, column)?;
+            let target = match tokens.get(here_doc.token_index).map(|token| &token.kind) {
+                Some(TokenKind::Word(_)) => Word::literal(here_doc.delimiter.clone()),
+                _ => {
+                    return Err(ShellError::new(
+                        "missing here-document target",
+                        line,
+                        column,
+                    ));
+                }
+            };
+            tokens[here_doc.token_index].kind = TokenKind::HereDocTarget {
+                target,
+                here_doc: HereDoc {
+                    delimiter: here_doc.delimiter,
+                    content,
+                    quoted: here_doc.quoted,
+                    strip_tabs: here_doc.strip_tabs,
+                },
+            };
+        }
+        Ok(())
+    }
+
+    fn read_here_doc_content(
+        &mut self,
+        here_doc: &PendingHereDoc,
+        line: usize,
+        column: usize,
+    ) -> ShellResult<String> {
+        let mut content = String::new();
+        let mut line_buffer = String::new();
+
+        while let Some(character) = self.peek() {
+            self.advance();
+            line_buffer.push(character);
+
+            if character != '\n' {
+                continue;
+            }
+
+            let line_without_newline = line_buffer.strip_suffix('\n').unwrap_or(&line_buffer);
+            let delimiter_candidate = if here_doc.strip_tabs {
+                line_without_newline.trim_start_matches('\t')
+            } else {
+                line_without_newline
+            };
+            if delimiter_candidate == here_doc.delimiter {
+                return Ok(content);
+            }
+
+            content.push_str(&line_buffer);
+            line_buffer.clear();
+        }
+
+        if !line_buffer.is_empty() {
+            let delimiter_candidate = if here_doc.strip_tabs {
+                line_buffer.trim_start_matches('\t')
+            } else {
+                line_buffer.as_str()
+            };
+            if delimiter_candidate == here_doc.delimiter {
+                return Ok(content);
+            }
+            content.push_str(&line_buffer);
+        }
+
+        Err(ShellError::new(
+            format!(
+                "here-document delimited by end-of-file: {}",
+                here_doc.delimiter
+            ),
+            line,
+            column,
+        ))
     }
 
     fn read_operator(&mut self) -> Option<TokenKind> {
@@ -1014,7 +1471,8 @@ fn serialize_inline_statements(statements: &[Statement]) -> String {
 }
 
 fn serialize_statement(statement: &Statement) -> String {
-    let mut output = serialize_pipeline(&statement.pipelines[0]);
+    let mut here_docs = Vec::new();
+    let mut output = serialize_pipeline(&statement.pipelines[0], &mut here_docs);
     for (operator, pipeline) in statement
         .operators
         .iter()
@@ -1024,7 +1482,7 @@ fn serialize_statement(statement: &Statement) -> String {
             ListOperator::And => " && ",
             ListOperator::Or => " || ",
         });
-        output.push_str(&serialize_pipeline(pipeline));
+        output.push_str(&serialize_pipeline(pipeline, &mut here_docs));
     }
     if statement.background {
         if !output.is_empty() {
@@ -1032,10 +1490,14 @@ fn serialize_statement(statement: &Statement) -> String {
         }
         output.push('&');
     }
+    if !here_docs.is_empty() {
+        output.push('\n');
+        output.push_str(&here_docs.join("\n"));
+    }
     output
 }
 
-fn serialize_pipeline(pipeline: &Pipeline) -> String {
+fn serialize_pipeline(pipeline: &Pipeline, here_docs: &mut Vec<String>) -> String {
     let mut output = String::new();
     if pipeline.negated {
         output.push_str("! ");
@@ -1055,14 +1517,14 @@ fn serialize_pipeline(pipeline: &Pipeline) -> String {
                 },
             );
         }
-        output.push_str(&serialize_command(command));
+        output.push_str(&serialize_command(command, here_docs));
     }
     output
 }
 
-fn serialize_command(command: &Command) -> String {
+fn serialize_command(command: &Command, here_docs: &mut Vec<String>) -> String {
     match command {
-        Command::Simple(command) => serialize_simple_command(command),
+        Command::Simple(command) => serialize_simple_command(command, here_docs),
         Command::If(command) => serialize_if(command),
         Command::For(command) => serialize_for(command),
         Command::While(command) => serialize_loop("while", command),
@@ -1071,7 +1533,7 @@ fn serialize_command(command: &Command) -> String {
         Command::FunctionDef(function) => format!(
             "{}() {}{}",
             function.name,
-            serialize_command(&function.body),
+            serialize_command(&function.body, here_docs),
             serialize_redirections(&function.redirections)
         ),
         Command::Subshell(body) => format!("({})", serialize_inline_statements(body)),
@@ -1088,14 +1550,19 @@ fn serialize_command(command: &Command) -> String {
     }
 }
 
-fn serialize_simple_command(command: &SimpleCommand) -> String {
+fn serialize_simple_command(command: &SimpleCommand, here_docs: &mut Vec<String>) -> String {
     let mut parts = Vec::new();
     parts.extend(command.assignments.iter().map(serialize_assignment));
     if let Some(name) = &command.name {
         parts.push(serialize_word(name));
     }
     parts.extend(command.args.iter().map(serialize_word));
-    parts.extend(command.redirections.iter().map(serialize_redirection));
+    parts.extend(
+        command
+            .redirections
+            .iter()
+            .map(|redirection| serialize_redirection(redirection, here_docs)),
+    );
     parts.join(" ")
 }
 
@@ -1202,13 +1669,14 @@ fn serialize_case(command: &CaseCommand) -> String {
 }
 
 fn serialize_redirections(redirections: &[Redirection]) -> String {
+    let mut here_docs = Vec::new();
     redirections
         .iter()
-        .map(|redirection| format!(" {}", serialize_redirection(redirection)))
+        .map(|redirection| format!(" {}", serialize_redirection(redirection, &mut here_docs)))
         .collect::<String>()
 }
 
-fn serialize_redirection(redirection: &Redirection) -> String {
+fn serialize_redirection(redirection: &Redirection, here_docs: &mut Vec<String>) -> String {
     let mut output = redirection.fd.map(|fd| fd.to_string()).unwrap_or_default();
     output.push_str(match redirection.operator {
         RedirectionOperator::Input => "<",
@@ -1224,9 +1692,102 @@ fn serialize_redirection(redirection: &Redirection) -> String {
         RedirectionOperator::HereDoc => "<<",
         RedirectionOperator::HereDocStripTabs => "<<-",
     });
-    output.push(' ');
-    output.push_str(&serialize_word(&redirection.target));
+    if let Some(here_doc) = &redirection.here_doc {
+        let delimiter = if here_doc.quoted {
+            format!("'{}'", here_doc.delimiter.replace('\'', "'\\''"))
+        } else {
+            here_doc.delimiter.clone()
+        };
+        output.push_str(&delimiter);
+        here_docs.push(serialize_here_doc_body(here_doc));
+    } else {
+        output.push(' ');
+        output.push_str(&serialize_word(&redirection.target));
+    }
     output
+}
+
+fn serialize_here_doc_body(here_doc: &HereDoc) -> String {
+    let mut output = here_doc.content.clone();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&here_doc.delimiter);
+    output
+}
+
+fn serialize_simple_command_without_redirections(command: &SimpleCommand) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = &command.name {
+        parts.push(serialize_word(name));
+    }
+    parts.extend(command.args.iter().map(serialize_word));
+    parts.join(" ")
+}
+
+fn simple_command_for_tee(command: &Command) -> Option<&SimpleCommand> {
+    match command {
+        Command::Simple(command) if command.name.is_some() => Some(command),
+        _ => None,
+    }
+}
+
+fn make_pipestatus_save(original_indices: &[usize]) -> Pipeline {
+    Pipeline {
+        commands: vec![Command::Simple(SimpleCommand {
+            assignments: original_indices
+                .iter()
+                .enumerate()
+                .map(|(index, original_index)| Assignment {
+                    name: format!("__tps{index}"),
+                    value: Some(Word {
+                        parts: vec![WordPart::Parameter(ParameterExpansion {
+                            parameter: format!("PIPESTATUS[{original_index}]"),
+                            operation: None,
+                        })],
+                    }),
+                    append: false,
+                    array: None,
+                    index: None,
+                })
+                .collect(),
+            name: None,
+            args: Vec::new(),
+            redirections: Vec::new(),
+        })],
+        negated: false,
+        pipe_stderr: Vec::new(),
+    }
+}
+
+fn make_pipestatus_restore(count: usize, negated: bool) -> Pipeline {
+    Pipeline {
+        commands: (0..count)
+            .map(|index| {
+                Command::Subshell(vec![Statement {
+                    pipelines: vec![Pipeline {
+                        commands: vec![Command::Simple(SimpleCommand {
+                            assignments: Vec::new(),
+                            name: Some(Word::literal("exit")),
+                            args: vec![Word {
+                                parts: vec![WordPart::Parameter(ParameterExpansion {
+                                    parameter: format!("__tps{index}"),
+                                    operation: None,
+                                })],
+                            }],
+                            redirections: Vec::new(),
+                        })],
+                        negated: false,
+                        pipe_stderr: Vec::new(),
+                    }],
+                    operators: Vec::new(),
+                    background: false,
+                }])
+            })
+            .collect(),
+        negated,
+        pipe_stderr: (1..count).map(|_| false).collect(),
+    }
 }
 
 fn serialize_word(word: &Word) -> String {
@@ -1643,6 +2204,9 @@ impl Parser {
             if matches!(self.current().kind, TokenKind::Word(_)) {
                 return self.parse_simple_command().map(Command::Simple);
             }
+            if matches!(self.current().kind, TokenKind::Redirection(_)) {
+                return self.parse_simple_command().map(Command::Simple);
+            }
             return Err(self.error_here("expected command"));
         };
 
@@ -1662,7 +2226,10 @@ impl Parser {
         let mut command = SimpleCommand::default();
 
         loop {
-            if self.is_command_terminator() {
+            let reserved_words_terminate = command.name.is_none()
+                && command.assignments.is_empty()
+                && command.redirections.is_empty();
+            if self.is_command_terminator(reserved_words_terminate) {
                 break;
             }
 
@@ -1742,6 +2309,13 @@ impl Parser {
                 fd,
                 operator,
                 target,
+                here_doc: None,
+            }),
+            TokenKind::HereDocTarget { target, here_doc } => Ok(Redirection {
+                fd,
+                operator,
+                target,
+                here_doc: Some(here_doc),
             }),
             _ => Err(self.error_previous("expected redirection target")),
         }
@@ -1948,7 +2522,7 @@ impl Parser {
             && matches!(self.peek(2), TokenKind::RightParen)
     }
 
-    fn is_command_terminator(&self) -> bool {
+    fn is_command_terminator(&self, reserved_words_terminate: bool) -> bool {
         matches!(
             self.current().kind,
             TokenKind::Eof
@@ -1961,7 +2535,8 @@ impl Parser {
                 | TokenKind::RightParen
                 | TokenKind::RightBrace
                 | TokenKind::DoubleSemicolon
-        ) || self.current_word_is_any(&["then", "else", "elif", "fi", "do", "done", "esac"])
+        ) || (reserved_words_terminate
+            && self.current_word_is_any(&["then", "else", "elif", "fi", "do", "done", "esac"]))
     }
 
     fn current_word_text(&self) -> Option<String> {
@@ -2198,6 +2773,7 @@ pub struct AppliedRedirection {
     pub fd: Option<u8>,
     pub operator: RedirectionOperator,
     pub target: String,
+    pub here_doc: Option<HereDoc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2404,10 +2980,14 @@ impl<D: CommandDispatcher> Interpreter<D> {
             statuses.push(result.exit_code);
             if index + 1 == pipeline.commands.len() {
                 aggregate.stdout.push_str(&result.stdout);
+                aggregate.stderr.push_str(&result.stderr);
+            } else if pipeline.pipe_stderr.get(index).copied().unwrap_or_default() {
+                stdin = result.stdout;
+                stdin.push_str(&result.stderr);
             } else {
                 stdin = result.stdout;
+                aggregate.stderr.push_str(&result.stderr);
             }
-            aggregate.stderr.push_str(&result.stderr);
             if self.state.exited.is_some() {
                 break;
             }
@@ -2500,6 +3080,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 fd: redirection.fd,
                 operator: redirection.operator,
                 target: self.expand_word_to_string(&redirection.target),
+                here_doc: redirection.here_doc.clone(),
             })
             .collect::<Vec<_>>();
 
@@ -2885,7 +3466,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn apply_input_redirections(
-        &self,
+        &mut self,
         mut stdin: String,
         redirections: &[AppliedRedirection],
     ) -> String {
@@ -2900,6 +3481,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 }
                 RedirectionOperator::HereString => {
                     stdin = format!("{}\n", redirection.target);
+                }
+                RedirectionOperator::HereDoc | RedirectionOperator::HereDocStripTabs => {
+                    if let Some(here_doc) = &redirection.here_doc {
+                        stdin = self.expand_here_doc(here_doc);
+                    }
                 }
                 _ => {}
             }
@@ -2916,7 +3502,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
             let fd = redirection.fd.unwrap_or(match redirection.operator {
                 RedirectionOperator::Input
                 | RedirectionOperator::DuplicateInput
-                | RedirectionOperator::ReadWrite => 0,
+                | RedirectionOperator::ReadWrite
+                | RedirectionOperator::HereDoc
+                | RedirectionOperator::HereDocStripTabs => 0,
                 _ => 1,
             });
             match redirection.operator {
@@ -2956,6 +3544,120 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
         }
         output
+    }
+
+    fn expand_here_doc(&mut self, here_doc: &HereDoc) -> String {
+        let content = if here_doc.strip_tabs {
+            strip_leading_tabs_from_lines(&here_doc.content)
+        } else {
+            here_doc.content.clone()
+        };
+        if here_doc.quoted {
+            content
+        } else {
+            self.expand_here_doc_unquoted(&content)
+        }
+    }
+
+    fn expand_here_doc_unquoted(&mut self, content: &str) -> String {
+        let chars = content.chars().collect::<Vec<_>>();
+        let mut output = String::new();
+        let mut index = 0usize;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' => {
+                    if let Some(next) = chars.get(index + 1).copied()
+                        && matches!(next, '$' | '`' | '\\')
+                    {
+                        output.push(next);
+                        index += 2;
+                    } else {
+                        output.push('\\');
+                        index += 1;
+                    }
+                }
+                '$' => {
+                    let (expanded, next_index) = self.expand_here_doc_dollar(&chars, index);
+                    output.push_str(&expanded);
+                    index = next_index;
+                }
+                '`' => {
+                    if let Some(end) = chars[index + 1..]
+                        .iter()
+                        .position(|character| *character == '`')
+                    {
+                        let body = chars[index + 1..index + 1 + end].iter().collect::<String>();
+                        output.push_str(&self.execute_substitution_source(&body));
+                        index += end + 2;
+                    } else {
+                        output.push('`');
+                        index += 1;
+                    }
+                }
+                character => {
+                    output.push(character);
+                    index += 1;
+                }
+            }
+        }
+        output
+    }
+
+    fn expand_here_doc_dollar(&mut self, chars: &[char], index: usize) -> (String, usize) {
+        if chars.get(index + 1) == Some(&'(') && chars.get(index + 2) == Some(&'(') {
+            if let Some(end) = find_double_right_paren(chars, index + 3) {
+                let source = chars[index + 3..end].iter().collect::<String>();
+                return (self.eval_arithmetic(&source).to_string(), end + 2);
+            }
+        }
+
+        if chars.get(index + 1) == Some(&'(') {
+            if let Some(end) = find_matching_substitution_paren(chars, index + 2) {
+                let body = chars[index + 2..end].iter().collect::<String>();
+                return (self.execute_substitution_source(&body), end + 1);
+            }
+        }
+
+        if chars.get(index + 1) == Some(&'{') {
+            if let Some(end) = chars[index + 2..]
+                .iter()
+                .position(|character| *character == '}')
+            {
+                let content = chars[index + 2..index + 2 + end].iter().collect::<String>();
+                let parameter = parse_parameter_expansion(&content);
+                return (
+                    self.expand_parameter(&parameter, false).join(" "),
+                    index + end + 3,
+                );
+            }
+        }
+
+        if let Some(parameter) = chars.get(index + 1).copied() {
+            if is_special_parameter(parameter) {
+                return (self.lookup_parameter(&parameter.to_string()), index + 2);
+            }
+            if is_name_start(parameter) {
+                let mut end = index + 2;
+                while chars
+                    .get(end)
+                    .is_some_and(|character| is_name_continue(*character))
+                {
+                    end += 1;
+                }
+                let name = chars[index + 1..end].iter().collect::<String>();
+                return (self.lookup_parameter(&name), end);
+            }
+        }
+
+        ("$".to_string(), index + 1)
+    }
+
+    fn execute_substitution_source(&mut self, source: &str) -> String {
+        let output = match parse(source) {
+            Ok(script) => self.exec_script(&script).stdout,
+            Err(_) => String::new(),
+        };
+        output.trim_end_matches('\n').replace('\n', " ")
     }
 
     fn count_command(&mut self) -> Result<(), &'static str> {
@@ -3185,6 +3887,54 @@ fn append_expanded_values(prefixes: Vec<String>, suffixes: Vec<String>) -> Vec<S
     output
 }
 
+fn strip_leading_tabs_from_lines(content: &str) -> String {
+    content
+        .split_inclusive('\n')
+        .map(|line| line.trim_start_matches('\t'))
+        .collect()
+}
+
+fn find_double_right_paren(chars: &[char], start: usize) -> Option<usize> {
+    let mut index = start;
+    while index + 1 < chars.len() {
+        if chars[index] == ')' && chars[index + 1] == ')' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_matching_substitution_paren(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut index = start;
+    while index < chars.len() {
+        let character = chars[index];
+        if let Some(quote_char) = quote {
+            if character == '\\' {
+                index += 2;
+                continue;
+            }
+            if character == quote_char {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(index),
+            ')' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 fn write_or_discard(files: &mut ShellVirtualFileSystem, target: &str, content: &str, append: bool) {
     if target == "/dev/null" {
         return;
@@ -3213,6 +3963,21 @@ fn shell_quote(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
+}
+
+pub fn shell_join_args<I, S>(args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|arg| shell_quote_arg(arg.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn split_assignment_text(text: &str) -> Option<(String, String)> {
@@ -3657,13 +4422,29 @@ mod tests {
             self.invocations.push(invocation.clone());
             match invocation.name.as_str() {
                 "echo" => fake_echo(&invocation.args),
-                "printf" => CommandResult::success(invocation.args.join("")),
+                "printf" => fake_printf(&invocation.args),
                 "cat" => fake_cat(&invocation, files),
                 "grep" => fake_grep(&invocation, files),
+                "sort" => fake_sort(&invocation),
                 "wc" if invocation.args.first().map(String::as_str) == Some("-l") => {
                     let count = invocation.stdin.lines().count();
                     CommandResult::success(format!("{count}\n"))
                 }
+                "err" => CommandResult {
+                    stdout: invocation
+                        .args
+                        .first()
+                        .map_or_else(String::new, |value| format!("{value}\n")),
+                    stderr: invocation
+                        .args
+                        .get(1)
+                        .map_or_else(|| "err\n".to_string(), |value| format!("{value}\n")),
+                    exit_code: invocation
+                        .args
+                        .get(2)
+                        .and_then(|arg| arg.parse::<i32>().ok())
+                        .unwrap_or(0),
+                },
                 "status" => CommandResult {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -3696,6 +4477,18 @@ mod tests {
         }
         stdout.push('\n');
         CommandResult::success(stdout)
+    }
+
+    fn fake_printf(args: &[String]) -> CommandResult {
+        if args.first().map(String::as_str) == Some("%s|") {
+            return CommandResult::success(
+                args.iter()
+                    .skip(1)
+                    .map(|arg| format!("{arg}|"))
+                    .collect::<String>(),
+            );
+        }
+        CommandResult::success(args.join(""))
     }
 
     fn fake_cat(invocation: &CommandInvocation, files: &ShellVirtualFileSystem) -> CommandResult {
@@ -3749,6 +4542,20 @@ mod tests {
                 exit_code: 1,
             }
         }
+    }
+
+    fn fake_sort(invocation: &CommandInvocation) -> CommandResult {
+        let mut lines = invocation
+            .stdin
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        lines.sort();
+        let mut stdout = lines.join("\n");
+        if !stdout.is_empty() {
+            stdout.push('\n');
+        }
+        CommandResult::success(stdout)
     }
 
     fn shell() -> Interpreter<FakeCommands> {
@@ -4467,5 +5274,513 @@ esac"#,
         assert_eq!(after_collect.stdout, plain.stdout);
         assert_eq!(after_collect.stderr, plain.stderr);
         assert_eq!(after_collect.exit_code, plain.exit_code);
+    }
+
+    #[test]
+    fn jbc19_shell_join_args_quotes_and_preserves_literal_arguments() {
+        assert_eq!(shell_join_args(["echo", "hello"]), "'echo' 'hello'");
+        assert_eq!(shell_join_args(Vec::<String>::new()), "");
+        assert_eq!(shell_join_args(["ls"]), "'ls'");
+        assert_eq!(
+            shell_join_args(["echo", "hello world"]),
+            "'echo' 'hello world'"
+        );
+        assert_eq!(shell_join_args(["echo", "it's"]), "'echo' 'it'\\''s'");
+        assert_eq!(shell_join_args(["echo", ""]), "'echo' ''");
+        assert_eq!(
+            shell_join_args([
+                "echo",
+                "$(whoami)",
+                "; rm -rf /",
+                "`id`",
+                "a|b",
+                "a&b",
+                "a>b"
+            ]),
+            "'echo' '$(whoami)' '; rm -rf /' '`id`' 'a|b' 'a&b' 'a>b'"
+        );
+        assert_eq!(
+            shell_join_args(["echo", "line1\nline2", "col1\tcol2"]),
+            "'echo' 'line1\nline2' 'col1\tcol2'"
+        );
+
+        assert_eq!(
+            shell()
+                .exec(&shell_join_args(["echo", "$(echo INJECTED)"]))
+                .stdout,
+            "$(echo INJECTED)\n"
+        );
+        assert_eq!(
+            shell()
+                .exec(&shell_join_args(["echo", "it's a test"]))
+                .stdout,
+            "it's a test\n"
+        );
+        assert_eq!(
+            shell()
+                .exec(&shell_join_args(["echo", "safe; echo INJECTED"]))
+                .stdout,
+            "safe; echo INJECTED\n"
+        );
+        assert_eq!(
+            shell()
+                .exec(&shell_join_args(["printf", "%s|", "a", "", "b"]))
+                .stdout,
+            "a||b|"
+        );
+        assert_eq!(
+            shell()
+                .exec(&shell_join_args(["echo", "hello   world"]))
+                .stdout,
+            "hello   world\n"
+        );
+    }
+
+    #[test]
+    fn jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        fn assert_exec_equiv(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let mut original = shell().with_env([("x", "world")]);
+            let mut transformed = shell().with_env([("x", "world")]);
+            let original = original.exec(source);
+            let transformed = transformed.exec(&serialized);
+            assert_eq!(
+                (
+                    transformed.stdout,
+                    transformed.stderr,
+                    transformed.exit_code
+                ),
+                (original.stdout, original.stderr, original.exit_code),
+                "{source} -> {serialized}"
+            );
+        }
+
+        for source in [
+            "cat <<EOF\nhello\nEOF",
+            "cat <<'EOF'\nhello $name\nEOF",
+            "cat <<\"EOF\"\nhello $name\nEOF",
+            "cat <<-EOF\n\thello\n\tworld\nEOF",
+            "cat <<EOF\nline1\nline2\nline3\nEOF",
+            "cat <<EOF\n\nline\n\nEOF",
+            "cat <<EOF\nresult: $(echo hi)\nEOF",
+            "grep pattern <<EOF\nfoo pattern bar\nEOF",
+            "cat <<EOF | sort\nbanana\napple\ncherry\nEOF",
+            "<<EOF cat\nprefix heredoc\nEOF",
+            "cat <<END-TEST\n  content with spaces\nEND-TEST",
+        ] {
+            assert_round_trip(source);
+        }
+
+        for source in [
+            "x=world; cat <<EOF\nhello $x\nEOF",
+            "cat <<'EOF'\nhello $x\nEOF",
+            "cat <<EOF\nresult: $(echo 42)\nEOF",
+            "cat <<EOF\n!@#$%^&*()\nEOF",
+            "cat <<EOF\n!@#$%^&*\nEOF",
+            "cat <<EOF\nresult: `echo hi`\nEOF",
+            "cat <<EOF\n\nline\n\nEOF",
+            "cat <<EOF\n\ttabbed\nEOF",
+            "cat <<'EOF'\n`not a command`\nEOF",
+            "cat <<EOF\nprice: \\$5\nEOF",
+            "cat <<-EOF\n\thello\n\tworld\nEOF",
+            "cat <<EOF\nline1\\\nline2\nEOF",
+        ] {
+            assert_exec_equiv(source);
+        }
+
+        let mut env_shell = shell().with_env([("NAME", "Alice"), ("x", "world")]);
+        assert_eq!(
+            env_shell.exec("cat <<EOF\nHello, $NAME!\nEOF").stdout,
+            "Hello, Alice!\n"
+        );
+        assert_eq!(
+            env_shell.exec("cat <<'EOF'\nHello, $NAME!\nEOF").stdout,
+            "Hello, $NAME!\n"
+        );
+        assert_eq!(
+            env_shell.exec("cat <<\"EOF\"\nHello, $NAME!\nEOF").stdout,
+            "Hello, $NAME!\n"
+        );
+        assert_eq!(
+            env_shell
+                .exec("cat <<EOF\nresult: $(echo 42)\nresult: `echo hi`\nprice: \\$5\nEOF")
+                .stdout,
+            "result: 42\nresult: hi\nprice: $5\n"
+        );
+        assert_eq!(
+            shell().exec("cat <<-EOF\n\thello\n\tworld\nEOF").stdout,
+            "hello\nworld\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("cat <<EOF | grep hello\nhello world\ngoodbye world\nEOF")
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("cat <<EOF | sort\nbanana\napple\ncherry\nEOF")
+                .stdout,
+            "apple\nbanana\ncherry\n"
+        );
+        assert_eq!(
+            shell().exec(r#"cat <<< "hello world""#).stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            shell()
+                .with_env([("x", "hello")])
+                .exec(r#"cat <<< "$x world""#)
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            shell().exec("wc -l <<EOF\none\ntwo\nthree\nEOF").stdout,
+            "3\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("grep world <<EOF\nhello world\ngoodbye world\njust hello\nEOF")
+                .stdout,
+            "hello world\ngoodbye world\n"
+        );
+        assert_eq!(shell().exec("cat <<EOF\nEOF").stdout, "");
+        assert_eq!(shell().exec("cat <<EOF\n\nEOF").stdout, "\n");
+        let multiple_commands = shell().exec("cat <<EOF\nhello\nEOF\necho done");
+        assert_eq!(
+            (
+                multiple_commands.stdout,
+                multiple_commands.stderr,
+                multiple_commands.exit_code
+            ),
+            ("hello\ndone\n".to_string(), String::new(), 0)
+        );
+        assert_eq!(shell().exec("cat <<EOF\n{a,b}\nEOF").stdout, "{a,b}\n");
+        assert_eq!(
+            shell().exec("cat <<EOF\nline1\\\nline2\nEOF").stdout,
+            "line1\\\nline2\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("if [[ 1 -eq 1 ]]; then\ncat <<EOF\nhello from if\nEOF\nfi")
+                .stdout,
+            "hello from if\n"
+        );
+        assert_eq!(
+            shell().exec("cat <<MYDELIM\ncontent here\nMYDELIM").stdout,
+            "content here\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("cat <<EOF\n    four spaces\n\ttab\n  EOF\nEOF")
+                .stdout,
+            "    four spaces\n\ttab\n  EOF\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("NAME=World; cat <<EOF\nHello, $NAME!\nEOF")
+                .stdout,
+            "Hello, World!\n"
+        );
+    }
+
+    #[test]
+    fn jbc19_transform_serialize_quoting_edge_rows_round_trip() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            "echo hello\\ world",
+            "echo 'a&b|c;d'",
+            r#"echo "hello $name""#,
+            r#"echo "result: `echo hi`""#,
+            r#"echo "result: $(echo hi)""#,
+            r#"echo "it's fine""#,
+            "echo '\"quoted\"'",
+            "echo ''",
+            r#"echo """#,
+            "echo 'a'\"b\"'c'",
+            "echo test\\\\",
+            "echo hello\\nworld",
+            "echo 'a\tb'",
+            "echo 'file*.txt'",
+            "echo '(test)'",
+            "echo '[test]'",
+            "echo '#comment'",
+            "echo '!bang'",
+            "echo '~user'",
+            "echo '{a,b}'",
+            r#"echo "${var}""#,
+            r#"echo "$(echo "inner")""#,
+            r#"echo "total: $((1 + 2))""#,
+        ] {
+            assert_round_trip(source);
+        }
+
+        let mut env_shell = shell().with_env([("HOME", "/home/user"), ("x", "val")]);
+        for (source, expected_stdout) in [
+            ("echo 'hello world'", "hello world\n"),
+            (r#"echo "hello world""#, "hello world\n"),
+            ("echo ''", "\n"),
+            (r#"echo """#, "\n"),
+            ("echo 'a'\"b\"'c'", "abc\n"),
+            (r#"echo "price is \$5""#, "price is $5\n"),
+            (r#"echo "say \"hello\"""#, "say \"hello\"\n"),
+            (r#"echo "\`not a command\`""#, "`not a command`\n"),
+            (r#"echo "path\\dir""#, "path\\dir\n"),
+            (r#"echo "line1\nline2""#, "line1\\nline2\n"),
+            (r#"echo "home: $HOME""#, "home: /home/user\n"),
+            (r#"echo "home: ${HOME}""#, "home: /home/user\n"),
+            (r#"echo "result: $(echo hi)""#, "result: hi\n"),
+            (r#"echo "result: `echo hi`""#, "result: hi\n"),
+            (r#"echo "total: $((2 + 3))""#, "total: 5\n"),
+            ("echo '$HOME'", "$HOME\n"),
+            ("echo '`cmd`'", "`cmd`\n"),
+            ("echo '\"quoted\"'", "\"quoted\"\n"),
+            ("echo 'back\\slash'", "back\\slash\n"),
+            ("echo '!bang'", "!bang\n"),
+            ("echo '#not a comment'", "#not a comment\n"),
+            ("echo hello\\ world", "hello world\n"),
+            ("echo \\*.txt", "*.txt\n"),
+            ("echo \\#not-comment", "#not-comment\n"),
+            (r#"echo "*.txt""#, "*.txt\n"),
+            (r#"echo "\$x is $x""#, "$x is val\n"),
+            (r#"echo "end\$""#, "end$\n"),
+            (r#"echo "\$start""#, "$start\n"),
+            (r#"echo "\$a \$b \$c""#, "$a $b $c\n"),
+        ] {
+            let result = env_shell.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+        }
+    }
+
+    #[test]
+    fn jbc19_pipeline_stderr_rows_keep_regular_and_pipe_stderr_separate() {
+        let mut interp = shell();
+
+        let regular = interp.exec("err out parent_err | cat");
+        assert_eq!(regular.stdout, "out\n");
+        assert_eq!(regular.stderr, "parent_err\n");
+
+        let pipe_stderr = interp.exec("err out piped_err |& cat");
+        assert_eq!(pipe_stderr.stdout, "out\npiped_err\n");
+        assert_eq!(pipe_stderr.stderr, "");
+
+        let first_of_three = interp.exec("err first first_err | cat | cat");
+        assert_eq!(first_of_three.stdout, "first\n");
+        assert_eq!(first_of_three.stderr, "first_err\n");
+
+        let middle = interp.exec("echo hello | err middle middle_err | cat");
+        assert_eq!(middle.stdout, "middle\n");
+        assert_eq!(middle.stderr, "middle_err\n");
+
+        let last = interp.exec("echo hello | err last last_err 7");
+        assert_eq!(last.stdout, "last\n");
+        assert_eq!(last.stderr, "last_err\n");
+        assert_eq!(last.exit_code, 7);
+
+        let exit_code = interp.exec("echo hello | grep nomatch");
+        assert_eq!(exit_code.exit_code, 1);
+    }
+
+    #[test]
+    fn jbc19_transform_tee_plugin_metadata_and_script_rows() {
+        let fixed_ts = "2024-01-15T10:30:45.123Z";
+        let sanitized_ts = "2024-01-15T10-30-45.123Z";
+
+        let mut no_plugins = BashTransformPipeline::new();
+        let unchanged = no_plugins.transform("echo hello | cat").unwrap();
+        assert_eq!(unchanged.script, "echo hello | cat");
+        assert!(unchanged.metadata.is_empty());
+
+        let mut single =
+            BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+        let single_result = single.transform("echo hello").unwrap();
+        assert_eq!(single_result.script, "echo hello");
+        assert!(single_result.metadata.tee_files.is_empty());
+
+        let mut tee =
+            BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+        let result = tee.transform("echo hello | grep hello").unwrap();
+        assert!(
+            result
+                .script
+                .contains(&format!("tee /tmp/logs/{sanitized_ts}-000-echo.stdout.txt"))
+        );
+        assert!(
+            result
+                .script
+                .contains(&format!("tee /tmp/logs/{sanitized_ts}-001-grep.stdout.txt"))
+        );
+        assert!(result.script.contains("__tps0=${PIPESTATUS[0]}"));
+        assert!(result.script.contains("(exit $__tps0) | (exit $__tps1)"));
+        assert_eq!(
+            result.metadata.tee_files,
+            vec![
+                TeeFileInfo {
+                    command_index: 0,
+                    command_name: "echo".to_string(),
+                    command: "echo hello".to_string(),
+                    stdout_file: format!("/tmp/logs/{sanitized_ts}-000-echo.stdout.txt"),
+                },
+                TeeFileInfo {
+                    command_index: 1,
+                    command_name: "grep".to_string(),
+                    command: "grep hello".to_string(),
+                    stdout_file: format!("/tmp/logs/{sanitized_ts}-001-grep.stdout.txt"),
+                },
+            ]
+        );
+
+        let mut targeted = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^grep$").unwrap()),
+        );
+        let targeted_result = targeted
+            .transform("cat file | sort | grep pattern | wc -l")
+            .unwrap();
+        assert_eq!(targeted_result.metadata.tee_files.len(), 1);
+        assert_eq!(targeted_result.metadata.tee_files[0].command_name, "grep");
+        assert!(targeted_result.script.contains("sort | grep pattern | tee"));
+
+        let mut dynamic =
+            BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+        let dynamic_result = dynamic.transform("$cmd hello | cat").unwrap();
+        assert!(dynamic_result.script.contains("000-unknown.stdout.txt"));
+
+        let mut multi =
+            BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+        let multi_result = multi.transform("echo a | cat\necho b | cat").unwrap();
+        assert_eq!(
+            multi_result
+                .metadata
+                .tee_files
+                .iter()
+                .map(|file| file.command_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert!(!multi_result.script.contains("10:30:45"));
+        assert!(multi_result.script.contains("10-30-45"));
+    }
+
+    #[test]
+    fn jbc19_transform_plugin_ordering_and_metadata_rows() {
+        #[derive(Default)]
+        struct CustomPlugin;
+
+        impl TransformPlugin for CustomPlugin {
+            fn name(&self) -> &str {
+                "custom"
+            }
+
+            fn transform(&mut self, context: TransformContext<'_>) -> ShellResult<TransformResult> {
+                let mut custom = BTreeMap::new();
+                custom.insert("custom".to_string(), true);
+                Ok(TransformResult {
+                    ast: context.ast.clone(),
+                    metadata: TransformMetadata {
+                        custom,
+                        ..TransformMetadata::default()
+                    },
+                })
+            }
+        }
+
+        struct RewritePlugin;
+
+        impl TransformPlugin for RewritePlugin {
+            fn name(&self) -> &str {
+                "rewrite"
+            }
+
+            fn transform(
+                &mut self,
+                _context: TransformContext<'_>,
+            ) -> ShellResult<TransformResult> {
+                Ok(TransformResult {
+                    ast: parse("echo transformed").expect("rewrite parses"),
+                    metadata: TransformMetadata {
+                        custom: BTreeMap::from([("rewritten".to_string(), true)]),
+                        ..TransformMetadata::default()
+                    },
+                })
+            }
+        }
+
+        struct FailingPlugin;
+
+        impl TransformPlugin for FailingPlugin {
+            fn name(&self) -> &str {
+                "failing"
+            }
+
+            fn transform(
+                &mut self,
+                _context: TransformContext<'_>,
+            ) -> ShellResult<TransformResult> {
+                Err(ShellError::new("plugin failed", 1, 1))
+            }
+        }
+
+        let mut tee_then_collector = BashTransformPipeline::new()
+            .use_plugin(TeePlugin::new("/tmp/logs", "2024-01-15T10:30:45.123Z"))
+            .use_plugin(CommandCollectorPlugin);
+        let ordered = tee_then_collector
+            .transform("echo hello | grep hello")
+            .unwrap();
+        assert_eq!(
+            ordered.metadata.commands,
+            vec!["echo", "exit", "grep", "tee"]
+        );
+        assert_eq!(ordered.metadata.tee_files.len(), 2);
+        assert_eq!(ordered.metadata.tee_files[0].command_name, "echo");
+        assert_eq!(ordered.metadata.tee_files[1].command_name, "grep");
+
+        let mut collector = BashTransformPipeline::new().use_plugin(CommandCollectorPlugin);
+        assert_eq!(
+            collector
+                .transform("echo hello | cat")
+                .unwrap()
+                .metadata
+                .commands,
+            vec!["cat", "echo"]
+        );
+
+        let mut merged = BashTransformPipeline::new()
+            .use_plugin(CommandCollectorPlugin)
+            .use_plugin(CustomPlugin);
+        let merged_result = merged.transform("echo hello").unwrap();
+        assert_eq!(merged_result.metadata.commands, vec!["echo"]);
+        assert_eq!(merged_result.metadata.custom.get("custom"), Some(&true));
+
+        let mut rewritten = BashTransformPipeline::new().use_plugin(RewritePlugin);
+        let rewritten_result = rewritten.transform("echo original").unwrap();
+        assert_eq!(rewritten_result.script, "echo transformed");
+        assert_eq!(
+            rewritten_result.metadata.custom.get("rewritten"),
+            Some(&true)
+        );
+
+        let mut failing = BashTransformPipeline::new().use_plugin(FailingPlugin);
+        let error = failing
+            .transform("echo hello")
+            .expect_err("plugin should fail");
+        assert!(error.to_string().contains("plugin failed"));
     }
 }

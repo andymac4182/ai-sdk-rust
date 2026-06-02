@@ -712,6 +712,27 @@ const jbc12SourceGroups = [
   },
 ];
 
+const jbc19SourceGroups = [
+  {
+    files: [
+      'packages/just-bash/src/transform/pipeline.ts',
+      'packages/just-bash/src/transform/plugins/tee-plugin.ts',
+      'packages/just-bash/src/transform/types.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform',
+    notes:
+      'JBC-19 verifies portable transform pipeline ordering, metadata merging, TeePlugin AST rewriting, target filtering, sanitized timestamp paths, and plugin failure propagation without JS host APIs.',
+  },
+  {
+    files: ['packages/just-bash/src/helpers/shell-quote.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell-quote',
+    notes:
+      'JBC-19 verifies shellJoinArgs single-quote escaping and literal argv preservation through the Rust parser/interpreter.',
+  },
+];
+
 const jbc12CaseGroups = [
   {
     file: 'packages/just-bash/src/syntax/case-statement.test.ts',
@@ -1282,6 +1303,90 @@ const jbc18CaseGroups = [
   },
 ];
 
+const jbc19CaseGroups = [
+  {
+    file: 'packages/just-bash/src/helpers/shell-quote.test.ts',
+    lines: [6, 10, 14, 18, 22, 26, 30, 39, 43, 52, 59, 66, 73, 80],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell-quote',
+    rustTest: 'jbc19_shell_join_args_quotes_and_preserves_literal_arguments',
+    notes:
+      'JBC-19 verifies shellJoinArgs quoting, metacharacter neutralization, empty strings, whitespace, quotes, newlines, tabs, and interpreter literal-preservation rows.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/here-document.test.ts',
+    lines: [5, 14, 25, 34, 43, 52, 63, 74, 82, 91, 101, 110, 119, 129, 139, 152, 162, 220, 232],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::heredoc',
+    rustTest: 'jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion',
+    notes:
+      'JBC-19 verifies heredoc stdin delivery, multiline/empty bodies, quoted delimiters, variable and command substitution, grep/wc/pipeline consumers, delimiter variants, whitespace preservation, and no brace expansion.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/here-document.comparison.test.ts',
+    lines: [20, 31, 45, 58, 69],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::heredoc',
+    rustTest: 'jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion',
+    notes:
+      'JBC-19 maps the portable real-Bash comparison heredoc rows to deterministic Rust heredoc execution and serializer-equivalence checks.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/pipeline-execution.test.ts',
+    lines: [5, 11, 16, 22, 27, 35, 47, 57],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::pipeline',
+    rustTest: 'jbc19_pipeline_stderr_rows_keep_regular_and_pipe_stderr_separate',
+    notes:
+      'JBC-19 verifies regular pipes keep stderr on the parent stream, |& pipes stdout and stderr together, multi-stage stderr stays ordered, and final command status is preserved.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [215, 217, 218, 219, 221, 223, 225, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 242, 244],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest: 'jbc19_transform_serialize_quoting_edge_rows_round_trip',
+    notes:
+      'JBC-19 verifies Rust parse/serialize/parse stability for upstream string escaping edge rows covering adjacent quotes, empty quotes, escaped literals, glob/meta characters, substitutions, and arithmetic in quotes.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [271, 272, 273, 274, 275, 278, 280, 282, 284, 286, 290, 291, 293, 295, 297, 303, 304, 305, 306, 307, 308, 313, 315, 316, 373, 375, 377, 379, 397],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest: 'jbc19_transform_serialize_quoting_edge_rows_round_trip',
+    notes:
+      'JBC-19 verifies execution-equivalent Rust serializer behavior for portable quoting rows with escaped dollars/backticks/backslashes, quoted literals, variable and command substitutions, escaped spaces/globs/hashes, and literal quoted globs.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [331, 333, 335, 337, 339, 341, 343, 344, 345, 347, 349, 387, 388, 398, 403, 404, 405, 406, 408, 409, 411, 413, 415, 416],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest: 'jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion',
+    notes:
+      'JBC-19 verifies heredoc and here-string parse/serialize/execution equivalence for variable, quoted, command-substitution, special-character, empty-line, tab-stripping, escaped-dollar, and command-consumer rows.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/transform.test.ts',
+    lines: [13, 22, 31, 42, 57, 80, 91, 100],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::tee',
+    rustTest: 'jbc19_transform_tee_plugin_metadata_and_script_rows',
+    notes:
+      'JBC-19 verifies no-plugin identity plus TeePlugin AST rewriting, target filtering, metadata, global counters, dynamic command names, and sanitized timestamp paths.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/transform.test.ts',
+    lines: [170, 180, 197, 209, 217, 223, 241],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::pipeline',
+    rustTest: 'jbc19_transform_plugin_ordering_and_metadata_rows',
+    notes:
+      'JBC-19 verifies transform plugin ordering, collector visibility after Tee rewrites, single/no-plugin pipeline behavior, metadata merging, rewrite plugins, and exception propagation.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1304,6 +1409,7 @@ function sourceOverrideFor(relativePath) {
     ...jbc13SourceGroups,
     ...jbc17SourceGroups,
     ...jbc18SourceGroups,
+    ...jbc19SourceGroups,
   ].find((entry) => groupMatchesFile(entry, relativePath));
   return group ? rowOverrideFromGroup(group) : undefined;
 }
@@ -1320,6 +1426,7 @@ function caseOverrideFor(testCase) {
     ...jbc16CaseGroups,
     ...jbc17CaseGroups,
     ...jbc18CaseGroups,
+    ...jbc19CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

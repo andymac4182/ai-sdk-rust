@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1365,
-      "portable-verified": 306
+      "portable-pending": 1360,
+      "portable-verified": 311
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -9615,13 +9615,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/here-document.comparison.test.ts:20:it:should require delimiter at start of line",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::shell::heredoc",
+        "rustTest": "jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion",
+        "notes": "JBC-19 maps the portable real-Bash comparison heredoc rows to deterministic Rust heredoc execution and serializer-equivalence checks.",
         "found": true
       },
       "assertions": [],
@@ -9662,13 +9662,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/here-document.comparison.test.ts:69:it:should NOT expand variables when delimiter is quoted",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::shell::heredoc",
+        "rustTest": "jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion",
+        "notes": "JBC-19 maps the portable real-Bash comparison heredoc rows to deterministic Rust heredoc execution and serializer-equivalence checks.",
         "found": true
       },
       "assertions": [],
@@ -9709,13 +9709,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/here-document.comparison.test.ts:45:it:should handle multiple lines in here document",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::shell::heredoc",
+        "rustTest": "jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion",
+        "notes": "JBC-19 maps the portable real-Bash comparison heredoc rows to deterministic Rust heredoc execution and serializer-equivalence checks.",
         "found": true
       },
       "assertions": [],
@@ -9756,13 +9756,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/here-document.comparison.test.ts:58:it:should expand variables in here document",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::shell::heredoc",
+        "rustTest": "jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion",
+        "notes": "JBC-19 maps the portable real-Bash comparison heredoc rows to deterministic Rust heredoc execution and serializer-equivalence checks.",
         "found": true
       },
       "assertions": [],
@@ -9803,13 +9803,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/here-document.comparison.test.ts:31:it:should work inside if statement with proper formatting",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::shell::heredoc",
+        "rustTest": "jbc19_heredoc_rows_parse_serialize_and_execute_with_expansion",
+        "notes": "JBC-19 maps the portable real-Bash comparison heredoc rows to deterministic Rust heredoc execution and serializer-equivalence checks.",
         "found": true
       },
       "assertions": [],
