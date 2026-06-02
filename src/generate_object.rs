@@ -3633,6 +3633,34 @@ mod tests {
     }
 
     #[test]
+    fn generate_object_reports_no_text_as_no_object_errors() {
+        let result = LanguageModelGenerateResult::new(
+            Vec::new(),
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect_err("empty model content should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: the model did not return a response."
+        );
+        assert_eq!(error.text(), None);
+        assert!(error.cause_message().is_none());
+        assert_eq!(error.usage(), &object_usage());
+        assert_eq!(error.finish_reason(), &FinishReason::Stop);
+        assert_eq!(error.response().model_id.as_deref(), Some("object-test"));
+    }
+
+    #[test]
     fn generate_object_on_start_runs_before_model_call() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let model =
