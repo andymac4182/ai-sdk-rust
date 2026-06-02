@@ -3392,6 +3392,15 @@ mod tests {
             )]
         );
         assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert_eq!(result.response.model_id, "wan2.6-t2v");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id").map(String::as_str)),
+            Some("req-status")
+        );
         assert_eq!(
             result
                 .provider_metadata
@@ -3635,6 +3644,54 @@ mod tests {
             ])
         );
         assert_eq!(r2v_body["parameters"]["size"], "1280*720");
+    }
+
+    #[test]
+    fn alibaba_video_model_maps_url_images_720p_resolution_and_omits_mode_specific_inputs() {
+        let (requests, transport) = video_success_transport();
+        let provider = create_alibaba(AlibabaProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let i2v = poll_ready(
+            provider.video("wan2.6-i2v").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate URL")
+                    .with_image(VideoModelFile::url(
+                        Url::parse("https://example.com/image.jpg").expect("valid URL"),
+                    ))
+                    .with_resolution("1280x720"),
+            ),
+        );
+        let t2v = poll_ready(
+            provider.video("wan2.6-t2v").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Ignore non-T2V inputs")
+                    .with_image(VideoModelFile::url(
+                        Url::parse("https://example.com/ignored.jpg").expect("valid URL"),
+                    ))
+                    .with_provider_options(provider_options(
+                        "alibaba",
+                        json!({
+                            "referenceUrls": ["https://example.com/reference.jpg"]
+                        }),
+                    )),
+            ),
+        );
+
+        assert_eq!(i2v.warnings, Vec::new());
+        assert_eq!(t2v.warnings, Vec::new());
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        let i2v_body = request_body_json(&requests[0]);
+        let t2v_body = request_body_json(&requests[2]);
+        assert_eq!(
+            i2v_body["input"]["img_url"],
+            "https://example.com/image.jpg"
+        );
+        assert_eq!(i2v_body["parameters"]["resolution"], "720P");
+        assert!(t2v_body["input"].get("img_url").is_none());
+        assert!(t2v_body["input"].get("reference_urls").is_none());
+        assert_eq!(t2v_body["input"]["prompt"], "Ignore non-T2V inputs");
     }
 
     fn alibaba_video_error_message(result: &VideoModelResult) -> Option<&str> {
