@@ -7218,6 +7218,7 @@ fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
                     raw: options.raw_output,
                     compact: options.compact,
                     tab_indent: options.tab_indent,
+                    indent: 2,
                     default_scalar_raw: false,
                 },
             ));
@@ -7372,6 +7373,7 @@ struct StructuredOutput {
     raw: bool,
     compact: bool,
     tab_indent: bool,
+    indent: usize,
     default_scalar_raw: bool,
 }
 
@@ -7388,17 +7390,33 @@ fn render_json_output(value: &JsonValue, options: StructuredOutput) -> String {
     if options.compact {
         return serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
     }
-    if options.tab_indent {
-        return serde_json::to_string_pretty(value)
-            .unwrap_or_else(|_| value.to_string())
-            .replace("  ", "\t");
-    }
     match value {
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
+        JsonValue::Array(_) | JsonValue::Object(_) => render_pretty_json_output(value, options),
         _ => value.to_string(),
     }
+}
+
+fn render_pretty_json_output(value: &JsonValue, options: StructuredOutput) -> String {
+    let rendered = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    if options.tab_indent {
+        return rendered.replace("  ", "\t");
+    }
+    if options.indent == 2 {
+        return rendered;
+    }
+    rendered
+        .lines()
+        .map(|line| {
+            let leading_spaces = line.chars().take_while(|ch| *ch == ' ').count();
+            let level = leading_spaces / 2;
+            format!(
+                "{}{}",
+                " ".repeat(level * options.indent),
+                &line[leading_spaces..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn eval_structured_filter(
@@ -7461,6 +7479,9 @@ fn eval_structured_expr(
     }
     if let Some(result) = eval_conditional_expr(value, root, expr, env)? {
         return Ok(vec![result]);
+    }
+    if let Some(inner) = function_arg(expr, "range") {
+        return Ok(json_range_values(inner));
     }
     if let Some((left, op, right)) = split_binary_expr(expr, &["//", " or ", " and "]) {
         let left_value = eval_first(value, root, left, env)?;
@@ -7596,13 +7617,11 @@ fn eval_object_construction(
         if let Some((raw_key, raw_value)) = split_object_entry(entry) {
             let key = object_key(value, root, raw_key.trim(), env)?;
             let value = eval_first(value, root, raw_value.trim(), env)?;
-            object.insert(key, value);
+            insert_json_object_key(&mut object, key, value);
         } else {
             let key = entry.trim().trim_matches('"').to_string();
-            object.insert(
-                key.clone(),
-                eval_first(value, root, &format!(".{key}"), env)?,
-            );
+            let value = eval_first(value, root, &format!(".{key}"), env)?;
+            insert_json_object_key(&mut object, key, value);
         }
     }
     Ok(JsonValue::Object(object))
@@ -7632,6 +7651,16 @@ fn split_object_entry(entry: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+fn is_safe_json_object_key(key: &str) -> bool {
+    !matches!(key, "__proto__" | "constructor" | "prototype")
+}
+
+fn insert_json_object_key(object: &mut JsonMap<String, JsonValue>, key: String, value: JsonValue) {
+    if is_safe_json_object_key(&key) {
+        object.insert(key, value);
+    }
 }
 
 fn object_key(
@@ -7880,22 +7909,6 @@ fn eval_function(
             }
         }
         return Ok(Some(JsonValue::Array(indexes)));
-    }
-    if let Some(inner) = function_arg(expr, "range") {
-        let args = split_top_level(inner, ';');
-        let (start, end) = if args.len() == 1 {
-            (0, args[0].trim().parse::<i64>().unwrap_or(0))
-        } else {
-            (
-                args[0].trim().parse::<i64>().unwrap_or(0),
-                args[1].trim().parse::<i64>().unwrap_or(0),
-            )
-        };
-        return Ok(Some(JsonValue::Array(
-            (start..end)
-                .map(|value| json_number(value as f64))
-                .collect(),
-        )));
     }
     if let Some(inner) = function_arg(expr, "first") {
         return Ok(Some(
@@ -8257,15 +8270,26 @@ fn json_from_entries(value: &JsonValue) -> JsonValue {
     let mut map = JsonMap::new();
     for entry in entries {
         if let JsonValue::Object(entry) = entry
-            && let Some(JsonValue::String(key)) = entry.get("key")
+            && let Some((key, value)) = json_entry_key_value(entry)
         {
-            map.insert(
-                key.clone(),
-                entry.get("value").cloned().unwrap_or(JsonValue::Null),
-            );
+            insert_json_object_key(&mut map, key, value);
         }
     }
     JsonValue::Object(map)
+}
+
+fn json_entry_key_value(entry: &JsonMap<String, JsonValue>) -> Option<(String, JsonValue)> {
+    let key = ["key", "Key", "name", "Name", "k"]
+        .into_iter()
+        .find_map(|name| match entry.get(name) {
+            Some(JsonValue::String(value)) => Some(value.clone()),
+            _ => None,
+        })?;
+    let value = ["value", "Value", "v"]
+        .into_iter()
+        .find_map(|name| entry.get(name).cloned())
+        .unwrap_or(JsonValue::Null);
+    Some((key, value))
 }
 
 fn json_sort_by(
@@ -8369,6 +8393,21 @@ fn json_contains(value: &JsonValue, needle: &JsonValue) -> bool {
         (JsonValue::String(value), JsonValue::String(needle)) => value.contains(needle),
         _ => value == needle,
     }
+}
+
+fn json_range_values(inner: &str) -> Vec<JsonValue> {
+    let args = split_top_level(inner, ';');
+    let (start, end) = if args.len() == 1 {
+        (0, args[0].trim().parse::<i64>().unwrap_or(0))
+    } else {
+        (
+            args[0].trim().parse::<i64>().unwrap_or(0),
+            args[1].trim().parse::<i64>().unwrap_or(0),
+        )
+    };
+    (start..end)
+        .map(|value| json_number(value as f64))
+        .collect()
 }
 
 fn compare_json(left: &JsonValue, right: &JsonValue, op: &str) -> bool {
@@ -8669,6 +8708,7 @@ fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
                 raw: options.raw_output,
                 compact: options.compact,
                 tab_indent: false,
+                indent: options.indent,
                 default_scalar_raw: false,
             },
         );
@@ -8979,9 +9019,13 @@ fn xan_select_drop(
     match read_csv_arg(state, args.get(1).map(String::as_str), stdin, "xan select") {
         Ok(csv) => {
             let selected = csv_column_indexes(&csv.headers, spec);
-            let indexes = (0..csv.headers.len())
-                .filter(|index| selected.contains(index) != drop)
-                .collect::<Vec<_>>();
+            let indexes = if drop {
+                (0..csv.headers.len())
+                    .filter(|index| !selected.contains(index))
+                    .collect::<Vec<_>>()
+            } else {
+                selected
+            };
             stdout_result(render_csv(&project_csv(&csv, &indexes)))
         }
         Err(result) => result,
@@ -9848,7 +9892,7 @@ fn format_sql_json(result_set: &SqlResultSet) -> String {
             format!("{{{fields}}}")
         })
         .collect::<Vec<_>>()
-        .join(",");
+        .join(",\n");
     format!("[{rows}]\n")
 }
 
@@ -11031,6 +11075,60 @@ mod tests {
                 .expect_err("malformed positional JSON should fail")
                 .contains("Invalid positional JSON")
         );
+    }
+
+    #[test]
+    fn structured_data_query_engine_safe_key_rows() {
+        assert!(!is_safe_json_object_key("__proto__"));
+        assert!(!is_safe_json_object_key("constructor"));
+        assert!(!is_safe_json_object_key("prototype"));
+        assert!(is_safe_json_object_key("name"));
+        assert!(is_safe_json_object_key("__Proto__"));
+        assert!(is_safe_json_object_key("CONSTRUCTOR"));
+
+        let mut object = JsonMap::new();
+        insert_json_object_key(&mut object, "a".to_string(), json!(1));
+        insert_json_object_key(&mut object, "__proto__".to_string(), json!("polluted"));
+        insert_json_object_key(&mut object, "b".to_string(), json!(2));
+        insert_json_object_key(&mut object, "constructor".to_string(), json!("polluted"));
+        assert_eq!(JsonValue::Object(object), json!({"a": 1, "b": 2}));
+
+        let mut dangerous_only = JsonMap::new();
+        insert_json_object_key(
+            &mut dangerous_only,
+            "__proto__".to_string(),
+            json!("polluted"),
+        );
+        insert_json_object_key(
+            &mut dangerous_only,
+            "constructor".to_string(),
+            json!("polluted"),
+        );
+        insert_json_object_key(
+            &mut dangerous_only,
+            "prototype".to_string(),
+            json!("polluted"),
+        );
+        assert_eq!(JsonValue::Object(dangerous_only), json!({}));
+
+        let safe_entries = json!([
+            {"key": "a", "value": 1},
+            {"key": "b", "value": 2}
+        ]);
+        assert_eq!(json_from_entries(&safe_entries), json!({"a": 1, "b": 2}));
+
+        let entries = json!([
+            {"key": "a", "value": "safe"},
+            {"key": "__proto__", "value": "polluted"},
+            {"key": "b", "value": "safe"},
+            {"key": "constructor", "value": "polluted"}
+        ]);
+        assert_eq!(
+            json_from_entries(&entries),
+            json!({"a": "safe", "b": "safe"})
+        );
+
+        assert_eq!(json_from_entries(&json!([])), json!({}));
     }
 
     #[test]

@@ -12,7 +12,7 @@ Local mirror inspected at `/Users/andrewmcclenaghan/.opensrc/repos/github.com/ve
 
 JB-05 owns the portable command registry and earlier high-risk built-ins/coreutils/text/search command smoke coverage implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
 
-JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. JBC-10 extends the `command:rg` slice with exact row closures for portable ripgrep-compatible virtual filesystem search, filters, output modes, context, max-count, no-filename, `--files`, and stdin behavior. JBC-11 promotes exact-pass generated conformance-corpus comparison rows to verified rows without hiding unrelated command-family failures. JBC-12 maps portable syntax and transform rows to named parser/AST tests. JBC-13 maps portable read-write, overlay, and mountable filesystem rows to deterministic virtual filesystem tests. JBC-14 maps portable sandbox/security rows and JS-only worker/runtime exceptions. JBC-15 closes additional interpreter core, builtin dispatch, expansion, substitution, arithmetic, array, alias/function, loop, pipefail/status, and diagnostic rows. JBC-16 adds deterministic structured/data command coverage for bounded `jq`, `yq`, `xan`, and `sqlite3` behavior that runs fully against the Rust virtual filesystem. JBC-17 closes executor-package and public example behavior through the shared session/executor API, NAPI-backed JavaScript smoke coverage, and explicit no-host-shell semantics. JBC-18 closes focused CLI/package rows for argument planning, help/version output, command invocation shape, JSON result shape, CJS package entry behavior, and JS-only distribution exceptions. JBC-19 closes targeted shell quoting, heredoc, pipeline-stderr, serializer, and transform plugin rows. JBC-20 closes portable core runtime/session rows for facade cwd/env APIs, per-exec scoped environment/cwd restoration, timeout/cancellation behavior, and selected cd/env/parse-error comparison rows while re-verifying already-mapped pipeline diagnostics/status rows. JBC-21 closes basename/dirname comparison-corpus rows through crate-backed small POSIX command implementations. These slices do not claim upstream `fs/**`, remaining filesystem rows beyond the JBC-13 mappings, remaining parser/syntax/transform rows beyond the JBC-12/JBC-19 mappings, remaining security rows beyond the JBC-14 mappings, remaining interpreter rows beyond the JBC-15/JBC-19/JBC-20 mappings, full AWK/JQ/YQ languages, full ripgrep compatibility, full CSV/SQL engines, binary tests, UTF-8 byte-level tests, PCRE/stats/replace/vimgrep/multiline/passthru behavior, host OverlayFS write policy/root existence, CLI errexit runtime behavior, bundled binary runtime execution rows, interactive readline shell semantics, remaining mock-clock/logger/PIPESTATUS behavior, broad `test`/`tee` comparison suites, remaining small POSIX command rows beyond the generated basename/dirname corpus subset, TeePlugin exec/file-capture rows, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test, NAPI JS proof, generated corpus proof, or explicit exception below.
+JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 narrows the largest remaining `command:awk` gap with exact portable AWK rows for print, fields, separators, BEGIN/END, simple patterns, stdin/files, and common diagnostics. JBC-10 extends the `command:rg` slice with exact row closures for portable ripgrep-compatible virtual filesystem search, filters, output modes, context, max-count, no-filename, `--files`, and stdin behavior. JBC-11 promotes exact-pass generated conformance-corpus comparison rows to verified rows without hiding unrelated command-family failures. JBC-12 maps portable syntax and transform rows to named parser/AST tests. JBC-13 maps portable read-write, overlay, and mountable filesystem rows to deterministic virtual filesystem tests. JBC-14 maps portable sandbox/security rows and JS-only worker/runtime exceptions. JBC-15 closes additional interpreter core, builtin dispatch, expansion, substitution, arithmetic, array, alias/function, loop, pipefail/status, and diagnostic rows. JBC-16 adds deterministic structured/data command coverage for bounded `jq`, `yq`, `xan`, and `sqlite3` behavior that runs fully against the Rust virtual filesystem. JBC-17 closes executor-package and public example behavior through the shared session/executor API, NAPI-backed JavaScript smoke coverage, and explicit no-host-shell semantics. JBC-18 closes focused CLI/package rows for argument planning, help/version output, command invocation shape, JSON result shape, CJS package entry behavior, and JS-only distribution exceptions. JBC-19 closes targeted shell quoting, heredoc, pipeline-stderr, serializer, and transform plugin rows. JBC-20 closes portable core runtime/session rows for facade cwd/env APIs, per-exec scoped environment/cwd restoration, timeout/cancellation behavior, and selected cd/env/parse-error comparison rows while re-verifying already-mapped pipeline diagnostics/status rows. JBC-21 closes basename/dirname comparison-corpus rows through crate-backed small POSIX command implementations. JBC-22 closes `find` plus opt-in fake-transport `curl` rows. JBC-23 closes deeper text command rows. JBC-24 closes deeper structured-data and query-engine safe-object rows. These slices do not claim upstream `fs/**`, remaining filesystem rows beyond the JBC-13 mappings, remaining parser/syntax/transform rows beyond the JBC-12/JBC-19 mappings, remaining security rows beyond the JBC-14 mappings, remaining interpreter rows beyond the JBC-15/JBC-19/JBC-20 mappings, full AWK/JQ/YQ languages, full ripgrep compatibility, full CSV/SQL engines, search-engine internals, binary tests, UTF-8 byte-level tests, PCRE/stats/replace/vimgrep/multiline/passthru behavior, host OverlayFS write policy/root existence, CLI errexit runtime behavior, bundled binary runtime execution rows, interactive readline shell semantics, remaining mock-clock/logger/PIPESTATUS behavior, broad `test`/`tee` comparison suites, remaining small POSIX command rows beyond the generated basename/dirname corpus subset, TeePlugin exec/file-capture rows, or JS-only command runtimes. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test, NAPI JS proof, generated corpus proof, or explicit exception below.
 
 Mapped Rust/NAPI proofs:
 
@@ -51,6 +51,12 @@ Mapped Rust/NAPI proofs:
 | `packages/just-bash/src/cli/just-bash.bundle.test.ts:193` CJS package entry row | `jbc18_napi_cjs_entrypoint_requires_and_executes_basic_commands` | portable-mapped | JBC-18 verifies the Rust-backed CommonJS package entry requires successfully and executes commands through the NAPI adapter. |
 | `packages/just-bash/src/cli/just-bash.bundle.test.ts` 13 dist/bin, lazy-load, worker-layout, optional WASM, and ESM dynamic-require rows | `js-only:upstream-esbuild-binary-lazy-load-worker-and-dynamic-require-distribution` | js-only-documented | JBC-18 documents exact JavaScript package distribution rows that do not map to Rust runtime parity; Rust/NAPI CJS and ESM package entries are verified separately. |
 | `examples/cjs-consumer/index.ts` and `packages/just-bash/src/cli/{exec,shell}.ts` source rows | `jbc18_napi_cjs_entrypoint_requires_and_executes_basic_commands`; `jbc18_napi_esm_entrypoint_imports_and_executes_basic_commands`; `js-only:node-dev-exec-and-readline-shell-wrapper` | portable-mapped / js-only-documented | JBC-18 maps the CJS consumer example to the NAPI package-entry tests and classifies Node dev/interactive CLI wrappers as JS-only tooling. |
+| Additional exact text rows across `echo.binary`, `printf`, `grep.advanced`, `sed`, `head`, `tail`, `wc`, `sort`, `cut`, `tr`, and `uniq` suites | `echo_upstream_command_handles_newline_and_escape_flags`; `printf_upstream_command_formats_core_specifiers_and_escapes`; `text_search_grep_rg_sed_and_awk_close_upstream_rows`; `text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows` | portable-mapped | JBC-23 closes deeper text-stream and text-pipeline cases over the Rust virtual filesystem without host command fallback. |
+| 92 additional exact rows across `packages/just-bash/src/commands/jq/{jq.functions.test.ts,jq.operators.test.ts,jq.filters.test.ts,jq.construction.test.ts,jq.strings.test.ts,jq.keyword-field-access.test.ts,jq.prototype-pollution.test.ts}` | `structured_data_jq_deep_query_construction_and_operator_rows`; `structured_data_jq_string_keyword_and_safe_object_rows` | portable-mapped | JBC-24 covers additional jq functions, operators, filters, construction, keyword field access, string helpers, and dangerous-key handling over deterministic JSON stdin. |
+| 16 additional exact rows across `packages/just-bash/src/commands/yq/{yq.test.ts,yq.env.test.ts,yq.yaml-security.test.ts}` | `structured_data_yq_deep_query_env_and_security_rows` | portable-mapped | JBC-24 covers yq join/indent/combined-option behavior, additional jq-compatible functions, scoped env lookup, and YAML/JSON dangerous-key handling. |
+| 26 additional exact rows across `packages/just-bash/src/commands/xan/{xan.basic.test.ts,xan.columns.test.ts,xan.data.test.ts,xan.filter-sort.test.ts}` | `structured_data_xan_extended_csv_rows` | portable-mapped | JBC-24 covers additional xan headers/head/tail/slice/behead, select/drop/rename, filter/sort/dedup/search, and JSON conversion diagnostics over in-memory CSV/JSON fixtures. |
+| 23 additional exact rows across `packages/just-bash/src/commands/sqlite3/{sqlite3.test.ts,sqlite3.output-modes.test.ts,sqlite3.options.test.ts,sqlite3.errors.test.ts}` | `structured_data_sqlite3_deep_options_modes_and_error_rows` | portable-mapped | JBC-24 covers additional sqlite3 options, output modes, SQL error flow, NULL JSON, and `load_extension` blocking over in-memory databases. |
+| 10 exact rows in `packages/just-bash/src/commands/query-engine/safe-object.test.ts` | `structured_data_query_engine_safe_key_rows` | portable-mapped | JBC-24 covers safe-key classification, ignored unsafe inserts, and filtered `from_entries` construction through Rust structured-data helpers. |
 
 ## JBC-12 Syntax and Transform Slice
 
@@ -155,16 +161,17 @@ JBC-20 closes 76 net-new core runtime/session and comparison rows while
 supporting 7 pipeline rows already owned by JBC-19. JBC-21 closes 15
 basename/dirname comparison-corpus rows. JBC-22 closes 195 exact `find` rows and
 202 exact `curl` rows with deterministic in-memory filesystem behavior plus
-opt-in fake network/resource seams. After regeneration the combined Just Bash
-ledger is `2,566` verified / `7,211` pending / `159` JS-only, with `7,222`
-strict gate gaps. These slices do not claim full command, filesystem, syntax,
-transform, interpreter, security, executor, examples, host-backed CLI, or
-source-only command-module parity until every portable row is named in the
-generated ledger.
+opt-in fake network/resource seams. JBC-23 closes deeper text command rows, and
+JBC-24 closes 167 additional exact structured-data/query-engine rows. After
+regeneration the combined Just Bash ledger is `2,857` verified / `6,920`
+pending / `159` JS-only, with `6,931` strict gate gaps. These slices do not
+claim full command, filesystem, syntax, transform, interpreter, security,
+executor, examples, host-backed CLI, or source-only command-module parity until
+every portable row is named in the generated ledger.
 
 The counts below are the exact current upstream command-family case counts from
 `docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, JBC-09,
-JBC-10, JBC-11, JBC-13, JBC-16, and JBC-22 command-family row mappings. Seed smoke
+JBC-10, JBC-11, JBC-13, JBC-16, JBC-22, JBC-23, and JBC-24 command-family row mappings. Seed smoke
 coverage in these slices does not close rows outside the named verified cases.
 JBC-12 syntax/transform closure, JBC-14 security closure, JBC-15 interpreter
 closure, JBC-17 executor/example closure, JBC-18 CLI/package closure, JBC-19
@@ -175,25 +182,27 @@ per-domain tables.
 | Family | Exact upstream command cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |
 | Core filesystem command rows closed by JBC-06 (`cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`) | 92 | 92 | 0 |
-| `grep` basic/advanced/perl/exclude/binary/UTF-8 suite | 213 | 20 | 193 |
+| `grep` basic/advanced/perl/exclude/binary/UTF-8 suite | 213 | 47 | 166 |
 | Full `awk` command language suite | 643 | 63 | 580 |
-| Full `sed` command/address/error suite | 231 | 10 | 221 |
+| Full `sed` command/address/error suite | 231 | 24 | 207 |
 | Full `rg` ripgrep compatibility suite, including imported tests | 590 | 207 | 383 |
-| `head` command suite | 17 | 11 | 6 |
-| `tail` command suite | 19 | 16 | 3 |
-| `wc` command suite | 20 | 12 | 8 |
-| `sort` command suite | 57 | 10 | 47 |
-| `uniq` command suite | 15 | 11 | 4 |
-| `cut` command suite | 16 | 11 | 5 |
-| `tr` command suite | 27 | 13 | 14 |
-| `jq` command suite | 254 | 66 | 188 |
+| `head` command suite | 17 | 12 | 5 |
+| `tail` command suite | 19 | 17 | 2 |
+| `wc` command suite | 20 | 15 | 5 |
+| `sort` command suite | 57 | 17 | 40 |
+| `uniq` command suite | 15 | 15 | 0 |
+| `cut` command suite | 16 | 13 | 3 |
+| `tr` command suite | 27 | 24 | 3 |
+| `jq` command suite | 254 | 158 | 96 |
 | `curl` command suite | 202 | 202 | 0 |
 | `find` command suite | 195 | 195 | 0 |
 | Archive/compression (`gzip`, `gunzip`, `zcat`, `tar`) | 210 | 0 | 210 |
-| `yq` command suite | 215 | 28 | 187 |
-| `xan` command suite | 201 | 27 | 174 |
-| `sqlite3` command suite | 151 | 21 | 119 |
-| Remaining command utilities outside the groups above | 1,325 | 0 | 1,325 |
+| `yq` command suite | 215 | 44 | 171 |
+| `xan` command suite | 201 | 53 | 148 |
+| `sqlite3` command suite | 151 | 44 | 96 |
+| `query-engine` safe-object/query helper suite | 45 | 10 | 35 |
+| `search-engine` internal matcher/prefilter suite | 53 | 0 | 53 |
+| Remaining command utilities outside the groups above | 1,402 | 155 | 1,212 |
 
 `sqlite3` also has 11 JS-only worker/runtime rows documented as excluded in the generated ledger.
 

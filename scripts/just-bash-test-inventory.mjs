@@ -1676,6 +1676,180 @@ const jbc23CaseGroups = [
   },
 ];
 
+const jbc24CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
+    lines: [6, 13, 29, 36, 52, 75, 115, 138, 146, 156, 171, 179, 189, 199, 209, 237, 243],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_deep_query_construction_and_operator_rows',
+    notes:
+      'JBC-24 verifies additional portable jq keys/values, scalar/object metadata, range streams, string add, min_by/max_by, flatten, sort/group/unique_by, and entries conversion over deterministic JSON stdin.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.operators.test.ts',
+    lines: [24, 30, 44, 50, 66, 72, 78, 84, 90, 98, 104, 124, 134, 140, 146, 152, 158, 166, 172],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_deep_query_construction_and_operator_rows',
+    notes:
+      'JBC-24 verifies additional portable jq arithmetic, comparisons, logic, defaulting, math, and type conversion operators over deterministic JSON stdin.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.filters.test.ts',
+    lines: [20, 28, 38, 44, 50, 58, 64, 74, 80, 88, 96, 114, 120],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_deep_query_construction_and_operator_rows',
+    notes:
+      'JBC-24 verifies additional portable jq select chains, object/array has and contains, any/all, simple if/else, and optional field access.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.construction.test.ts',
+    lines: [6, 14, 22, 30, 40, 46],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_deep_query_construction_and_operator_rows',
+    notes:
+      'JBC-24 verifies portable jq object and array construction rows with static keys, shorthand keys, dynamic keys, piped values, and object value iteration.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.strings.test.ts',
+    lines: [6, 22, 38, 48, 56, 72, 80, 86, 102],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_string_keyword_and_safe_object_rows',
+    notes:
+      'JBC-24 verifies additional portable jq split, regex test, suffix/prefix trimming, uppercase, substitution, global substitution, and indices string helpers.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.keyword-field-access.test.ts',
+    lines: [6, 15, 22, 29, 36, 43, 50, 57, 66, 75, 84, 95, 104, 169, 178, 187, 196],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_string_keyword_and_safe_object_rows',
+    notes:
+      'JBC-24 verifies portable jq keyword-like field access and keyword object-key construction rows without opening parser/destructuring gaps.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.prototype-pollution.test.ts',
+    lines: [15, 26, 36, 46, 57, 66, 75, 88, 100, 109, 118],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_string_keyword_and_safe_object_rows',
+    notes:
+      'JBC-24 verifies portable jq handling for dangerous object keys by allowing safe direct lookup while filtering unsafe constructed/from_entries keys.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/query-engine/safe-object.test.ts',
+    lines: [17, 21, 25, 29, 38, 117, 129, 163, 173, 184],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_query_engine_safe_key_rows',
+    notes:
+      'JBC-24 verifies portable query-engine safe-key classification, ignored unsafe inserts, and filtered from_entries construction through the Rust structured-data helpers.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [521, 560, 580, 636, 645, 659, 670],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_deep_query_env_and_security_rows',
+    notes:
+      'JBC-24 verifies additional portable yq join output, custom JSON indentation, combined short options, and jq-compatible unique/sort_by/reverse/group_by rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.env.test.ts',
+    lines: [17, 26, 49, 69, 78],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_deep_query_env_and_security_rows',
+    notes:
+      'JBC-24 verifies additional portable yq $ENV/env object lookup, env key listing, missing values, special characters, and expression composition.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.yaml-security.test.ts',
+    lines: [60, 75, 93, 105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_deep_query_env_and_security_rows',
+    notes:
+      'JBC-24 verifies portable yq YAML/JSON dangerous-key handling for deterministic in-memory fixtures without claiming non-YAML/JSON format support.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.basic.test.ts',
+    lines: [71, 80, 98, 107, 136, 211],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_extended_csv_rows',
+    notes:
+      'JBC-24 verifies additional portable xan headers stdin, default head/tail, stdin head, slice length, and header-only behead rows over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.columns.test.ts',
+    lines: [36, 45, 63, 84, 93, 112],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_extended_csv_rows',
+    notes:
+      'JBC-24 verifies additional portable xan select/drop/rename rows including requested column order and relative virtual file paths.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.filter-sort.test.ts',
+    lines: [36, 56, 65, 74, 92, 113, 120, 176],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_extended_csv_rows',
+    notes:
+      'JBC-24 verifies additional portable xan filter, limit, header-only, string/numeric reverse sort, dedup, and case-insensitive search rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [10, 22, 31, 54, 63, 72],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_extended_csv_rows',
+    notes:
+      'JBC-24 verifies additional portable xan to/from JSON rows, pretty JSON output, and fail-closed data-format diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.options.test.ts',
+    lines: [15, 35, 48, 59, 68, 90, 114],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_deep_options_modes_and_error_rows',
+    notes:
+      'JBC-24 verifies additional portable sqlite3 option rows for end-of-options, echo, -cmd, header/noheader, nullvalue, and bail behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.output-modes.test.ts',
+    lines: [6, 24, 35, 78, 104],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_deep_options_modes_and_error_rows',
+    notes:
+      'JBC-24 verifies additional portable sqlite3 csv/json/line/tabs/quote output rows without claiming table, markdown, box, html, or escaping completeness.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.errors.test.ts',
+    lines: [58, 69, 82, 92, 113, 135],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_deep_options_modes_and_error_rows',
+    notes:
+      'JBC-24 verifies additional portable sqlite3 non-bail/bail SQL error flow, double-dash option normalization, and load_extension entry-point blocking rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.test.ts',
+    lines: [15, 40, 91, 107, 118],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_deep_options_modes_and_error_rows',
+    notes:
+      'JBC-24 verifies additional portable sqlite3 multi-column, multi-statement, syntax/missing-table diagnostics, and NULL JSON rows over in-memory databases.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1719,6 +1893,7 @@ function caseOverrideFor(testCase) {
     ...jbc20CaseGroups,
     ...jbc22CaseGroups,
     ...jbc23CaseGroups,
+    ...jbc24CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
