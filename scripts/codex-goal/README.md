@@ -45,6 +45,10 @@ Just Bash parity is tracked in `docs/open-agents/just-bash-parity.md` and
 TypeScript/Rust conformance harness to run the same upstream cases with
 `JUST_BASH_ENGINE=typescript` and `JUST_BASH_ENGINE=rust`; the Rust engine is
 exposed to JavaScript through the `napi-rs` adapter.
+The remaining strict closeout is coordinated by JBC-32 and split into the
+parallel JBC-33 through JBC-40 buckets in
+`docs/ts-to-rust-migration-tracker.md`; do not collapse those rows into one
+broad smoke-test closure.
 
 Package progress reporting is generated, not hand-maintained:
 

@@ -37,6 +37,12 @@ sandbox. Use `docs/open-agents/just-bash-parity.md` and
 conformance harness must be able to run the same upstream cases against both
 `JUST_BASH_ENGINE=typescript` and `JUST_BASH_ENGINE=rust`, with the Rust engine
 exposed to JavaScript through the `napi-rs` adapter.
+The remaining Just Bash strict closeout is multi-threaded: JBC-32 coordinates
+the burn-down, and JBC-33 through JBC-40 own parser/runtime, text/search,
+AWK/comparison fixtures, filesystem/core runtime, structured/data commands,
+small POSIX/archive commands, host-runtime boundary, and final dual-engine NAPI
+proof. Follow those tracker rows instead of taking a broad all-in-one closure
+slice.
 
 First build/update `docs/upstream-parity.md`: record upstream commit/package
 inventory, every provider package, every core/helper/library package, public

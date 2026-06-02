@@ -85,6 +85,15 @@ falling back to host `/bin/bash`. Track this work in
 Rust Just Bash to JavaScript through the `napi-rs` adapter and run the same
 upstream cases with `JUST_BASH_ENGINE=typescript` and
 `JUST_BASH_ENGINE=rust`.
+The remaining Just Bash closeout is a parallel workstream, not a single broad
+final-audit slice: JBC-32 coordinates the strict burn-down, and JBC-33 through
+JBC-40 own parser/runtime, text/search, AWK/comparison fixtures,
+filesystem/core runtime, structured/data commands, small POSIX/archive
+commands, host-runtime boundary, and final dual-engine NAPI proof. Use those
+tracker rows from `docs/ts-to-rust-migration-tracker.md` when dispatching or
+continuing Just Bash work, and do not mark a row closed unless the generated
+Just Bash ledger names the exact Rust test, NAPI-backed JS proof, generated
+corpus proof, or explicit exception.
 
 Do not decide the goal is complete until an upstream parity ledger proves there
 are no unchecked upstream packages, providers, public APIs, examples, tests, or
