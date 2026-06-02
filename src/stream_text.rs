@@ -5713,6 +5713,32 @@ mod tests {
     }
 
     #[test]
+    fn smooth_stream_should_combine_partial_reasoning_words() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Let")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", " me ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "think...")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should combine partial reasoning words");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Let ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "me ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "think...")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
     fn smooth_stream_should_flush_reasoning_buffer_before_tool_call() {
         let parts = smooth_stream(
             vec![
@@ -6022,6 +6048,19 @@ mod tests {
                 buffer: "Hello, world!".to_string(),
             }
         );
+
+        let error = smooth_stream(
+            vec![TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                "1",
+                "Hello, world!",
+            ))],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Detector(Arc::new(
+                |_| Some(String::new()),
+            ))),
+        )
+        .expect_err("empty detector matches should fail");
+
+        assert_eq!(error, SmoothStreamError::EmptyDetectorMatch);
     }
 
     #[test]

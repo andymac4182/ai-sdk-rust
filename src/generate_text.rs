@@ -13239,6 +13239,41 @@ mod tests {
     }
 
     #[test]
+    fn execute_tool_call_should_fall_back_to_tool_ms_when_tool_specific_timeout_does_not_match() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new()
+                .with_tool_ms(5_000)
+                .with_tool_timeout("otherTool", 2_000),
+        );
+        let received_signal = Arc::new(AtomicBool::new(false));
+        let received_signal_for_closure = Arc::clone(&received_signal);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_signal = Arc::clone(&received_signal_for_closure);
+                    async move {
+                        received_signal.store(options.abort_signal.is_some(), Ordering::SeqCst);
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_extra_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            ExecuteToolCallsTestContext {
+                timeout: Some(&timeout),
+                ..ExecuteToolCallsTestContext::default()
+            },
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert!(received_signal.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn execute_tool_call_should_call_preliminary_tool_result_callback_for_preliminary_results() {
         let preliminary_results = Arc::new(Mutex::new(Vec::<GenerateTextToolResult>::new()));
         let preliminary_results_for_callback = Arc::clone(&preliminary_results);
@@ -13984,6 +14019,21 @@ mod tests {
             tool_execution_ms["call-1"] < 20,
             "wrapper overhead should not be included in tool execution time"
         );
+    }
+
+    #[test]
+    fn execute_tool_call_should_execute_tool_directly_when_no_telemetry_context_wrapper_is_provided()
+     {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+
+        let (tool_results, _) =
+            execute_tool_calls_for_test(&tools, execute_tool_call_test_call(), JsonObject::new());
+
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_results[0].output, json!("test-result"));
     }
 
     #[test]
