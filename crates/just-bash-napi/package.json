@@ -4,6 +4,13 @@
   "private": true,
   "type": "commonjs",
   "main": "./index.cjs",
+  "exports": {
+    ".": {
+      "require": "./index.cjs",
+      "import": "./index.mjs",
+      "default": "./index.cjs"
+    }
+  },
   "scripts": {
     "build": "cargo build -p just-bash-napi && node scripts/copy-addon.cjs",
     "test": "npm run build --silent && node test/smoke.cjs"

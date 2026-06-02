@@ -1191,6 +1191,97 @@ const jbc17CaseGroups = [
   },
 ];
 
+const jbc18SourceGroups = [
+  {
+    files: ['packages/just-bash/src/cli/just-bash.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::cli',
+    notes:
+      'JBC-18 verifies portable just-bash CLI argument planning, help/version output, virtual mount cwd selection, stdin/script-file source routing, JSON result shape, and NAPI planner exposure. Host OverlayFS read-only/existence behavior remains pending at exact test rows.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/cli/exec.ts',
+      'packages/just-bash/src/cli/shell.ts',
+    ],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::cli::js-dev-tools',
+    notes:
+      'JBC-18 classifies the upstream Node dev:exec helper and readline interactive shell wrapper as JavaScript CLI tooling; portable Bash execution and CLI planning are mapped separately.',
+  },
+  {
+    files: ['examples/cjs-consumer/index.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash-napi::package-entry',
+    notes:
+      'JBC-18 verifies the Rust-backed NAPI CommonJS and ESM package entries with named JS smoke tests that import/require the package and execute commands.',
+  },
+];
+
+const jbc18CliBundleJsOnlyLines = [
+  28, 34, 70, 81, 87, 103, 114, 124, 141, 163, 168, 170, 211,
+];
+
+const jbc18CaseGroups = [
+  {
+    file: 'packages/just-bash/src/cli/just-bash.test.ts',
+    lines: [50, 57, 63, 69],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::cli',
+    rustTest:
+      'jbc18_cli_help_and_version_flags_match_upstream_output; jbc18_napi_cli_planner_matches_upstream_help_version_and_argument_rows',
+    notes:
+      'JBC-18 verifies upstream -h/--help and -v/--version output strings through the Rust CLI planner and NAPI planner harness.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.test.ts',
+    lines: [77, 84, 90, 102, 137, 203, 218, 277, 286, 295],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::cli',
+    rustTest: 'jbc18_cli_invocation_shape_executes_inline_stdin_script_file_and_json_rows',
+    notes:
+      'JBC-18 verifies portable CLI invocation shape over the Rust in-memory backend: inline scripts, echo, pipes, ls, read-only read behavior, stdin source, script-file source, JSON stdout/stderr/exitCode formatting, and /home/user/project mount-path routing. Host OverlayFS read-only and root-existence rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.test.ts',
+    lines: [307, 312, 324, 338],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::cli',
+    rustTest:
+      'jbc18_cli_argument_parser_routes_sources_root_and_cwd; jbc18_napi_cli_planner_matches_upstream_help_version_and_argument_rows',
+    notes:
+      'JBC-18 verifies default mount cwd, explicit --cwd override, and upstream-style virtual cwd normalization without host filesystem access.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.test.ts',
+    lines: [352, 358],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::cli',
+    rustTest:
+      'jbc18_cli_argument_parser_handles_combined_flags_and_errors; jbc18_napi_cli_planner_matches_upstream_help_version_and_argument_rows',
+    notes:
+      'JBC-18 verifies unknown-option and missing -c diagnostics through the Rust CLI parser and NAPI planner harness.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.bundle.test.ts',
+    lines: [193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash-napi::package-entry',
+    rustTest: 'jbc18_napi_cjs_entrypoint_requires_and_executes_basic_commands',
+    notes:
+      'JBC-18 verifies the Rust-backed CommonJS package entry requires successfully and executes basic commands through the NAPI adapter.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.bundle.test.ts',
+    lines: jbc18CliBundleJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::cli::js-distribution-exception',
+    rustTest: 'js-only:upstream-esbuild-binary-lazy-load-worker-and-dynamic-require-distribution',
+    notes:
+      'JBC-18 classifies these exact upstream dist/bin, esbuild lazy-load, worker chunk layout, optional WASM runtime, and ESM dynamic-require rows as JavaScript package distribution behavior. Rust/NAPI package entry behavior is verified separately; portable command runtime rows remain mapped by command-owner tests.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1212,6 +1303,7 @@ function sourceOverrideFor(relativePath) {
     ...jbc12SourceGroups,
     ...jbc13SourceGroups,
     ...jbc17SourceGroups,
+    ...jbc18SourceGroups,
   ].find((entry) => groupMatchesFile(entry, relativePath));
   return group ? rowOverrideFromGroup(group) : undefined;
 }
@@ -1227,6 +1319,7 @@ function caseOverrideFor(testCase) {
     ...jbc15CaseGroups,
     ...jbc16CaseGroups,
     ...jbc17CaseGroups,
+    ...jbc18CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

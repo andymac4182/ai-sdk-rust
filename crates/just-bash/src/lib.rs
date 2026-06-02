@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod cli;
 mod commands;
 mod encoding;
 mod error;
@@ -19,6 +20,11 @@ pub mod security;
 mod session;
 mod shell;
 
+pub use cli::{
+    JUST_BASH_CLI_HELP_OUTPUT, JUST_BASH_CLI_MOUNT_POINT, JUST_BASH_CLI_VERSION_OUTPUT,
+    JustBashCliAction, JustBashCliError, JustBashCliOptions, JustBashCliPlan,
+    JustBashCliScriptSource, format_just_bash_cli_json_result, plan_just_bash_cli_args,
+};
 pub use commands::{
     Builtin, CommandRegistry, UPSTREAM_COMMAND_REGISTRY, UPSTREAM_DEFAULT_COMMAND_NAMES,
 };
