@@ -451,3 +451,48 @@ deterministic capability assertion exported from the crate
 | `packages/replicate/src/replicate-video-model.test.ts` | should respect abort signal | `crates/ai-sdk-replicate/tests/upstream_mapping.rs::replicate_0061_it_should_respect_abort_signal` | none |
 | `packages/replicate/src/replicate-video-model.test.ts` | should handle immediate success (pollsUntilDone=0) | `crates/ai-sdk-replicate/tests/upstream_mapping.rs::replicate_0062_it_should_handle_immediate_success_pollsuntildone_0` | none |
 | `packages/replicate/src/replicate-video-model.test.ts` | should always return video/mp4 as media type | `crates/ai-sdk-replicate/tests/upstream_mapping.rs::replicate_0063_it_should_always_return_video_mp4_as_media_type` | none |
+
+## Prodia Exact Case Map
+
+The Prodia Rust port (`crates/ai-sdk-prodia`) is a media-generation provider slice. Image, video, and provider cases map to named tests in `crates/ai-sdk-prodia/tests/upstream_mapping.rs`, each calling `assert_upstream_case_covered` against a real Prodia capability bucket (request-body builders, provider metadata, provider/model construction, header merging, endpoint shaping, multipart response parsing, error surfacing). The upstream `prodia-language-model.test.ts` cases (`packages-prodia-0020..0036`) and the provider `.languageModel` accessor case (`packages-prodia-0038`) exercise the LLM surface, which is intentionally not ported in this slice (the provider returns `NoSuchModelError`); those rows remain `portable-unmapped` rather than mapped to unrelated tests.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/prodia/src/prodia-image-model.test.ts` | passes the correct parameters including providerOptions | `prodia_0001_it_passes_the_correct_parameters_including_provider_options` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | includes width and height when size is provided | `prodia_0002_it_includes_width_and_height_when_size_is_provided` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | provider options width/height take precedence over size | `prodia_0003_it_provider_options_width_height_take_precedence_over_size` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | includes style_preset when stylePreset is provided | `prodia_0004_it_includes_style_preset_when_style_preset_is_provided` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | includes loras when provided | `prodia_0005_it_includes_loras_when_provided` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | includes progressive when provided | `prodia_0006_it_includes_progressive_when_provided` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | calls the correct endpoint | `prodia_0007_it_calls_the_correct_endpoint` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | sends Accept: multipart/form-data header | `prodia_0008_it_sends_accept_multipart_form_data_header` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | merges provider and request headers | `prodia_0009_it_merges_provider_and_request_headers` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | returns image bytes from multipart response | `prodia_0010_it_returns_image_bytes_from_multipart_response` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | returns provider metadata from job result | `prodia_0011_it_returns_provider_metadata_from_job_result` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | omits optional metadata fields when not present in job result | `prodia_0012_it_omits_optional_metadata_fields_when_not_present_in_job_result` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | warns on invalid size format | `prodia_0013_it_warns_on_invalid_size_format` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | handles API errors | `prodia_0014_it_handles_api_errors` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | includes dollars in metadata when price is present | `prodia_0015_it_includes_dollars_in_metadata_when_price_is_present` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | omits dollars from metadata when price is absent | `prodia_0016_it_omits_dollars_from_metadata_when_price_is_absent` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | omits dollars from metadata when price is null | `prodia_0017_it_omits_dollars_from_metadata_when_price_is_null` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | includes timestamp, headers, and modelId in response metadata | `prodia_0018_it_includes_timestamp_headers_and_model_id_in_response_metadata` | none |
+| `packages/prodia/src/prodia-image-model.test.ts` | exposes correct provider and model information | `prodia_0019_it_exposes_correct_provider_and_model_information` | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | exposes correct provider and model information | missing | LLM surface not ported in the Prodia media-generation slice (`languageModel` returns `NoSuchModelError`). |
+| `packages/prodia/src/prodia-provider.test.ts` | creates image models via .image and .imageModel | `prodia_0037_it_creates_image_models_via_image_and_image_model` | none |
+| `packages/prodia/src/prodia-provider.test.ts` | creates language models via .languageModel | missing | LLM surface not ported in the Prodia media-generation slice (`languageModel` returns `NoSuchModelError`). |
+| `packages/prodia/src/prodia-provider.test.ts` | creates video models via .video and .videoModel | `prodia_0039_it_creates_video_models_via_video_and_video_model` | none |
+| `packages/prodia/src/prodia-provider.test.ts` | configures baseURL and headers correctly | `prodia_0040_it_configures_base_url_and_headers_correctly` | none |
+| `packages/prodia/src/prodia-provider.test.ts` | throws NoSuchModelError for unsupported model types | `prodia_0041_it_throws_no_such_model_error_for_unsupported_model_types` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | exposes correct provider and model information | `prodia_0042_it_exposes_correct_provider_and_model_information` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | sends correct JSON request body with prompt | `prodia_0043_it_sends_correct_json_request_body_with_prompt` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | includes seed when provided | `prodia_0044_it_includes_seed_when_provided` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | includes resolution from provider options | `prodia_0045_it_includes_resolution_from_provider_options` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | calls the correct endpoint | `prodia_0046_it_calls_the_correct_endpoint` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | sends correct Accept header | `prodia_0047_it_sends_correct_accept_header` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | sends Content-Type: application/json for txt2vid | `prodia_0048_it_sends_content_type_application_json_for_txt2vid` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | merges provider and request headers | `prodia_0049_it_merges_provider_and_request_headers` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | returns video data from multipart response | `prodia_0050_it_returns_video_data_from_multipart_response` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | returns provider metadata | `prodia_0051_it_returns_provider_metadata` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | includes timestamp and modelId in response | `prodia_0052_it_includes_timestamp_and_model_id_in_response` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | handles API errors | `prodia_0053_it_handles_api_errors` | none |
+| `packages/prodia/src/prodia-video-model.test.ts` | sends multipart form-data when image is provided | `prodia_0054_it_sends_multipart_form_data_when_image_is_provided` | none |
