@@ -2704,6 +2704,145 @@ const jbc35CaseGroups = [
   },
 ];
 
+const jbc37CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/html-to-markdown/html-to-markdown.test.ts',
+    lines: [
+      6, 16, 26, 35, 44, 55, 66, 76, 85, 94, 105, 114, 123, 132, 139,
+      151, 160, 171, 180, 189, 198, 210, 222, 233, 246, 258, 265, 274,
+      284,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::html-to-markdown',
+    rustTest: 'structured_data_jbc37_html_to_markdown_rows',
+    notes:
+      'JBC-37 implements deterministic in-memory html-to-markdown conversion for headings, paragraphs, links, emphasis, lists, code, images, blockquotes, options, file input, help text, script/style stripping, empty/plain/nested HTML, and unknown-option diagnostics.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/html-to-markdown/html-to-markdown.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::html-to-markdown',
+    rustTest: 'structured_data_jbc37_html_to_markdown_rows',
+    notes:
+      'JBC-37 verifies html-to-markdown preserves multibyte UTF-8 text through the Rust virtual pipe path.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.basic.test.ts',
+    lines: [119, 130, 136, 142, 148, 154, 162, 168],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_jq_path_math_dot_and_safe_key_rows',
+    notes:
+      'JBC-37 verifies portable jq multi-pipe chains, array/string slicing, negative slice bounds, and comma-output streams over deterministic JSON stdin.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
+    lines: [163, 217, 227, 251, 259, 267, 277, 287, 294, 301, 308, 316, 322],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_jq_path_math_dot_and_safe_key_rows',
+    notes:
+      'JBC-37 verifies jq flatten depth, with_entries, transpose, limit, getpath, setpath, recursive number selection, pow, atan2, and nonnumeric null results.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.dot-adjacency.test.ts',
+    lines: [6, 25, 40, 62, 77, 85, 92, 99, 110, 116, 125, 131],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_jq_path_math_dot_and_safe_key_rows',
+    notes:
+      'JBC-37 verifies jq adjacent keyword/string field access and fail-closed whitespace-sensitive dot selector errors.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.utf8-stdin.test.ts',
+    lines: [8],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_jq_path_math_dot_and_safe_key_rows',
+    notes:
+      'JBC-37 verifies jq preserves multibyte UTF-8 string values through the Rust virtual pipe path.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/query-engine/safe-object.test.ts',
+    lines: [48, 54, 67, 199],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_jq_path_math_dot_and_safe_key_rows',
+    notes:
+      'JBC-37 verifies the Rust query helpers filter the upstream extended dangerous-key set during constructed object/from_entries insertion while preserving safe keys.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/query-engine/safe-object.sanitize-parsed-data.test.ts',
+    lines: [5, 30, 37, 47],
+    status: 'js-only-documented',
+    owner: 'docs/just-bash::query-engine-js-object-sanitizer',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-37 documents these rows as JavaScript object-graph sanitizer behavior for null prototypes, Date instances, cycles, and shared references; Rust serde_json inputs do not expose JS prototypes or cyclic object identity.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.format-strings.test.ts',
+    lines: [
+      8, 15, 24, 33, 42, 53, 62, 69, 78, 85, 92, 101, 109, 116, 125,
+      134, 141, 148, 160, 167, 176, 183, 190, 197, 204,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_yq_format_and_utf8_rows',
+    notes:
+      'JBC-37 verifies yq format-string operators @base64, @base64d, @uri, @csv, @tsv, @json, @html, @sh, and @text including unicode, null, numeric, quote, and non-string/array edge cases.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc37_yq_format_and_utf8_rows',
+    notes:
+      'JBC-37 verifies yq preserves multibyte UTF-8 YAML values through the Rust virtual pipe path.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.output-modes.test.ts',
+    lines: [15, 44, 55, 65, 89, 115, 127, 138],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc37_sqlite3_formatter_and_utf8_rows',
+    notes:
+      'JBC-37 verifies deterministic sqlite3 output modes for escaped CSV, column, table, markdown, box, html, HTML escaping, and ASCII separators over the Rust in-memory SQL engine.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.formatters.test.ts',
+    lines: [
+      31, 51, 62, 72, 94, 103, 114, 155, 165, 177, 190, 202, 213, 220,
+      228, 237, 246, 255, 264, 275, 287, 296, 305,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc37_sqlite3_formatter_and_utf8_rows',
+    notes:
+      'JBC-37 verifies sqlite3 formatter edge rows for CSV quoting, empty JSON results, JSON escaped characters, HTML escaping/header cells, column/table/box rendering, quote/nullvalue modes, BLOB text decoding, and combined options.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc37_sqlite3_formatter_and_utf8_rows',
+    notes:
+      'JBC-37 verifies sqlite3 preserves multibyte UTF-8 SQL string literals through the Rust virtual pipe path.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::xan',
+    rustTest: 'structured_data_jbc37_xan_utf8_stdin_row',
+    notes:
+      'JBC-37 verifies xan preserves multibyte UTF-8 CSV fields through the Rust virtual pipe path.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -2759,6 +2898,7 @@ function caseOverrideFor(testCase) {
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
+    ...jbc37CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

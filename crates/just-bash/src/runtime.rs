@@ -5741,6 +5741,545 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn structured_data_jbc37_html_to_markdown_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.html".to_string(), "<h2>From File</h2>".to_string())]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("echo \"<h1>Hello World</h1>\" | html-to-markdown")
+                .stdout,
+            "# Hello World\n"
+        );
+        let paragraphs =
+            env.exec("echo \"<p>First paragraph.</p><p>Second paragraph.</p>\" | html-to-markdown");
+        assert!(paragraphs.stdout.contains("First paragraph."));
+        assert!(paragraphs.stdout.contains("Second paragraph."));
+        assert_eq!(
+            env.exec("echo \"<a href='https://example.com'>Click here</a>\" | html-to-markdown")
+                .stdout,
+            "[Click here](https://example.com)\n"
+        );
+        assert_eq!(
+            env.exec("echo \"<strong>bold</strong> and <em>italic</em>\" | html-to-markdown")
+                .stdout,
+            "**bold** and _italic_\n"
+        );
+        let unordered =
+            env.exec("echo \"<ul><li>One</li><li>Two</li><li>Three</li></ul>\" | html-to-markdown");
+        assert!(unordered.stdout.contains("-   One"));
+        assert!(unordered.stdout.contains("-   Two"));
+        assert!(unordered.stdout.contains("-   Three"));
+        let ordered =
+            env.exec("echo \"<ol><li>First</li><li>Second</li></ol>\" | html-to-markdown");
+        assert!(ordered.stdout.contains("1."));
+        assert!(ordered.stdout.contains("First"));
+        assert!(ordered.stdout.contains("Second"));
+        let code_block =
+            env.exec("echo \"<pre><code>const x = 1;</code></pre>\" | html-to-markdown");
+        assert!(code_block.stdout.contains("```"));
+        assert!(code_block.stdout.contains("const x = 1;"));
+        assert!(
+            env.exec("echo \"Use <code>npm install</code> to install\" | html-to-markdown")
+                .stdout
+                .contains("`npm install`")
+        );
+        assert_eq!(
+            env.exec("echo \"<img src='photo.jpg' alt='A photo'>\" | html-to-markdown")
+                .stdout,
+            "![A photo](photo.jpg)\n"
+        );
+        assert!(
+            env.exec("echo \"<blockquote>A wise quote</blockquote>\" | html-to-markdown")
+                .stdout
+                .contains("> A wise quote")
+        );
+        assert!(
+            env.exec("echo \"<ul><li>Item</li></ul>\" | html-to-markdown -b '*'")
+                .stdout
+                .contains("*   Item")
+        );
+        assert!(
+            env.exec("echo \"<ul><li>Item</li></ul>\" | html-to-markdown --bullet=+")
+                .stdout
+                .contains("+   Item")
+        );
+        assert!(
+            env.exec("echo \"<pre><code>code</code></pre>\" | html-to-markdown -c '~~~'")
+                .stdout
+                .contains("~~~")
+        );
+        assert!(
+            env.exec("echo \"<hr>\" | html-to-markdown -r '***'")
+                .stdout
+                .contains("***")
+        );
+        let setext = env.exec("echo \"<h1>Title</h1>\" | html-to-markdown --heading-style=setext");
+        assert!(setext.stdout.contains("Title"));
+        assert!(setext.stdout.contains("="));
+        assert_eq!(
+            env.exec("html-to-markdown /test.html").stdout,
+            "## From File\n"
+        );
+        assert_eq!(env.exec("html-to-markdown /nonexistent.html").exit_code, 1);
+        let help = env.exec("html-to-markdown --help").stdout;
+        assert!(help.contains("html-to-markdown"));
+        assert!(help.contains("convert HTML to Markdown"));
+        assert!(help.contains("BashEnv extension"));
+        assert!(help.contains("turndown"));
+        assert!(help.contains("Examples:"));
+        assert!(help.contains("curl"));
+        assert!(help.contains("Headings"));
+        assert!(help.contains("Links"));
+        assert!(help.contains("Bold"));
+        assert!(help.contains("Lists"));
+        let scripts = env
+            .exec("echo \"<p>Hello</p><script>alert(1);</script><p>World</p>\" | html-to-markdown");
+        assert!(scripts.stdout.contains("Hello"));
+        assert!(scripts.stdout.contains("World"));
+        assert!(!scripts.stdout.contains("alert"));
+        let styles = env.exec(
+            "echo \"<style>.red { color: red; }</style><p>Styled text</p>\" | html-to-markdown",
+        );
+        assert!(styles.stdout.contains("Styled text"));
+        assert!(!styles.stdout.contains("color"));
+        let multi = env.exec("echo \"<style>body{}</style><h1>Title</h1><script>var x=1;</script><p>Text</p><script>var y=2;</script>\" | html-to-markdown");
+        assert!(multi.stdout.contains("# Title"));
+        assert!(multi.stdout.contains("Text"));
+        assert!(!multi.stdout.contains("var x"));
+        assert!(
+            env.exec("echo \"<script type='text/javascript'>console.log(1);</script><p>Content</p>\" | html-to-markdown")
+                .stdout
+                .contains("Content")
+        );
+        assert_eq!(env.exec("printf '' | html-to-markdown").stdout, "");
+        assert_eq!(
+            env.exec("echo \"Just plain text\" | html-to-markdown")
+                .stdout,
+            "Just plain text\n"
+        );
+        let nested = env.exec(
+            "echo \"<div><h1>Title</h1><p>Text with <strong>bold</strong></p></div>\" | html-to-markdown",
+        );
+        assert!(nested.stdout.contains("# Title"));
+        assert!(nested.stdout.contains("**bold**"));
+        assert!(
+            env.exec("html-to-markdown --invalid")
+                .stderr
+                .contains("unrecognized option")
+        );
+        let utf8 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/in.html".to_string(),
+                "<p>한글 / café / 漢字</p>\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert!(
+            utf8.exec("cat /in.html | html-to-markdown")
+                .stdout
+                .contains("한글 / café / 漢字")
+        );
+    }
+
+    #[test]
+    fn structured_data_jbc37_jq_path_math_dot_and_safe_key_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/in.json".to_string(),
+                serde_json::json!({"msg":"한글 / café / 漢字"}).to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("echo '{\"a\":{\"b\":{\"c\":\"deep\"}}}' | jq '.a | .b | .c'")
+                .stdout,
+            "\"deep\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[0,1,2,3,4,5]' | jq '.[2:4]'").stdout,
+            "[\n  2,\n  3\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '[0,1,2,3,4]' | jq '.[:3]'").stdout,
+            "[\n  0,\n  1,\n  2\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '[0,1,2,3,4]' | jq '.[3:]'").stdout,
+            "[\n  3,\n  4\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"hello\"' | jq '.[1:4]'").stdout,
+            "\"ell\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[0,1,2,3,4]' | jq '.[-2:]'").stdout,
+            "[\n  3,\n  4\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1,\"b\":2}' | jq '.a, .b'").stdout,
+            "1\n2\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"x\":1,\"y\":2,\"z\":3}' | jq '.x, .y, .z'")
+                .stdout,
+            "1\n2\n3\n"
+        );
+        assert_eq!(
+            env.exec("echo '[[[1]],[[2]]]' | jq 'flatten(1)'").stdout,
+            "[\n  [\n    1\n  ],\n  [\n    2\n  ]\n]\n"
+        );
+        assert_eq!(
+            env.exec(
+                "echo '{\"a\":1,\"b\":2}' | jq -c 'with_entries({key: .key, value: (.value + 10)})'"
+            )
+            .stdout,
+            "{\"a\":11,\"b\":12}\n"
+        );
+        assert_eq!(
+            env.exec("echo '[[1,2],[3,4]]' | jq 'transpose'").stdout,
+            "[\n  [\n    1,\n    3\n  ],\n  [\n    2,\n    4\n  ]\n]\n"
+        );
+        assert_eq!(
+            env.exec("jq -n '[limit(3; range(10))]'").stdout,
+            "[\n  0,\n  1,\n  2\n]\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":{\"b\":42}}' | jq 'getpath([\"a\",\"b\"])'")
+                .stdout,
+            "42\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -c 'setpath([\"b\"]; 2)'")
+                .stdout,
+            "{\"a\":1,\"b\":2}\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":{\"b\":1}}' | jq '[.. | numbers]'")
+                .stdout,
+            "[\n  1\n]\n"
+        );
+        assert_eq!(env.exec("jq -n 'pow(2; 3)'").stdout, "8\n");
+        assert_eq!(env.exec("jq -n 'pow(4; 0.5)'").stdout, "2\n");
+        assert_eq!(
+            env.exec("jq -n 'atan2(3; 4)'").stdout,
+            "0.6435011087932844\n"
+        );
+        assert_eq!(
+            env.exec("jq -n 'atan2(-1; -1)'").stdout,
+            "-2.356194490192345\n"
+        );
+        assert_eq!(env.exec("jq -n 'pow(\"a\"; 2)'").stdout, "null\n");
+        assert_eq!(env.exec("jq -n 'atan2(\"a\"; 2)'").stdout, "null\n");
+        assert_eq!(
+            env.exec("echo '{\"null\":\"n\"}' | jq '.null'").stdout,
+            "\"n\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"data\":{\"as\":\"val\"}}' | jq '.data.as'")
+                .stdout,
+            "\"val\"\n"
+        );
+        assert_ne!(env.exec("echo '{\"if\":\"x\"}' | jq '. if'").exit_code, 0);
+        assert_ne!(
+            env.exec("echo '{\"data\":{\"and\":\"x\"}}' | jq '.data. and'")
+                .exit_code,
+            0
+        );
+        assert_ne!(
+            env.exec("echo '{\"foo\":\"x\"}' | jq '.  foo'").exit_code,
+            0
+        );
+        assert_eq!(
+            env.exec("echo '{\"foo\":\"bar\"}' | jq '.  \"foo\"'")
+                .stdout,
+            "\"bar\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"data\":{\"foo\":\"bar\"}}' | jq '.data.\"foo\"'")
+                .stdout,
+            "\"bar\"\n"
+        );
+        assert_ne!(
+            env.exec("echo '[{\"foo\":1}]' | jq '.[0]. foo'").exit_code,
+            0
+        );
+        assert_eq!(
+            env.exec("echo '[{\"foo\":1}]' | jq '.[0]. \"foo\"'").stdout,
+            "1\n"
+        );
+        assert_ne!(env.exec("echo '{\"foo\":1}' | jq '(.). foo'").exit_code, 0);
+        assert_eq!(
+            env.exec("echo '{\"foo\":1}' | jq '(.). \"foo\"'").stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec("echo 'null' | jq -c '{(\"__defineGetter__\"): 1, safe: 2}'")
+                .stdout,
+            "{\"safe\":2}\n"
+        );
+        assert_eq!(
+            env.exec("echo '[{\"key\":\"toString\",\"value\":1},{\"key\":\"safe\",\"value\":2}]' | jq -c 'from_entries'")
+                .stdout,
+            "{\"safe\":2}\n"
+        );
+        assert_eq!(
+            env.exec("cat /in.json | jq -r '.msg'").stdout,
+            "한글 / café / 漢字\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_jbc37_yq_format_and_utf8_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/quote.json".to_string(),
+                    serde_json::json!("it's").to_string(),
+                ),
+                (
+                    "/in.yaml".to_string(),
+                    "msg: 한글 / café / 漢字\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("echo '\"hello\"' | yq -o json '@base64'").stdout,
+            "\"aGVsbG8=\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"aGVsbG8=\"' | yq -o json '@base64d'")
+                .stdout,
+            "\"hello\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"hello world\"' | yq -o json '@uri'")
+                .stdout,
+            "\"hello%20world\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\",\"c\"]' | yq -o json '@csv'")
+                .stdout,
+            "\"a,b,c\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b,c\",\"d\"]' | yq -o json '@csv'")
+                .stdout,
+            "\"a,\\\"b,c\\\",d\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\",\"c\"]' | yq -o json '@tsv'")
+                .stdout,
+            "\"a\\tb\\tc\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | yq -o json '@json'").stdout,
+            "\"{\\\"a\\\":1}\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"<script>alert(1)</script>\"' | yq -o json '@html'")
+                .stdout,
+            "\"&lt;script&gt;alert(1)&lt;/script&gt;\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"hello world\"' | yq -o json '@sh'").stdout,
+            "\"'hello world'\"\n"
+        );
+        assert_eq!(
+            env.exec("cat /quote.json | yq -o json '@sh'").stdout,
+            "\"'it'\\\\''s'\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"test\"' | yq -o json '@text'").stdout,
+            "\"test\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"héllo\"' | yq -o json '@base64'").stdout,
+            "\"aMOpbGxv\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '123' | yq -o json '@base64'").stdout,
+            "null\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\"]' | yq -o json '@base64'")
+                .stdout,
+            "null\n"
+        );
+        assert_eq!(
+            env.exec("echo '[\"a\",null,\"c\"]' | yq -o json '@csv'")
+                .stdout,
+            "\"a,,c\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '[1,2,3]' | yq -o json '@csv'").stdout,
+            "\"1,2,3\"\n"
+        );
+        assert_eq!(env.exec("echo '[]' | yq -o json '@csv'").stdout, "\"\"\n");
+        assert_eq!(
+            env.exec("echo '[\"a\",\"b\\\"c\",\"d\"]' | yq -o json '@csv'")
+                .stdout,
+            "\"a,\\\"b\\\"\\\"c\\\",d\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"test\"' | yq -o json '@csv'").stdout,
+            "null\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"a=1&b=2?c#d\"' | yq -o json '@uri'")
+                .stdout,
+            "\"a%3D1%26b%3D2%3Fc%23d\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '\"a & b\"' | yq -o json '@html'").stdout,
+            "\"a &amp; b\"\n"
+        );
+        assert_eq!(env.exec("echo '123' | yq -o json '@html'").stdout, "null\n");
+        assert_eq!(env.exec("echo '123' | yq -o json '@sh'").stdout, "null\n");
+        assert_eq!(
+            env.exec("echo 'null' | yq -o json '@text'").stdout,
+            "\"\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '42' | yq -o json '@text'").stdout,
+            "\"42\"\n"
+        );
+        assert_eq!(
+            env.exec("cat /in.yaml | yq '.msg'").stdout.trim(),
+            "한글 / café / 漢字"
+        );
+    }
+
+    #[test]
+    fn structured_data_jbc37_sqlite3_formatter_and_utf8_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/q.sql".to_string(),
+                "SELECT '한글 / café / 漢字' AS msg;\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("sqlite3 -csv :memory: \"SELECT 'hello,world'\"")
+                .stdout,
+            "\"hello,world\"\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -csv :memory: \"SELECT '', 'x', ''\"")
+                .stdout,
+            ",x,\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -json :memory: \"CREATE TABLE t(x INT); SELECT * FROM t\"")
+                .stdout,
+            ""
+        );
+        let special_json = env.exec("sqlite3 -json :memory: \"SELECT 'line1\nline2' as x\"");
+        assert!(special_json.stdout.contains("line1\\nline2"));
+        let column = env.exec("sqlite3 -column -header :memory: \"SELECT 'short' as a, 'this is a very long value' as b\"");
+        assert!(column.stdout.contains("short"));
+        assert!(column.stdout.contains("this is a very long value"));
+        assert!(column.stdout.contains("--"));
+        let table =
+            env.exec("sqlite3 -table -header :memory: \"CREATE TABLE t(a INT); SELECT * FROM t\"");
+        assert!(table.stdout.contains("+"));
+        assert!(table.stdout.contains("|"));
+        assert!(table.stdout.contains("a"));
+        let markdown = env.exec("sqlite3 -markdown -header :memory: \"CREATE TABLE t(a INT, b TEXT); INSERT INTO t VALUES(1,'x'); SELECT * FROM t\"");
+        assert!(markdown.stdout.contains("| a | b |"));
+        assert!(markdown.stdout.contains("|---|---|"));
+        assert!(markdown.stdout.contains("| 1 | x |"));
+        let html =
+            env.exec("sqlite3 -html -header :memory: \"SELECT '<div>&</div>' as col1, 2 as col2\"");
+        assert!(html.stdout.contains("<TH>col1</TH>"));
+        assert!(html.stdout.contains("&lt;div&gt;&amp;&lt;/div&gt;"));
+        assert!(html.stdout.contains("<TD>2</TD>"));
+        let box_mode = env.exec("sqlite3 -box :memory: \"SELECT 42 as value\"");
+        assert!(box_mode.stdout.contains("┌"));
+        assert!(box_mode.stdout.contains("└"));
+        assert!(box_mode.stdout.contains("value"));
+        assert!(box_mode.stdout.contains("42"));
+        let ascii = env.exec(
+            "sqlite3 -ascii :memory: \"CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2),(3,4); SELECT * FROM t\"",
+        );
+        assert!(ascii.stdout.contains('\x1f'));
+        assert!(ascii.stdout.contains('\x1e'));
+        assert_eq!(
+            env.exec("sqlite3 -quote :memory: \"SELECT 42\"").stdout,
+            "42\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -quote :memory: \"SELECT 3.14\"").stdout,
+            "3.1400000000000001\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -quote :memory: \"SELECT 'hello'\"")
+                .stdout,
+            "'hello'\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -quote :memory: \"SELECT NULL\"").stdout,
+            "NULL\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -nullvalue 'N/A' :memory: \"SELECT NULL, 1\"")
+                .stdout,
+            "N/A|1\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -csv -nullvalue 'N/A' :memory: \"SELECT NULL, 1\"")
+                .stdout,
+            "N/A,1\n"
+        );
+        assert!(
+            env.exec("sqlite3 -column -nullvalue 'NULL' :memory: \"SELECT NULL as x\"")
+                .stdout
+                .contains("NULL")
+        );
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT X'48454C4C4F'\"").stdout,
+            "HELLO\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -csv -header -nullvalue 'N/A' :memory: \"SELECT 1 as a, NULL as b\"")
+                .stdout,
+            "a,b\n1,N/A\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 -json -cmd \"CREATE TABLE t(x); INSERT INTO t VALUES(42)\" :memory: \"SELECT * FROM t\"")
+                .stdout,
+            "[{\"x\":42}]\n"
+        );
+        let echo_header = env.exec("sqlite3 -echo -header :memory: \"SELECT 1 as x\"");
+        assert!(echo_header.stdout.contains("SELECT 1 as x"));
+        assert!(echo_header.stdout.contains("x"));
+        assert!(echo_header.stdout.contains("1"));
+        assert_eq!(
+            env.exec("cat /q.sql | sqlite3 :memory:").stdout.trim(),
+            "한글 / café / 漢字"
+        );
+    }
+
+    #[test]
+    fn structured_data_jbc37_xan_utf8_stdin_row() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/in.csv".to_string(),
+                "name,city\n홍길동,서울\nAlice,Paris\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat /in.csv | xan select city");
+        assert!(result.stdout.contains("서울"));
+        assert!(result.stdout.contains("Paris"));
+    }
+
+    #[test]
     fn jbc31_readme_quick_start_and_configuration_examples_use_public_bash_api() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([(

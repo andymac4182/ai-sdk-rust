@@ -1113,6 +1113,7 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "yq" => command_yq(state, &tokens[1..], &stdin),
         "xan" => command_xan(state, &tokens[1..], &stdin),
         "sqlite3" => command_sqlite3(state, &tokens[1..], &stdin),
+        "html-to-markdown" => command_html_to_markdown(state, &tokens[1..], &stdin),
         "which" => command_which(state, &tokens[1..]),
         "whoami" => stdout_result("user\n"),
         "sleep" => command_sleep(state, &tokens[1..]),
@@ -4393,6 +4394,308 @@ fn percent_encode(value: &str) -> String {
         }
     }
     output
+}
+
+#[derive(Clone, Debug)]
+struct HtmlMarkdownOptions {
+    bullet: String,
+    code_fence: String,
+    hr: String,
+    heading_style: HtmlHeadingStyle,
+    path: Option<String>,
+}
+
+impl Default for HtmlMarkdownOptions {
+    fn default() -> Self {
+        Self {
+            bullet: "-".to_string(),
+            code_fence: "```".to_string(),
+            hr: "---".to_string(),
+            heading_style: HtmlHeadingStyle::Atx,
+            path: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HtmlHeadingStyle {
+    Atx,
+    Setext,
+}
+
+fn command_html_to_markdown(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let options = match parse_html_markdown_options(args) {
+        Ok(HtmlMarkdownParse::Help) => return stdout_result(html_to_markdown_help()),
+        Ok(HtmlMarkdownParse::Options(options)) => options,
+        Err(result) => return result,
+    };
+    let input = if let Some(path) = &options.path {
+        let resolved = resolve_path(&state.cwd, path);
+        match state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| stderr_result(1, "html-to-markdown: filesystem lock poisoned\n"))
+            .and_then(|fs| {
+                fs.read_file(&resolved).map_err(|_| {
+                    stderr_result(
+                        1,
+                        format!("html-to-markdown: {resolved}: No such file or directory\n"),
+                    )
+                })
+            }) {
+            Ok(input) => input,
+            Err(result) => return result,
+        }
+    } else {
+        stdin.to_string()
+    };
+    stdout_result(html_to_markdown(&input, &options))
+}
+
+enum HtmlMarkdownParse {
+    Help,
+    Options(HtmlMarkdownOptions),
+}
+
+fn parse_html_markdown_options(args: &[String]) -> Result<HtmlMarkdownParse, CommandResult> {
+    let mut options = HtmlMarkdownOptions::default();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--help" || arg == "-h" {
+            return Ok(HtmlMarkdownParse::Help);
+        }
+        if let Some(value) = arg.strip_prefix("--bullet=") {
+            options.bullet = value.to_string();
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--heading-style=") {
+            options.heading_style = match value {
+                "setext" => HtmlHeadingStyle::Setext,
+                "atx" => HtmlHeadingStyle::Atx,
+                _ => {
+                    return Err(stderr_result(
+                        1,
+                        format!("html-to-markdown: unsupported heading style: {value}\n"),
+                    ));
+                }
+            };
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "-b" | "--bullet" | "-c" | "--code-fence" | "-r" | "--hr" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        1,
+                        format!("html-to-markdown: missing argument to {arg}\n"),
+                    ));
+                };
+                match arg.as_str() {
+                    "-b" | "--bullet" => options.bullet = value.clone(),
+                    "-c" | "--code-fence" => options.code_fence = value.clone(),
+                    "-r" | "--hr" => options.hr = value.clone(),
+                    _ => {}
+                }
+                index += 2;
+                continue;
+            }
+            _ if arg.starts_with('-') => {
+                return Err(stderr_result(
+                    1,
+                    format!("html-to-markdown: unrecognized option: {arg}\n"),
+                ));
+            }
+            _ => options.path = Some(arg.clone()),
+        }
+        index += 1;
+    }
+    Ok(HtmlMarkdownParse::Options(options))
+}
+
+fn html_to_markdown_help() -> String {
+    [
+        "html-to-markdown - convert HTML to Markdown",
+        "",
+        "Description:",
+        "  BashEnv extension backed by deterministic turndown-style conversion.",
+        "",
+        "Usage: html-to-markdown [options] [FILE]",
+        "",
+        "Options:",
+        "  -b, --bullet MARKER       Bullet marker for unordered lists",
+        "  -c, --code-fence FENCE    Code fence marker",
+        "  -r, --hr RULE             Horizontal rule marker",
+        "      --heading-style=STYLE Heading style: atx or setext",
+        "",
+        "Supported HTML elements: Headings, Links, Bold, Italic, Lists, Code, Images, Blockquotes",
+        "",
+        "Examples:",
+        "  echo '<h1>Hello</h1>' | html-to-markdown",
+        "  curl https://example.com | html-to-markdown",
+        "",
+    ]
+    .join("\n")
+}
+
+fn html_to_markdown(input: &str, options: &HtmlMarkdownOptions) -> String {
+    let mut output = input.trim().to_string();
+    if output.is_empty() {
+        return String::new();
+    }
+    for pattern in [
+        r"(?is)<script\b[^>]*>.*?</script>",
+        r"(?is)<style\b[^>]*>.*?</style>",
+    ] {
+        output = Regex::new(pattern)
+            .unwrap()
+            .replace_all(&output, "")
+            .into_owned();
+    }
+    output = Regex::new(r"(?is)<pre\b[^>]*>\s*<code\b[^>]*>(.*?)</code>\s*</pre>")
+        .unwrap()
+        .replace_all(&output, |captures: &regex::Captures<'_>| {
+            format!(
+                "\n{fence}\n{}\n{fence}\n",
+                html_inline_text(&captures[1]),
+                fence = options.code_fence
+            )
+        })
+        .into_owned();
+    output = Regex::new(r#"(?is)<img\b[^>]*src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*>"#)
+        .unwrap()
+        .replace_all(&output, |captures: &regex::Captures<'_>| {
+            format!(
+                "![{}]({})",
+                html_inline_text(&captures[2]),
+                captures[1].trim()
+            )
+        })
+        .into_owned();
+    output = Regex::new(r#"(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"#)
+        .unwrap()
+        .replace_all(&output, |captures: &regex::Captures<'_>| {
+            format!(
+                "[{}]({})",
+                html_inline_text(&captures[2]),
+                captures[1].trim()
+            )
+        })
+        .into_owned();
+    for (pattern, replacement) in [
+        (r"(?is)<(?:strong|b)\b[^>]*>(.*?)</(?:strong|b)>", "**"),
+        (r"(?is)<(?:em|i)\b[^>]*>(.*?)</(?:em|i)>", "_"),
+        (r"(?is)<code\b[^>]*>(.*?)</code>", "`"),
+    ] {
+        output = Regex::new(pattern)
+            .unwrap()
+            .replace_all(&output, |captures: &regex::Captures<'_>| {
+                format!(
+                    "{replacement}{}{replacement}",
+                    html_inline_text(&captures[1])
+                )
+            })
+            .into_owned();
+    }
+    for level in 1..=6 {
+        let pattern = format!(r"(?is)<h{level}\b[^>]*>(.*?)</h{level}>");
+        output = Regex::new(&pattern)
+            .unwrap()
+            .replace_all(&output, |captures: &regex::Captures<'_>| {
+                let text = html_inline_text(&captures[1]);
+                if level <= 2 && options.heading_style == HtmlHeadingStyle::Setext {
+                    let underline = if level == 1 { "=" } else { "-" };
+                    format!(
+                        "\n{text}\n{}\n",
+                        underline.repeat(text.chars().count().max(1))
+                    )
+                } else {
+                    format!("\n{} {text}\n", "#".repeat(level))
+                }
+            })
+            .into_owned();
+    }
+    output = convert_html_lists(&output, "ul", false, &options.bullet);
+    output = convert_html_lists(&output, "ol", true, &options.bullet);
+    output = Regex::new(r"(?is)<blockquote\b[^>]*>(.*?)</blockquote>")
+        .unwrap()
+        .replace_all(&output, |captures: &regex::Captures<'_>| {
+            format!("\n> {}\n", html_inline_text(&captures[1]))
+        })
+        .into_owned();
+    output = Regex::new(r"(?is)<p\b[^>]*>(.*?)</p>")
+        .unwrap()
+        .replace_all(&output, |captures: &regex::Captures<'_>| {
+            format!("\n{}\n", html_inline_text(&captures[1]))
+        })
+        .into_owned();
+    output = Regex::new(r"(?is)<hr\b[^>]*>")
+        .unwrap()
+        .replace_all(&output, format!("\n{}\n", options.hr))
+        .into_owned();
+    output = Regex::new(r"(?is)</?(?:div|section|article|main|span)\b[^>]*>")
+        .unwrap()
+        .replace_all(&output, "\n")
+        .into_owned();
+    normalize_markdown_output(&html_inline_text(&output))
+}
+
+fn convert_html_lists(input: &str, tag: &str, ordered: bool, bullet: &str) -> String {
+    let pattern = format!(r"(?is)<{tag}\b[^>]*>(.*?)</{tag}>");
+    Regex::new(&pattern)
+        .unwrap()
+        .replace_all(input, |captures: &regex::Captures<'_>| {
+            let item_re = Regex::new(r"(?is)<li\b[^>]*>(.*?)</li>").unwrap();
+            let mut lines = Vec::new();
+            for (index, item) in item_re.captures_iter(&captures[1]).enumerate() {
+                let text = html_inline_text(&item[1]);
+                if ordered {
+                    lines.push(format!("{}.  {text}", index + 1));
+                } else {
+                    lines.push(format!("{bullet}   {text}"));
+                }
+            }
+            format!("\n{}\n", lines.join("\n"))
+        })
+        .into_owned()
+}
+
+fn html_inline_text(input: &str) -> String {
+    decode_html_entities(
+        &Regex::new(r"(?is)<[^>]+>")
+            .unwrap()
+            .replace_all(input, "")
+            .replace('\r', ""),
+    )
+    .trim()
+    .to_string()
+}
+
+fn normalize_markdown_output(input: &str) -> String {
+    let mut output = input.replace('\r', "");
+    output = Regex::new(r"[ \t]+\n")
+        .unwrap()
+        .replace_all(&output, "\n")
+        .into_owned();
+    output = Regex::new(r"\n{3,}")
+        .unwrap()
+        .replace_all(&output, "\n\n")
+        .into_owned();
+    output = output
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if output.is_empty() {
+        String::new()
+    } else {
+        output.push('\n');
+        output
+    }
 }
 
 fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -9068,6 +9371,33 @@ fn eval_structured_expr(
     if expr == "empty" {
         return Ok(Vec::new());
     }
+    if expr == ".." {
+        return Ok(json_recursive_values(value));
+    }
+    if expr == "numbers" {
+        return if value.is_number() {
+            Ok(vec![value.clone()])
+        } else {
+            Ok(Vec::new())
+        };
+    }
+    if let Some(tail) = expr.strip_prefix("(.).") {
+        let selector = format!(".{tail}");
+        return eval_path_selector(value, &selector);
+    }
+    if let Some(inner) = function_arg(expr, "limit") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let limit = args[0].trim().parse::<usize>().unwrap_or(0);
+            return Ok(eval_structured_filter(value, root, args[1], env)?
+                .into_iter()
+                .take(limit)
+                .collect());
+        }
+    }
+    if let Some(formatter) = expr.strip_prefix('@') {
+        return Ok(vec![format_yq_value(value, formatter)]);
+    }
     if let Some(env_expr) = expr
         .strip_prefix("env.")
         .or_else(|| expr.strip_prefix("$ENV."))
@@ -9265,7 +9595,22 @@ fn split_object_entry(entry: &str) -> Option<(&str, &str)> {
 }
 
 fn is_safe_json_object_key(key: &str) -> bool {
-    !matches!(key, "__proto__" | "constructor" | "prototype")
+    !matches!(
+        key,
+        "__proto__"
+            | "constructor"
+            | "prototype"
+            | "__defineGetter__"
+            | "__defineSetter__"
+            | "__lookupGetter__"
+            | "__lookupSetter__"
+            | "hasOwnProperty"
+            | "isPrototypeOf"
+            | "propertyIsEnumerable"
+            | "toLocaleString"
+            | "toString"
+            | "valueOf"
+    )
 }
 
 fn insert_json_object_key(object: &mut JsonMap<String, JsonValue>, key: String, value: JsonValue) {
@@ -9333,7 +9678,52 @@ fn eval_function(
         "flatten" => return Ok(Some(json_flatten(value, usize::MAX))),
         "to_entries" => return Ok(Some(json_to_entries(value))),
         "from_entries" => return Ok(Some(json_from_entries(value))),
+        "transpose" => return Ok(Some(json_transpose(value))),
         _ => {}
+    }
+    if let Some(inner) = function_arg(expr, "with_entries") {
+        let JsonValue::Array(entries) = json_to_entries(value) else {
+            return Ok(Some(JsonValue::Object(JsonMap::new())));
+        };
+        let mut mapped = Vec::new();
+        for entry in entries {
+            mapped.extend(eval_structured_filter(&entry, root, inner, env)?);
+        }
+        return Ok(Some(json_from_entries(&JsonValue::Array(mapped))));
+    }
+    if let Some(inner) = function_arg(expr, "getpath") {
+        let path = parse_json_path_arg(inner);
+        return Ok(Some(json_get_path(value, &path)));
+    }
+    if let Some(inner) = function_arg(expr, "setpath") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let path = parse_json_path_arg(args[0]);
+            let replacement = eval_first(value, root, args[1], env)?;
+            return Ok(Some(json_set_path(value, &path, replacement)));
+        }
+    }
+    if let Some(inner) = function_arg(expr, "pow") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let base = eval_first(value, root, args[0], env)?;
+            let exponent = eval_first(value, root, args[1], env)?;
+            return Ok(Some(match (base.as_f64(), exponent.as_f64()) {
+                (Some(base), Some(exponent)) => json_number(base.powf(exponent)),
+                _ => JsonValue::Null,
+            }));
+        }
+    }
+    if let Some(inner) = function_arg(expr, "atan2") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let y = eval_first(value, root, args[0], env)?;
+            let x = eval_first(value, root, args[1], env)?;
+            return Ok(Some(match (y.as_f64(), x.as_f64()) {
+                (Some(y), Some(x)) => json_number(y.atan2(x)),
+                _ => JsonValue::Null,
+            }));
+        }
     }
     if let Some(inner) = function_arg(expr, "map") {
         let JsonValue::Array(values) = value else {
@@ -9536,6 +9926,9 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
     if selector == "." {
         return Ok(vec![value.clone()]);
     }
+    if has_invalid_dot_whitespace(selector) {
+        return Err("invalid field selector".to_string());
+    }
     if selector == ".[]" {
         return Ok(json_iter_values(value));
     }
@@ -9549,8 +9942,12 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
             return Ok(json_iter_values(&current));
         }
         if let Some((inside, tail)) = rest.strip_prefix('[').and_then(|tail| tail.split_once(']')) {
-            let inside = inside.trim().trim_matches('"');
-            current = json_index_or_field(&current, inside).unwrap_or(JsonValue::Null);
+            let inside = inside.trim();
+            current = if inside.contains(':') {
+                json_slice(&current, inside)
+            } else {
+                json_index_or_field(&current, inside.trim_matches('"')).unwrap_or(JsonValue::Null)
+            };
             rest = tail.strip_prefix('.').unwrap_or(tail);
             continue;
         }
@@ -9578,6 +9975,23 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
     Ok(vec![current])
 }
 
+fn has_invalid_dot_whitespace(selector: &str) -> bool {
+    for (index, ch) in selector.char_indices() {
+        if ch != '.' {
+            continue;
+        }
+        let tail = &selector[index + ch.len_utf8()..];
+        if !tail.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let next = tail.trim_start().chars().next();
+        if next != Some('"') {
+            return true;
+        }
+    }
+    false
+}
+
 fn json_iter_values(value: &JsonValue) -> Vec<JsonValue> {
     match value {
         JsonValue::Array(values) => values.clone(),
@@ -9600,11 +10014,45 @@ fn json_index_or_field(value: &JsonValue, index: &str) -> Option<JsonValue> {
     value.get(index).cloned()
 }
 
+fn json_slice(value: &JsonValue, spec: &str) -> JsonValue {
+    let (start, end) = spec.split_once(':').unwrap_or((spec, ""));
+    match value {
+        JsonValue::Array(values) => {
+            let start = slice_bound(start, values.len(), 0);
+            let end = slice_bound(end, values.len(), values.len());
+            JsonValue::Array(values[start.min(end)..end.min(values.len())].to_vec())
+        }
+        JsonValue::String(value) => {
+            let chars = value.chars().collect::<Vec<_>>();
+            let start = slice_bound(start, chars.len(), 0);
+            let end = slice_bound(end, chars.len(), chars.len());
+            JsonValue::String(chars[start.min(end)..end.min(chars.len())].iter().collect())
+        }
+        _ => JsonValue::Null,
+    }
+}
+
+fn slice_bound(raw: &str, len: usize, default: usize) -> usize {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return default;
+    }
+    let Ok(index) = raw.parse::<isize>() else {
+        return default;
+    };
+    if index < 0 {
+        len.saturating_sub(index.unsigned_abs())
+    } else {
+        (index as usize).min(len)
+    }
+}
+
 fn split_top_level(input: &str, separator: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut depth = 0_i32;
     let mut in_string = false;
+    let mut in_single_string = false;
     let mut escape = false;
     for (index, ch) in input.char_indices() {
         if in_string {
@@ -9617,8 +10065,15 @@ fn split_top_level(input: &str, separator: char) -> Vec<&str> {
             }
             continue;
         }
+        if in_single_string {
+            if ch == '\'' {
+                in_single_string = false;
+            }
+            continue;
+        }
         match ch {
             '"' => in_string = true,
+            '\'' => in_single_string = true,
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             _ if ch == separator && depth == 0 => {
@@ -9889,6 +10344,90 @@ fn json_from_entries(value: &JsonValue) -> JsonValue {
     JsonValue::Object(map)
 }
 
+fn json_transpose(value: &JsonValue) -> JsonValue {
+    let JsonValue::Array(rows) = value else {
+        return JsonValue::Array(Vec::new());
+    };
+    let width = rows
+        .iter()
+        .filter_map(|row| match row {
+            JsonValue::Array(values) => Some(values.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut output = Vec::new();
+    for column in 0..width {
+        output.push(JsonValue::Array(
+            rows.iter()
+                .filter_map(|row| match row {
+                    JsonValue::Array(values) => values.get(column).cloned(),
+                    _ => None,
+                })
+                .collect(),
+        ));
+    }
+    JsonValue::Array(output)
+}
+
+fn parse_json_path_arg(inner: &str) -> Vec<JsonValue> {
+    serde_json::from_str::<Vec<JsonValue>>(inner.trim()).unwrap_or_default()
+}
+
+fn json_get_path(value: &JsonValue, path: &[JsonValue]) -> JsonValue {
+    let mut current = value;
+    for part in path {
+        match part {
+            JsonValue::String(key) => {
+                let Some(next) = current.get(key) else {
+                    return JsonValue::Null;
+                };
+                current = next;
+            }
+            JsonValue::Number(index) => {
+                let Some(index) = index.as_u64().and_then(|index| usize::try_from(index).ok())
+                else {
+                    return JsonValue::Null;
+                };
+                let Some(next) = current.get(index) else {
+                    return JsonValue::Null;
+                };
+                current = next;
+            }
+            _ => return JsonValue::Null,
+        }
+    }
+    current.clone()
+}
+
+fn json_set_path(value: &JsonValue, path: &[JsonValue], replacement: JsonValue) -> JsonValue {
+    let Some((head, tail)) = path.split_first() else {
+        return replacement;
+    };
+    match head {
+        JsonValue::String(key) => {
+            let mut map = value.as_object().cloned().unwrap_or_default();
+            let child = map.get(key).cloned().unwrap_or(JsonValue::Null);
+            let next = json_set_path(&child, tail, replacement);
+            insert_json_object_key(&mut map, key.clone(), next);
+            JsonValue::Object(map)
+        }
+        JsonValue::Number(index) => {
+            let Some(index) = index.as_u64().and_then(|index| usize::try_from(index).ok()) else {
+                return value.clone();
+            };
+            let mut values = value.as_array().cloned().unwrap_or_default();
+            if values.len() <= index {
+                values.resize(index + 1, JsonValue::Null);
+            }
+            let next = json_set_path(&values[index], tail, replacement);
+            values[index] = next;
+            JsonValue::Array(values)
+        }
+        _ => value.clone(),
+    }
+}
+
 fn json_entry_key_value(entry: &JsonMap<String, JsonValue>) -> Option<(String, JsonValue)> {
     let key = ["key", "Key", "name", "Name", "k"]
         .into_iter()
@@ -10088,6 +10627,164 @@ fn json_scalar_string(value: &JsonValue) -> String {
         JsonValue::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+fn json_recursive_values(value: &JsonValue) -> Vec<JsonValue> {
+    let mut values = vec![value.clone()];
+    match value {
+        JsonValue::Array(items) => {
+            for item in items {
+                values.extend(json_recursive_values(item));
+            }
+        }
+        JsonValue::Object(map) => {
+            for item in map.values() {
+                values.extend(json_recursive_values(item));
+            }
+        }
+        _ => {}
+    }
+    values
+}
+
+fn format_yq_value(value: &JsonValue, formatter: &str) -> JsonValue {
+    match formatter {
+        "base64" => value
+            .as_str()
+            .map(|value| JsonValue::String(base64_encode(value.as_bytes())))
+            .unwrap_or(JsonValue::Null),
+        "base64d" => value
+            .as_str()
+            .and_then(base64_decode)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+        "uri" => value
+            .as_str()
+            .map(|value| JsonValue::String(percent_encode(value)))
+            .unwrap_or(JsonValue::Null),
+        "csv" => match value {
+            JsonValue::Array(values) => JsonValue::String(format_csv_record(values, ",")),
+            _ => JsonValue::Null,
+        },
+        "tsv" => match value {
+            JsonValue::Array(values) => JsonValue::String(format_csv_record(values, "\t")),
+            _ => JsonValue::Null,
+        },
+        "json" => JsonValue::String(
+            serde_json::to_string(value).unwrap_or_else(|_| json_scalar_string(value)),
+        ),
+        "html" => value
+            .as_str()
+            .map(|value| JsonValue::String(escape_html(value)))
+            .unwrap_or(JsonValue::Null),
+        "sh" => value
+            .as_str()
+            .map(|value| JsonValue::String(shell_quote(value)))
+            .unwrap_or(JsonValue::Null),
+        "text" => JsonValue::String(json_scalar_string(value)),
+        _ => JsonValue::Null,
+    }
+}
+
+fn format_csv_record(values: &[JsonValue], separator: &str) -> String {
+    values
+        .iter()
+        .map(|value| csv_escape_field(&json_scalar_string(value), separator))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn csv_escape_field(value: &str, separator: &str) -> String {
+    if value.contains(separator) || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn decode_html_entities(value: &str) -> String {
+    value
+        .replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
+fn base64_decode(value: &str) -> Option<Vec<u8>> {
+    fn val(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            b'=' => Some(64),
+            _ => None,
+        }
+    }
+
+    let bytes = value.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return None;
+    }
+    let mut output = Vec::new();
+    for chunk in bytes.chunks(4) {
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        let c = val(chunk[2])?;
+        let d = val(chunk[3])?;
+        if a == 64 || b == 64 {
+            return None;
+        }
+        output.push((a << 2) | (b >> 4));
+        if c != 64 {
+            output.push(((b & 0b0000_1111) << 4) | (c >> 2));
+        }
+        if d != 64 {
+            output.push(((c & 0b0000_0011) << 6) | d);
+        }
+    }
+    Some(output)
 }
 
 #[derive(Clone, Debug)]
@@ -11089,6 +11786,12 @@ enum SqliteMode {
     Csv,
     Json,
     Line,
+    Column,
+    Table,
+    Markdown,
+    Html,
+    Box,
+    Ascii,
     Tabs,
     Quote,
 }
@@ -11175,6 +11878,16 @@ fn parse_sqlite_args(
             "-csv" => options.mode = SqliteMode::Csv,
             "-json" => options.mode = SqliteMode::Json,
             "-line" => options.mode = SqliteMode::Line,
+            "-column" => options.mode = SqliteMode::Column,
+            "-table" => options.mode = SqliteMode::Table,
+            "-markdown" => options.mode = SqliteMode::Markdown,
+            "-html" => options.mode = SqliteMode::Html,
+            "-box" => options.mode = SqliteMode::Box,
+            "-ascii" => {
+                options.mode = SqliteMode::Ascii;
+                options.separator = "\x1f".to_string();
+                options.newline = "\x1e".to_string();
+            }
             "-tabs" => {
                 options.mode = SqliteMode::Tabs;
                 options.separator = "\t".to_string();
@@ -11372,6 +12085,13 @@ fn parse_sql_value(value: &str) -> SqlValue {
     if value.eq_ignore_ascii_case("NULL") {
         return SqlValue { raw: None };
     }
+    if value.len() >= 3
+        && value.starts_with("X'")
+        && value.ends_with('\'')
+        && let Some(decoded) = decode_sql_blob(&value[2..value.len() - 1])
+    {
+        return SqlValue { raw: Some(decoded) };
+    }
     if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
         return SqlValue {
             raw: Some(value[1..value.len() - 1].replace("''", "'")),
@@ -11446,6 +12166,12 @@ fn format_sql_result(result_set: &SqlResultSet, options: &SqliteOptions) -> Stri
     match options.mode {
         SqliteMode::Json => format_sql_json(result_set),
         SqliteMode::Line => format_sql_line(result_set, options),
+        SqliteMode::Column => format_sql_column(result_set, options),
+        SqliteMode::Table => format_sql_table(result_set, options, false),
+        SqliteMode::Markdown => format_sql_markdown(result_set, options),
+        SqliteMode::Html => format_sql_html(result_set, options),
+        SqliteMode::Box => format_sql_table(result_set, options, true),
+        SqliteMode::Ascii => format_sql_delimited(result_set, options, &options.separator),
         SqliteMode::Csv => format_sql_delimited(result_set, options, ","),
         SqliteMode::Tabs => format_sql_delimited(result_set, options, "\t"),
         SqliteMode::Quote => format_sql_quote(result_set),
@@ -11466,11 +12192,155 @@ fn format_sql_delimited(
     for row in &result_set.rows {
         output.push_str(
             &row.iter()
-                .map(|value| sql_value_text(value, &options.null_value))
+                .map(|value| sql_value_delimited(value, &options.null_value, separator))
                 .collect::<Vec<_>>()
                 .join(separator),
         );
         output.push_str(&options.newline);
+    }
+    output
+}
+
+fn format_sql_column(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    let widths = sql_column_widths(result_set, options);
+    let mut output = String::new();
+    if options.header {
+        output.push_str(&format_sql_padded_row(&result_set.columns, &widths));
+        output.push('\n');
+        output.push_str(
+            &widths
+                .iter()
+                .map(|width| "-".repeat(*width))
+                .collect::<Vec<_>>()
+                .join("  "),
+        );
+        output.push('\n');
+    }
+    for row in &result_set.rows {
+        let cells = row
+            .iter()
+            .map(|value| sql_value_text(value, &options.null_value))
+            .collect::<Vec<_>>();
+        output.push_str(&format_sql_padded_row(&cells, &widths));
+        output.push('\n');
+    }
+    output
+}
+
+fn format_sql_padded_row(cells: &[String], widths: &[usize]) -> String {
+    cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, width)| format!("{cell:<width$}"))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn sql_column_widths(result_set: &SqlResultSet, options: &SqliteOptions) -> Vec<usize> {
+    let mut widths = result_set
+        .columns
+        .iter()
+        .map(|column| column.len())
+        .collect::<Vec<_>>();
+    for row in &result_set.rows {
+        for (index, value) in row.iter().enumerate() {
+            let width = sql_value_text(value, &options.null_value).len();
+            if let Some(existing) = widths.get_mut(index) {
+                *existing = (*existing).max(width);
+            }
+        }
+    }
+    widths
+}
+
+fn format_sql_table(result_set: &SqlResultSet, options: &SqliteOptions, unicode: bool) -> String {
+    let widths = sql_column_widths(result_set, options);
+    let (tl, tr, bl, br, h, v, cross) = if unicode {
+        ("┌", "┐", "└", "┘", "─", "│", "┼")
+    } else {
+        ("+", "+", "+", "+", "-", "|", "+")
+    };
+    let border = |left: &str, right: &str| {
+        format!(
+            "{left}{}{right}\n",
+            widths
+                .iter()
+                .map(|width| h.repeat(width + 2))
+                .collect::<Vec<_>>()
+                .join(cross)
+        )
+    };
+    let row = |cells: Vec<String>| {
+        format!(
+            "{v}{}{v}\n",
+            cells
+                .iter()
+                .zip(&widths)
+                .map(|(cell, width)| format!(" {cell:<width$} "))
+                .collect::<Vec<_>>()
+                .join(v)
+        )
+    };
+    let mut output = String::new();
+    output.push_str(&border(tl, tr));
+    if options.header || unicode {
+        output.push_str(&row(result_set.columns.clone()));
+        output.push_str(&border(cross, cross));
+    }
+    for row_values in &result_set.rows {
+        output.push_str(&row(row_values
+            .iter()
+            .map(|value| sql_value_text(value, &options.null_value))
+            .collect()));
+    }
+    output.push_str(&border(bl, br));
+    output
+}
+
+fn format_sql_markdown(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    let mut output = String::new();
+    if options.header {
+        output.push_str(&format!("| {} |\n", result_set.columns.join(" | ")));
+        output.push_str(&format!(
+            "|{}|\n",
+            result_set
+                .columns
+                .iter()
+                .map(|_| "---")
+                .collect::<Vec<_>>()
+                .join("|")
+        ));
+    }
+    for row in &result_set.rows {
+        output.push_str(&format!(
+            "| {} |\n",
+            row.iter()
+                .map(|value| sql_value_text(value, &options.null_value))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    output
+}
+
+fn format_sql_html(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    let mut output = String::new();
+    if options.header {
+        output.push_str("<TR>");
+        for column in &result_set.columns {
+            output.push_str(&format!("<TH>{}</TH>", escape_html(column)));
+        }
+        output.push_str("</TR>\n");
+    }
+    for row in &result_set.rows {
+        output.push_str("<TR>");
+        for value in row {
+            output.push_str(&format!(
+                "<TD>{}</TD>",
+                escape_html(&sql_value_text(value, &options.null_value))
+            ));
+        }
+        output.push_str("</TR>\n");
     }
     output
 }
@@ -11538,12 +12408,41 @@ fn sql_value_text(value: &SqlValue, null_value: &str) -> String {
     value.raw.clone().unwrap_or_else(|| null_value.to_string())
 }
 
+fn sql_value_delimited(value: &SqlValue, null_value: &str, separator: &str) -> String {
+    let value = sql_value_text(value, null_value);
+    if separator == "," {
+        csv_escape_field(&value, separator)
+    } else {
+        value
+    }
+}
+
 fn sql_value_quote(value: &SqlValue) -> String {
     match &value.raw {
         None => "NULL".to_string(),
-        Some(value) if value.parse::<f64>().is_ok() => value.clone(),
+        Some(value) if value.parse::<i64>().is_ok() => value.clone(),
+        Some(value) if value.parse::<f64>().is_ok() => {
+            let float = value.parse::<f64>().unwrap_or_default();
+            if value.contains('.') {
+                format!("{float:.16}")
+            } else {
+                value.clone()
+            }
+        }
         Some(value) => format!("'{}'", value.replace('\'', "''")),
     }
+}
+
+fn decode_sql_blob(hex: &str) -> Option<String> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    for index in (0..hex.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex[index..index + 2], 16).ok()?;
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
