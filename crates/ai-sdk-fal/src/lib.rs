@@ -1647,14 +1647,15 @@ fn fal_provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        FalProviderSettings, FalTransport, FalTransportFuture, create_fal, fal_image_metadata,
-        fal_image_request_body, fal_image_response, fal_video_request_body,
+        FalProviderSettings, FalTransport, FalTransportFuture, create_fal, fal_error_message,
+        fal_error_response, fal_image_metadata, fal_image_request_body, fal_image_response,
+        fal_video_request_body,
     };
     use ai_sdk_rust::{
-        FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile,
+        FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile, ModelType, Provider,
         ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
-        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, VideoModel,
-        VideoModelCallOptions, Warning,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, SpecificationVersion,
+        VideoModel, VideoModelCallOptions, Warning,
     };
     use serde_json::json;
     use std::env;
@@ -1764,11 +1765,59 @@ mod tests {
     }
 
     #[test]
+    fn fal_provider_creates_image_video_models_and_rejects_language_embedding_models() {
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"));
+        let image = provider.image("fal-ai/flux/dev");
+        let video = provider.video("luma-ray-2");
+
+        assert_eq!(provider.specification_version(), SpecificationVersion::V4);
+        assert_eq!(image.provider(), "fal.image");
+        assert_eq!(image.model_id(), "fal-ai/flux/dev");
+        assert_eq!(poll_ready(image.max_images_per_call()), Some(1));
+        assert_eq!(video.provider(), "fal.video");
+        assert_eq!(video.model_id(), "luma-ray-2");
+        assert_eq!(poll_ready(video.max_videos_per_call()), Some(1));
+
+        let language_error = match provider.language_model("fal-ai/text") {
+            Ok(_) => panic!("fal has no language model lookup"),
+            Err(error) => error,
+        };
+        assert_eq!(language_error.model_id(), "fal-ai/text");
+        assert_eq!(language_error.model_type(), ModelType::LanguageModel);
+        let embedding_error = match provider.embedding_model("fal-ai/embed") {
+            Ok(_) => panic!("fal has no embedding model lookup"),
+            Err(error) => error,
+        };
+        assert_eq!(embedding_error.model_id(), "fal-ai/embed");
+        assert_eq!(embedding_error.model_type(), ModelType::EmbeddingModel);
+    }
+
+    #[test]
+    fn fal_error_schema_parses_resource_exhausted_message() {
+        let error = fal_error_response(&json!({
+            "error": {
+                "message": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+                "code": 429
+            }
+        }))
+        .expect("fal error parses");
+
+        assert_eq!(
+            fal_error_message(&error),
+            "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"
+        );
+    }
+
+    #[test]
     fn fal_image_model_converts_camel_case_provider_options_to_snake_case_for_api() {
         let (body, warnings) = fal_image_request_body(
             &ImageModelCallOptions::new(2)
                 .with_prompt("A sketch")
+                .with_size("1024x1024")
+                .with_seed(123)
                 .with_provider_options(fal_provider_options(json!({
+                    "imageUrl": "https://example.com/provider-image.png",
+                    "maskUrl": "https://example.com/provider-mask.png",
                     "guidanceScale": 7.5,
                     "numInferenceSteps": 30,
                     "enableSafetyChecker": true,
@@ -1784,7 +1833,11 @@ mod tests {
             body,
             json!({
                 "prompt": "A sketch",
+                "seed": 123,
+                "image_size": { "width": 1024, "height": 1024 },
                 "num_images": 2,
+                "image_url": "https://example.com/provider-image.png",
+                "mask_url": "https://example.com/provider-mask.png",
                 "guidance_scale": 7.5,
                 "num_inference_steps": 30,
                 "enable_safety_checker": true,
@@ -1845,6 +1898,18 @@ mod tests {
                 }))),
         )
         .expect("multiple image edit maps");
+        let (single_multi_body, single_multi_warnings) = fal_image_request_body(
+            &ImageModelCallOptions::new(1)
+                .with_prompt("Edit this image")
+                .with_files(vec![ImageModelFile::file(
+                    "image/png",
+                    FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                )])
+                .with_provider_options(fal_provider_options(json!({
+                    "useMultipleImages": true
+                }))),
+        )
+        .expect("single multiple-image request maps");
 
         assert_eq!(
             single_body["image_url"],
@@ -1863,6 +1928,12 @@ mod tests {
             ])
         );
         assert!(multi_warnings.is_empty());
+        assert_eq!(
+            single_multi_body["image_urls"],
+            json!(["data:image/png;base64,iVBORw=="])
+        );
+        assert!(single_multi_body.get("image_url").is_none());
+        assert!(single_multi_warnings.is_empty());
     }
 
     #[test]
@@ -1890,6 +1961,81 @@ mod tests {
         assert!(metadata.get("fileName").is_none());
         assert!(metadata.get("fileSize").is_none());
         assert_eq!(multiple.extra.get("timings"), Some(&json!({})));
+    }
+
+    #[test]
+    fn fal_image_model_preserves_lora_lcm_provider_metadata() {
+        let lora = fal_image_response(&json!({
+            "images": [{
+                "url": "https://fal.example/lora.png",
+                "width": 1024,
+                "height": 1024,
+                "content_type": "image/png",
+                "file_data": "<image file_data>",
+                "file_size": 123,
+                "file_name": "<image file_name>"
+            }],
+            "seed": 123,
+            "has_nsfw_concepts": [true],
+            "debug_latents": {
+                "url": "<debug_latents url>",
+                "content_type": "<debug_latents content_type>"
+            },
+            "debug_per_pass_latents": {
+                "url": "<debug_per_pass_latents url>",
+                "content_type": "<debug_per_pass_latents content_type>"
+            }
+        }))
+        .expect("lora response parses");
+        let lcm = fal_image_response(&json!({
+            "images": [{
+                "url": "https://fal.example/lcm.png",
+                "width": 1024,
+                "height": 1024
+            }],
+            "seed": 123,
+            "num_inference_steps": 456,
+            "nsfw_content_detected": [false]
+        }))
+        .expect("lcm response parses");
+
+        assert_eq!(
+            fal_image_metadata(lora.images[0].clone(), Some(true)),
+            json!({
+                "width": 1024,
+                "height": 1024,
+                "contentType": "image/png",
+                "fileName": "<image file_name>",
+                "fileData": "<image file_data>",
+                "fileSize": 123,
+                "nsfw": true
+            })
+        );
+        assert_eq!(lora.extra.get("seed"), Some(&json!(123)));
+        assert_eq!(
+            lora.extra.get("debug_latents"),
+            Some(&json!({
+                "url": "<debug_latents url>",
+                "content_type": "<debug_latents content_type>"
+            }))
+        );
+        assert_eq!(
+            lora.extra.get("debug_per_pass_latents"),
+            Some(&json!({
+                "url": "<debug_per_pass_latents url>",
+                "content_type": "<debug_per_pass_latents content_type>"
+            }))
+        );
+        assert_eq!(
+            fal_image_metadata(lcm.images[0].clone(), Some(false)),
+            json!({
+                "width": 1024,
+                "height": 1024,
+                "nsfw": false
+            })
+        );
+        assert_eq!(lcm.extra.get("seed"), Some(&json!(123)));
+        assert_eq!(lcm.extra.get("num_inference_steps"), Some(&json!(456)));
     }
 
     #[test]
@@ -1936,6 +2082,21 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(poll.poll_interval_millis, Some(11));
         assert_eq!(poll.poll_timeout_millis, Some(22));
+
+        let (url_body, url_warnings, _) = fal_video_request_body(
+            &VideoModelCallOptions::new(1)
+                .with_prompt("A river")
+                .with_image(ai_sdk_rust::VideoModelFile::url(
+                    Url::parse("https://example.com/input-image.png").expect("valid URL"),
+                )),
+        )
+        .expect("URL image maps");
+
+        assert_eq!(
+            url_body["image_url"],
+            json!("https://example.com/input-image.png")
+        );
+        assert!(url_warnings.is_empty());
     }
 
     #[test]
@@ -2184,9 +2345,13 @@ mod tests {
             };
             Box::pin(ready(Ok(response)))
         });
-        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
-            .with_transport(transport)
-            .with_current_date(fixed_timestamp);
+        let provider = create_fal(
+            FalProviderSettings::new()
+                .with_api_key("test-key")
+                .with_header("x-provider-header", "provider"),
+        )
+        .with_transport(transport)
+        .with_current_date(fixed_timestamp);
         let mut provider_options = ProviderOptions::new();
         provider_options.insert(
             "fal".to_string(),
@@ -2204,11 +2369,23 @@ mod tests {
                 VideoModelCallOptions::new(1)
                     .with_prompt("A river")
                     .with_duration(5.0)
-                    .with_provider_options(provider_options),
+                    .with_provider_options(provider_options)
+                    .with_header("x-request-header", "request"),
             ),
         );
 
         assert_eq!(result.videos.len(), 1);
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert_eq!(result.response.model_id, "luma-dream-machine");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-status-id")),
+            Some(&"status-1".to_string())
+        );
         assert_eq!(
             result
                 .provider_metadata
@@ -2219,6 +2396,18 @@ mod tests {
         );
         let requests = requests.lock().expect("request list mutex is not poisoned");
         assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Key test-key".to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("x-provider-header"),
+            Some(&"provider".to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("x-request-header"),
+            Some(&"request".to_string())
+        );
+        assert_eq!(
             request_body_json(&requests[0]),
             json!({
                 "prompt": "A river",
@@ -2226,6 +2415,235 @@ mod tests {
                 "motion_strength": 0.8,
                 "resolution": "720p"
             })
+        );
+    }
+
+    #[test]
+    fn fal_video_model_maps_missing_queue_response_missing_video_and_api_errors() {
+        for (response, expected_error) in [
+            (
+                json!({}),
+                "No response URL returned from queue endpoint".to_string(),
+            ),
+            (
+                json!({
+                    "request_id": "request-123",
+                    "response_url": "https://queue.fal.run/fal-ai/luma-dream-machine/requests/request-123"
+                }),
+                "No video URL in response".to_string(),
+            ),
+        ] {
+            let response_for_transport = response.clone();
+            let transport: FalTransport = Arc::new(move |request| -> FalTransportFuture {
+                let response = match request.method {
+                    ProviderApiRequestMethod::Post => json_response(response_for_transport.clone()),
+                    ProviderApiRequestMethod::Get => json_response(json!({})),
+                };
+                Box::pin(ready(Ok(response)))
+            });
+            let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport)
+                .with_current_date(fixed_timestamp);
+
+            let result = poll_ready(
+                provider
+                    .video("luma-dream-machine")
+                    .do_generate(VideoModelCallOptions::new(1).with_prompt("bad")),
+            );
+
+            assert!(result.videos.is_empty());
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("fal"))
+                    .and_then(|metadata| metadata.get("errorMessage")),
+                Some(&json!(expected_error))
+            );
+        }
+
+        let transport: FalTransport = Arc::new(move |_request| -> FalTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({"error": {"message": "Invalid prompt"}}).to_string(),
+            ))))
+        });
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider
+                .video("luma-dream-machine")
+                .do_generate(VideoModelCallOptions::new(1).with_prompt("bad")),
+        );
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("fal"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Invalid prompt"))
+        );
+    }
+
+    #[test]
+    fn fal_video_model_polls_until_ready_and_times_out() {
+        let poll_count = Arc::new(Mutex::new(0usize));
+        let poll_count_for_transport = Arc::clone(&poll_count);
+        let transport: FalTransport = Arc::new(move |request| -> FalTransportFuture {
+            let response = match (request.method, request.url.as_str()) {
+                (
+                    ProviderApiRequestMethod::Post,
+                    "https://queue.fal.run/fal-ai/luma-dream-machine",
+                ) => json_response(json!({
+                    "request_id": "request-123",
+                    "response_url": "https://queue.fal.run/fal-ai/luma-dream-machine/requests/request-123"
+                })),
+                (
+                    ProviderApiRequestMethod::Get,
+                    "https://queue.fal.run/fal-ai/luma-dream-machine/requests/request-123",
+                ) => {
+                    let mut count = poll_count_for_transport
+                        .lock()
+                        .expect("poll count mutex is not poisoned");
+                    *count += 1;
+                    if *count < 3 {
+                        ProviderApiResponse::text(
+                            500,
+                            "Internal Server Error",
+                            json!({"detail": "Request is still in progress"}).to_string(),
+                        )
+                    } else {
+                        json_response(json!({
+                            "video": {
+                                "url": "https://fal.example/final.mp4"
+                            }
+                        }))
+                    }
+                }
+                _ => ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    json!({"message": "unexpected request"}).to_string(),
+                ),
+            };
+            Box::pin(ready(Ok(response)))
+        });
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
+            .with_transport(transport);
+
+        let result = poll_until_ready(
+            provider.video("luma-dream-machine").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A city")
+                    .with_provider_options(fal_provider_options(json!({
+                        "pollIntervalMs": 1,
+                        "pollTimeoutMs": 250
+                    }))),
+            ),
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(
+            *poll_count.lock().expect("poll count mutex is not poisoned"),
+            3
+        );
+        assert_eq!(result.videos.len(), 1);
+        assert!(matches!(
+            &result.videos[0],
+            ai_sdk_rust::VideoModelVideoData::Url { media_type, .. } if media_type == "video/mp4"
+        ));
+
+        let transport: FalTransport = Arc::new(move |request| -> FalTransportFuture {
+            let response = match request.method {
+                ProviderApiRequestMethod::Post => json_response(json!({
+                    "request_id": "timeout-123",
+                    "response_url": "https://queue.fal.run/fal-ai/luma-dream-machine/requests/timeout-123"
+                })),
+                ProviderApiRequestMethod::Get => ProviderApiResponse::text(
+                    500,
+                    "Internal Server Error",
+                    json!({"detail": "Request is still in progress"}).to_string(),
+                ),
+            };
+            Box::pin(ready(Ok(response)))
+        });
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+        let result = poll_until_ready(
+            provider.video("luma-dream-machine").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A city")
+                    .with_provider_options(fal_provider_options(json!({
+                        "pollIntervalMs": 1,
+                        "pollTimeoutMs": 1
+                    }))),
+            ),
+            Duration::from_secs(2),
+        );
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("fal"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Video generation request timed out after 1ms"))
+        );
+    }
+
+    #[test]
+    fn fal_video_model_respects_abort_signal_during_polling() {
+        let abort_controller = ProviderAbortController::new();
+        let abort_controller_for_transport = abort_controller.clone();
+        let transport: FalTransport = Arc::new(move |request| -> FalTransportFuture {
+            let response = match request.method {
+                ProviderApiRequestMethod::Post => json_response(json!({
+                    "request_id": "abort-123",
+                    "response_url": "https://queue.fal.run/fal-ai/luma-dream-machine/requests/abort-123"
+                })),
+                ProviderApiRequestMethod::Get => {
+                    abort_controller_for_transport.abort();
+                    ProviderApiResponse::text(
+                        500,
+                        "Internal Server Error",
+                        json!({"detail": "Request is still in progress"}).to_string(),
+                    )
+                }
+            };
+            Box::pin(ready(Ok(response)))
+        });
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-key"))
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+        let result = poll_until_ready(
+            provider.video("luma-dream-machine").do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A city")
+                    .with_abort_signal(abort_controller.signal())
+                    .with_provider_options(fal_provider_options(json!({
+                        "pollIntervalMs": 1
+                    }))),
+            ),
+            Duration::from_secs(2),
+        );
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("fal"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!("Aborted"))
         );
     }
 
