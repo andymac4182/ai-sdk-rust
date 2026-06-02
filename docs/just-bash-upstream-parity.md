@@ -18,6 +18,8 @@ JBC-36 supersedes the older pending notes for its owned filesystem/core/CLI/sess
 
 JBC-38 closes the bounded small-command slice on top of the generated ledger. It maps 597 exact upstream rows to named Rust tests across path utilities, virtual gzip/base64/date/diff/file inspection, table/text layout commands, `xargs`, `test`/`[`, permissions/stat/link helpers, and virtual filesystem size/tree reporting. It intentionally leaves `tar`, checksum/digest commands, binary magic/byte fixtures, host-script compatibility rows, and broader archive/security surfaces pending until follow-up exact-row slices own them.
 
+JBC-41 through JBC-46 are the active `gpt-5.5` xhigh closeout wave for the remaining 3,297 strict gaps: parser/interpreter/syntax/transform, AWK, text/search, structured-data/query, core/filesystem/comparison, and archive/digest/small-command leftovers. These threads must update the generated ledger by exact upstream row id and may close a row only with a named Rust test, NAPI-backed JS proof, generated corpus proof, or explicit `js-only-documented` / `type-system-impossible` exception.
+
 Mapped Rust/NAPI proofs:
 
 | Upstream file/case | Rust test | Status | Notes |

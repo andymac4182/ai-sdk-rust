@@ -2192,14 +2192,14 @@ corpus proofs, leaves ${formatSummaryCount(
   )} generated cases pending.
 
 The remaining closeout is intentionally multi-threaded: JBC-32 coordinates the
-strict parity burn-down, and the landed JBC-33 through JBC-40 wave split large
+strict parity burn-down, the landed JBC-33 through JBC-40 wave split large
 parser/runtime, text/search, AWK/comparison, filesystem/core runtime,
 structured-data, small POSIX, host-runtime, and final dual-engine proof rows
-without claiming the still-pending ledger rows. The next wave should be split
-from the remaining generated \`portable-pending\` rows. The goal is to run the
-same upstream cases against both the TypeScript implementation and the Rust
-implementation exposed through \`napi-rs\`, then use those results to close
-ledger rows one by one.
+without claiming the still-pending ledger rows, and the active JBC-41 through
+JBC-46 wave now owns the next exact-row slices from the remaining generated
+\`portable-pending\` rows. The goal is to run the same upstream cases against both
+the TypeScript implementation and the Rust implementation exposed through
+\`napi-rs\`, then use those results to close ledger rows one by one.
 
 JBC-40 proof status: the JavaScript harness isolates generated Vitest suites per
 engine/process under the upstream conformance cache, so TypeScript and Rust
@@ -2267,6 +2267,12 @@ snapshot, so this is a final proof report, not strict parity completion.
 | JBC-38 | POSIX, archive, and small command family closeout | Landed bounded small POSIX/path/stream/table rows for virtual gzip/base64/date/diff/file inspection, column/join/comm, expand/unexpand/fold/nl/paste/seq/split, strings/test/xargs, path utilities, permissions/stat/link helpers, and size/tree reporting. \`tar\`, checksum/digest rows, binary magic/byte fixtures, and host-script compatibility remain pending. | Focused command-family tests; \`cargo test -p just-bash jbc38 -- --nocapture\`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-39 | Host-runtime boundary and optional language commands | Closed the remaining optional-language command boundary rows with explicit fake-runtime providers, kept Open Agents fail-closed with no host fallback, and documented real QuickJS/CPython/worker/package-runtime rows as JS-only host-runtime behavior. | \`cargo test -p just-bash just_bash_optional_language_commands\`; \`cargo test -p just-bash just_bash_host_runtime_custom_command_defense_rows_are_classified_nonportable\`; \`cargo test -p open-agents-sandbox open_agents_just_bash_blocks_js_python_host_runtime_without_fallback\`; \`cargo test -p just-bash -p open-agents-sandbox\`; inventory checks; shared fmt/clippy/naming/diff gates. |
 | JBC-40 | Dual-engine NAPI conformance finalization and strict gate | Landed JavaScript harness isolation for concurrent TypeScript/Rust runs, verified-corpus mode for either engine, and strict proof reporting without row overclaims. After JBC-38 regeneration, the strict report still has 3,297 gaps from remaining sibling-owned rows. | \`JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs\`; \`JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs\`; \`JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs --verified-corpus\`; \`JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs --verified-corpus\`; \`node scripts/just-bash-test-inventory.mjs --strict\` (expected report: 3,297 strict gaps until the next JBC-32 closeout slices land); \`node scripts/just-bash-conformance-corpus.mjs --check\`; \`cargo test -p just-bash -p just-bash-napi\`; \`npm test --prefix crates/just-bash-napi\`; \`scripts/master-parity-gate.sh --check\`. |
+| JBC-41 | Parser, interpreter, syntax, and transform strict gaps | Active thread \`019e8764-0c31-7102-8239-4404d1d0e863\` closes remaining parser/interpreter/syntax/transform rows with named Rust shell/parser tests or exact corpus proofs. It must leave command-family and structured-data rows to their sibling owners. | Fresh upstream fetch; focused parser/interpreter/shell tests; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-42 | AWK strict gaps | Active thread \`019e8764-fb04-7921-af38-44e60e512ab5\` closes remaining portable AWK parser, expression, function, control-flow, field, array, and comparison-corpus rows without host command fallback. | Focused AWK tests; AWK conformance subsets where available; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-43 | Text and search strict gaps | Active thread \`019e8764-fb3a-7901-a5eb-90fe639f71a9\` closes remaining \`grep\`, \`rg\`, \`sed\`, search-engine, shared regex/text-stream, and adjacent UTF-8 rows with exact stdout/stderr/status expectations. | Focused text/search tests; dual-engine conformance subsets where available; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-44 | Structured data and query strict gaps | Active thread \`019e8764-fc8b-7420-bb7a-7d924a799795\` closes remaining \`jq\`, \`yq\`, \`xan\`, \`sqlite3\`, query-engine, search-engine-helper, and adjacent structured-data rows with deterministic in-memory fixtures. | Focused structured/data tests; generated corpus structured subsets; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-45 | Core, filesystem, and comparison strict gaps | Active thread \`019e8765-0604-73a1-a61b-f33d95b957a3\` closes remaining core runtime, virtual filesystem/path, source/comparison-fixture, and exact-pass corpus rows not covered by command-family owners. | Core/fs tests; raw TypeScript/Rust conformance runs for promoted comparison rows; \`cargo test -p just-bash --test conformance_corpus\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-46 | Archive, digest, and small-command leftovers | Active thread \`019e8765-056a-7cd0-8a2d-a8e47b06c5ac\` closes remaining small command rows such as \`tar\`, digest/checksum, \`md5sum\`, \`touch\`, \`pwd\`, \`true\`, \`sleep\`, and adjacent archive/file-inspection behavior against the virtual filesystem. | Focused archive/digest/small-command tests; conformance corpus command subsets; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
 
 ## Corpus Contract
 
