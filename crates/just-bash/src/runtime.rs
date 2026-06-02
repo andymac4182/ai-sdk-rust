@@ -4275,6 +4275,832 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn text_search_jbc34_grep_basic_regex_and_utf8_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/a.txt".to_string(),
+                    "found here\nHello\nhello\nHELLO\ncat\nfoo\n".to_string(),
+                ),
+                ("/b.txt".to_string(), "nothing\nWorld\nremove\n".to_string()),
+                ("/c.txt".to_string(), "also found\nCAT\n".to_string()),
+                ("/dir/file.txt".to_string(), "findme\nneedle here\n".to_string()),
+                (
+                    "/dir/sub/deep.txt".to_string(),
+                    "another needle\n".to_string(),
+                ),
+                (
+                    "/regex.txt".to_string(),
+                    "hello world\nworld hello\ncat\ncut\ncot\ncar\nac\nabc\nabbc\nabbbc\nbat\nrat\nhat\nprice: $100\nprice: 100\nabc123\n123abc\ncolor\ncolour\ncolr\nab\nabab\nababab\n".to_string(),
+                ),
+                (
+                    "/repeat.txt".to_string(),
+                    "ac\nabc\nabbc\nabbbc\n".to_string(),
+                ),
+                (
+                    "/digits-regex.txt".to_string(),
+                    "abc\nabc123\n123abc\n".to_string(),
+                ),
+                ("/plus.txt".to_string(), "ac\nabc\nabbc\n".to_string()),
+                (
+                    "/optional.txt".to_string(),
+                    "color\ncolour\ncolr\n".to_string(),
+                ),
+                (
+                    "/groups.txt".to_string(),
+                    "ab\nabab\nababab\nac\n".to_string(),
+                ),
+                ("/iv.txt".to_string(), "Hello\nWorld\nhello\n".to_string()),
+                (
+                    "/ci.txt".to_string(),
+                    "Hello\nhello\nHELLO\nworld\n".to_string(),
+                ),
+                ("/nv.txt".to_string(), "keep\nremove\nkeep\n".to_string()),
+                (
+                    "/cat-case.txt".to_string(),
+                    "Cat\ncat\ncaterpillar\nCAT\n".to_string(),
+                ),
+                ("/eidog.txt".to_string(), "CAT\nDOG\nbird\n".to_string()),
+                ("/empty.txt".to_string(), String::new()),
+                ("/newlines.txt".to_string(), "\n\n\n".to_string()),
+                (
+                    "/long.txt".to_string(),
+                    format!("{}needle{}\n", "a".repeat(128), "b".repeat(128)),
+                ),
+                (
+                    "/multi-match.txt".to_string(),
+                    "foo bar foo baz foo\n".to_string(),
+                ),
+                (
+                    "/file-with-dash.txt".to_string(),
+                    "content\n".to_string(),
+                ),
+                (
+                    "/unicode.txt".to_string(),
+                    "hello\n中文\nworld\ncol1\tcol2\tcol3\n".to_string(),
+                ),
+                (
+                    "/posix.txt".to_string(),
+                    "abc\n123\na1b\nABC\nAbC\ndeadbeef\n12ab\nGHI\nhello world\nhelloworld\na1\nb2\nc!\n!@#\n".to_string(),
+                ),
+                (
+                    "/literal.txt".to_string(),
+                    "a^b\na$b\nacb\nabc\n*\n*abc\nab\nabb\nabbb\na1\n1a\nA9\n".to_string(),
+                ),
+                ("/bre-star.txt".to_string(), "ab\nabb\nabbb\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("grep --files-with-matches found /a.txt /b.txt /c.txt")
+                .stdout,
+            "/a.txt\n/c.txt\n"
+        );
+        assert_eq!(
+            env.exec("grep -R findme /dir").stdout,
+            "/dir/file.txt:findme\n"
+        );
+        assert_eq!(
+            env.exec("grep -r needle /dir").stdout,
+            "/dir/file.txt:needle here\n/dir/sub/deep.txt:another needle\n"
+        );
+        assert_eq!(env.exec("grep -w cat /a.txt").stdout, "cat\n");
+        assert_eq!(env.exec("grep --word-regexp cat /a.txt").stdout, "cat\n");
+        assert_eq!(
+            env.exec(r#"grep -E "cat|cut" /regex.txt"#).stdout,
+            "cat\ncut\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep --extended-regexp "abc[0-9]+" /regex.txt"#)
+                .stdout,
+            "abc123\n"
+        );
+        assert_eq!(env.exec("grep -e hello /a.txt").stdout, "hello\n");
+        assert_eq!(
+            env.exec("grep pattern /dir").stderr,
+            "grep: /dir: Is a directory\n"
+        );
+
+        assert_eq!(
+            env.exec(r#"grep "^hello" /regex.txt"#).stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep "hello$" /regex.txt"#).stdout,
+            "world hello\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep "c.t" /regex.txt"#).stdout,
+            "cat\ncut\ncot\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep "ab*c" /repeat.txt"#).stdout,
+            "ac\nabc\nabbc\nabbbc\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep "[cbr]at" /regex.txt"#).stdout,
+            "cat\nbat\nrat\n"
+        );
+        assert_eq!(env.exec(r#"grep "[^cbr]at" /regex.txt"#).stdout, "hat\n");
+        assert_eq!(
+            env.exec(r#"grep '\$100' /regex.txt"#).stdout,
+            "price: $100\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "[0-9]+" /digits-regex.txt"#).stdout,
+            "abc123\n123abc\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "ab+c" /plus.txt"#).stdout,
+            "abc\nabbc\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "colou?r" /optional.txt"#).stdout,
+            "color\ncolour\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "(ab)+" /groups.txt"#).stdout,
+            "ab\nabab\nababab\n"
+        );
+        assert_eq!(env.exec("grep pattern /empty.txt").exit_code, 1);
+        assert_eq!(env.exec(r#"grep "." /newlines.txt"#).exit_code, 1);
+        assert!(env.exec("grep needle /long.txt").stdout.contains("needle"));
+        assert_eq!(
+            env.exec("grep foo /multi-match.txt").stdout,
+            "foo bar foo baz foo\n"
+        );
+        assert_eq!(env.exec(r#"grep "^hello$" /a.txt"#).stdout, "hello\n");
+        assert_eq!(
+            env.exec("grep content /file-with-dash.txt").stdout,
+            "content\n"
+        );
+        assert_eq!(
+            env.exec("grep col2 /unicode.txt").stdout,
+            "col1\tcol2\tcol3\n"
+        );
+        assert_eq!(env.exec("grep 中文 /unicode.txt").stdout, "中文\n");
+        assert_eq!(env.exec("grep -iv hello /iv.txt").stdout, "World\n");
+        assert_eq!(env.exec("grep -ci hello /ci.txt").stdout, "3\n");
+        assert_eq!(
+            env.exec("grep -nv remove /nv.txt").stdout,
+            "1:keep\n3:keep\n"
+        );
+        assert!(
+            env.exec("grep -rl needle /dir")
+                .stdout
+                .contains("/dir/sub/deep.txt")
+        );
+        assert_eq!(
+            env.exec("grep -wi cat /cat-case.txt").stdout,
+            "Cat\ncat\nCAT\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -Ei "cat|dog" /eidog.txt"#).stdout,
+            "CAT\nDOG\n"
+        );
+
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:alpha:]]+$" /posix.txt"#).stdout,
+            "abc\nABC\nAbC\ndeadbeef\nGHI\nhelloworld\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:digit:]]+$" /posix.txt"#).stdout,
+            "123\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:alnum:]]+$" /posix.txt"#).stdout,
+            "abc\n123\na1b\nABC\nAbC\ndeadbeef\n12ab\nGHI\nhelloworld\na1\nb2\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:upper:]]+$" /posix.txt"#).stdout,
+            "ABC\nGHI\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:lower:]]+$" /posix.txt"#).stdout,
+            "abc\ndeadbeef\nhelloworld\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:xdigit:]]+$" /posix.txt"#).stdout,
+            "abc\n123\na1b\nABC\nAbC\ndeadbeef\n12ab\na1\nb2\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "[[:space:]]" /posix.txt"#).stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:alpha:]][[:digit:]]$" /posix.txt"#)
+                .stdout,
+            "a1\nb2\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[^[:alpha:]]+$" /posix.txt"#).stdout,
+            "123\n!@#\n"
+        );
+        assert_eq!(env.exec(r#"grep 'a\$b' /literal.txt"#).stdout, "a$b\n");
+        assert_eq!(env.exec(r#"grep '^\*' /literal.txt"#).stdout, "*\n*abc\n");
+        assert_eq!(
+            env.exec("grep 'ab*' /bre-star.txt").stdout,
+            "ab\nabb\nabbb\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[[:alpha:][:digit:]]+$" /literal.txt"#)
+                .stdout,
+            "acb\nabc\nab\nabb\nabbb\na1\n1a\nA9\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "^[^[:alpha:][:digit:]]+$" /posix.txt"#)
+                .stdout,
+            "!@#\n"
+        );
+        assert_eq!(
+            env.exec("printf '한글 found\\nplain\\n' | grep 한글")
+                .stdout,
+            "한글 found\n"
+        );
+        assert_eq!(env.exec("ls /dir | grep file").stdout, "file.txt\n");
+        assert_eq!(env.exec("grep -m 1 -i hello /a.txt").stdout, "Hello\n");
+    }
+
+    #[test]
+    fn text_search_jbc34_rg_patterns_gitignore_and_edge_rows() {
+        assert_home_exec(
+            &[("file.txt", "hello world\nhelloworld\n")],
+            "rg -w hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello\nhello world\n")],
+            "rg -x hello",
+            0,
+            "file.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a.b\naxb\n")],
+            "rg -F 'a.b'",
+            0,
+            "file.txt:1:a.b\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo[bar]\nfoobar\n")],
+            "rg -F '[bar]'",
+            0,
+            "file.txt:1:foo[bar]\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello\nworld\n")],
+            "rg -v hello",
+            0,
+            "file.txt:2:world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\nfoo\nbaz\n")],
+            "rg -v foo",
+            0,
+            "file.txt:2:bar\nfile.txt:4:baz\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\nbaz\n")],
+            "rg -e foo -e bar",
+            0,
+            "file.txt:1:foo\nfile.txt:2:bar\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello\nhello\nWorld\nworld\n")],
+            "rg -e Hello -e world",
+            0,
+            "file.txt:1:Hello\nfile.txt:4:world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\n")],
+            "rg --regexp=foo --regexp=bar",
+            0,
+            "file.txt:1:foo\nfile.txt:2:bar\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo bar baz\n")],
+            "rg -e foo -e bar",
+            0,
+            "file.txt:1:foo bar baz\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo123\nbar456\nbaz\n")],
+            "rg '[0-9]+'",
+            0,
+            "file.txt:1:foo123\nfile.txt:2:bar456\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello world\nworld hello\n")],
+            "rg '^hello'",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello world\nworld hello\n")],
+            "rg 'hello$'",
+            0,
+            "file.txt:2:world hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "cat\ndog\nbird\n")],
+            "rg 'cat|dog'",
+            0,
+            "file.txt:1:cat\nfile.txt:2:dog\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a\naa\naaa\nb\n")],
+            "rg 'a{2,}'",
+            0,
+            "file.txt:2:aa\nfile.txt:3:aaa\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a1\nb2\nc!\n")],
+            "rg '[a-z][0-9]'",
+            0,
+            "file.txt:1:a1\nfile.txt:2:b2\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello world\nhelloworld\nHELLO there\n")],
+            "rg -wi hello",
+            0,
+            "file.txt:1:Hello world\nfile.txt:3:HELLO there\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "Hello\nhello\nHELLO\n")],
+            "rg -ci hello",
+            0,
+            "file.txt:3\n",
+        );
+        assert_home_exec(
+            &[("a.txt", "HELLO\n"), ("b.txt", "world\n")],
+            "rg -li hello",
+            0,
+            "a.txt\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "foo\nbar\nfoo\nbaz\n")],
+            "rg -vc foo",
+            0,
+            "file.txt:2\n",
+        );
+
+        assert_home_exec(&[("empty.txt", "")], "rg hello", 1, "");
+        assert_home_exec(&[("file.txt", "\n\n\n")], "rg hello", 1, "");
+        assert_home_exec(
+            &[("file.txt", "foo\n\nbar\n")],
+            "rg '^$'",
+            0,
+            "file.txt:2:\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello   \nworld\n")],
+            "rg 'hello   '",
+            0,
+            "file.txt:1:hello   \n",
+        );
+        assert_home_exec(
+            &[("file.txt", "   \n   \n")],
+            "rg '^ +$'",
+            0,
+            "file.txt:1:   \nfile.txt:2:   \n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a.b.c\nabc\n")],
+            "rg -F 'a.b'",
+            0,
+            "file.txt:1:a.b.c\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "array[0]\narray0\n")],
+            "rg -F '[0]'",
+            0,
+            "file.txt:1:array[0]\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "func()\nfunc\n")],
+            "rg -F '()'",
+            0,
+            "file.txt:1:func()\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a*b\nab\naab\n")],
+            "rg -F 'a*b'",
+            0,
+            "file.txt:1:a*b\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "path\\to\\file\npath/to/file\n")],
+            "rg -F 'path\\'",
+            0,
+            "file.txt:1:path\\to\\file\n",
+        );
+        assert_home_exec(&[("file.txt", "hello\n")], "rg -o '^'", 0, "file.txt:\n");
+        assert_home_exec(
+            &[("file.txt", "hello")],
+            "rg 'hello$'",
+            0,
+            "file.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "  hello\nhello\n")],
+            "rg '^hello'",
+            0,
+            "file.txt:2:hello\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello 世界\nfoo bar\n")],
+            "rg 世界",
+            0,
+            "file.txt:1:hello 世界\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello 🎉\nfoo bar\n")],
+            "rg 🎉",
+            0,
+            "file.txt:1:hello 🎉\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "CAFÉ\ncafé\n")],
+            "rg -i café",
+            0,
+            "file.txt:1:CAFÉ\nfile.txt:2:café\n",
+        );
+        assert_home_exec(
+            &[
+                ("z.txt", "hello\n"),
+                ("a.txt", "hello\n"),
+                ("m.txt", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "a.txt:1:hello\nm.txt:1:hello\nz.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[("z/file.txt", "hello\n"), ("a/file.txt", "hello\n")],
+            "rg hello",
+            0,
+            "a/file.txt:1:hello\nz/file.txt:1:hello\n",
+        );
+        assert_eq!(
+            home_bash(&[("file.txt", "hello\n")])
+                .exec("rg hello")
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            home_bash(&[("file.txt", "hello\n")])
+                .exec("rg goodbye")
+                .exit_code,
+            1
+        );
+        let invalid = home_bash(&[("file.txt", "hello\n")]).exec("rg '['");
+        assert_eq!(invalid.exit_code, 2);
+        assert!(invalid.stderr.contains("regex"));
+        assert_home_exec(&[("file.txt", "hello\n")], "rg -q hello", 0, "");
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -w hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -w world",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "helloworld\nhello world\n")],
+            "rg -w hello",
+            0,
+            "file.txt:2:hello world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "hello, world\nhello.world\n")],
+            "rg -w hello",
+            0,
+            "file.txt:1:hello, world\nfile.txt:2:hello.world\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a\nb\nc\nd\ne\n")],
+            "rg -v -C1 c",
+            0,
+            "file.txt:1:a\nfile.txt-2-b\nfile.txt-3-c\nfile.txt:4:d\nfile.txt-5-e\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "# comment\n*.log\n"),
+                ("app.ts", "hello\n"),
+                ("debug.log", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "app.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n\n*.tmp\n"),
+                ("app.ts", "hello\n"),
+                ("debug.log", "hello\n"),
+                ("cache.tmp", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "app.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[("src/app.ts", "hello\n"), ("test/app.ts", "hello\n")],
+            "rg -g 'src/*.ts' hello",
+            0,
+            "src/app.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                ("a.ts", "hello\n"),
+                ("b.js", "hello\n"),
+                ("c.py", "hello\n"),
+            ],
+            "rg -g '*.ts' -g '*.js' hello",
+            0,
+            "a.ts:1:hello\nb.js:1:hello\n",
+        );
+
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n"),
+                ("debug.log", "hello\n"),
+                ("app.ts", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "app.ts:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "package-lock.json\n"),
+                ("package-lock.json", "hello\n"),
+                ("package.json", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "package.json:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "node_modules\n"),
+                ("node_modules/pkg/index.js", "hello\n"),
+                ("src/app.js", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "src/app.js:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n!important.log\n"),
+                ("debug.log", "hello\n"),
+                ("important.log", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "important.log:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*\n!src\n!*.ts\n"),
+                ("README.md", "hello\n"),
+                ("app.ts", "hello\n"),
+                ("src/app.js", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "app.ts:1:hello\nsrc/app.js:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "build/\n"),
+                ("build", "hello\n"),
+                ("build/out.js", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "build:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "/todo.txt\n"),
+                ("todo.txt", "hello\n"),
+                ("docs/todo.txt", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "docs/todo.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "**/foo\n"),
+                ("foo", "hello\n"),
+                ("a/foo", "hello\n"),
+                ("a/b/c/foo", "hello\n"),
+                ("bar", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "bar:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "abc/**\n"),
+                ("abc/def", "hello\n"),
+                ("abc/def/ghi", "hello\n"),
+                ("abc", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "abc:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "file?.txt\n"),
+                ("file1.txt", "hello\n"),
+                ("fileA.txt", "hello\n"),
+                ("file12.txt", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "file12.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "file[0-9].txt\n"),
+                ("file0.txt", "hello\n"),
+                ("file9.txt", "hello\n"),
+                ("fileA.txt", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "fileA.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "file[!0-9].txt\n"),
+                ("file0.txt", "hello\n"),
+                ("fileA.txt", "hello\n"),
+            ],
+            "rg hello",
+            0,
+            "file0.txt:1:hello\n",
+        );
+        assert_home_exec(
+            &[
+                (".gitignore", "*.log\n"),
+                ("debug.log", "hello\n"),
+                ("app.ts", "hello\n"),
+            ],
+            "rg -u hello",
+            0,
+            "app.ts:1:hello\ndebug.log:1:hello\n",
+        );
+        assert_home_exec(
+            &[(".hidden", "hello\n"), ("visible", "hello\n")],
+            "rg -uu hello",
+            0,
+            ".hidden:1:hello\nvisible:1:hello\n",
+        );
+    }
+
+    #[test]
+    fn text_search_jbc34_sed_regex_and_utf8_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/alpha.txt".to_string(), "abc123xyz\n".to_string()),
+                ("/alnum.txt".to_string(), "a1-b2_c3\n".to_string()),
+                ("/space.txt".to_string(), "a b\tc\n".to_string()),
+                ("/case.txt".to_string(), "Hello World\n".to_string()),
+                ("/punct.txt".to_string(), "Hello, World!\n".to_string()),
+                ("/hex.txt".to_string(), "0x1F2a3b\n".to_string()),
+                ("/digits.txt".to_string(), "abc123\n".to_string()),
+                ("/in.txt".to_string(), "한글 old café\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("sed 's/[[:alpha:]]/_/g' /alpha.txt").stdout,
+            "___123___\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:digit:]]/#/g' /alpha.txt").stdout,
+            "abc###xyz\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:alnum:]]/X/g' /alnum.txt").stdout,
+            "XX-XX_XX\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:space:]]/_/g' /space.txt").stdout,
+            "a_b_c\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:upper:]]/X/g' /case.txt").stdout,
+            "Xello Xorld\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:lower:]]/x/g' /case.txt").stdout,
+            "Hxxxx Wxxxx\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:punct:]]//g' /punct.txt").stdout,
+            "Hello World\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:blank:]]/_/g' /space.txt").stdout,
+            "a_b_c\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:xdigit:]]/X/g' /hex.txt").stdout,
+            "XxXXXXXX\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[^[:digit:]]/X/g' /digits.txt").stdout,
+            "XXX123\n"
+        );
+        assert_eq!(
+            env.exec("sed 's/[[:digit:]_-]/./g' /alnum.txt").stdout,
+            "a..b..c.\n"
+        );
+        assert_eq!(
+            env.exec("cat /in.txt | sed 's/old/NEW/'").stdout,
+            "한글 NEW café\n"
+        );
+    }
+
+    #[test]
+    fn text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/sort.txt".to_string(), "café\nbé\n".to_string()),
+                ("/sort_case.txt".to_string(), "Café\nApple\n".to_string()),
+                (
+                    "/head_tail.txt".to_string(),
+                    "한글\nfoo\n漢字\n".to_string(),
+                ),
+                ("/wc.txt".to_string(), "한글".to_string()),
+                (
+                    "/pipeline.txt".to_string(),
+                    "Ü ö ß é ñ Ω Д 漢字 🎉\n".to_string(),
+                ),
+                ("/uniq_case.txt".to_string(), "Café\nCAFÉ\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("cat /sort.txt | sort").stdout, "bé\ncafé\n");
+        assert_eq!(
+            env.exec("cat /sort_case.txt | sort -f").stdout,
+            "Apple\nCafé\n"
+        );
+        assert_eq!(env.exec("cat /head_tail.txt | head -1").stdout, "한글\n");
+        assert_eq!(env.exec("cat /head_tail.txt | tail -1").stdout, "漢字\n");
+        assert_eq!(env.exec("cat /wc.txt | wc -c").stdout.trim(), "6");
+        assert_eq!(env.exec("cat /wc.txt | wc -m").stdout.trim(), "2");
+        assert_eq!(env.exec("wc -c /wc.txt").stdout.trim(), "6 /wc.txt");
+        assert_eq!(env.exec("wc -m /wc.txt").stdout.trim(), "2 /wc.txt");
+        assert_eq!(env.exec("cat /wc.txt | cut -c 1-2").stdout, "한글\n");
+        assert_eq!(env.exec("echo 'café' | tr 'é' 'X'").stdout, "cafX\n");
+        assert_eq!(env.exec("cat /uniq_case.txt | uniq -i").stdout, "Café\n");
+        assert_eq!(env.exec("cat /pipeline.txt | grep -o 'Ü'").stdout, "Ü\n");
+        assert_eq!(
+            env.exec("echo 'café résumé' | sed 's/é/e/g' | tr 'a-z' 'A-Z'")
+                .stdout,
+            "CAFE RESUME\n"
+        );
+        assert_eq!(
+            env.exec("printf 'Ü\\nÄ\\nÜ\\nÖ\\nÄ\\n' | sort | uniq")
+                .stdout,
+            "Ä\nÖ\nÜ\n"
+        );
+        assert_eq!(env.exec("echo 'Ü:Ö:Ä' | cut -d: -f2").stdout, "Ö\n");
+        assert_eq!(
+            env.exec("head -1 /pipeline.txt").stdout,
+            "Ü ö ß é ñ Ω Д 漢字 🎉\n"
+        );
+        assert_eq!(
+            env.exec("tail -1 /pipeline.txt").stdout,
+            "Ü ö ß é ñ Ω Д 漢字 🎉\n"
+        );
+        assert_eq!(
+            env.exec("wc -l /pipeline.txt").stdout.trim(),
+            "1 /pipeline.txt"
+        );
+        assert_eq!(
+            env.exec("uniq -i /uniq_case.txt | wc -c").stdout.trim(),
+            "6"
+        );
+    }
+
+    #[test]
     fn structured_data_jq_basic_rows_access_and_iteration() {
         let env = bash();
 

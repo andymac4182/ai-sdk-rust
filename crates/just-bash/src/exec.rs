@@ -4621,6 +4621,7 @@ fn parse_rg_option(
         "--include-zero" => options.include_zero = true,
         "--heading" => options.heading = true,
         "--pcre2" => return Err(stderr_result(2, "rg: PCRE2 is not available\n")),
+        "--regexp" => patterns.push(rg_option_value(args, index, "--regexp")?),
         "--sort" => {
             rg_option_value(args, index, "--sort")?;
         }
@@ -4696,6 +4697,9 @@ fn parse_rg_option(
             let value = rg_parse_usize(&rg_option_value(args, index, "-C")?);
             options.before_context = value;
             options.after_context = value;
+        }
+        _ if arg.starts_with("--regexp=") => {
+            patterns.push(arg["--regexp=".len()..].to_string());
         }
         _ if arg.starts_with("--glob=") => {
             options.globs.push(arg["--glob=".len()..].to_string());
