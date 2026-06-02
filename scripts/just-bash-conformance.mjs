@@ -25,13 +25,14 @@ const legacyGeneratedRoot = path.join(
   upstreamPackageRoot,
   '.ai-sdk-rust-conformance'
 );
-const generatedRoot = path.join(
+const generatedBaseRoot = path.join(
   upstreamPackageRoot,
   'node_modules',
   '.cache',
   'ai-sdk-rust-conformance'
 );
-const generatedComparisonRoot = path.join(generatedRoot, 'comparison-tests');
+let generatedRoot = generatedBaseRoot;
+let generatedComparisonRoot = path.join(generatedRoot, 'comparison-tests');
 const rustRunnerFixturePath = path.join(
   repositoryRoot,
   'crates',
@@ -45,14 +46,17 @@ const upstreamHead = 'd64009aef6bc1556e7c84b22ed455863275ea953';
 const pnpmVersion = '10.33.2';
 const validEngines = new Set(['typescript', 'rust']);
 
+const defaultRustAddonPath = path.join(
+  repositoryRoot,
+  'crates',
+  'just-bash-napi',
+  `just-bash-napi.${process.platform}-${process.arch}.node`
+);
+
 const rustAddonCandidates = [
-  path.join(
-    repositoryRoot,
-    'crates',
-    'just-bash-napi',
-    `just-bash-napi.${process.platform}-${process.arch}.node`
-  ),
+  defaultRustAddonPath,
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'index.js'),
+  path.join(repositoryRoot, 'crates', 'just-bash-napi', 'index.cjs'),
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'index.mjs'),
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'just-bash-napi.node'),
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'just_bash_napi.node'),
@@ -75,6 +79,7 @@ Options:
   --record                    Set RECORD_FIXTURES=1 for this run.
   --record-force              Set RECORD_FIXTURES=force for this run.
   --playback                  Clear RECORD_FIXTURES for this run.
+  --verified-corpus           Run the generated verified corpus instead of raw domains.
   --help                      Print this help.
 
 Environment:
@@ -85,11 +90,13 @@ Environment:
   JUST_BASH_RUST_STUB         Set to fixtures to use fixture-backed Rust stub mode.
   JUST_BASH_REQUIRE_RUST_ADDON=1
                               Treat missing Rust addon as an error instead of a skip.
+  JUST_BASH_VERIFIED_CORPUS=1 Run the generated verified corpus for either engine.
   JUST_BASH_AUTO_INSTALL=1    Run pnpm install in the upstream mirror if deps are missing.
 
 By default, the TypeScript engine runs all upstream comparison domains. The Rust
-engine runs the generated verified comparison corpus; use --all or --domain to
-run raw upstream comparison files, including pending command-family failures.
+engine runs the generated verified comparison corpus; use --verified-corpus to
+run the exact same generated corpus against either engine. Use --all or --domain
+to run raw upstream comparison files, including pending command-family failures.
 `);
 }
 
@@ -101,6 +108,7 @@ function parseArgs(argv) {
   let listDomains = false;
   let runAll = false;
   let parsingVitestArgs = false;
+  let verifiedCorpus = process.env.JUST_BASH_VERIFIED_CORPUS === '1';
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -160,6 +168,10 @@ function parseArgs(argv) {
       recordMode = '';
       continue;
     }
+    if (arg === '--verified-corpus') {
+      verifiedCorpus = true;
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -173,6 +185,7 @@ function parseArgs(argv) {
     listDomains,
     recordMode,
     runAll,
+    verifiedCorpus,
     vitestArgs,
   };
 }
@@ -280,12 +293,55 @@ function ensureUpstreamDependencies() {
   );
 }
 
+function configureGeneratedRoot(engine) {
+  const runId = process.env.JUST_BASH_CONFORMANCE_RUN_ID;
+  const suffix = sanitizeGeneratedRootPart(
+    runId && runId.trim() ? `${engine}-${runId}` : `${engine}-${process.pid}`
+  );
+  generatedRoot = path.join(generatedBaseRoot, suffix);
+  generatedComparisonRoot = path.join(generatedRoot, 'comparison-tests');
+}
+
+function sanitizeGeneratedRootPart(value) {
+  return value.replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
 function resolveRustAddonPath() {
   if (process.env.JUST_BASH_RUST_ADDON) {
     const requestedPath = path.resolve(process.env.JUST_BASH_RUST_ADDON);
-    return fs.existsSync(requestedPath) ? requestedPath : null;
+    return isUsableRustAddonCandidate(requestedPath) ? requestedPath : null;
   }
-  return rustAddonCandidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+  return rustAddonCandidates.find((candidate) => isUsableRustAddonCandidate(candidate)) ?? null;
+}
+
+function isUsableRustAddonCandidate(candidate) {
+  if (!fs.existsSync(candidate)) {
+    return false;
+  }
+
+  const packageRoot = path.join(repositoryRoot, 'crates', 'just-bash-napi');
+  const isPackageWrapper =
+    path.dirname(candidate) === packageRoot &&
+    ['index.cjs', 'index.js', 'index.mjs'].includes(path.basename(candidate));
+  return !isPackageWrapper || fs.existsSync(defaultRustAddonPath);
+}
+
+function requestedRustAddonDiagnostic() {
+  if (!process.env.JUST_BASH_RUST_ADDON) {
+    return '';
+  }
+
+  const requestedPath = path.resolve(process.env.JUST_BASH_RUST_ADDON);
+  if (!fs.existsSync(requestedPath)) {
+    return `Requested JUST_BASH_RUST_ADDON does not exist: ${requestedPath}\n`;
+  }
+  if (!isUsableRustAddonCandidate(requestedPath)) {
+    return (
+      `Requested JUST_BASH_RUST_ADDON is a package wrapper, but the native addon is not built: ${requestedPath}\n` +
+      `Run: npm run build --prefix crates/just-bash-napi\n`
+    );
+  }
+  return '';
 }
 
 function maybeSkipMissingRustAddon(engine, rustAddonPath) {
@@ -296,14 +352,13 @@ function maybeSkipMissingRustAddon(engine, rustAddonPath) {
     return;
   }
 
-  const explicitAddon = process.env.JUST_BASH_RUST_ADDON
-    ? `Requested JUST_BASH_RUST_ADDON does not exist: ${path.resolve(
-        process.env.JUST_BASH_RUST_ADDON
-      )}\n`
-    : '';
+  const buildHint = fs.existsSync(defaultRustAddonPath)
+    ? ''
+    : `Run: npm run build --prefix crates/just-bash-napi\n`;
   const message =
     `[just-bash-conformance] JUST_BASH_ENGINE=rust requested, but the JBC-01 napi-rs adapter is not available.\n` +
-    explicitAddon +
+    requestedRustAddonDiagnostic() +
+    buildHint +
     `Set JUST_BASH_RUST_ADDON=/absolute/path/to/adapter or run the fixture-backed stub with JUST_BASH_RUST_STUB=fixtures.\n` +
     `Checked candidate paths:\n` +
     rustAddonCandidates.map((candidate) => `  - ${candidate}`).join('\n');
@@ -338,7 +393,7 @@ function prepareGeneratedSuite(selectedDomains, engine, rustAddonPath) {
   return writeVitestConfig(generatedTestPaths);
 }
 
-function prepareGeneratedRustCorpusSuite(engine, rustAddonPath) {
+function prepareGeneratedVerifiedCorpusSuite(engine, rustAddonPath) {
   cleanGeneratedRoot();
   fs.mkdirSync(generatedComparisonRoot, { recursive: true });
 
@@ -356,14 +411,16 @@ function prepareGeneratedRustCorpusSuite(engine, rustAddonPath) {
   fs.writeFileSync(generatedTestPath, rustCorpusTestSource(rustRunnerFixture));
   writeVitestSetup();
   console.log(
-    `[just-bash-conformance] rust verified corpus cases=${rustRunnerFixture.summary?.totalCases ?? 0}`
+    `[just-bash-conformance] verified corpus cases=${rustRunnerFixture.summary?.totalCases ?? 0}`
   );
   return writeVitestConfig([generatedTestPath]);
 }
 
 function cleanGeneratedRoot() {
-  if (!generatedRoot.startsWith(upstreamPackageRoot + path.sep)) {
-    throw new Error(`Refusing to clean generated root outside upstream package: ${generatedRoot}`);
+  if (!generatedRoot.startsWith(generatedBaseRoot + path.sep)) {
+    throw new Error(
+      `Refusing to clean generated root outside conformance cache: ${generatedRoot}`
+    );
   }
 
   if (fs.existsSync(legacyGeneratedRoot)) {
@@ -1031,19 +1088,24 @@ try {
     process.exit(0);
   }
 
+  if (options.verifiedCorpus && (options.runAll || options.domains.length > 0)) {
+    throw new Error('--verified-corpus cannot be combined with --all or --domain/--domains');
+  }
   const useRustVerifiedCorpus =
     options.engine === 'rust' && !options.runAll && options.domains.length === 0;
-  const selectedDomains = useRustVerifiedCorpus
+  const useVerifiedCorpus = options.verifiedCorpus || useRustVerifiedCorpus;
+  configureGeneratedRoot(options.engine);
+  const selectedDomains = useVerifiedCorpus
     ? []
     : selectDomains(allDomains, options.domains, options.runAll);
   const rustAddonPath = resolveRustAddonPath();
   maybeSkipMissingRustAddon(options.engine, rustAddonPath);
   ensureUpstreamDependencies();
-  const vitestConfigPath = useRustVerifiedCorpus
-    ? prepareGeneratedRustCorpusSuite(options.engine, rustAddonPath)
+  const vitestConfigPath = useVerifiedCorpus
+    ? prepareGeneratedVerifiedCorpusSuite(options.engine, rustAddonPath)
     : prepareGeneratedSuite(selectedDomains, options.engine, rustAddonPath);
   runVitest(vitestConfigPath, {
-    domains: useRustVerifiedCorpus
+    domains: useVerifiedCorpus
       ? ['verified-comparison-corpus']
       : selectedDomains.map((entry) => entry.domain),
     engine: options.engine,

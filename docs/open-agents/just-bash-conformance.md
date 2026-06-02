@@ -36,6 +36,14 @@ and final dual-engine NAPI proof. The goal is to run the same upstream cases
 against both the TypeScript implementation and the Rust implementation exposed
 through `napi-rs`, then use those results to close ledger rows one by one.
 
+JBC-40 proof status: the JavaScript harness isolates generated Vitest suites per
+engine/process under the upstream conformance cache, so TypeScript and Rust
+proofs can run concurrently without overwriting each other. `--verified-corpus`
+or `JUST_BASH_VERIFIED_CORPUS=1` runs the same 214
+exact-pass corpus cases against either engine. The strict inventory still has
+4,376 gate gaps in this
+snapshot, so this is a final proof report, not strict parity completion.
+
 ## Source Snapshot
 
 | Field | Value |
@@ -93,7 +101,7 @@ through `napi-rs`, then use those results to close ledger rows one by one.
 | JBC-37 | Structured data and query command closeout | Close remaining `jq`, `yq`, `xan`, `sqlite3`, query-engine, and HTML-to-Markdown rows with deterministic in-memory fixtures and narrow non-portable exceptions. | Focused structured/data tests; corpus structured subsets; TypeScript/Rust conformance runs where generated cases exist; `cargo test -p just-bash`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-38 | POSIX, archive, and small command family closeout | Close remaining bounded command-family rows for archive, checksum, date, diff, file, column/join/comm, expand/fold/nl/paste/seq/split, strings/test/xargs, path utilities, and related small commands. | Focused command-family tests; conformance command subsets; `cargo test -p just-bash`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-39 | Host-runtime boundary and optional language commands | Closed the remaining optional-language command boundary rows with explicit fake-runtime providers, kept Open Agents fail-closed with no host fallback, and documented real QuickJS/CPython/worker/package-runtime rows as JS-only host-runtime behavior. | `cargo test -p just-bash just_bash_optional_language_commands`; `cargo test -p just-bash just_bash_host_runtime_custom_command_defense_rows_are_classified_nonportable`; `cargo test -p open-agents-sandbox open_agents_just_bash_blocks_js_python_host_runtime_without_fallback`; `cargo test -p just-bash -p open-agents-sandbox`; inventory checks; shared fmt/clippy/naming/diff gates. |
-| JBC-40 | Dual-engine NAPI conformance finalization and strict gate | Finish the JavaScript harness so the same upstream cases run with `JUST_BASH_ENGINE=typescript` and `JUST_BASH_ENGINE=rust`, refresh corpus metadata after child row closures, and run final strict proof. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs`; `node scripts/just-bash-test-inventory.mjs --strict`; `node scripts/just-bash-conformance-corpus.mjs --check`; `cargo test -p just-bash -p just-bash-napi`; `npm test --prefix crates/just-bash-napi`; `scripts/master-parity-gate.sh --check`. |
+| JBC-40 | Dual-engine NAPI conformance finalization and strict gate | Finalize JavaScript harness isolation for concurrent TypeScript/Rust runs, add verified-corpus mode for either engine, refresh corpus metadata after child row closures, and run final strict proof/report without row overclaims. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs --verified-corpus`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs --verified-corpus`; `node scripts/just-bash-test-inventory.mjs --strict`; `node scripts/just-bash-conformance-corpus.mjs --check`; `cargo test -p just-bash -p just-bash-napi`; `npm test --prefix crates/just-bash-napi`; `scripts/master-parity-gate.sh --check`. |
 
 ## Corpus Contract
 
@@ -219,6 +227,8 @@ Just Bash is not parity-complete until all of these pass on current
 node scripts/just-bash-test-inventory.mjs --check
 node scripts/just-bash-test-inventory.mjs --strict
 node scripts/just-bash-conformance-corpus.mjs --check
+JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs --verified-corpus
+JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs --verified-corpus
 cargo test -p just-bash
 cargo test -p just-bash --test conformance_corpus
 cargo test -p just-bash-napi
