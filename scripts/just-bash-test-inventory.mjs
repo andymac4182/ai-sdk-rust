@@ -2507,6 +2507,39 @@ const jbc25CaseGroups = [
   },
 ];
 
+const jbc35CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
+    lines: [
+      45, 61, 68, 77, 86, 95, 127, 136, 156, 165, 183, 290, 297, 306,
+      346, 355, 362, 371, 382, 391, 400,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc35_field_rebuild_printf_and_edge_rows',
+    notes:
+      'JBC-35 verifies portable AWK variable field indexes, field assignment, NF/OFS record rebuilds, computed field mutation, whitespace and delimiter field edges, and field predicate rows; loops, delete/split, getline, redirection, parser, and error rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.output.test.ts',
+    lines: [115, 124, 133],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc35_field_rebuild_printf_and_edge_rows',
+    notes:
+      'JBC-35 verifies portable AWK printf length modifiers plus positive and negative dynamic width formatting; output redirection rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [323, 330, 339, 350, 359, 368, 377, 386, 399, 408, 417],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc35_field_rebuild_printf_and_edge_rows',
+    notes:
+      'JBC-35 verifies portable AWK print/printf, multiple BEGIN/END blocks, BEGIN-scoped variables, END NR, and string-number coercion edge rows; loop and array-iteration edge rows remain pending.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -2557,6 +2590,7 @@ function caseOverrideFor(testCase) {
     ...jbc23CaseGroups,
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
+    ...jbc35CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
   ].find(

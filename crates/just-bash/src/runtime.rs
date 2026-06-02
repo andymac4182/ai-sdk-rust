@@ -2584,6 +2584,183 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc35_field_rebuild_printf_and_edge_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.txt".to_string(), "1 2 3\n4 5 6\n".to_string()),
+                (
+                    "/letters.txt".to_string(),
+                    "apple 10 red\nbanana 5 yellow\napple 3 green\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec(r#"echo "a b c d" | awk '{ i=3; print $i }'"#)
+                .stdout,
+            "c\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk '{ $2 = "X"; print }'"#)
+                .stdout,
+            "a X c\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "one two three" | awk '{ $2 = "TWO"; print $0 }'"#)
+                .stdout,
+            "one TWO three\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b" | awk '{ $5 = "e"; print NF, $0 }'"#)
+                .stdout,
+            "5 a b   e\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ $1 = "HELLO"; print }'"#)
+                .stdout,
+            "HELLO world\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk '{ $NF = "C"; print }'"#)
+                .stdout,
+            "a b C\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b" | awk '{ $4 = "d"; print NF }'"#)
+                .stdout,
+            "4\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b c d e" | awk '{ NF = 2; print $0 }'"#)
+                .stdout,
+            "a b\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk 'BEGIN{OFS=":"} { $1=$1; print }'"#)
+                .stdout,
+            "a:b:c\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk 'BEGIN{OFS="-"} { $2 = "X"; print $0 }'"#)
+                .stdout,
+            "a-X-c\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'NR==1{OFS=","} { $1=$1; print }' /data.txt"#)
+                .stdout,
+            "1,2,3\n4,5,6\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "5 6" | awk '{ print $1 * $2 }'"#).stdout,
+            "30\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "10 20" | awk '{ $1 = $1 * 2; print }'"#)
+                .stdout,
+            "20 20\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "10 20" | awk '{ $(NF+1) = $1 + $2; print }'"#)
+                .stdout,
+            "10 20 30\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "old" | awk '{ $0 = "new line here"; print NF, $2 }'"#)
+                .stdout,
+            "3 line\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "   a b c" | awk '{ print NF, $1 }'"#)
+                .stdout,
+            "3 a\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a b c   " | awk '{ print NF, $NF }'"#)
+                .stdout,
+            "3 c\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a,,c" | awk -F, '{ print NF, "[" $2 "]" }'"#)
+                .stdout,
+            "3 []\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '$2 > 7 { print $1 }' /letters.txt"#).stdout,
+            "apple\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '$1 ~ /app/ { print $3 }' /letters.txt"#)
+                .stdout,
+            "red\ngreen\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '$1 == "apple" && $2 > 5 { print $3 }' /letters.txt"#)
+                .stdout,
+            "red\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "10" | awk '{ printf("%d %ld %lld\n", $1, $1, $1) }'"#)
+                .stdout,
+            "10 10 10\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { printf("a%*sb\n", 5, "x") }'"#)
+                .stdout,
+            "a    xb\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { printf("a%*sb\n", -5, "x") }'"#)
+                .stdout,
+            "ax    b\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ print }'"#).stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { printf "no newline" }'"#).stdout,
+            "no newline"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a" | awk '{ print "one"; print "two" }'"#)
+                .stdout,
+            "one\ntwo\n"
+        );
+        assert_eq!(env.exec(r#"awk 'BEGIN { print "only" }'"#).stdout, "only\n");
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print "one" } BEGIN { print "two" }'"#)
+                .stdout,
+            "one\ntwo\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "x" | awk 'END { print "one" } END { print "two" }'"#)
+                .stdout,
+            "one\ntwo\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "x" | awk 'BEGIN { prefix="pre" } { print prefix, $0 }'"#)
+                .stdout,
+            "pre x\n"
+        );
+        assert_eq!(
+            env.exec("printf 'a\nb\nc\n' | awk 'END { print NR }'")
+                .stdout,
+            "3\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print ("10" == 10), ("abc" == 0) }'"#)
+                .stdout,
+            "1 0\n"
+        );
+        assert_eq!(env.exec(r#"awk 'BEGIN { print "5" + 3 }'"#).stdout, "8\n");
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print 5 " apples" }'"#).stdout,
+            "5 apples\n"
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],

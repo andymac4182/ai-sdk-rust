@@ -25,8 +25,8 @@ inventory. Strict parity closes only when every portable upstream row in
 
 Just Bash is now part of the parent TypeScript-to-Rust parity goal and tracked
 alongside Open Agents, AI SDK, Chat SDK, Workflow SDK, and Open Plugin Spec.
-The current parity ledger maps 4,361 upstream rows to named Rust tests, NAPI-backed JS proofs, or generated
-corpus proofs, leaves 5,004 rows `portable-pending`, documents 571 JS-only exceptions, and has 5,015 strict gate gaps. The conformance corpus now maps 400 generated cases to Rust runner proofs and leaves 1,271 generated cases pending.
+The current parity ledger maps 4,399 upstream rows to named Rust tests, NAPI-backed JS proofs, or generated
+corpus proofs, leaves 4,966 rows `portable-pending`, documents 571 JS-only exceptions, and has 4,977 strict gate gaps. The conformance corpus now maps 403 generated cases to Rust runner proofs and leaves 1,268 generated cases pending.
 
 The remaining closeout is intentionally multi-threaded: JBC-32 coordinates the
 strict parity burn-down, and JBC-33 through JBC-40 split the remaining rows by
@@ -82,13 +82,13 @@ through `napi-rs`, then use those results to close ledger rows one by one.
 | JBC-26 | Filesystem semantics and path edge closure | Close remaining `fs:*`, file-operation, path normalization, symlink, mount routing, overlay precedence, permissions, binary/text encoding, and error-shape rows not covered by JBC-13. | Focused filesystem/path tests; corpus file-op subsets; `cargo test -p just-bash`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-27 | Security, limits, and attack corpus closure | Close remaining security attack, limits, sandbox, fuzzing, prototype-pollution, and policy rows with deterministic Rust tests, documenting only true JavaScript worker/browser hardening rows as JS-only exceptions. | Focused security/fuzz/limits tests; `cargo test -p just-bash`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-28 | Host-runtime command and JS/Python boundary closure | Closed optional-runtime absence and direct host-runtime probes with Rust/Open Agents tests, documented true JavaScript worker/Node-compat/QuickJS/bridge rows as JS-only, and left enabled `js-exec`/`python3` behavior pending. | `cargo test -p just-bash just_bash_optional_js_python_commands_fail_closed_without_host_runtime`; `cargo test -p just-bash just_bash_runtime_bridge_surfaces_are_classified_nonportable`; `cargo test -p open-agents-sandbox open_agents_just_bash_blocks_js_python_host_runtime_without_fallback`; `cargo test -p just-bash -p open-agents-sandbox`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
-| JBC-29 | Comparison fixture broad closure | Promoted 17 additional exact-pass `jq` comparison fixture rows through the Rust runner corpus without broad command-family smoke mapping, bringing the Rust fixture to 211 exact-pass comparison cases. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs`; `cargo test -p just-bash --test conformance_corpus`; inventory/corpus checks. |
+| JBC-29 | Comparison fixture broad closure | Promoted 17 additional exact-pass `jq` comparison fixture rows through the Rust runner corpus without broad command-family smoke mapping. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs`; `cargo test -p just-bash --test conformance_corpus`; inventory/corpus checks. |
 | JBC-30 | Agent examples and Open Agents command integration closure | Closed `agent-examples` and Open Agents command-execution rows proving Slack remote-agent tasks can use crate-backed Just Bash for multi-command workflows, stateful virtual files, failure surfaces, and no sandbox fallback unless explicitly selected. | `cargo test -p open-agents-service -p open-agents-sandbox -p just-bash`; `scripts/open-agents-local-e2e.sh --just-bash-conformance`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-31 | Upstream docs/examples parity closure | Closed portable README, docs, examples, custom-command, website, and bash-agent example behavior that represents public Just Bash API usage, with explicit exceptions for docs-only or browser-only rows. | Docs/example inventory check; NAPI/JS harness examples where applicable; `cargo test -p just-bash`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-32 | Just Bash strict closeout coordination | Coordinate the remaining Just Bash strict-parity burn-down from the current JBC-31 baseline, keep `docs/open-agents/just-bash-parity.md` generated, split implementation across JBC-33 through JBC-40, prevent broad smoke-test overclaims, and flip the strict gate only when zero `portable-pending` rows remain. | `node scripts/just-bash-test-inventory.mjs --check`; `node scripts/just-bash-test-inventory.mjs --strict` only when child rows are closed; `node scripts/just-bash-conformance-corpus.mjs --check`; TypeScript and Rust dual-engine conformance runs; `scripts/master-parity-gate.sh --check`; full fmt/clippy/naming/diff gates. |
 | JBC-33 | Parser, interpreter, syntax, transform, and regex closeout | Close remaining parser/interpreter-owned rows plus syntax, transform, expansion, control-flow, prototype-pollution, and user-regex cases with named Rust tests or exact corpus proofs. | Focused parser/interpreter/transform tests; `cargo test -p just-bash`; `node scripts/just-bash-test-inventory.mjs --check`; corpus subsets for syntax/transform; shared fmt/clippy/naming/diff gates. |
 | JBC-34 | Text and search command closeout | Close remaining `rg`, `grep`, `sed`, search-engine, shared regex/text, text stream, and UTF-8 command rows without broad command smoke overclaims. | Focused text/search command tests; dual-engine conformance subsets where available; `cargo test -p just-bash`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
-| JBC-35 | AWK and comparison fixture closeout | Close remaining portable AWK rows and generated comparison-test rows, promoting exact-pass cases only when stdout, stderr, exit status, and fixture setup match upstream. | Focused AWK tests; `cargo test -p just-bash --test conformance_corpus`; TypeScript/Rust conformance runs for comparison rows; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
+| JBC-35 | AWK and comparison fixture closeout | Promoted 35 exact portable `command:awk` rows for field rebuilds, printf width/length handling, and print/BEGIN/END edges, plus 3 exact-pass AWK arithmetic comparison fixtures, bringing the Rust fixture to 214 exact-pass comparison cases. Full AWK control flow, delete/split, getline, redirection, parser/error rows, and unrelated command-family comparison failures remain pending. | Focused AWK tests; `cargo test -p just-bash --test conformance_corpus`; TypeScript/Rust conformance runs for comparison rows; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-36 | Filesystem, core runtime, CLI, and session closeout | Close remaining core, filesystem, overlay/read-write/mountable filesystem, CLI, session/env/cwd/status, and stale missing-test mappings while preserving virtual-only default execution. | Focused FS/core/session/CLI tests; `cargo test -p just-bash -p just-bash-napi`; `npm test --prefix crates/just-bash-napi`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-37 | Structured data and query command closeout | Close remaining `jq`, `yq`, `xan`, `sqlite3`, query-engine, and HTML-to-Markdown rows with deterministic in-memory fixtures and narrow non-portable exceptions. | Focused structured/data tests; corpus structured subsets; TypeScript/Rust conformance runs where generated cases exist; `cargo test -p just-bash`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-38 | POSIX, archive, and small command family closeout | Close remaining bounded command-family rows for archive, checksum, date, diff, file, column/join/comm, expand/fold/nl/paste/seq/split, strings/test/xargs, path utilities, and related small commands. | Focused command-family tests; conformance command subsets; `cargo test -p just-bash`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
@@ -159,8 +159,8 @@ through `napi-rs`, then use those results to close ledger rows one by one.
 
 | Status | Cases |
 | --- | --- |
-| portable-pending | 1271 |
-| portable-verified | 400 |
+| portable-pending | 1268 |
+| portable-verified | 403 |
 
 ## Rust Runner Fixture
 
@@ -171,13 +171,13 @@ stdout, stderr, and exit code; mismatching rows remain `portable-pending`.
 
 | Field | Value |
 | --- | --- |
-| Exact-pass comparison cases | 211 |
+| Exact-pass comparison cases | 214 |
 | Expected failures | 0 |
 | Test command | `cargo test -p just-bash --test conformance_corpus` |
 
 | Domain | Exact-pass cases |
 | --- | --- |
-| awk | 9 |
+| awk | 12 |
 | basename-dirname | 15 |
 | cat | 7 |
 | cut | 14 |
