@@ -2767,6 +2767,235 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc42_parser_comment_numeric_and_if_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/in.tsv".to_string(),
+                    "vendor\tamount\nAcme\t100\nGlobex\t200\n".to_string(),
+                ),
+                ("/data.txt".to_string(), "1\n2\n3\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec(r#"awk 'BEGIN{x=1;y=2;print x+y}'"#).stdout, "3\n");
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN {   x  =  1  ;  y  =  2  ;  print  x + y  }'"#)
+                .stdout,
+            "3\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN {\n        x = 1\n        y = 2\n        print x + y\n      }'")
+                .stdout,
+            "3\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN {\tx=1;\ty=2;\tprint x+y}'").stdout,
+            "3\n"
+        );
+        assert_eq!(
+            env.exec(
+                "awk 'BEGIN {\n        printf \"%s=%d\\n\",\n          \"answer\", 42\n      }'"
+            )
+            .stdout,
+            "answer=42\n"
+        );
+        assert_eq!(
+            env.exec(
+                "echo \"abc\" | awk '{\n        print substr($0,\n                     1,\n                     2)\n      }'"
+            )
+            .stdout,
+            "ab\n"
+        );
+        assert_eq!(
+            env.exec(
+                "awk 'BEGIN {\n        if (1 == 1 &&\n            2 == 2) print \"ok\"\n      }'"
+            )
+            .stdout,
+            "ok\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN {\n        if (0 ||\n            1) print \"ok\"\n      }'")
+                .stdout,
+            "ok\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN {\n        x = 1\n        print x\n      }'")
+                .stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN {\n        if (0) print \"no\"\n        else\n          print \"yes\"\n      }'")
+                .stdout,
+            "yes\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN {\n        print 1 ?\n              \"yes\" :\n              \"no\"\n      }'")
+                .stdout,
+            "yes\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"awk -F'\t' 'NR > 1 {
+        printf "INSERT INTO t VALUES ('"'"'%s'"'"', %d);\n",
+          $1, $2
+      }' /in.tsv"#
+            )
+            .stdout,
+            "INSERT INTO t VALUES ('Acme', 100);\nINSERT INTO t VALUES ('Globex', 200);\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print "he said \"hello\"" }'"#)
+                .stdout,
+            "he said \"hello\"\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print "a\tb\nc" }'"#).stdout,
+            "a\tb\nc\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print "[" "" "]" }'"#).stdout,
+            "[]\n"
+        );
+        assert_eq!(env.exec(r#"awk 'BEGIN { print "\n" }'"#).stdout, "\n\n");
+        assert_eq!(env.exec(r#"awk 'BEGIN { print 42 }'"#).stdout, "42\n");
+        assert_eq!(env.exec(r#"awk 'BEGIN { print 3.14 }'"#).stdout, "3.14\n");
+        assert_eq!(env.exec(r#"awk 'BEGIN { print 1e3 }'"#).stdout, "1000\n");
+        assert_eq!(env.exec(r#"awk 'BEGIN { print 1e-2 }'"#).stdout, "0.01\n");
+        assert_eq!(env.exec(r#"awk 'BEGIN { print .5 }'"#).stdout, "0.5\n");
+        assert_eq!(
+            env.exec("awk 'BEGIN {\n        x = 1 # this is a comment\n        print x\n      }'")
+                .stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec("awk 'BEGIN { x = 1; # comment\n        print x }'")
+                .stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { if (1) print "yes" }'"#).stdout,
+            "yes\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { if (0) print "yes"; else print "no" }'"#)
+                .stdout,
+            "no\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc42_user_function_and_conditional_flow_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n4\n5\n".to_string())]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec(
+                r#"echo "5" | awk 'function double(x) { return x * 2 } { print double($1) }'"#
+            )
+            .stdout,
+            "10\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"echo "3 4" | awk 'function add(a, b) { return a + b } { print add($1, $2) }'"#
+            )
+            .stdout,
+            "7\n"
+        );
+        let greet = env
+            .exec(r#"echo "" | awk 'function greet() { return "hello" } BEGIN { print greet() }'"#);
+        assert_eq!(greet.stdout, "hello\n");
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'function foo() { x = 42 } BEGIN { foo(); print x }'"#)
+                .stdout,
+            "42\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'function foo(x) { x = 99 } BEGIN { x = 1; foo(5); print x }'"#
+            )
+            .stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'function foo(a,    local) { local = 100; return a + local } BEGIN { local = 5; print foo(1), local }'"#)
+                .stdout,
+            "101 5\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "5" | awk 'function square(x) { result = x * x; return result } { print square($1) }'"#)
+                .stdout,
+            "25\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "5" | awk 'function fact(n) { if (n <= 1) return 1; return n * fact(n-1) } { print fact($1) }'"#)
+                .stdout,
+            "120\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "10" | awk 'function fib(n) { if (n <= 2) return 1; return fib(n-1) + fib(n-2) } { print fib($1) }'"#)
+                .stdout,
+            "55\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "3" | awk 'function double(x) { return x * 2 } function quadruple(x) { return double(double(x)) } { print quadruple($1) }'"#)
+                .stdout,
+            "12\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "world" | awk 'function greet(name) { return "hello " name } { print greet($1) }'"#)
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'function sum(a,b) { return a+b } BEGIN { print sum(10, 20) }'"#
+            )
+            .stdout,
+            "30\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "4" | awk 'function square(x) { return x*x } function cube(x) { return x*x*x } { print square($1), cube($1) }'"#)
+                .stdout,
+            "16 64\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'function hello() { return "hi" } BEGIN { print hello() }'"#)
+                .stdout,
+            "hi\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'function add(a, b) { return a + b } BEGIN { print add(2, 3) }'"#
+            )
+            .stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec(
+                "echo \"\" | awk '\n          function f1() { return 1 }\n          function f2() { return 2 }\n          BEGIN { print f1() + f2() }\n        '"
+            )
+            .stdout,
+            "3\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '{ if ($1 % 2 == 0) next; print }' /data.txt"#)
+                .stdout,
+            "1\n3\n5\n"
+        );
+        let exit_with_code = env.exec(r#"awk '{ if ($1 == 2) exit 42; print }' /data.txt"#);
+        assert_eq!(exit_with_code.stdout, "1\n");
+        assert_eq!(exit_with_code.exit_code, 42);
+        let exit_default = env.exec(r#"awk '{ if ($1 == 2) exit; print }' /data.txt"#);
+        assert_eq!(exit_default.stdout, "1\n");
+        assert_eq!(exit_default.exit_code, 0);
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],

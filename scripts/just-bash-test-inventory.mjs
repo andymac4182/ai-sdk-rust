@@ -3158,6 +3158,48 @@ const jbc35CaseGroups = [
   },
 ];
 
+const jbc42CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
+    lines: [
+      6, 13, 22, 33, 50, 60, 71, 81, 91, 101, 112, 125, 143, 152, 161,
+      170, 179, 186, 193, 200, 207, 272, 282, 383, 392,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc42_parser_comment_numeric_and_if_rows',
+    notes:
+      'JBC-42 verifies portable AWK whitespace and newline continuation parsing, string escapes, scientific and leading-decimal numeric literals, line comments, and simple if/else actions; loops, for-in, getline, output redirection, and parser error edges remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
+    lines: [439, 448, 457],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc42_user_function_and_conditional_flow_rows',
+    notes:
+      'JBC-42 verifies portable AWK function definition parsing for no-parameter, parameterized, and multiple user-defined functions; loops, for-in, getline, output redirection, and parser error edges remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [6, 15, 24, 35, 45, 55, 65, 76, 85, 96, 107, 118, 129],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc42_user_function_and_conditional_flow_rows',
+    notes:
+      'JBC-42 verifies portable AWK user-defined functions with scalar returns, parameter-local restoration, extra local parameters, recursion, nested calls, string returns, BEGIN calls, and multiple definitions; loops, array passing, getline, output redirection, and broader parser errors remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [199, 223, 234],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc42_user_function_and_conditional_flow_rows',
+    notes:
+      'JBC-42 verifies portable AWK conditional next and exit flow rows without claiming loop break/continue, do-while, getline, or output redirection support.',
+  },
+];
+
 const jbc37CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/html-to-markdown/html-to-markdown.test.ts',
@@ -3455,6 +3497,7 @@ function caseOverrideFor(testCase) {
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
+    ...jbc42CaseGroups,
     ...jbc38CaseGroups,
     ...jbc41CaseGroups,
     ...jbc27CaseGroups,

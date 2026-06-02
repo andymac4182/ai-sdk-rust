@@ -6989,6 +6989,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         variables,
         arrays: BTreeMap::new(),
         range_active: BTreeMap::new(),
+        functions: program.functions.clone(),
     };
     let mut nr = 0usize;
     let mut last_filename = String::new();
@@ -6999,13 +7000,24 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         .filter(|rule| matches!(rule.pattern, AwkPattern::Begin))
     {
         let mut context = AwkRecordContext::empty(nr, &last_filename);
-        if let Err(error) = execute_awk_actions(
+        match execute_awk_actions(
             rule.actions.as_slice(),
             &mut context,
             &mut runtime,
             &mut stdout,
         ) {
-            return stderr_result(1, format!("awk: {error}\n"));
+            Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) => {}
+            Ok(AwkFlow::Exit(code)) => {
+                return CommandResult {
+                    stdout,
+                    exit_code: code,
+                    ..CommandResult::default()
+                };
+            }
+            Ok(AwkFlow::Return(_)) => {
+                return stderr_result(1, "awk: unsupported program\n");
+            }
+            Err(error) => return stderr_result(1, format!("awk: {error}\n")),
         }
     }
 
@@ -7053,6 +7065,9 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                                 ..CommandResult::default()
                             };
                         }
+                        Ok(AwkFlow::Return(_)) => {
+                            return stderr_result(1, "awk: unsupported program\n");
+                        }
                         Err(error) => return stderr_result(1, format!("awk: {error}\n")),
                     }
                 }
@@ -7066,13 +7081,24 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         .filter(|rule| matches!(rule.pattern, AwkPattern::End))
     {
         let mut context = AwkRecordContext::empty(nr, &last_filename);
-        if let Err(error) = execute_awk_actions(
+        match execute_awk_actions(
             rule.actions.as_slice(),
             &mut context,
             &mut runtime,
             &mut stdout,
         ) {
-            return stderr_result(1, format!("awk: {error}\n"));
+            Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) => {}
+            Ok(AwkFlow::Exit(code)) => {
+                return CommandResult {
+                    stdout,
+                    exit_code: code,
+                    ..CommandResult::default()
+                };
+            }
+            Ok(AwkFlow::Return(_)) => {
+                return stderr_result(1, "awk: unsupported program\n");
+            }
+            Err(error) => return stderr_result(1, format!("awk: {error}\n")),
         }
     }
     stdout_result(stdout)
@@ -7348,6 +7374,13 @@ enum AwkSeparator {
 #[derive(Clone, Debug)]
 struct AwkProgram {
     rules: Vec<AwkRule>,
+    functions: BTreeMap<String, AwkFunction>,
+}
+
+#[derive(Clone, Debug)]
+struct AwkFunction {
+    params: Vec<String>,
+    actions: Vec<AwkAction>,
 }
 
 #[derive(Clone, Debug)]
@@ -7364,6 +7397,7 @@ struct AwkRuntime {
     variables: BTreeMap<String, String>,
     arrays: BTreeMap<String, BTreeMap<String, String>>,
     range_active: BTreeMap<usize, bool>,
+    functions: BTreeMap<String, AwkFunction>,
 }
 
 #[derive(Clone, Debug)]
@@ -7425,11 +7459,12 @@ enum AwkAssignOp {
     Pow,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AwkFlow {
     Continue,
     Next,
     Exit(i32),
+    Return(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7456,8 +7491,14 @@ enum AwkAction {
         format: AwkExpr,
         args: Vec<AwkExpr>,
     },
+    If {
+        condition: AwkExpr,
+        then_actions: Vec<AwkAction>,
+        else_actions: Vec<AwkAction>,
+    },
     Next,
     Exit(Option<AwkExpr>),
+    Return(Option<AwkExpr>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7554,11 +7595,20 @@ fn assign_awk_variable(
 fn parse_awk_program(program: &str) -> Result<AwkProgram, String> {
     let mut cursor = 0;
     let mut rules = Vec::new();
-    let source = program.trim();
+    let mut functions = BTreeMap::new();
+    let source = strip_awk_comments(program);
+    let source = source.trim();
     while cursor < source.len() {
         cursor = skip_awk_whitespace(source, cursor);
         if cursor >= source.len() {
             break;
+        }
+
+        if starts_awk_keyword(source, cursor, "function") {
+            let (name, function, next_cursor) = parse_awk_function_definition(source, cursor)?;
+            functions.insert(name, function);
+            cursor = next_cursor;
+            continue;
         }
 
         let (pattern, block_start) = if starts_awk_keyword(source, cursor, "BEGIN") {
@@ -7592,10 +7642,46 @@ fn parse_awk_program(program: &str) -> Result<AwkProgram, String> {
         cursor = block_end + 1;
     }
 
-    if rules.is_empty() {
+    if rules.is_empty() && functions.is_empty() {
         return Err("unsupported program".to_string());
     }
-    Ok(AwkProgram { rules })
+    Ok(AwkProgram { rules, functions })
+}
+
+fn parse_awk_function_definition(
+    source: &str,
+    start: usize,
+) -> Result<(String, AwkFunction, usize), String> {
+    let mut cursor = start + "function".len();
+    cursor = skip_awk_whitespace(source, cursor);
+    let name = take_awk_identifier(&source[cursor..])
+        .ok_or_else(|| "unsupported program".to_string())?
+        .to_string();
+    cursor += name.len();
+    cursor = skip_awk_whitespace(source, cursor);
+    if source.as_bytes().get(cursor) != Some(&b'(') {
+        return Err("unsupported program".to_string());
+    }
+    let params_end =
+        find_matching_awk_paren(source, cursor).ok_or_else(|| "unsupported program".to_string())?;
+    let params = source[cursor + 1..params_end]
+        .split(',')
+        .map(str::trim)
+        .filter(|param| !param.is_empty())
+        .map(|param| {
+            if is_awk_identifier(param) {
+                Ok(param.to_string())
+            } else {
+                Err("unsupported program".to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    cursor = skip_awk_whitespace(source, params_end + 1);
+    let block_start = expect_awk_block(source, cursor)?;
+    let block_end = find_matching_awk_brace(source, block_start)
+        .ok_or_else(|| "unterminated action block".to_string())?;
+    let actions = parse_awk_actions(&source[block_start + 1..block_end])?;
+    Ok((name, AwkFunction { params, actions }, block_end + 1))
 }
 
 impl AwkExpr {
@@ -7620,13 +7706,47 @@ fn parse_awk_pattern(pattern: &str) -> Result<AwkPattern, String> {
 
 fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
     let mut actions = Vec::new();
-    for statement in split_awk_statements(body) {
-        let statement = statement.trim();
+    let statements = split_awk_statements(body);
+    let mut index = 0usize;
+    while index < statements.len() {
+        let statement = statements[index].trim();
         if statement.is_empty() {
+            index += 1;
             continue;
+        }
+        if let Some((condition, then_source)) = parse_awk_if_statement(statement)? {
+            let then_actions = parse_awk_nested_actions(&then_source)?;
+            let mut else_actions = Vec::new();
+            let mut next_index = index + 1;
+            if let Some(next) = statements.get(next_index) {
+                let next = next.trim();
+                if let Some(rest) = strip_awk_keyword(next, "else") {
+                    if rest.is_empty() {
+                        next_index += 1;
+                        let Some(else_source) = statements.get(next_index) else {
+                            return Err("unsupported program".to_string());
+                        };
+                        else_actions = parse_awk_nested_actions(else_source)?;
+                    } else {
+                        else_actions = parse_awk_nested_actions(rest)?;
+                    }
+                    next_index += 1;
+                }
+            }
+            actions.push(AwkAction::If {
+                condition,
+                then_actions,
+                else_actions,
+            });
+            index = next_index;
+            continue;
+        }
+        if strip_awk_keyword(statement, "else").is_some() {
+            return Err("unsupported program".to_string());
         }
         if statement == "next" {
             actions.push(AwkAction::Next);
+            index += 1;
             continue;
         }
         if let Some(rest) = strip_awk_keyword(statement, "exit") {
@@ -7636,14 +7756,27 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
                     .then(|| parse_awk_expr(rest))
                     .transpose()?,
             ));
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = strip_awk_keyword(statement, "return") {
+            let rest = rest.trim();
+            actions.push(AwkAction::Return(
+                (!rest.is_empty())
+                    .then(|| parse_awk_expr(rest))
+                    .transpose()?,
+            ));
+            index += 1;
             continue;
         }
         if let Some(rest) = strip_awk_keyword(statement, "print") {
             actions.push(AwkAction::Print(parse_awk_print_exprs(rest)?));
+            index += 1;
             continue;
         }
         if let Some(rest) = strip_awk_keyword(statement, "printf") {
             actions.push(parse_awk_printf_action(rest)?);
+            index += 1;
             continue;
         }
         if let Some(target) = statement.strip_suffix("++") {
@@ -7651,6 +7784,7 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
                 target: parse_awk_target(target.trim())?,
                 delta: 1,
             });
+            index += 1;
             continue;
         }
         if let Some(target) = statement.strip_suffix("--") {
@@ -7658,6 +7792,7 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
                 target: parse_awk_target(target.trim())?,
                 delta: -1,
             });
+            index += 1;
             continue;
         }
         if let Some(target) = statement.strip_prefix("++") {
@@ -7665,6 +7800,7 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
                 target: parse_awk_target(target.trim())?,
                 delta: 1,
             });
+            index += 1;
             continue;
         }
         if let Some(target) = statement.strip_prefix("--") {
@@ -7672,17 +7808,53 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
                 target: parse_awk_target(target.trim())?,
                 delta: -1,
             });
+            index += 1;
             continue;
         }
-        if let Some((index, op)) = find_awk_assignment(statement) {
-            let target = parse_awk_target(statement[..index].trim())?;
-            let value = parse_awk_expr(statement[index + op.token_len()..].trim())?;
+        if let Some((assignment_index, op)) = find_awk_assignment(statement) {
+            let target = parse_awk_target(statement[..assignment_index].trim())?;
+            let value = parse_awk_expr(statement[assignment_index + op.token_len()..].trim())?;
             actions.push(AwkAction::Assign { target, op, value });
+            index += 1;
             continue;
         }
         actions.push(AwkAction::Expr(parse_awk_expr(statement)?));
+        index += 1;
     }
     Ok(actions)
+}
+
+fn parse_awk_if_statement(statement: &str) -> Result<Option<(AwkExpr, String)>, String> {
+    let Some(rest) = strip_awk_keyword(statement, "if") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return Err("unsupported program".to_string());
+    }
+    let condition_end =
+        find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
+    let condition = parse_awk_expr(&rest[1..condition_end])?;
+    let then_source = rest[condition_end + 1..].trim();
+    if then_source.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    Ok(Some((condition, then_source.to_string())))
+}
+
+fn parse_awk_nested_actions(source: &str) -> Result<Vec<AwkAction>, String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    if source.starts_with('{') {
+        let end = find_matching_awk_brace(source, 0)
+            .ok_or_else(|| "unterminated action block".to_string())?;
+        if source[end + 1..].trim().is_empty() {
+            return parse_awk_actions(&source[1..end]);
+        }
+    }
+    parse_awk_actions(source)
 }
 
 fn parse_awk_printf_action(rest: &str) -> Result<AwkAction, String> {
@@ -8212,6 +8384,21 @@ fn execute_awk_actions(
                     .collect::<Result<Vec<_>, _>>()?;
                 stdout.push_str(&format_awk_printf(&format, &values)?);
             }
+            AwkAction::If {
+                condition,
+                then_actions,
+                else_actions,
+            } => {
+                let actions = if eval_awk_truth(condition, context, runtime)? {
+                    then_actions
+                } else {
+                    else_actions
+                };
+                match execute_awk_actions(actions, context, runtime, stdout)? {
+                    AwkFlow::Continue => {}
+                    flow => return Ok(flow),
+                }
+            }
             AwkAction::Next => return Ok(AwkFlow::Next),
             AwkAction::Exit(code) => {
                 let code = match code {
@@ -8219,6 +8406,14 @@ fn execute_awk_actions(
                     None => 0,
                 };
                 return Ok(AwkFlow::Exit(code));
+            }
+            AwkAction::Return(value) => {
+                let value = value
+                    .as_ref()
+                    .map(|value| eval_awk_expr(value, context, runtime))
+                    .transpose()?
+                    .unwrap_or_default();
+                return Ok(AwkFlow::Return(value));
             }
         }
     }
@@ -8231,9 +8426,8 @@ fn eval_awk_expr(
     runtime: &mut AwkRuntime,
 ) -> Result<String, String> {
     match expression {
-        AwkExpr::Literal(value) | AwkExpr::RegexLiteral(value) | AwkExpr::Number(value) => {
-            Ok(value.clone())
-        }
+        AwkExpr::Literal(value) | AwkExpr::RegexLiteral(value) => Ok(value.clone()),
+        AwkExpr::Number(value) => Ok(format_awk_number(awk_to_number(value))),
         AwkExpr::WholeLine => Ok(context.line.clone()),
         AwkExpr::Field(index) => {
             let index = awk_to_number(&eval_awk_expr(index, context, runtime)?) as isize;
@@ -8560,6 +8754,9 @@ fn eval_awk_function(
     context: &mut AwkRecordContext,
     runtime: &mut AwkRuntime,
 ) -> Result<String, String> {
+    if let Some(function) = runtime.functions.get(name).cloned() {
+        return eval_awk_user_function(&function, args, context, runtime);
+    }
     match name {
         "__subsep" => Ok(args
             .iter()
@@ -8760,6 +8957,52 @@ fn eval_awk_function(
         }
         _ => Err("unsupported program".to_string()),
     }
+}
+
+fn eval_awk_user_function(
+    function: &AwkFunction,
+    args: &[AwkExpr],
+    context: &mut AwkRecordContext,
+    runtime: &mut AwkRuntime,
+) -> Result<String, String> {
+    let values = args
+        .iter()
+        .map(|arg| eval_awk_expr(arg, context, runtime))
+        .collect::<Result<Vec<_>, _>>()?;
+    let saved = function
+        .params
+        .iter()
+        .map(|param| (param.clone(), runtime.variables.get(param).cloned()))
+        .collect::<Vec<_>>();
+    for (index, param) in function.params.iter().enumerate() {
+        runtime.variables.insert(
+            param.clone(),
+            values.get(index).cloned().unwrap_or_default(),
+        );
+    }
+
+    let mut scratch_stdout = String::new();
+    let result = match execute_awk_actions(
+        function.actions.as_slice(),
+        context,
+        runtime,
+        &mut scratch_stdout,
+    ) {
+        Ok(AwkFlow::Return(value)) => Ok(value),
+        Ok(AwkFlow::Continue) => Ok(String::new()),
+        Ok(AwkFlow::Next) | Ok(AwkFlow::Exit(_)) => Err("unsupported program".to_string()),
+        Err(error) => Err(error),
+    };
+
+    for (param, old_value) in saved {
+        if let Some(old_value) = old_value {
+            runtime.variables.insert(param, old_value);
+        } else {
+            runtime.variables.remove(&param);
+        }
+    }
+
+    result
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9252,6 +9495,7 @@ fn split_awk_statements(value: &str) -> Vec<String> {
     let mut in_regex = false;
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
     while cursor < bytes.len() {
         match bytes[cursor] {
             b'"' if !is_awk_escaped(value, cursor) => in_string = !in_string,
@@ -9262,7 +9506,25 @@ fn split_awk_statements(value: &str) -> Vec<String> {
             b')' if !in_string && !in_regex => paren_depth = paren_depth.saturating_sub(1),
             b'[' if !in_string && !in_regex => bracket_depth += 1,
             b']' if !in_string && !in_regex => bracket_depth = bracket_depth.saturating_sub(1),
-            b';' | b'\n' if !in_string && !in_regex && paren_depth == 0 && bracket_depth == 0 => {
+            b'{' if !in_string && !in_regex => brace_depth += 1,
+            b'}' if !in_string && !in_regex => brace_depth = brace_depth.saturating_sub(1),
+            b';' if !in_string
+                && !in_regex
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                parts.push(value[start..cursor].to_string());
+                start = cursor + 1;
+            }
+            b'\n'
+                if !in_string
+                    && !in_regex
+                    && paren_depth == 0
+                    && bracket_depth == 0
+                    && brace_depth == 0
+                    && !awk_newline_continues_statement(value, cursor) =>
+            {
                 parts.push(value[start..cursor].to_string());
                 start = cursor + 1;
             }
@@ -9272,6 +9534,61 @@ fn split_awk_statements(value: &str) -> Vec<String> {
     }
     parts.push(value[start..].to_string());
     parts
+}
+
+fn awk_newline_continues_statement(value: &str, newline_index: usize) -> bool {
+    let prefix = value[..newline_index].trim_end();
+    if prefix.is_empty() {
+        return false;
+    }
+    if prefix.ends_with("&&") || prefix.ends_with("||") {
+        return true;
+    }
+    let Some(last) = prefix.chars().next_back() else {
+        return false;
+    };
+    if matches!(last, ',' | '{' | '?' | ':') {
+        return true;
+    }
+    prefix
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .next_back()
+        .is_some_and(|word| matches!(word, "do" | "else" | "if" | "while"))
+}
+
+fn strip_awk_comments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut in_regex = false;
+    while cursor < value.len() {
+        let ch = value.as_bytes()[cursor];
+        if ch == b'"' && !is_awk_escaped(value, cursor) {
+            in_string = !in_string;
+            output.push(ch as char);
+            cursor += 1;
+            continue;
+        }
+        if ch == b'/' && !in_string && awk_regex_delimiter(value, cursor, in_regex) {
+            in_regex = !in_regex;
+            output.push(ch as char);
+            cursor += 1;
+            continue;
+        }
+        if ch == b'#' && !in_string && !in_regex {
+            while cursor < value.len() && value.as_bytes()[cursor] != b'\n' {
+                cursor += 1;
+            }
+            if cursor < value.len() {
+                output.push('\n');
+                cursor += 1;
+            }
+            continue;
+        }
+        output.push(ch as char);
+        cursor += 1;
+    }
+    output
 }
 
 fn find_awk_top_level_char(value: &str, delimiter: char) -> Option<usize> {
@@ -9434,18 +9751,42 @@ fn take_awk_number(value: &str) -> Option<&str> {
     let mut seen_digit = false;
     let mut seen_dot = false;
     let mut end = 0usize;
-    for (index, ch) in value.char_indices() {
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, ch)) = chars.peek().copied() {
         if ch.is_ascii_digit() {
             seen_digit = true;
             end = index + ch.len_utf8();
+            chars.next();
         } else if ch == '.' && !seen_dot {
             seen_dot = true;
             end = index + ch.len_utf8();
+            chars.next();
         } else {
             break;
         }
     }
     if seen_digit {
+        if let Some((exponent_index, 'e' | 'E')) = chars.peek().copied() {
+            let mut exponent_end = exponent_index + 1;
+            let mut exponent_seen_digit = false;
+            chars.next();
+            if let Some((index, '+' | '-')) = chars.peek().copied() {
+                exponent_end = index + 1;
+                chars.next();
+            }
+            while let Some((index, ch)) = chars.peek().copied() {
+                if ch.is_ascii_digit() {
+                    exponent_seen_digit = true;
+                    exponent_end = index + ch.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if exponent_seen_digit {
+                end = exponent_end;
+            }
+        }
         Some(&value[..end])
     } else {
         None
@@ -16940,7 +17281,7 @@ fn strip_shebang(script: &str) -> &str {
 }
 
 fn extract_function_definitions(script: &mut String, functions: &mut BTreeMap<String, String>) {
-    while let Some(marker) = script.find("()") {
+    while let Some(marker) = find_unquoted_function_marker(script) {
         let prefix = &script[..marker];
         let name_start = prefix
             .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
@@ -16966,6 +17307,25 @@ fn extract_function_definitions(script: &mut String, functions: &mut BTreeMap<St
         }
         script.replace_range(name_start..end, "");
     }
+}
+
+fn find_unquoted_function_marker(script: &str) -> Option<usize> {
+    let chars = script.char_indices().collect::<Vec<_>>();
+    let mut quote = None::<char>;
+    let mut index = 0usize;
+    while let Some((byte, ch)) = chars.get(index).copied() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '(' && chars.get(index + 1).is_some_and(|(_, next)| *next == ')') => {
+                return Some(byte);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn command_basename(command: &str) -> &str {
