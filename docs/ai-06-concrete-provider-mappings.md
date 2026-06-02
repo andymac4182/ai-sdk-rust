@@ -300,3 +300,40 @@ the strict inventory generator.
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when task status is failed | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no task_id is returned | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no videos in response | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
+
+## Perplexity Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a system message with text content | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a user message with text parts | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a user message with image parts | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert an assistant message with text content | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should throw an error for tool messages | `convert_to_perplexity_messages_handles_tool_messages_and_provider_references` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should throw for file parts with provider references | `convert_to_perplexity_messages_handles_tool_messages_and_provider_references` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | passes full image/png through unchanged for inline data | `convert_to_perplexity_messages_passes_full_image_and_url_cases_through_unchanged` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | detects image subtype from inline bytes for top-level "image" | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | passes through URL source for top-level-only image | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | accepts top-level-only "application" mediaType for PDF without error | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
+| `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | normalizes image/* wildcard via detection | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should extract text content | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should extract citation content | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should send correct request body | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should pass through perplexity provider options | `perplexity_provider_passes_through_perplexity_provider_options` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should pass headers | `perplexity_provider_creates_language_model_with_headers_and_base_url; perplexity_provider_streams_passes_headers_and_exposes_raw_response_headers` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should expose the raw response headers | `perplexity_provider_creates_language_model_with_headers_and_base_url; perplexity_provider_streams_passes_headers_and_exposes_raw_response_headers` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should extract usage | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should send additional response information | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should handle PDF files with base64 encoding | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should handle PDF files with URLs | `perplexity_provider_handles_pdf_and_image_files_in_request_messages` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should extract images | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should extract extended usage | `perplexity_provider_creates_language_model_with_headers_and_base_url` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should pass headers | `perplexity_provider_streams_passes_headers_and_exposes_raw_response_headers` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should expose the raw response headers | `perplexity_provider_streams_passes_headers_and_exposes_raw_response_headers` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should warn about unsupported reasoning | `perplexity_provider_warns_about_unsupported_reasoning; perplexity_provider_supports_json_response_format_and_provider_options` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should stream text | `perplexity_provider_streams_sources_and_usage` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should stream citations | `perplexity_provider_streams_sources_and_usage` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should send correct streaming request body | `perplexity_provider_streams_sources_and_usage` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should stream images | `perplexity_provider_streams_sources_and_usage` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should stream extended usage | `perplexity_provider_streams_sources_and_usage` | none |
+| `packages/perplexity/src/perplexity-language-model.test.ts` | should stream raw chunks | `perplexity_provider_streams_raw_chunks` | none |

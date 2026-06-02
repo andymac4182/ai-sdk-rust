@@ -15,12 +15,11 @@ use ai_sdk_rust::{
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelText,
     LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage,
     LanguageModelUserContentPart, ModelType, NoSuchModelError, OpenAICompatibleEmbeddingModel,
-    OpenAICompatibleImageModel, OpenAICompatibleTransport, OpenAICompatibleTransportFuture,
-    OutputTokenUsage, ParseJsonResult, PostJsonToApiOptions, Provider, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, ProviderMetadata, RuntimeEnvironment,
-    UnsupportedFunctionalityError, Warning, combine_headers, convert_to_base64,
-    create_event_source_response_handler, create_json_error_response_handler,
+    OpenAICompatibleImageModel, OpenAICompatibleTransport, OutputTokenUsage, ParseJsonResult,
+    PostJsonToApiOptions, Provider, ProviderApiRequest, ProviderApiRequestBody,
+    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
+    ProviderMetadata, RuntimeEnvironment, UnsupportedFunctionalityError, Warning, combine_headers,
+    convert_to_base64, create_event_source_response_handler, create_json_error_response_handler,
     create_json_response_handler, generate_id, get_top_level_media_type, post_json_to_api,
     resolve_full_media_type, with_user_agent_suffix, without_trailing_slash,
 };
@@ -1419,8 +1418,9 @@ mod tests {
         LanguageModelFilePart, LanguageModelMessage, LanguageModelResponseFormat,
         LanguageModelStreamPart, LanguageModelStreamStart, LanguageModelSystemMessage,
         LanguageModelTextPart, LanguageModelToolMessage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, ModelType, Provider, ProviderApiRequest, ProviderApiRequestBody,
-        ProviderApiRequestMethod, ProviderApiResponse, ProviderReference, Warning,
+        LanguageModelUserMessage, ModelType, OpenAICompatibleTransportFuture, Provider,
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        ProviderReference, Warning,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1428,6 +1428,7 @@ mod tests {
     use std::future::ready;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use time::OffsetDateTime;
     use url::Url;
 
     struct NoopWake;
@@ -1475,7 +1476,7 @@ mod tests {
         let captured_request_for_transport = Arc::clone(&captured_request);
         let response_body = response_body.to_string();
         let transport: super::OpenAICompatibleTransport =
-            Arc::new(move |request| -> super::OpenAICompatibleTransportFuture {
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
@@ -1501,7 +1502,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: super::OpenAICompatibleTransport =
-            Arc::new(move |request| -> super::OpenAICompatibleTransportFuture {
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
@@ -1925,7 +1926,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: super::OpenAICompatibleTransport =
-            Arc::new(move |request| -> super::OpenAICompatibleTransportFuture {
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
@@ -2025,6 +2026,27 @@ mod tests {
                 .and_then(JsonValue::as_u64),
             Some(2)
         );
+        // Extracted images are exposed through perplexity provider metadata.
+        let generated_images = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("perplexity"))
+            .and_then(|metadata| metadata.get("images"))
+            .and_then(JsonValue::as_array)
+            .expect("generated images array is present");
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(
+            generated_images[0]
+                .get("imageUrl")
+                .and_then(JsonValue::as_str),
+            Some("https://example.com/image.png")
+        );
+        assert_eq!(
+            generated_images[0]
+                .get("originUrl")
+                .and_then(JsonValue::as_str),
+            Some("https://example.com/original.png")
+        );
         assert_eq!(
             result
                 .response
@@ -2033,6 +2055,31 @@ mod tests {
                 .and_then(|headers| headers.get("x-request-id"))
                 .map(String::as_str),
             Some("req_perplexity")
+        );
+        // Additional response information: id, timestamp, modelId.
+        let response_info = result
+            .response
+            .as_ref()
+            .expect("response metadata is present");
+        assert_eq!(response_info.id.as_deref(), Some("pplx-123"));
+        assert_eq!(
+            response_info.timestamp,
+            Some(
+                OffsetDateTime::from_unix_timestamp(1711115037)
+                    .expect("timestamp from unix seconds")
+            )
+        );
+        assert_eq!(response_info.model_id.as_deref(), Some("sonar"));
+        // Extended usage exposes numSearchQueries alongside citationTokens.
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("perplexity"))
+                .and_then(|metadata| metadata.get("usage"))
+                .and_then(|usage| usage.get("numSearchQueries"))
+                .and_then(JsonValue::as_u64),
+            Some(1)
         );
 
         let request = captured_request
@@ -2079,7 +2126,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: super::OpenAICompatibleTransport =
-            Arc::new(move |request| -> super::OpenAICompatibleTransportFuture {
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
@@ -2185,7 +2232,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: super::OpenAICompatibleTransport =
-            Arc::new(move |request| -> super::OpenAICompatibleTransportFuture {
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
@@ -2303,7 +2350,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: super::OpenAICompatibleTransport =
-            Arc::new(move |request| -> super::OpenAICompatibleTransportFuture {
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
@@ -2352,7 +2399,8 @@ mod tests {
                                 "prompt_tokens": 5,
                                 "completion_tokens": 2,
                                 "citation_tokens": 1,
-                                "num_search_queries": 3
+                                "num_search_queries": 3,
+                                "reasoning_tokens": 7
                             }
                         }),
                     ]),
@@ -2393,15 +2441,38 @@ mod tests {
         );
         assert_eq!(finish.usage.input_tokens.total, Some(5));
         assert_eq!(finish.usage.output_tokens.total, Some(2));
+        // Extended streamed usage surfaces reasoning tokens and citation metadata.
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(7));
+        let perplexity_metadata = finish
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("perplexity"))
+            .expect("perplexity provider metadata is present");
         assert_eq!(
-            finish
-                .provider_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("perplexity"))
-                .and_then(|metadata| metadata.get("usage"))
+            perplexity_metadata
+                .get("usage")
                 .and_then(|usage| usage.get("numSearchQueries"))
                 .and_then(JsonValue::as_u64),
             Some(3)
+        );
+        assert_eq!(
+            perplexity_metadata
+                .get("usage")
+                .and_then(|usage| usage.get("citationTokens"))
+                .and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        // Streamed images are exposed through finish provider metadata.
+        let streamed_images = perplexity_metadata
+            .get("images")
+            .and_then(JsonValue::as_array)
+            .expect("streamed images array is present");
+        assert_eq!(streamed_images.len(), 1);
+        assert_eq!(
+            streamed_images[0]
+                .get("imageUrl")
+                .and_then(JsonValue::as_str),
+            Some("https://example.com/image.png")
         );
         let request = captured_request
             .lock()
@@ -2505,6 +2576,81 @@ mod tests {
                 ],
                 "stream": true
             })
+        );
+    }
+
+    #[test]
+    fn perplexity_provider_streams_passes_headers_and_exposes_raw_response_headers() {
+        let (transport, captured_request) = recording_stream_transport(
+            sse_body([json!({
+                "id": "pplx-stream",
+                "created": 1711115040,
+                "model": "sonar",
+                "choices": [
+                    {
+                        "delta": { "role": "assistant", "content": "Hi" },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            })]),
+            Some(Headers::from([(
+                "test-header".to_string(),
+                "test-value".to_string(),
+            )])),
+        );
+        let provider = create_perplexity(
+            PerplexityProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_header("custom-provider-header", "provider-header-value"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("sonar");
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Say hi"),
+                    )]),
+                )])
+                .with_header("custom-request-header", "request-header-value"),
+            ),
+        );
+
+        // Raw streaming response headers are surfaced on the result.
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("test-header"))
+                .map(String::as_str),
+            Some("test-value")
+        );
+
+        // Provider headers, the authorization token, and per-call headers all reach the request.
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-provider-header")
+                .map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-request-header")
+                .map(String::as_str),
+            Some("request-header-value")
         );
     }
 
