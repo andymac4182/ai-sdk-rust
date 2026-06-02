@@ -1173,6 +1173,59 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn basename_dirname_upstream_command_rows_are_portable() {
+        // maps packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json
+        let env = bash();
+        let cases = [
+            ("basename -s .txt /path/to/file.txt", "file\n"),
+            ("basename ./path/to/file.txt", "file.txt\n"),
+            ("basename /path/to/file.txt .md", "file.txt\n"),
+            (
+                "basename -a /path/one.txt /path/two.txt",
+                "one.txt\ntwo.txt\n",
+            ),
+            ("basename /path/to/dir/", "dir\n"),
+            ("basename file.txt", "file.txt\n"),
+            ("basename /path/to/file.txt .txt", "file\n"),
+            ("basename /usr/bin/sort", "sort\n"),
+            (
+                "basename -a -s .txt /path/one.txt /path/two.txt",
+                "one\ntwo\n",
+            ),
+            ("dirname /path/to/dir/", "/path/to\n"),
+            ("dirname ./path/to/file.txt", "./path/to\n"),
+            (
+                "dirname /path/to/file1 /another/path/file2",
+                "/path/to\n/another/path\n",
+            ),
+            ("dirname file.txt", ".\n"),
+            ("dirname /usr/bin/sort", "/usr/bin\n"),
+            ("dirname /file.txt", "/\n"),
+        ];
+
+        for (script, stdout) in cases {
+            let result = env.exec(script);
+            assert_eq!(result.exit_code, 0, "{script}");
+            assert_eq!(result.stdout, stdout, "{script}");
+            assert_eq!(result.stderr, "", "{script}");
+        }
+
+        let missing_basename = env.exec("basename");
+        assert_eq!(missing_basename.exit_code, 1);
+        assert_eq!(missing_basename.stderr, "basename: missing operand\n");
+        let basename_help = env.exec("basename --help");
+        assert_eq!(basename_help.exit_code, 0);
+        assert!(basename_help.stdout.contains("strip directory"));
+
+        let missing_dirname = env.exec("dirname");
+        assert_eq!(missing_dirname.exit_code, 1);
+        assert_eq!(missing_dirname.stderr, "dirname: missing operand\n");
+        let dirname_help = env.exec("dirname --help");
+        assert_eq!(dirname_help.exit_code, 0);
+        assert!(dirname_help.stdout.contains("strip last component"));
+    }
+
+    #[test]
     fn redirection_upstream_cases_write_append_and_read_virtual_files() {
         // maps packages/just-bash/src/commands/bash/bash.test.ts:156 redirection-heavy script behavior
         let env = bash();

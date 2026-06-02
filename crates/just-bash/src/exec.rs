@@ -847,6 +847,8 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "uniq" => command_uniq(state, &tokens[1..], &stdin),
         "cut" => command_cut(state, &tokens[1..], &stdin),
         "tr" => command_tr(&tokens[1..], &stdin),
+        "basename" => command_basename_utility(&tokens[1..]),
+        "dirname" => command_dirname_utility(&tokens[1..]),
         "ls" => command_ls(state, &tokens[1..]),
         "mkdir" => command_mkdir(state, &tokens[1..]),
         "touch" => command_touch(state, &tokens[1..]),
@@ -7735,6 +7737,93 @@ fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         exit_code,
         ..CommandResult::default()
     }
+}
+
+fn command_basename_utility(args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: basename NAME [SUFFIX]\nbasename OPTION... NAME...\nstrip directory and suffix from filenames\n",
+        );
+    }
+
+    let mut multiple = false;
+    let mut suffix = String::new();
+    let mut names = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "-a" || arg == "--multiple" {
+            multiple = true;
+        } else if arg == "-s" {
+            if let Some(value) = args.get(index + 1) {
+                suffix = value.clone();
+                index += 1;
+            }
+            multiple = true;
+        } else if let Some(value) = arg.strip_prefix("--suffix=") {
+            suffix = value.to_string();
+            multiple = true;
+        } else if !arg.starts_with('-') {
+            names.push(arg.as_str());
+        }
+        index += 1;
+    }
+
+    if names.is_empty() {
+        return stderr_result(1, "basename: missing operand\n");
+    }
+
+    if !multiple && names.len() >= 2 {
+        suffix = names.pop().unwrap_or_default().to_string();
+    }
+
+    let stdout = names
+        .into_iter()
+        .map(|name| {
+            let clean_name = name.trim_end_matches('/');
+            let mut base = clean_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(clean_name)
+                .to_string();
+            if !suffix.is_empty() && base.ends_with(&suffix) {
+                base.truncate(base.len() - suffix.len());
+            }
+            base
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    stdout_result(format!("{stdout}\n"))
+}
+
+fn command_dirname_utility(args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: dirname [OPTION] NAME...\nstrip last component from file name\n",
+        );
+    }
+
+    let names = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return stderr_result(1, "dirname: missing operand\n");
+    }
+
+    let stdout = names
+        .into_iter()
+        .map(|name| {
+            let clean_name = name.trim_end_matches('/');
+            match clean_name.rfind('/') {
+                None => ".".to_string(),
+                Some(0) => "/".to_string(),
+                Some(index) => clean_name[..index].to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    stdout_result(format!("{stdout}\n"))
 }
 
 fn collect_named_text_inputs(

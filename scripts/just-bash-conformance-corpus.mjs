@@ -38,7 +38,26 @@ const parityPath = path.join(
 const comparisonRoot = 'packages/just-bash/src/comparison-tests';
 const comparisonFixturesRoot = `${comparisonRoot}/fixtures`;
 
+const jbc21SmallCommandComparisonCaseIds = [
+  'comparison:basename-dirname:1050447eb8fcea43',
+  'comparison:basename-dirname:34fc89ba5a1350c1',
+  'comparison:basename-dirname:4a36b89901f4596f',
+  'comparison:basename-dirname:6432d8d9b8f26c2a',
+  'comparison:basename-dirname:6c1f73fc04d44746',
+  'comparison:basename-dirname:78569eb44390ae76',
+  'comparison:basename-dirname:7b467ba5755fc78d',
+  'comparison:basename-dirname:7e773f3d686bcf22',
+  'comparison:basename-dirname:980a9e04c9919a04',
+  'comparison:basename-dirname:9910476a759ea007',
+  'comparison:basename-dirname:becbe09b8d34b057',
+  'comparison:basename-dirname:c58fb4d57c1cf35b',
+  'comparison:basename-dirname:ce2679abcb4aa7be',
+  'comparison:basename-dirname:f338c3acb6a9d20e',
+  'comparison:basename-dirname:f5d9cb2f39b2f952',
+];
+
 const rustRunnerComparisonCaseIds = [
+  ...jbc21SmallCommandComparisonCaseIds,
   'comparison:awk:5fb5a4d01bc7c720',
   'comparison:awk:6264f92b9b03799d',
   'comparison:awk:63976ead5650d0f3',
@@ -220,6 +239,7 @@ const rustRunnerComparisonCaseIds = [
   'comparison:wc:fbae9795c34391b6',
 ];
 const rustRunnerComparisonCaseIdSet = new Set(rustRunnerComparisonCaseIds);
+const jbc21SmallCommandComparisonCaseIdSet = new Set(jbc21SmallCommandComparisonCaseIds);
 
 const unitSourceFiles = [
   'packages/just-bash/src/commands/printf/printf.test.ts',
@@ -396,12 +416,17 @@ function rustRunnerProofFor(testCase) {
   if (!rustRunnerComparisonCaseIdSet.has(testCase.id)) {
     return undefined;
   }
+  const isJbc21 = jbc21SmallCommandComparisonCaseIdSet.has(testCase.id);
   return {
     status: 'portable-verified',
-    owner: 'crates/just-bash::conformance_corpus',
+    owner: isJbc21
+      ? 'crates/just-bash::runtime::small-posix-command-family'
+      : 'crates/just-bash::conformance_corpus',
     rustTest: rustRunnerCaseName(testCase.id),
-    notes:
-      'JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.',
+    notes: isJbc21
+      ? 'JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.'
+      : 'JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.',
+    source: isJbc21 ? 'JBC-21' : 'JBC-11',
   };
 }
 
@@ -422,7 +447,7 @@ function withRustRunnerProof(testCase) {
       notes: proof.notes,
     },
     runnerProof: {
-      source: 'JBC-11',
+      source: proof.source,
       engine: 'rust-just-bash',
       assertion: 'stdout-stderr-exit-code-exact',
     },

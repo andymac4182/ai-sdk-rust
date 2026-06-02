@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1348,
-      "portable-verified": 323
+      "portable-pending": 1333,
+      "portable-verified": 338
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -1366,13 +1366,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:53:it:should handle -s option",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_1050447eb8fcea43",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1383,6 +1383,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_1050447eb8fcea43",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1413,13 +1419,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:26:it:should extract basename from relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_34fc89ba5a1350c1",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1430,6 +1436,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_34fc89ba5a1350c1",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1460,13 +1472,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:112:it:should handle path with trailing slash",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_4a36b89901f4596f",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1477,6 +1489,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_4a36b89901f4596f",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1507,13 +1525,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:97:it:should extract directory from relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6432d8d9b8f26c2a",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1524,6 +1542,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6432d8d9b8f26c2a",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1554,13 +1578,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:48:it:should not remove suffix if not matching",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6c1f73fc04d44746",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1571,6 +1595,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6c1f73fc04d44746",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1601,13 +1631,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:60:it:should handle multiple paths with -a",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_78569eb44390ae76",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1618,6 +1648,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_78569eb44390ae76",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1648,13 +1684,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:119:it:should handle multiple paths",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7b467ba5755fc78d",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1665,6 +1701,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7b467ba5755fc78d",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1695,13 +1737,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:36:it:should handle path ending with slash",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7e773f3d686bcf22",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1712,6 +1754,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7e773f3d686bcf22",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1742,13 +1790,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:31:it:should handle filename without directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_980a9e04c9919a04",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1759,6 +1807,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_980a9e04c9919a04",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1789,13 +1843,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:43:it:should remove suffix when specified",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_9910476a759ea007",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1806,6 +1860,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_9910476a759ea007",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1836,13 +1896,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:102:it:should return . for filename without directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_becbe09b8d34b057",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1853,6 +1913,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_becbe09b8d34b057",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1883,13 +1949,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:21:it:should extract basename from absolute path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_c58fb4d57c1cf35b",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1900,6 +1966,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_c58fb4d57c1cf35b",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1930,13 +2002,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:92:it:should extract directory from absolute path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_ce2679abcb4aa7be",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1947,6 +2019,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_ce2679abcb4aa7be",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1977,13 +2055,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:107:it:should return / for root-level file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f338c3acb6a9d20e",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -1994,6 +2072,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f338c3acb6a9d20e",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -2024,13 +2108,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:69:it:should handle -a with -s",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f5d9cb2f39b2f952",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
         "found": true
       },
       "assertions": [],
@@ -2041,6 +2125,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f5d9cb2f39b2f952",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {

@@ -15,12 +15,13 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 179,
+    "totalCases": 194,
     "byKind": {
-      "comparison-fixture": 179
+      "comparison-fixture": 194
     },
     "byDomain": {
       "awk": 9,
+      "basename-dirname": 15,
       "cat": 7,
       "cut": 14,
       "echo": 26,
@@ -36,7 +37,7 @@
       "uniq": 10
     },
     "byStatus": {
-      "portable-verified": 179
+      "portable-verified": 194
     }
   },
   "cases": [
@@ -527,6 +528,801 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_d4640ec4826f2d8a",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:1050447eb8fcea43",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 53,
+        "suite": "basename command - Real Bash Comparison > suffix removal",
+        "testName": "should handle -s option",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "1050447eb8fcea43"
+      },
+      "command": "basename -s .txt /path/to/file.txt",
+      "script": "basename -s .txt /path/to/file.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:53:it:should handle -s option",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_1050447eb8fcea43",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "1050447eb8fcea43",
+        "expectedFixtureId": "1050447eb8fcea43",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_1050447eb8fcea43",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:34fc89ba5a1350c1",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 26,
+        "suite": "basename command - Real Bash Comparison > basic usage",
+        "testName": "should extract basename from relative path",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "34fc89ba5a1350c1"
+      },
+      "command": "basename ./path/to/file.txt",
+      "script": "basename ./path/to/file.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:26:it:should extract basename from relative path",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_34fc89ba5a1350c1",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "34fc89ba5a1350c1",
+        "expectedFixtureId": "34fc89ba5a1350c1",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_34fc89ba5a1350c1",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:4a36b89901f4596f",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 112,
+        "suite": "dirname command - Real Bash Comparison > basic usage",
+        "testName": "should handle path with trailing slash",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "4a36b89901f4596f"
+      },
+      "command": "dirname /path/to/dir/",
+      "script": "dirname /path/to/dir/",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "/path/to\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:112:it:should handle path with trailing slash",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_4a36b89901f4596f",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "4a36b89901f4596f",
+        "expectedFixtureId": "4a36b89901f4596f",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_4a36b89901f4596f",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:6432d8d9b8f26c2a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 97,
+        "suite": "dirname command - Real Bash Comparison > basic usage",
+        "testName": "should extract directory from relative path",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "6432d8d9b8f26c2a"
+      },
+      "command": "dirname ./path/to/file.txt",
+      "script": "dirname ./path/to/file.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "./path/to\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:97:it:should extract directory from relative path",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6432d8d9b8f26c2a",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "6432d8d9b8f26c2a",
+        "expectedFixtureId": "6432d8d9b8f26c2a",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6432d8d9b8f26c2a",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:6c1f73fc04d44746",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 48,
+        "suite": "basename command - Real Bash Comparison > suffix removal",
+        "testName": "should not remove suffix if not matching",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "6c1f73fc04d44746"
+      },
+      "command": "basename /path/to/file.txt .md",
+      "script": "basename /path/to/file.txt .md",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:48:it:should not remove suffix if not matching",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6c1f73fc04d44746",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "6c1f73fc04d44746",
+        "expectedFixtureId": "6c1f73fc04d44746",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_6c1f73fc04d44746",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:78569eb44390ae76",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 60,
+        "suite": "basename command - Real Bash Comparison > multiple files with -a",
+        "testName": "should handle multiple paths with -a",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "78569eb44390ae76"
+      },
+      "command": "basename -a /path/one.txt /path/two.txt",
+      "script": "basename -a /path/one.txt /path/two.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "one.txt\ntwo.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:60:it:should handle multiple paths with -a",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_78569eb44390ae76",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "78569eb44390ae76",
+        "expectedFixtureId": "78569eb44390ae76",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_78569eb44390ae76",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:7b467ba5755fc78d",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 119,
+        "suite": "dirname command - Real Bash Comparison > multiple paths",
+        "testName": "should handle multiple paths",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "7b467ba5755fc78d"
+      },
+      "command": "dirname /path/to/file1 /another/path/file2",
+      "script": "dirname /path/to/file1 /another/path/file2",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "/path/to\n/another/path\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:119:it:should handle multiple paths",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7b467ba5755fc78d",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "7b467ba5755fc78d",
+        "expectedFixtureId": "7b467ba5755fc78d",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7b467ba5755fc78d",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:7e773f3d686bcf22",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 36,
+        "suite": "basename command - Real Bash Comparison > basic usage",
+        "testName": "should handle path ending with slash",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "7e773f3d686bcf22"
+      },
+      "command": "basename /path/to/dir/",
+      "script": "basename /path/to/dir/",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "dir\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:36:it:should handle path ending with slash",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7e773f3d686bcf22",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "7e773f3d686bcf22",
+        "expectedFixtureId": "7e773f3d686bcf22",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_7e773f3d686bcf22",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:980a9e04c9919a04",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 31,
+        "suite": "basename command - Real Bash Comparison > basic usage",
+        "testName": "should handle filename without directory",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "980a9e04c9919a04"
+      },
+      "command": "basename file.txt",
+      "script": "basename file.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:31:it:should handle filename without directory",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_980a9e04c9919a04",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "980a9e04c9919a04",
+        "expectedFixtureId": "980a9e04c9919a04",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_980a9e04c9919a04",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:9910476a759ea007",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 43,
+        "suite": "basename command - Real Bash Comparison > suffix removal",
+        "testName": "should remove suffix when specified",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "9910476a759ea007"
+      },
+      "command": "basename /path/to/file.txt .txt",
+      "script": "basename /path/to/file.txt .txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:43:it:should remove suffix when specified",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_9910476a759ea007",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "9910476a759ea007",
+        "expectedFixtureId": "9910476a759ea007",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_9910476a759ea007",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:becbe09b8d34b057",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 102,
+        "suite": "dirname command - Real Bash Comparison > basic usage",
+        "testName": "should return . for filename without directory",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "becbe09b8d34b057"
+      },
+      "command": "dirname file.txt",
+      "script": "dirname file.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": ".\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:102:it:should return . for filename without directory",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_becbe09b8d34b057",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "becbe09b8d34b057",
+        "expectedFixtureId": "becbe09b8d34b057",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_becbe09b8d34b057",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:c58fb4d57c1cf35b",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 21,
+        "suite": "basename command - Real Bash Comparison > basic usage",
+        "testName": "should extract basename from absolute path",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "c58fb4d57c1cf35b"
+      },
+      "command": "basename /usr/bin/sort",
+      "script": "basename /usr/bin/sort",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "sort\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:21:it:should extract basename from absolute path",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_c58fb4d57c1cf35b",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "c58fb4d57c1cf35b",
+        "expectedFixtureId": "c58fb4d57c1cf35b",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_c58fb4d57c1cf35b",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:ce2679abcb4aa7be",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 92,
+        "suite": "dirname command - Real Bash Comparison > basic usage",
+        "testName": "should extract directory from absolute path",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "ce2679abcb4aa7be"
+      },
+      "command": "dirname /usr/bin/sort",
+      "script": "dirname /usr/bin/sort",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "/usr/bin\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:92:it:should extract directory from absolute path",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_ce2679abcb4aa7be",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "ce2679abcb4aa7be",
+        "expectedFixtureId": "ce2679abcb4aa7be",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_ce2679abcb4aa7be",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:f338c3acb6a9d20e",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 107,
+        "suite": "dirname command - Real Bash Comparison > basic usage",
+        "testName": "should return / for root-level file",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "f338c3acb6a9d20e"
+      },
+      "command": "dirname /file.txt",
+      "script": "dirname /file.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "/\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:107:it:should return / for root-level file",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f338c3acb6a9d20e",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "f338c3acb6a9d20e",
+        "expectedFixtureId": "f338c3acb6a9d20e",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f338c3acb6a9d20e",
+      "runnerProof": {
+        "source": "JBC-21",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:basename-dirname:f5d9cb2f39b2f952",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "basename-dirname",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts",
+        "line": 69,
+        "suite": "basename command - Real Bash Comparison > multiple files with -a",
+        "testName": "should handle -a with -s",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "fixtureId": "f5d9cb2f39b2f952"
+      },
+      "command": "basename -a -s .txt /path/one.txt /path/two.txt",
+      "script": "basename -a -s .txt /path/one.txt /path/two.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "one\ntwo\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/basename-dirname.comparison.test.ts:69:it:should handle -a with -s",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-posix-command-family",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f5d9cb2f39b2f952",
+        "notes": "JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "f5d9cb2f39b2f952",
+        "expectedFixtureId": "f5d9cb2f39b2f952",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/basename-dirname.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_basename_dirname_f5d9cb2f39b2f952",
+      "runnerProof": {
+        "source": "JBC-21",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
