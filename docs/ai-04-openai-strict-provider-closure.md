@@ -730,6 +730,7 @@ Rows in these tables are exact upstream case mappings consumed by `scripts/ai-st
 | `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should stream text content | `openai_compatible_chat_stream_streams_text_content` | none |
 | `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should stream tool call content | `openai_compatible_chat_extracts_tool_call_content` | none |
 | `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should expose the raw response headers | `openai_compatible_chat_exposes_raw_response_headers` | none |
+| `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should handle empty string role in delta chunks | `openai_compatible_chat_stream_handles_empty_string_role_in_delta_chunks` | none |
 | `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should respect the includeUsage option | `openai_compatible_provider_uses_language_model_as_default_chat_model_alias` | none |
 | `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should stream reasoning content before text deltas | `openai_compatible_chat_streams_reasoning_content_before_text_deltas` | none |
 | `packages/openai-compatible/src/chat/openai-compatible-chat-language-model.test.ts` | should stream reasoning from reasoning field when reasoning_content is not provided | `openai_compatible_chat_stream_prefers_reasoning_content_over_reasoning_field` | none |

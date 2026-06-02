@@ -6703,6 +6703,32 @@ where
         .collect()
 }
 
+/// Extracts a 1-based inclusive line range while preserving the detected line ending.
+pub fn extract_lines(text: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+    if start_line.is_none() && end_line.is_none() {
+        return text.to_string();
+    }
+
+    let line_ending = if text.contains("\r\n") {
+        "\r\n"
+    } else if text.contains('\n') {
+        "\n"
+    } else if text.contains('\r') {
+        "\r"
+    } else {
+        "\n"
+    };
+    let lines: Vec<&str> = text.split(line_ending).collect();
+    let start = start_line.unwrap_or(1).max(1) - 1;
+    let end = end_line.unwrap_or(lines.len()).min(lines.len());
+
+    if start >= end {
+        String::new()
+    } else {
+        lines[start..end].join(line_ending)
+    }
+}
+
 /// Serializes provider model options for workflow step boundaries.
 ///
 /// Upstream `serializeModelOptions` keeps JSON-serializable config values and
@@ -8847,8 +8873,8 @@ mod tests {
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
         create_tool_name_mapping, delay, delay_with_options, detect_media_type, download_blob,
-        dynamic_tool, execute_provider_api_request, execute_tool, extract_response_headers,
-        filter_nullable, generate_id, get_error_message, get_from_api,
+        dynamic_tool, execute_provider_api_request, execute_tool, extract_lines,
+        extract_response_headers, filter_nullable, generate_id, get_error_message, get_from_api,
         get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
         handle_provider_api_response, inject_json_instruction,
         inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
@@ -12702,6 +12728,49 @@ mod tests {
                 ("zero".to_string(), json!(0)),
             ])
         );
+    }
+
+    #[test]
+    fn extract_lines_upstream_returns_input_when_no_start_or_end_line_is_set() {
+        assert_eq!(extract_lines("a\nb\nc", None, None), "a\nb\nc");
+    }
+
+    #[test]
+    fn extract_lines_upstream_slices_a_1_based_inclusive_range_from_a_newline_file() {
+        assert_eq!(extract_lines("a\nb\nc\nd", Some(2), Some(3)), "b\nc");
+    }
+
+    #[test]
+    fn extract_lines_upstream_preserves_crlf_line_endings() {
+        assert_eq!(
+            extract_lines("a\r\nb\r\nc\r\nd", Some(2), Some(3)),
+            "b\r\nc"
+        );
+    }
+
+    #[test]
+    fn extract_lines_upstream_preserves_cr_line_endings() {
+        assert_eq!(extract_lines("a\rb\rc\rd", Some(2), Some(3)), "b\rc");
+    }
+
+    #[test]
+    fn extract_lines_upstream_treats_end_line_past_eof_as_the_last_line() {
+        assert_eq!(extract_lines("a\nb\nc", Some(2), Some(99)), "b\nc");
+    }
+
+    #[test]
+    fn extract_lines_upstream_defaults_start_line_to_1_when_only_end_line_is_set() {
+        assert_eq!(extract_lines("a\nb\nc", None, Some(2)), "a\nb");
+    }
+
+    #[test]
+    fn extract_lines_upstream_defaults_end_line_to_the_last_line_when_only_start_line_is_set() {
+        assert_eq!(extract_lines("a\nb\nc", Some(2), None), "b\nc");
+    }
+
+    #[test]
+    fn extract_lines_upstream_returns_input_unchanged_when_there_are_no_line_breaks() {
+        assert_eq!(extract_lines("one-liner", Some(1), Some(1)), "one-liner");
     }
 
     #[test]

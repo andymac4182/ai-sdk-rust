@@ -11769,6 +11769,75 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_chat_stream_handles_empty_string_role_in_delta_chunks() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+            json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "",
+                            "content": "Hello"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "",
+                            "content": " World"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+        ]));
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => {
+                        Some((delta.id.as_str(), delta.delta.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![("txt-0", "Hello"), ("txt-0", " World")]
+        );
+    }
+
+    #[test]
     fn openai_compatible_chat_streams_xai_text_fixture_content() {
         let result = openai_compatible_chat_stream_result_from_chunk_fixture(
             OPENAI_COMPATIBLE_XAI_TEXT_CHUNKS,

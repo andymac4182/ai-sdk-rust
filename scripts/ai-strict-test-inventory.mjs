@@ -1350,19 +1350,22 @@ function gatewayVercelGroupedRustTests(testCase) {
   }
 
   if (testCase.file === 'packages/gateway/src/errors/parse-auth-method.test.ts') {
-    if (line === 8) {
+    if (line === 9) {
       return ['gateway_auth_method_header_matches_upstream_name'];
     }
-    if ([15, 25, 35].includes(line)) {
+    if (line === 13) {
+      return ['vercel_ai_gateway_team_header_matches_upstream_name'];
+    }
+    if ([20, 30, 40].includes(line)) {
       return ['parse_gateway_auth_method_accepts_valid_values_and_extra_headers'];
     }
-    if ([50, 57, 64, 71, 78, 85].includes(line)) {
+    if ([55, 62, 69, 76, 83, 90].includes(line)) {
       return ['parse_gateway_auth_method_rejects_invalid_values'];
     }
-    if ([94, 101, 108, 129].includes(line)) {
+    if ([99, 106, 113, 134].includes(line)) {
       return ['parse_gateway_auth_method_returns_none_for_missing_or_nullish_headers'];
     }
-    if ([115, 122].includes(line)) {
+    if ([120, 127].includes(line)) {
       return ['parse_gateway_auth_method_rejects_whitespace'];
     }
   }
@@ -1558,6 +1561,12 @@ function buildProviderUtilsMappings(rustTests) {
         name.startsWith('download_blob_ssrf_upstream_') ||
         name.startsWith('download_error_upstream_'),
       ),
+    'packages/provider-utils/src/extract-lines.test.ts':
+      [
+        ['extract_lines_upstream_returns_input_when_no_start_or_end_line_is_set'],
+        ...byPrefix('extract_lines_upstream_')
+          .filter(rustTests => rustTests[0] !== 'extract_lines_upstream_returns_input_when_no_start_or_end_line_is_set'),
+      ],
     'packages/provider-utils/src/filter-nullable.test.ts': [
       ['filter_nullable_removes_null_and_undefined_values_from_value_list'],
       ['filter_nullable_preserves_other_falsy_values'],

@@ -166,7 +166,7 @@ pub use gateway_error::{
     GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
     GatewayErrorResponse, GatewayErrorResponseError, GatewayInternalServerError,
     GatewayInvalidRequestError, GatewayModelNotFoundError, GatewayRateLimitError,
-    GatewayResponseError, GatewayTimeoutError, as_gateway_error,
+    GatewayResponseError, GatewayTimeoutError, VERCEL_AI_GATEWAY_TEAM_HEADER, as_gateway_error,
     create_gateway_error_from_api_call, create_gateway_error_from_response,
     extract_gateway_api_call_response, gateway_headers_from_auth_method, parse_gateway_auth_method,
 };

@@ -3,23 +3,25 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 54.6%
-- Portable package average: 44.3%
-- Closed package rows: 19 / 54
-- Strict portable verified rows: 9 / 44
-- In-progress rows: 35
+- Average estimated completion: 54.8%
+- Portable package average: 44.5%
+- Closed package rows: 21 / 54
+- Strict portable verified rows: 11 / 44
+- In-progress rows: 33
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 5302 / 7671
-- Strict inventory full portable cases unmapped: 2369
-- Displayed-row strict portable test cases mapped: 4984 / 7268
-- Displayed-row strict portable test cases unmapped: 2284
+- Strict inventory full portable cases mapped: 5328 / 7671
+- Strict inventory full portable cases unmapped: 2343
+- Displayed-row strict portable test cases mapped: 5010 / 7268
+- Displayed-row strict portable test cases unmapped: 2258
 
 ## 100% Closed
 
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
+| `@ai-sdk/provider-utils` | 100% | Verified | provider support library |
 | `@ai-sdk/provider` | 100% | Verified | provider contracts |
+| `@ai-sdk/openai-compatible` | 100% | Verified | provider base package |
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/alibaba` | 100% | Verified | provider package |
 | `@ai-sdk/cohere` | 100% | Verified | provider package |
@@ -44,10 +46,8 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `ai` | 37% | In progress | root core SDK package | strict test inventory: 1467 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/provider-utils` | 98% | In progress | provider support library | strict test inventory: 8 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/gateway` | 73% | In progress | provider package | strict test inventory: 107 portable upstream cases still need named Rust tests; sample failing IDs:... |
+| `@ai-sdk/gateway` | 77% | In progress | provider package | strict test inventory: 90 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/openai` | 98% | In progress | provider package | strict test inventory: 6 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/openai-compatible` | 99% | In progress | provider base package | strict test inventory: 1 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/anthropic` | 97% | In progress | provider package | strict test inventory: 10 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/amazon-bedrock` | 99% | In progress | provider package | strict test inventory: 2 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/google` | 94% | In progress | provider package | strict test inventory: 30 portable upstream cases still need named Rust tests; sample failing IDs:... |

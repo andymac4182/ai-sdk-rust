@@ -9,6 +9,7 @@ use ai_sdk_provider::provider::ApiCallError;
 use ai_sdk_provider_utils::{FetchErrorInfo, HandledFetchError};
 
 pub const GATEWAY_AUTH_METHOD_HEADER: &str = "ai-gateway-auth-method";
+pub const VERCEL_AI_GATEWAY_TEAM_HEADER: &str = "x-vercel-ai-gateway-team";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum GatewayAuthMethod {
@@ -988,10 +989,11 @@ mod tests {
     use super::{
         GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
         GatewayInternalServerError, GatewayInvalidRequestError, GatewayModelNotFoundError,
-        GatewayRateLimitError, GatewayResponseError, GatewayTimeoutError, as_gateway_error,
-        create_gateway_error_from_api_call, create_gateway_error_from_response,
-        create_gateway_error_from_response_with_cause_message, extract_gateway_api_call_response,
-        gateway_headers_from_auth_method, parse_gateway_auth_method,
+        GatewayRateLimitError, GatewayResponseError, GatewayTimeoutError,
+        VERCEL_AI_GATEWAY_TEAM_HEADER, as_gateway_error, create_gateway_error_from_api_call,
+        create_gateway_error_from_response, create_gateway_error_from_response_with_cause_message,
+        extract_gateway_api_call_response, gateway_headers_from_auth_method,
+        parse_gateway_auth_method,
     };
     use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::provider::ApiCallError;
@@ -1861,6 +1863,11 @@ mod tests {
     #[test]
     fn gateway_auth_method_header_matches_upstream_name() {
         assert_eq!(GATEWAY_AUTH_METHOD_HEADER, "ai-gateway-auth-method");
+    }
+
+    #[test]
+    fn vercel_ai_gateway_team_header_matches_upstream_name() {
+        assert_eq!(VERCEL_AI_GATEWAY_TEAM_HEADER, "x-vercel-ai-gateway-team");
     }
 
     #[test]
