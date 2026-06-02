@@ -41,7 +41,7 @@ the strict inventory generator.
 | `packages/klingai` | `crates/ai-sdk-klingai` | 0 |
 | `packages/lmnt` | `crates/ai-sdk-lmnt` | 9 |
 | `packages/luma` | `crates/ai-sdk-luma` | 29 |
-| `packages/mistral` | `crates/ai-sdk-mistral` | 72 |
+| `packages/mistral` | `crates/ai-sdk-mistral` | 0 |
 | `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 17 |
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
@@ -300,3 +300,86 @@ the strict inventory generator.
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when task status is failed | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no task_id is returned | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no videos in response | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
+
+## Mistral Exact Case Map
+
+Row-level strict mapping for portable `packages/mistral` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-mistral/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`).
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/mistral/src/convert-mistral-usage.test.ts` | should return undefined values when usage is null | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0001_it_should_return_undefined_values_when_usage_is_null` | none |
+| `packages/mistral/src/convert-mistral-usage.test.ts` | should map basic usage without cached tokens | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0002_it_should_map_basic_usage_without_cached_tokens` | none |
+| `packages/mistral/src/convert-mistral-usage.test.ts` | should map cached tokens from num_cached_tokens | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0003_it_should_map_cached_tokens_from_num_cached_tokens` | none |
+| `packages/mistral/src/convert-mistral-usage.test.ts` | should map cached tokens from prompt_tokens_details.cached_tokens | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0004_it_should_map_cached_tokens_from_prompt_tokens_details` | none |
+| `packages/mistral/src/convert-mistral-usage.test.ts` | should map cached tokens from prompt_token_details.cached_tokens | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0005_it_should_map_cached_tokens_from_prompt_token_details` | none |
+| `packages/mistral/src/convert-mistral-usage.test.ts` | should prefer num_cached_tokens over prompt_tokens_details | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0006_it_should_prefer_num_cached_tokens_over_prompt_tokens_details` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should convert messages with image parts | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0007_it_should_convert_messages_with_image_parts` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should convert messages with image parts from Uint8Array | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0008_it_should_convert_messages_with_image_parts_from_uint8array` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should convert messages with PDF file parts using URL | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0009_it_should_convert_messages_with_pdf_file_parts_using_url` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should convert messages with PDF file parts from Uint8Array | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0010_it_should_convert_messages_with_pdf_file_parts_from_uint8array` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should convert messages with reasoning content | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0011_it_should_convert_messages_with_reasoning_content` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should stringify arguments to tool calls | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0012_it_should_stringify_arguments_to_tool_calls` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should handle text output format | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0013_it_should_handle_text_output_format` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should handle content output format | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0014_it_should_handle_content_output_format` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should handle error output format | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0015_it_should_handle_error_output_format` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | should add prefix true to trailing assistant messages | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0016_it_should_add_prefix_true_to_trailing_assistant_messages` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | passes full image/png through unchanged for inline data | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0017_it_passes_full_image_png_through_unchanged_for_inline_data` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | detects image subtype from inline bytes for top-level "image" | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0018_it_detects_image_subtype_from_inline_bytes_for_top_level_image` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | throws for top-level-only application with URL source | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0019_it_throws_for_top_level_only_application_with_url_source` | none |
+| `packages/mistral/src/convert-to-mistral-chat-messages.test.ts` | normalizes image/* wildcard via detection | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0020_it_normalizes_image_wildcard_via_detection` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0021_it_should_extract_text_content` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0022_it_should_send_correct_request_body` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should extract tool call content | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0023_it_should_extract_tool_call_content` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should extract reasoning content | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0024_it_should_extract_reasoning_content` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should pass tools and toolChoice | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0025_it_should_pass_tools_and_tool_choice` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should forward stopSequences as the Mistral stop parameter and not warn | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0026_it_should_forward_stop_sequences_as_the_mistral_stop_parameter` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should pass headers | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0027_it_should_pass_headers` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should expose the raw response headers | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0028_it_should_expose_the_raw_response_headers` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should extract usage | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0029_it_should_extract_usage` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send additional response information | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0030_it_should_send_additional_response_information` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send request body | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0031_it_should_send_request_body` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should inject JSON instruction for JSON response format | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0032_it_should_inject_json_instruction_for_json_response_format` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should inject JSON instruction for JSON response format with schema | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0033_it_should_inject_json_instruction_for_json_response_format_with_schema` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should pass parallelToolCalls option | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0034_it_should_pass_parallel_tool_calls_option` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should avoid duplication when trailing assistant message | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0035_it_should_avoid_duplication_when_trailing_assistant_message` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should preserve ordering of mixed thinking and text | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0036_it_should_preserve_ordering_of_mixed_thinking_and_text` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should handle empty thinking content | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0037_it_should_handle_empty_thinking_content` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should extract content when message content is a content object | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0038_it_should_extract_content_when_message_content_is_a_content_object` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should return raw text with think tags | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0039_it_should_return_raw_text_with_think_tags` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should warn about unsupported reasoning for non-supporting models | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0040_it_should_warn_about_unsupported_reasoning_for_non_supporting_models` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should emit compatibility warning for reasoning medium on supporting model | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0041_it_should_emit_compatibility_warning_for_reasoning_medium_on_supporting_model` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should not warn for reasoning high on supporting model | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0042_it_should_not_warn_for_reasoning_high_on_supporting_model` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send reasoning_effort high for reasoning high | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0043_it_should_send_reasoning_effort_high_for_reasoning_high` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send reasoning_effort high for reasoning medium | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0044_it_should_send_reasoning_effort_high_for_reasoning_medium` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send reasoning_effort high for reasoning minimal | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0045_it_should_send_reasoning_effort_high_for_reasoning_minimal` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send reasoning_effort none for reasoning none | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0046_it_should_send_reasoning_effort_none_for_reasoning_none` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should allow provider option to override reasoning | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0047_it_should_allow_provider_option_to_override_reasoning` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should not send reasoning_effort for non-supporting models | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0048_it_should_not_send_reasoning_effort_for_non_supporting_models` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should stream text | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0049_it_should_stream_text` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should stream tool call | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0050_it_should_stream_tool_call` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should stream reasoning | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0051_it_should_stream_reasoning` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should pass the messages | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0052_it_should_pass_the_messages` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should pass headers | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0053_it_should_pass_headers_stream` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should expose the raw response headers | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0054_it_should_expose_the_raw_response_headers_stream` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should send request body | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0055_it_should_send_request_body_stream` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should avoid duplication when trailing assistant message | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0056_it_should_avoid_duplication_when_trailing_assistant_message_stream` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should stream text with content objects | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0057_it_should_stream_text_with_content_objects` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should handle interleaved thinking and text | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0058_it_should_handle_interleaved_thinking_and_text` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should stream raw chunks | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0059_it_should_stream_raw_chunks` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should handle new LanguageModelV4ToolResultOutput format | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0060_it_should_handle_new_language_model_v4_tool_result_output_format` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should handle reference_ids as numbers | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0061_it_should_handle_reference_ids_as_numbers` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should handle reference_ids as strings | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0062_it_should_handle_reference_ids_as_strings` | none |
+| `packages/mistral/src/mistral-chat-language-model.test.ts` | should handle mixed reference_ids | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0063_it_should_handle_mixed_reference_ids` | none |
+| `packages/mistral/src/mistral-embedding-model.test.ts` | should extract embedding | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0064_it_should_extract_embedding` | none |
+| `packages/mistral/src/mistral-embedding-model.test.ts` | should extract usage | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0065_it_should_extract_usage_embedding` | none |
+| `packages/mistral/src/mistral-embedding-model.test.ts` | should expose the raw response | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0066_it_should_expose_the_raw_response` | none |
+| `packages/mistral/src/mistral-embedding-model.test.ts` | should pass the model and the values | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0067_it_should_pass_the_model_and_the_values` | none |
+| `packages/mistral/src/mistral-embedding-model.test.ts` | should pass headers | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0068_it_should_pass_headers_embedding` | none |
+| `packages/mistral/src/mistral-prepare-tools.test.ts` | should pass through strict mode when strict is true | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0069_it_should_pass_through_strict_mode_when_strict_is_true` | none |
+| `packages/mistral/src/mistral-prepare-tools.test.ts` | should pass through strict mode when strict is false | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0070_it_should_pass_through_strict_mode_when_strict_is_false` | none |
+| `packages/mistral/src/mistral-prepare-tools.test.ts` | should not include strict mode when strict is undefined | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0071_it_should_not_include_strict_mode_when_strict_is_undefined` | none |
+| `packages/mistral/src/mistral-prepare-tools.test.ts` | should pass through strict mode for multiple tools with different strict settings | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0072_it_should_pass_through_strict_mode_for_multiple_tools_with_different_strict_settings` | none |
