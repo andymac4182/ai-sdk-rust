@@ -4935,6 +4935,186 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn text_search_jbc43_grep_bre_include_and_real_world_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/bre-count.txt".to_string(),
+                    "ab\naab\naaab\naaaab\n".to_string(),
+                ),
+                (
+                    "/bre-zero.txt".to_string(),
+                    "bc\nabc\nac\n".to_string(),
+                ),
+                (
+                    "/bre-word.txt".to_string(),
+                    "foo bar\nbarfoo\nfoobar\nfoo\n".to_string(),
+                ),
+                (
+                    "/bre-literal.txt".to_string(),
+                    "a^b\nacb\nabc\n".to_string(),
+                ),
+                ("/group-b.txt".to_string(), "b\nab\nba\n".to_string()),
+                ("/group-a.txt".to_string(), "a\nab\nba\n".to_string()),
+                ("/stars.txt".to_string(), "*\nabc\n*abc\n".to_string()),
+                (
+                    "/alpha-interval.txt".to_string(),
+                    "ab\naab\naaab\n".to_string(),
+                ),
+                (
+                    "/alt.txt".to_string(),
+                    "cat\ndog\nbird\n".to_string(),
+                ),
+                (
+                    "/colors.txt".to_string(),
+                    "red\ngreen\nblue\nyellow\n".to_string(),
+                ),
+                (
+                    "/secrets.txt".to_string(),
+                    "PASSWORD\npassword\nsecret\n".to_string(),
+                ),
+                (
+                    "/dir/a.ts".to_string(),
+                    "test\nmatch\n".to_string(),
+                ),
+                ("/dir/b.js".to_string(), "test\n".to_string()),
+                ("/dir/c.py".to_string(), "test\n".to_string()),
+                ("/dir/sub/b.ts".to_string(), "match\n".to_string()),
+                ("/dir/sub/c.js".to_string(), "match\n".to_string()),
+                ("/include/a.ts".to_string(), "test\n".to_string()),
+                ("/include/b.js".to_string(), "test\n".to_string()),
+                ("/include/c.ts".to_string(), "test\n".to_string()),
+                (
+                    "/code.js".to_string(),
+                    "function hello() {\n  return \"hello\";\n}\nfunction world() {\n  return \"world\";\n}\n".to_string(),
+                ),
+                (
+                    "/app.log".to_string(),
+                    "[INFO] Starting app\n[ERROR] Connection failed\n[INFO] Retrying\n[ERROR] Timeout\n[INFO] Success\n".to_string(),
+                ),
+                (
+                    "/src/a.js".to_string(),
+                    "// TODO: fix this\ncode here\n".to_string(),
+                ),
+                (
+                    "/src/b.js".to_string(),
+                    "// Regular comment\n// TODO: implement\n".to_string(),
+                ),
+                (
+                    "/config.json".to_string(),
+                    "{\n  \"port\": 3000,\n  \"host\": \"localhost\",\n  \"debug\": true\n}\n".to_string(),
+                ),
+                (
+                    "/index.ts".to_string(),
+                    "import { foo } from './foo';\nimport { bar } from './bar';\nconst x = 1;\n".to_string(),
+                ),
+                (
+                    "/hosts.txt".to_string(),
+                    "localhost 127.0.0.1\nserver 192.168.1.100\ngateway 10.0.0.1\n"
+                        .to_string(),
+                ),
+                (
+                    "/code.ts".to_string(),
+                    "class User {\n  name: string;\n}\nclass Admin extends User {\n}\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec(r#"grep '^a\{2\}b$' /bre-count.txt"#).stdout,
+            "aab\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep '^a\{2,\}b$' /bre-count.txt"#).stdout,
+            "aab\naaab\naaaab\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep '^a\{2,3\}b$' /bre-count.txt"#).stdout,
+            "aab\naaab\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep 'a\{0,0\}bc' /bre-zero.txt"#).stdout,
+            "bc\nabc\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "[[:<:]]foo" /bre-word.txt"#).stdout,
+            "foo bar\nfoobar\nfoo\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "foo[[:>:]]" /bre-word.txt"#).stdout,
+            "foo bar\nbarfoo\nfoo\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "[[:<:]]foo[[:>:]]" /bre-word.txt"#)
+                .stdout,
+            "foo bar\nfoo\n"
+        );
+        assert_eq!(env.exec("grep 'a^b' /bre-literal.txt").stdout, "a^b\n");
+        assert_eq!(env.exec(r#"grep 'a*\(^b$\)c*' /group-b.txt"#).stdout, "b\n");
+        assert_eq!(env.exec(r#"grep '\(^a$\)' /group-a.txt"#).stdout, "a\n");
+        assert_eq!(env.exec("grep '^*' /stars.txt").stdout, "*\n*abc\n");
+        assert_eq!(
+            env.exec(r#"grep '[[:alpha:]]\{2\}b' /alpha-interval.txt"#)
+                .stdout,
+            "aab\naaab\n"
+        );
+
+        assert_eq!(env.exec(r#"grep "cat\|dog" /alt.txt"#).stdout, "cat\ndog\n");
+        assert_eq!(
+            env.exec(r#"grep "red\|green\|blue" /colors.txt"#).stdout,
+            "red\ngreen\nblue\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -i "PASSWORD\|secret" /secrets.txt"#)
+                .stdout,
+            "PASSWORD\npassword\nsecret\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -r --include="*.ts" test /include"#).stdout,
+            "/include/a.ts:test\n/include/c.ts:test\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -r --include="*.ts" test /dir"#).stdout,
+            "/dir/a.ts:test\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -r --include="*.ts" match /dir"#).stdout,
+            "/dir/a.ts:match\n/dir/sub/b.ts:match\n"
+        );
+
+        assert_eq!(
+            env.exec("grep \"function\" /code.js").stdout,
+            "function hello() {\nfunction world() {\n"
+        );
+        assert_eq!(
+            env.exec("grep ERROR /app.log").stdout,
+            "[ERROR] Connection failed\n[ERROR] Timeout\n"
+        );
+        assert_eq!(
+            env.exec("grep -r TODO /src").stdout,
+            "/src/a.js:// TODO: fix this\n/src/b.js:// TODO: implement\n"
+        );
+        assert_eq!(
+            env.exec("grep \"port\" /config.json").stdout,
+            "  \"port\": 3000,\n"
+        );
+        assert_eq!(
+            env.exec("grep \"^import\" /index.ts").stdout,
+            "import { foo } from './foo';\nimport { bar } from './bar';\n"
+        );
+        assert_eq!(
+            env.exec(r#"grep -E "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" /hosts.txt"#)
+                .stdout,
+            "localhost 127.0.0.1\nserver 192.168.1.100\ngateway 10.0.0.1\n"
+        );
+        assert_eq!(
+            env.exec("grep \"^class\" /code.ts").stdout,
+            "class User {\nclass Admin extends User {\n"
+        );
+    }
+
+    #[test]
     fn text_search_jbc34_rg_patterns_gitignore_and_edge_rows() {
         assert_home_exec(
             &[("file.txt", "hello world\nhelloworld\n")],

@@ -3441,6 +3441,27 @@ const jbc41CaseGroups = [
   },
 ];
 
+const jbc43CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.basic.test.ts',
+    lines: [574, 583, 591, 599, 610, 618, 626, 654, 670, 678, 696, 714],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::grep',
+    rustTest: 'text_search_jbc43_grep_bre_include_and_real_world_rows',
+    notes:
+      'JBC-43 verifies portable plain-grep BRE intervals, BRE grouping anchors, literal mid-pattern caret/star rules, POSIX word-boundary classes, and POSIX class intervals over virtual files.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.advanced.test.ts',
+    lines: [306, 319, 333, 390, 399, 408, 420, 431, 444, 455, 466, 479, 494],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::grep',
+    rustTest: 'text_search_jbc43_grep_bre_include_and_real_world_rows',
+    notes:
+      'JBC-43 verifies portable grep --include recursive filtering, BRE alternation, and real-world virtual file search rows without host grep fallback.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -3500,6 +3521,7 @@ function caseOverrideFor(testCase) {
     ...jbc42CaseGroups,
     ...jbc38CaseGroups,
     ...jbc41CaseGroups,
+    ...jbc43CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,

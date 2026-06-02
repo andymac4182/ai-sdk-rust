@@ -1271,9 +1271,9 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "printenv" => command_printenv(state, &tokens[1..]),
         "cd" => command_cd(state, tokens.get(1).map(String::as_str)),
         "cat" => command_cat(state, &tokens[1..], &stdin),
-        "grep" => command_grep(state, &tokens[1..], &stdin, GrepMode::Regex),
+        "grep" => command_grep(state, &tokens[1..], &stdin, GrepMode::BasicRegex),
         "fgrep" => command_grep(state, &tokens[1..], &stdin, GrepMode::Fixed),
-        "egrep" => command_grep(state, &tokens[1..], &stdin, GrepMode::Regex),
+        "egrep" => command_grep(state, &tokens[1..], &stdin, GrepMode::ExtendedRegex),
         "rg" => command_rg(state, &tokens[1..], &stdin),
         "sed" => command_sed(state, &tokens[1..], &stdin),
         "awk" => command_awk(state, &tokens[1..], &stdin),
@@ -1900,7 +1900,8 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GrepMode {
-    Regex,
+    BasicRegex,
+    ExtendedRegex,
     Fixed,
 }
 
@@ -1923,6 +1924,8 @@ fn command_grep(
     let mut before_context = 0usize;
     let mut after_context = 0usize;
     let mut max_count: Option<usize> = None;
+    let mut mode = mode;
+    let mut include_globs = Vec::new();
     let mut pattern = None;
     let mut paths = Vec::new();
     let mut index = 0;
@@ -1938,11 +1941,20 @@ fn command_grep(
             "-x" | "--line-regexp" => line_regexp = true,
             "-o" | "--only-matching" => only_matching = true,
             "-h" | "--no-filename" => no_filename = true,
-            "-E" | "--extended-regexp" => {}
+            "-E" | "--extended-regexp" => mode = GrepMode::ExtendedRegex,
+            "-F" | "--fixed-strings" => mode = GrepMode::Fixed,
             "-e" => {
                 pattern = args.get(index + 1).cloned();
                 index += 2;
                 break;
+            }
+            "--include" => {
+                if let Some(value) = args.get(index + 1) {
+                    include_globs.push(value.clone());
+                    index += 2;
+                    continue;
+                }
+                return stderr_result(2, "grep: option '--include' requires an argument\n");
             }
             "-A" | "-B" | "-C" | "-m" => {
                 let value = args
@@ -1964,6 +1976,9 @@ fn command_grep(
             }
             _ if arg.starts_with("--max-count=") => {
                 max_count = arg["--max-count=".len()..].parse().ok();
+            }
+            _ if arg.starts_with("--include=") => {
+                include_globs.push(arg["--include=".len()..].to_string());
             }
             "--max-count" => {
                 max_count = args.get(index + 1).and_then(|value| value.parse().ok());
@@ -1996,7 +2011,8 @@ fn command_grep(
                         'x' => line_regexp = true,
                         'o' => only_matching = true,
                         'h' => no_filename = true,
-                        'E' | 'F' => {}
+                        'E' => mode = GrepMode::ExtendedRegex,
+                        'F' => mode = GrepMode::Fixed,
                         'A' | 'B' | 'C' | 'm' => {
                             let tail = flags[flag_index + 1..].iter().collect::<String>();
                             let value = if tail.is_empty() {
@@ -2045,7 +2061,7 @@ fn command_grep(
             text: stdin.to_string(),
         }]
     } else {
-        match grep_inputs(state, &paths, recursive) {
+        match grep_inputs(state, &paths, recursive, &include_globs) {
             Ok(inputs) => inputs,
             Err(error) => return stderr_result(2, format!("grep: {error}\n")),
         }
@@ -2319,12 +2335,13 @@ impl LineMatcher {
                 line_regexp,
             });
         }
+        let pattern = normalize_grep_regex(pattern, mode);
         let pattern = if line_regexp {
             format!("^(?:{})$", pattern)
         } else if word_regexp {
             format!(r"\b(?:{})\b", pattern)
         } else {
-            pattern.to_string()
+            pattern
         };
         RegexBuilder::new(&pattern)
             .case_insensitive(ignore_case)
@@ -2359,6 +2376,120 @@ impl LineMatcher {
             } => fixed_line_matches(line, pattern, *ignore_case, *word_regexp, *line_regexp),
         }
     }
+}
+
+fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {
+    let pattern = pattern.replace("[[:<:]]", r"\b").replace("[[:>:]]", r"\b");
+    if mode == GrepMode::BasicRegex {
+        normalize_basic_grep_regex(&pattern)
+    } else {
+        pattern
+    }
+}
+
+fn normalize_basic_grep_regex(pattern: &str) -> String {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0;
+    let mut in_class = false;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' if index + 1 < chars.len() => match chars[index + 1] {
+                '(' => {
+                    output.push_str("(?:");
+                    index += 2;
+                }
+                ')' => {
+                    output.push(')');
+                    index += 2;
+                }
+                '|' | '+' | '?' => {
+                    output.push(chars[index + 1]);
+                    index += 2;
+                }
+                '{' => {
+                    if let Some((interval, next_index)) = basic_grep_interval(&chars, index + 2) {
+                        output.push_str(&interval);
+                        index = next_index;
+                    } else {
+                        output.push('\\');
+                        output.push('{');
+                        index += 2;
+                    }
+                }
+                other => {
+                    output.push('\\');
+                    output.push(other);
+                    index += 2;
+                }
+            },
+            '[' => {
+                in_class = true;
+                output.push('[');
+                index += 1;
+            }
+            ']' if in_class => {
+                in_class = false;
+                output.push(']');
+                index += 1;
+            }
+            '*' if !in_class && basic_grep_star_is_literal(&chars, index) => {
+                output.push_str(r"\*");
+                index += 1;
+            }
+            '^' if !in_class && !basic_grep_caret_is_anchor(&chars, index) => {
+                output.push_str(r"\^");
+                index += 1;
+            }
+            other => {
+                output.push(other);
+                index += 1;
+            }
+        }
+    }
+    output
+}
+
+fn basic_grep_interval(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+    let start = index;
+    while index + 1 < chars.len() {
+        if chars[index] == '\\' && chars[index + 1] == '}' {
+            let body = chars[start..index].iter().collect::<String>();
+            if basic_grep_interval_body_is_valid(&body) {
+                return Some((format!("{{{body}}}"), index + 2));
+            }
+            return None;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn basic_grep_interval_body_is_valid(body: &str) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    let parts = body.split(',').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [count] => !count.is_empty() && count.chars().all(|ch| ch.is_ascii_digit()),
+        [min, max] => {
+            !min.is_empty()
+                && min.chars().all(|ch| ch.is_ascii_digit())
+                && max.chars().all(|ch| ch.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn basic_grep_star_is_literal(chars: &[char], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    matches!(chars.get(index.wrapping_sub(1)), Some('^' | '|' | '('))
+}
+
+fn basic_grep_caret_is_anchor(chars: &[char], index: usize) -> bool {
+    index == 0 || (index >= 2 && chars[index - 2] == '\\' && matches!(chars[index - 1], '(' | '|'))
 }
 
 fn fixed_line_match(
@@ -2444,6 +2575,7 @@ fn grep_inputs(
     state: &ExecState<'_>,
     paths: &[String],
     recursive: bool,
+    include_globs: &[String],
 ) -> Result<Vec<NamedTextInput>, String> {
     let fs = state
         .session
@@ -2474,6 +2606,9 @@ fn grep_inputs(
                 if !child_stat.is_file {
                     continue;
                 }
+                if !grep_path_matches_includes(&state.cwd, &child_path, include_globs) {
+                    continue;
+                }
                 let text = fs
                     .read_file(&child_path)
                     .map_err(|_| format!("{child_path}: No such file or directory"))?;
@@ -2490,6 +2625,22 @@ fn grep_inputs(
         }
     }
     Ok(inputs)
+}
+
+fn grep_path_matches_includes(cwd: &str, path: &str, include_globs: &[String]) -> bool {
+    if include_globs.is_empty() {
+        return true;
+    }
+    let relative = relative_display_path(cwd, path);
+    let unrooted = path.trim_start_matches('/');
+    include_globs.iter().any(|glob| {
+        rg_glob_matches_path(glob, &relative)
+            || rg_glob_matches_path(glob, unrooted)
+            || path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| rg_glob_match(glob, name))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -5762,7 +5913,7 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     let mode = if request.options.fixed {
         GrepMode::Fixed
     } else {
-        GrepMode::Regex
+        GrepMode::ExtendedRegex
     };
     let matchers = match patterns
         .iter()
