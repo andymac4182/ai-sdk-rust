@@ -2507,6 +2507,228 @@ const jbc25CaseGroups = [
   },
 ];
 
+const jbc36OverlayE2eJsOnlyLines = [
+  42, 48, 54, 60, 67, 76, 86, 94, 108, 116, 126, 138, 148, 158, 166,
+  179, 187, 203, 213, 223, 233, 246, 265, 271, 276, 282, 287, 292, 298,
+  304, 310, 317, 324, 337, 343, 349, 356, 374, 381, 387, 396, 406, 421,
+  439, 461, 474, 485, 490, 498, 506, 519, 528, 537, 547, 552, 557, 563,
+  572, 595,
+];
+
+const jbc36OverlaySecurityJsOnlyLines = [
+  165, 640, 647, 653, 659, 666, 673, 679, 685, 692, 700, 708, 729, 803,
+  818, 829, 845, 855, 871, 883, 898, 905, 911, 917, 923, 969, 987, 1002,
+  1020, 1037, 1051, 1065, 1077, 1089, 1101, 1113, 1126, 1149, 1219, 1235,
+  1245, 1256, 1262, 1267, 1272, 1278, 1283, 1298, 1308, 1377, 1385, 1395,
+  1405, 1415, 1425, 1434, 1444, 1455, 1490, 1510, 1527, 1544,
+];
+
+const jbc36ReadWriteSecurityJsOnlyLines = [
+  462, 477, 491, 502, 517, 530, 541, 594, 638, 647, 666, 683, 699, 715,
+  733, 750, 767, 784, 804, 842, 873, 904, 917, 1015, 1046, 1058, 1073,
+  1085, 1114, 1136, 1329, 1350, 1430,
+];
+
+const jbc36MountableSecurityJsOnlyLines = [
+  175, 195, 215, 248, 266, 284, 297, 315, 336,
+];
+
+const jbc36InMemoryLazyJsOnlyLines = [
+  315, 324, 337, 347, 360, 370, 380, 390, 398, 414, 422, 433, 442, 452,
+];
+
+const jbc36CaseGroups = [
+  {
+    file: 'packages/just-bash/src/Bash.general.test.ts',
+    lines: [
+      14, 22, 28, 34, 48, 54, 71, 89, 96, 105, 113, 122, 130, 138, 146,
+      152, 160, 173, 179, 188, 229, 237, 246, 254, 264, 270, 277, 283,
+      302, 308, 314, 320, 327, 335, 346, 365, 371, 377, 385, 394, 406,
+      416, 426, 438, 447, 454, 463, 474, 480, 486, 498, 556, 563, 569,
+      575,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc36-core-runtime',
+    rustTest: 'jbc36_core_runtime_shell_session_rows_are_virtual_and_stateful',
+    notes:
+      'JBC-36 verifies these core Bash facade rows with the in-process virtual session: pipes, redirection, env/default expansion, export/unset scope, &&/||/; chaining, exit status, cd/cwd handling, empty input, and whitespace. Escaped-quote parser semantics stay pending for the parser/interpreter slice.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [257, 391, 516, 554, 611, 639],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc36-session-isolation',
+    rustTest: 'jbc36_exec_errexit_concurrent_env_cwd_and_file_rows_are_isolated',
+    notes:
+      'JBC-36 verifies concurrent virtual execs share the base session while preserving per-exec env/cwd isolation, file writes, sleep-delayed interleaving, and shell-option isolation without host shell fallback or JavaScript mock-clock injection.',
+  },
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [23, 29, 35, 43, 64, 89, 193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc36-encoding-pipeline',
+    rustTest: 'jbc36_utf8_redirection_and_text_stdin_rows_are_byte_safe',
+    notes:
+      'JBC-36 verifies text-to-byte wc counts, byte-producer file counts, UTF-8 redirection, cat redirect byte preservation, and text stdin byte counts through the virtual Rust pipeline. Tee, heredoc, function/subshell, byte-stdin-kind, and package encoding-helper rows remain pending or JS-only as exact rows say.',
+  },
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [213],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-encoding-helper-package-exports',
+    rustTest: 'js-only:upstream-typescript-encoding-helper-exports',
+    notes:
+      'JBC-36 classifies the upstream package-entry encoding helper export row as TypeScript package API surface. Portable byte/text pipeline behavior is mapped to Rust execution rows separately.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/shell.test.ts',
+    lines: [
+      11, 21, 32, 45, 56, 67, 77, 89, 98, 110, 122, 132, 144, 156, 163,
+      171, 180, 193, 199,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc36-shell-session',
+    rustTest: 'jbc36_core_runtime_shell_session_rows_are_virtual_and_stateful',
+    notes:
+      'JBC-36 maps the portable shell-session CLI rows to the Rust virtual session proof for cd/pwd, command chaining, export/unset scope, initial env availability, and exit status. The upstream interactive readline wrapper remains JS-only source tooling.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.test.ts',
+    lines: [233, 245, 257, 269],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::cli::jbc36-errexit',
+    rustTest: 'jbc36_cli_errexit_executes_runtime_stop_and_json_rows',
+    notes:
+      'JBC-36 verifies -e, --errexit, combined -ec, non-errexit continuation, and JSON stdout/stderr/exitCode shape through the Rust CLI planner plus in-memory execution backend.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.test.ts',
+    lines: [113, 124, 130, 146, 158, 170, 184, 194, 364],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-cli-host-overlay-root',
+    rustTest: 'js-only:upstream-host-backed-cli-overlay-root-and-allow-write',
+    notes:
+      'JBC-36 classifies these upstream CLI rows as host OverlayFS/root validation behavior for the TypeScript binary. The Rust CLI planner and execution tests keep CLI behavior virtual and host-agnostic.',
+  },
+  {
+    file: 'packages/just-bash/src/cli/just-bash.bundle.test.ts',
+    lines: [40, 46, 52, 62, 93],
+    status: 'portable-verified',
+    owner: 'crates/just-bash-napi::jbc36-cli-bundle',
+    rustTest: 'jbc36_napi_cli_bundle_virtual_execution_and_errexit_rows',
+    notes:
+      'JBC-36 verifies the NAPI package/bundle execution surface with virtual cwd/files, echo, pipes, redirection, JSON-shaped exec result fields, and errexit behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.piping.test.ts',
+    lines: [36, 60, 78, 96, 119, 143],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::jbc36-read-write-piping',
+    rustTest: 'jbc36_read_write_piping_large_virtual_data_rows',
+    notes:
+      'JBC-36 verifies the portable read/write piping behavior with virtual files: large and direct wc counts, small/medium sort-uniq pipelines, grep counting over large text, and byte-buffer persistence. Host ReadWriteFs adapter mechanics remain JS-only where exact rows require real roots or OS symlinks.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/mountable-fs/mountable-fs.test.ts',
+    lines: [48],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::jbc36-mountable',
+    rustTest: 'jbc36_mountable_construction_time_mount_rows_are_virtual',
+    notes:
+      'JBC-36 verifies construction-style virtual base plus mounted filesystem routing, mounted writes, directory listing, and invalid root mount rejection without host filesystem access.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.test.ts',
+    lines: [162, 166, 173, 180, 189, 193, 202, 240],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::path::jbc36-root-boundaries',
+    rustTest: 'jbc36_real_fs_utils_virtual_root_boundary_rows',
+    notes:
+      'JBC-36 verifies pure path/root-boundary containment rows in Rust, including exact root, children, non-existent virtual children, sibling-prefix attacks, filesystem root rejection, and Windows-style boundary checks.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.test.ts',
+    lines: [213, 229, 249, 258, 264, 277],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-real-fs-host-validation',
+    rustTest: 'js-only:upstream-realpath-host-directory-and-os-symlink-validation',
+    notes:
+      'JBC-36 classifies these rows as host realpath, host directory existence, and OS symlink validation behavior in the TypeScript filesystem adapter. Pure path containment rows are mapped to Rust tests separately.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/overlay-fs/overlay-fs.test.ts',
+    lines: [20, 29, 35, 92, 685, 711, 725, 742, 755],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-overlay-host-root-and-bashenv',
+    rustTest: 'js-only:upstream-host-backed-overlayfs-root-and-bashenv-adapter',
+    notes:
+      'JBC-36 classifies these OverlayFS constructor and BashEnv rows as TypeScript host-root adapter behavior. Portable overlay precedence and virtual command execution are covered by Rust filesystem/runtime proofs.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.test.ts',
+    lines: [19, 24, 33],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-read-write-host-root',
+    rustTest: 'js-only:upstream-host-backed-readwritefs-root-validation',
+    notes:
+      'JBC-36 classifies these ReadWriteFs constructor rows as host root directory validation for the TypeScript adapter; Rust execution remains virtual by default.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/overlay-fs/overlay-fs.e2e.test.ts',
+    lines: jbc36OverlayE2eJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-overlay-e2e-host-adapter',
+    rustTest: 'js-only:upstream-host-backed-overlayfs-e2e-real-file-fixtures',
+    notes:
+      'JBC-36 classifies the upstream OverlayFS E2E suite as host-backed real-file adapter coverage. The portable command, redirection, virtual file, and session behaviors exercised by those workflows are mapped to Rust command/runtime tests in their owned rows.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/overlay-fs/overlay-fs.security.test.ts',
+    lines: jbc36OverlaySecurityJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-overlay-os-symlink-security',
+    rustTest: 'js-only:upstream-host-backed-overlayfs-os-symlink-and-realpath-security',
+    notes:
+      'JBC-36 classifies these OverlayFS security rows as host realpath, OS symlink, permission, and path-leak probes for the TypeScript adapter. Rust virtual symlink and no-host-leak policy rows are verified separately.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.security.test.ts',
+    lines: jbc36ReadWriteSecurityJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-read-write-os-symlink-security',
+    rustTest: 'js-only:upstream-host-backed-readwritefs-os-symlink-and-realpath-security',
+    notes:
+      'JBC-36 classifies these ReadWriteFs security rows as host root, OS symlink, realpath, permission, and sanitized host-error probes. Rust virtual traversal and sanitized-error behavior stays mapped to virtual filesystem tests.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/mountable-fs/mountable-fs.security.test.ts',
+    lines: jbc36MountableSecurityJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-mountable-host-adapter-security',
+    rustTest: 'js-only:upstream-mounted-host-readwrite-overlayfs-security',
+    notes:
+      'JBC-36 classifies these mountable security rows as mounted host ReadWriteFs/OverlayFs adapter behavior involving real OS symlinks and real roots. Portable virtual mount routing is mapped to Rust MountableFileSystem tests.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/cross-fs-security.test.ts',
+    lines: [603, 631, 676, 690, 711, 1331, 1503, 1767],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-cross-fs-host-adapter-security',
+    rustTest: 'js-only:upstream-cross-fs-real-root-and-os-symlink-security',
+    notes:
+      'JBC-36 classifies these cross-FS rows as host real-root and OS symlink adapter security scenarios. Virtual mount boundaries and symlink policy are covered by Rust filesystem tests separately.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.test.ts',
+    lines: jbc36InMemoryLazyJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-in-memory-lazy-provider-callbacks',
+    rustTest: 'js-only:upstream-javascript-lazy-file-provider-callbacks',
+    notes:
+      'JBC-36 classifies lazy file provider rows as JavaScript callback/promise behavior in the TypeScript InMemoryFs adapter. Rust VirtualFileSystem uses eager virtual file content, with byte persistence mapped separately.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -2557,6 +2779,7 @@ function caseOverrideFor(testCase) {
     ...jbc23CaseGroups,
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
+    ...jbc36CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
   ].find(
@@ -3346,8 +3569,29 @@ function discoverRustTests() {
       }
     }
   }
+  for (const proofName of discoverNapiJsProofs()) {
+    names.add(proofName);
+  }
   for (const proofName of readRustRunnerProofs().proofNames) {
     names.add(proofName);
+  }
+  return names;
+}
+
+function discoverNapiJsProofs() {
+  const roots = [path.join(repositoryRoot, 'crates/just-bash-napi/test')].filter((entry) =>
+    fs.existsSync(entry)
+  );
+  const names = new Set();
+  for (const root of roots) {
+    for (const file of walk(root).filter((entry) => /\.(?:cjs|mjs|js)$/.test(entry))) {
+      const source = fs.readFileSync(file, 'utf8');
+      for (const match of source.matchAll(
+        /\b(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g
+      )) {
+        names.add(match[1]);
+      }
+    }
   }
   return names;
 }

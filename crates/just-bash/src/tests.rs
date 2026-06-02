@@ -1332,6 +1332,104 @@ fn upstream_mountable_fs_routes_mounts_cross_mount_ops_and_virtual_dirs() {
 }
 
 #[test]
+fn jbc36_read_write_piping_large_virtual_data_rows() {
+    let large = (1..=2_000)
+        .map(|line| format!("row-{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut files = BTreeMap::new();
+    files.insert("/home/user/large.txt".to_string(), large);
+    files.insert(
+        "/home/user/dupes.txt".to_string(),
+        "banana\napple\nbanana\ncarrot\napple\n".to_string(),
+    );
+    files.insert(
+        "/home/user/log.txt".to_string(),
+        "skip\nMATCH one\nskip\nMATCH two\n".to_string(),
+    );
+    let bash = Bash::with_options(BashOptions {
+        cwd: Some("/home/user".to_string()),
+        files,
+        ..BashOptions::default()
+    });
+
+    assert_eq!(bash.exec("cat large.txt | wc -l").stdout.trim(), "2000");
+    let direct_wc = bash.exec("wc -l large.txt");
+    assert_exec_success(&direct_wc);
+    assert_eq!(direct_wc.stdout, "2000 /home/user/large.txt\n");
+    assert_eq!(
+        bash.exec("cat dupes.txt | sort | uniq | wc -l")
+            .stdout
+            .trim(),
+        "3"
+    );
+    assert_eq!(bash.exec("grep MATCH log.txt | wc -l").stdout.trim(), "2");
+
+    let mut fs = VirtualFileSystem::new();
+    fs.write_file("/binary.bin", vec![0x00, 0x01, 0x00, 0xff, 0x00])
+        .unwrap();
+    assert_eq!(
+        fs.read_file_buffer("/binary.bin").unwrap(),
+        vec![0x00, 0x01, 0x00, 0xff, 0x00]
+    );
+    assert_eq!(fs.stat("/binary.bin").unwrap().size, 5);
+}
+
+#[test]
+fn jbc36_mountable_construction_time_mount_rows_are_virtual() {
+    let base = VirtualFileSystem::with_text_files([("/base.txt", "base")]);
+    let mut fs = MountableFileSystem::with_base(base);
+    fs.mount(
+        "/mnt/data",
+        VirtualFileSystem::with_text_files([("/input.txt", "mounted")]),
+    )
+    .unwrap();
+
+    assert_eq!(fs.read_file("/base.txt").unwrap(), "base");
+    assert_eq!(fs.read_file("/mnt/data/input.txt").unwrap(), "mounted");
+    fs.write_file("/mnt/data/output.txt", "written").unwrap();
+    assert_eq!(fs.read_file("/mnt/data/output.txt").unwrap(), "written");
+    assert_eq!(fs.readdir("/mnt").unwrap(), vec!["data"]);
+    assert_eq!(
+        fs.mount("/", VirtualFileSystem::new()).unwrap_err().kind(),
+        &JustBashErrorKind::InvalidInput
+    );
+}
+
+#[test]
+fn jbc36_real_fs_utils_virtual_root_boundary_rows() {
+    for (path, root, expected) in [
+        ("/workspace", "/workspace", true),
+        ("/workspace/file.txt", "/workspace", true),
+        ("/workspace/nested/child.txt", "/workspace", true),
+        ("/workspace-evil/file.txt", "/workspace", false),
+        ("/workspaces/file.txt", "/workspace", false),
+        ("/", "/workspace", false),
+        ("/tmp/datastore/file.txt", "/tmp/data", false),
+        ("D:\\project\\file.txt", "D:\\project", true),
+        ("D:\\projects\\file.txt", "D:\\project", false),
+    ] {
+        assert_eq!(
+            is_path_within_root(path, root),
+            expected,
+            "path {path:?} root {root:?}"
+        );
+    }
+    assert_eq!(
+        normalize_path("/workspace/../workspace/file.txt"),
+        "/workspace/file.txt"
+    );
+    validate_path("/workspace/file.txt", "validateRealPath").unwrap();
+    assert!(
+        validate_path("/workspace/bad\0path", "validateRealPath")
+            .unwrap_err()
+            .to_string()
+            .contains("validateRealPath")
+    );
+}
+
+#[test]
 fn jbc26_file_operation_comparison_rows_are_virtual_and_stateful() {
     let bash = jbc26_bash_with_files(&[]);
     let mkdir = bash.exec("mkdir newdir && mkdir -p a/b/c && mkdir -p a/b/c");
