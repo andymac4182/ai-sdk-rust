@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    JustBashExecOptions, JustBashExecResult, JustBashResult, JustBashSession,
-    JustBashSessionOptions, NetworkPolicy, NetworkResponse, path::resolve_path,
+    JustBashCustomCommand, JustBashExecOptions, JustBashExecResult, JustBashResult,
+    JustBashSession, JustBashSessionOptions, NetworkPolicy, NetworkResponse, path::resolve_path,
 };
 
 /// Construction options for the upstream-style [`Bash`] facade.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct BashOptions {
     /// Optional list of portable command names to register.
     pub commands: Option<Vec<String>>,
@@ -18,6 +18,8 @@ pub struct BashOptions {
     pub env: BTreeMap<String, String>,
     /// Base working directory.
     pub cwd: Option<String>,
+    /// Public Rust custom commands available before built-ins.
+    pub custom_commands: Vec<JustBashCustomCommand>,
     /// Optional network policy. When present, upstream-style `curl` is
     /// registered and backed by fake responses.
     pub network_policy: Option<NetworkPolicy>,
@@ -51,6 +53,7 @@ impl Bash {
             }
         });
         session_options.commands = options.commands;
+        session_options.custom_commands = options.custom_commands;
         session_options.create_default_layout = create_default_layout;
         session_options.network_policy = options.network_policy;
         session_options.network_responses = options.network_responses;
@@ -121,8 +124,9 @@ impl Default for Bash {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
-    use crate::UPSTREAM_DEFAULT_COMMAND_NAMES;
+    use crate::{JustBashCustomCommandResult, UPSTREAM_DEFAULT_COMMAND_NAMES};
 
     fn bash() -> Bash {
         Bash::new()
@@ -5556,6 +5560,311 @@ and exhibited clearly, with a label attached.\n";
             )
             .stdout
             .contains("not authorized")
+        );
+    }
+
+    #[test]
+    fn jbc31_readme_quick_start_and_configuration_examples_use_public_bash_api() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data/file.txt".to_string(),
+                "content\npattern\n".to_string(),
+            )]),
+            env: BTreeMap::from([("MY_VAR".to_string(), "value".to_string())]),
+            cwd: Some("/app".to_string()),
+            ..BashOptions::default()
+        });
+
+        let wrote = env.exec("echo \"Hello\" > greeting.txt");
+        assert_eq!(wrote.exit_code, 0);
+
+        let result = env.exec("cat greeting.txt");
+        assert_eq!(result.stdout, "Hello\n");
+        assert_eq!(result.exit_code, 0);
+
+        let configured = env.exec_with_options(
+            "pwd; echo $TEMP; cat",
+            JustBashExecOptions::new()
+                .with_cwd("/data")
+                .with_env("TEMP", "value")
+                .with_stdin("hello from stdin\n"),
+        );
+        assert_eq!(configured.stdout, "/data\nvalue\nhello from stdin\n");
+        assert_eq!(configured.exit_code, 0);
+
+        let clean = env.exec_with_options(
+            "env",
+            JustBashExecOptions::new()
+                .with_replace_env(true)
+                .with_env("ONLY", "this"),
+        );
+        assert!(clean.stdout.contains("ONLY=this"));
+        assert!(!clean.stdout.contains("MY_VAR=value"));
+
+        let grep = env.exec_with_options(
+            "grep",
+            JustBashExecOptions::new().with_args(["-r", "pattern", "/data"]),
+        );
+        assert_eq!(grep.stdout, "/data/file.txt:pattern\n");
+        assert_eq!(grep.exit_code, 0);
+
+        assert_eq!(env.read_file("/app/greeting.txt").unwrap(), "Hello\n");
+        assert!(env.file_exists("/data/file.txt"));
+    }
+
+    #[test]
+    fn jbc31_docs_supported_command_list_matches_public_registry() {
+        let default_names = UPSTREAM_DEFAULT_COMMAND_NAMES;
+
+        for command in [
+            "cat",
+            "cp",
+            "file",
+            "ln",
+            "ls",
+            "mkdir",
+            "mv",
+            "readlink",
+            "rm",
+            "rmdir",
+            "split",
+            "stat",
+            "touch",
+            "tree",
+            "awk",
+            "base64",
+            "column",
+            "comm",
+            "cut",
+            "diff",
+            "expand",
+            "fold",
+            "grep",
+            "egrep",
+            "fgrep",
+            "head",
+            "join",
+            "md5sum",
+            "nl",
+            "od",
+            "paste",
+            "printf",
+            "rev",
+            "rg",
+            "sed",
+            "sha1sum",
+            "sha256sum",
+            "sort",
+            "strings",
+            "tac",
+            "tail",
+            "tr",
+            "unexpand",
+            "uniq",
+            "wc",
+            "xargs",
+            "jq",
+            "sqlite3",
+            "xan",
+            "yq",
+            "basename",
+            "dirname",
+            "du",
+            "echo",
+            "env",
+            "find",
+            "hostname",
+            "printenv",
+            "pwd",
+            "tee",
+            "alias",
+            "bash",
+            "chmod",
+            "clear",
+            "date",
+            "expr",
+            "false",
+            "help",
+            "history",
+            "seq",
+            "sh",
+            "sleep",
+            "time",
+            "timeout",
+            "true",
+            "unalias",
+            "which",
+            "whoami",
+            "gzip",
+            "gunzip",
+            "zcat",
+            "tar",
+        ] {
+            assert!(
+                default_names.contains(&command),
+                "README-listed command {command} should exist in the tracked upstream registry data"
+            );
+        }
+
+        let public_registry = Bash::new().registered_command_names();
+        for implemented in [
+            "echo", "cat", "printf", "ls", "mkdir", "touch", "rm", "cp", "mv", "pwd", "grep", "rg",
+            "sed", "awk", "jq", "yq", "xan", "sqlite3", "bash", "sh", "which", "whoami",
+        ] {
+            assert!(
+                public_registry.iter().any(|name| name == implemented),
+                "implemented public command {implemented} should be registered"
+            );
+        }
+        assert!(default_names.len() > 40);
+        assert!(default_names.len() < 150);
+    }
+
+    #[test]
+    fn jbc31_custom_commands_match_public_api_usage_rows() {
+        let load_count = Arc::new(Mutex::new(0));
+        let lazy_count = Arc::clone(&load_count);
+        let regular = JustBashCustomCommand::new("regular", |_| {
+            JustBashCustomCommandResult::stdout("regular\n")
+        });
+        let lazy = JustBashCustomCommand::lazy("lazy", move || {
+            *lazy_count.lock().expect("load count lock") += 1;
+            JustBashCustomCommand::new("lazy", |_| JustBashCustomCommandResult::stdout("lazy\n"))
+        });
+
+        assert_eq!(regular.name(), "regular");
+        assert!(!regular.is_lazy());
+        assert!(lazy.is_lazy());
+
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "file content".to_string())]),
+            env: BTreeMap::from([("MY_VAR".to_string(), "my_value".to_string())]),
+            cwd: Some("/home/user".to_string()),
+            custom_commands: vec![
+                JustBashCustomCommand::new("hello", |ctx| {
+                    let name = ctx.args.first().map(String::as_str).unwrap_or("world");
+                    JustBashCustomCommandResult::stdout(format!(
+                        "Hello, {name}! CWD: {}\n",
+                        ctx.cwd
+                    ))
+                }),
+                JustBashCustomCommand::new("wordcount", |ctx| {
+                    let words = ctx.stdin.split_whitespace().count();
+                    JustBashCustomCommandResult::stdout(format!("{words}\n"))
+                }),
+                JustBashCustomCommand::new("reader", |ctx| {
+                    match ctx.args.first().and_then(|path| ctx.read_file(path).ok()) {
+                        Some(content) => JustBashCustomCommandResult::stdout(content),
+                        None => JustBashCustomCommandResult::stderr(1, "reader: missing file\n"),
+                    }
+                }),
+                JustBashCustomCommand::new("showenv", |ctx| {
+                    let key = ctx.args.first().cloned().unwrap_or_default();
+                    let value = ctx.env.get(&key).cloned().unwrap_or_default();
+                    JustBashCustomCommandResult::stdout(format!("{key}={value}\n"))
+                }),
+                JustBashCustomCommand::new("echo", |ctx| {
+                    JustBashCustomCommandResult::stdout(format!("Custom: {}\n", ctx.args.join(" ")))
+                }),
+                JustBashCustomCommand::new("cmd1", |_| {
+                    JustBashCustomCommandResult::stdout("one\n")
+                }),
+                JustBashCustomCommand::new("cmd2", |_| {
+                    JustBashCustomCommandResult::stdout("two\n")
+                }),
+                JustBashCustomCommand::new("failing", |_| {
+                    JustBashCustomCommandResult::stderr(42, "error occurred\n")
+                }),
+                JustBashCustomCommand::new("upper", |ctx| {
+                    JustBashCustomCommandResult::stdout(ctx.stdin.to_uppercase())
+                }),
+                JustBashCustomCommand::new("wrapper", |ctx| {
+                    if ctx.args.is_empty() {
+                        return JustBashCustomCommandResult::stderr(1, "exec not available\n");
+                    }
+                    let result = ctx.exec(ctx.args.join(" "));
+                    JustBashCustomCommandResult::new(
+                        format!("[wrapped] {}", result.stdout),
+                        result.stderr,
+                        result.exit_code,
+                    )
+                }),
+                regular,
+                lazy.clone(),
+            ],
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("hello Alice").stdout,
+            "Hello, Alice! CWD: /home/user\n"
+        );
+        assert_eq!(env.exec("hello").stdout, "Hello, world! CWD: /home/user\n");
+        assert_eq!(env.exec("printf 'one two three' | wordcount").stdout, "3\n");
+        assert_eq!(env.exec("reader /test.txt").stdout, "file content");
+        assert_eq!(env.exec("showenv MY_VAR").stdout, "MY_VAR=my_value\n");
+        assert_eq!(env.exec("echo hello world").stdout, "Custom: hello world\n");
+        assert_eq!(env.exec("cmd1").stdout, "one\n");
+        assert_eq!(env.exec("cmd2").stdout, "two\n");
+
+        let failing = env.exec("failing");
+        assert_eq!(failing.stdout, "");
+        assert_eq!(failing.stderr, "error occurred\n");
+        assert_eq!(failing.exit_code, 42);
+
+        assert_eq!(
+            env.exec("printf 'hello world\\n' | upper | cat").stdout,
+            "HELLO WORLD\n"
+        );
+        assert_eq!(env.exec("wrapper printf hello").stdout, "[wrapped] hello");
+        assert_eq!(env.exec("regular").stdout, "regular\n");
+        assert_eq!(env.exec("lazy").stdout, "lazy\n");
+        assert_eq!(env.exec("lazy").stdout, "lazy\n");
+        assert_eq!(*load_count.lock().expect("load count lock"), 1);
+        assert!(
+            env.registered_command_names()
+                .contains(&"hello".to_string())
+        );
+    }
+
+    #[test]
+    fn jbc31_bash_agent_and_website_examples_use_virtual_workspace_commands() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/workspace/README.md".to_string(),
+                    "# Project\n".to_string(),
+                ),
+                (
+                    "/workspace/src/app.ts".to_string(),
+                    "export function run() {\n  // TODO: inspect\n}\n".to_string(),
+                ),
+                (
+                    "/workspace/src/lib.ts".to_string(),
+                    "export const value = 42;\n".to_string(),
+                ),
+            ]),
+            cwd: Some("/workspace".to_string()),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(env.exec("ls /workspace").stdout, "README.md\nsrc\n");
+        assert_eq!(env.exec("cat /workspace/README.md").stdout, "# Project\n");
+        assert_eq!(
+            env.exec("grep -r TODO /workspace").stdout,
+            "/workspace/src/app.ts:  // TODO: inspect\n"
+        );
+        assert_eq!(
+            env.exec("find /workspace -name \"*.ts\"").stdout,
+            "/workspace/src/app.ts\n/workspace/src/lib.ts\n"
+        );
+        assert_eq!(
+            env.exec("head -1 /workspace/src/app.ts").stdout,
+            "export function run() {\n"
+        );
+        assert_eq!(
+            env.exec("wc /workspace/src/lib.ts").stdout,
+            "1 5 25 /workspace/src/lib.ts\n"
         );
     }
 }

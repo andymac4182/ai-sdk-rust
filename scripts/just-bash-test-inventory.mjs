@@ -1517,6 +1517,112 @@ const jbc30AgentExampleCaseGroups = [
   },
 ];
 
+const jbc31BrowserWebsiteSourceFiles = [
+  'examples/website/app/api/fs/route.ts',
+  'examples/website/app/components/Terminal.tsx',
+  'examples/website/app/components/TerminalData.tsx',
+  'examples/website/app/components/lite-terminal/LiteTerminal.ts',
+  'examples/website/app/components/lite-terminal/ansi-parser.ts',
+  'examples/website/app/components/lite-terminal/index.ts',
+  'examples/website/app/components/lite-terminal/input-handler.ts',
+  'examples/website/app/components/lite-terminal/types.ts',
+  'examples/website/app/components/terminal-content.ts',
+  'examples/website/app/components/terminal-parts/agent-command.ts',
+  'examples/website/app/components/terminal-parts/commands.ts',
+  'examples/website/app/components/terminal-parts/constants.ts',
+  'examples/website/app/components/terminal-parts/index.ts',
+  'examples/website/app/components/terminal-parts/input-handler.ts',
+  'examples/website/app/components/terminal-parts/markdown.ts',
+  'examples/website/app/components/terminal-parts/welcome.ts',
+  'examples/website/app/layout.tsx',
+  'examples/website/app/md/[[...path]]/route.ts',
+  'examples/website/app/opengraph-image.tsx',
+  'examples/website/app/page.tsx',
+  'examples/website/next.config.ts',
+];
+
+const jbc31ExecutorJsExampleSourceFiles = [
+  'examples/executor-tools/inline-tools.ts',
+  'examples/executor-tools/main.ts',
+  'examples/executor-tools/multi-api-agent.ts',
+  'examples/executor-tools/multi-turn-discovery.ts',
+];
+
+const jbc31SourceGroups = [
+  {
+    files: ['examples/cjs-consumer/index.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash-napi::public-examples',
+    notes:
+      'JBC-31 verifies the CJS consumer shape through the NAPI smoke harness plus Rust README-style Bash constructor and exec tests.',
+  },
+  {
+    files: ['examples/custom-command/commands.ts', 'examples/custom-command/main.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::custom-commands',
+    notes:
+      'JBC-31 maps the local custom-command public API behavior to Rust custom commands with args, stdin, env, virtual file reads, built-in override, lazy loading, pipelines, and subcommand exec. The live AI summarize branch remains an external-provider example and is not counted as Rust behavior.',
+  },
+  {
+    files: ['examples/bash-agent/agent.ts', 'examples/website/app/api/agent/route.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::examples::virtual-workspace',
+    notes:
+      'JBC-31 verifies the public Just Bash sandbox usage from these examples with deterministic virtual workspace commands (`ls`, `cat`, `grep -r`, `find`, `head`, and `wc`). AI streaming, bash-tool wiring, and Next.js response mechanics remain JavaScript host integration outside the Rust runtime row.',
+  },
+  {
+    files: ['examples/bash-agent/main.ts', 'examples/bash-agent/shell.ts'],
+    status: 'js-only-documented',
+    owner: 'examples/bash-agent::interactive-cli',
+    notes:
+      'JBC-31 classifies the interactive readline shell, terminal coloring, process argv handling, and live AI agent loop as JavaScript CLI example code rather than portable Rust Just Bash behavior.',
+  },
+  {
+    files: jbc31ExecutorJsExampleSourceFiles,
+    status: 'js-only-documented',
+    owner: 'examples/executor-tools::js-exec-live-tools',
+    notes:
+      'JBC-31 classifies these executor examples as JavaScript/QuickJS `js-exec`, SDK discovery, browser fetch, and live public API demonstrations. The Rust backend has a separate deterministic executor-tool seam; these source rows are not portable Rust runtime behavior.',
+  },
+  {
+    files: jbc31BrowserWebsiteSourceFiles,
+    status: 'js-only-documented',
+    owner: 'examples/website::browser-ui',
+    notes:
+      'JBC-31 classifies the website UI, static data routes, markdown/image routes, terminal rendering, and Next.js config as browser/server presentation code. Public Just Bash sandbox behavior is mapped separately through the website agent route source row.',
+  },
+];
+
+const jbc31CaseGroups = [
+  {
+    file: 'packages/just-bash/src/custom-commands.test.ts',
+    lines: [15, 26, 43, 54, 64, 104, 118, 132, 148, 165, 179, 202, 223, 238, 252, 272],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::custom-commands',
+    rustTest: 'jbc31_custom_commands_match_public_api_usage_rows',
+    notes:
+      'JBC-31 verifies the portable custom-command API surface with Rust eager and lazy command handlers, args/context data, stdin, virtual file reads, environment access, built-in override, multiple commands, non-zero status, pipelines, subcommand exec, and mixed eager/lazy registration. TypeScript structural helper rows map to the Rust `name()` and `is_lazy()` public methods rather than TS object-shape checks.',
+  },
+  {
+    file: 'packages/just-bash/src/readme.test.ts',
+    lines: [317, 370, 383],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::docs::command-registry',
+    rustTest: 'jbc31_docs_supported_command_list_matches_public_registry',
+    notes:
+      'JBC-31 verifies the README command-list rows against the tracked upstream registry data and the Rust public command registry without claiming unsupported command implementations.',
+  },
+  {
+    file: 'packages/just-bash/src/readme.test.ts',
+    lines: [432, 438, 444, 450, 472, 478],
+    status: 'js-only-documented',
+    owner: 'packages/just-bash::documentation-harness',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-31 classifies these rows as documentation-harness checks for markdown block presence, TypeScript compilation, and package docs example execution. Portable README/API behavior is mapped separately to named Rust tests; this JS docs harness itself is not Rust runtime behavior.',
+  },
+];
+
 const jbc17ExecutorJsOnlySourceFiles = [
   'packages/just-bash-executor/src/create-executor.ts',
   'packages/just-bash-executor/src/executor-discovery-plugin.ts',
@@ -2421,6 +2527,7 @@ function sourceOverrideFor(relativePath) {
     ...jb06SourceGroups,
     ...jbc12SourceGroups,
     ...jbc13SourceGroups,
+    ...jbc31SourceGroups,
     ...jbc17SourceGroups,
     ...jbc18SourceGroups,
     ...jbc19SourceGroups,
@@ -2443,6 +2550,7 @@ function caseOverrideFor(testCase) {
     ...jbc16CaseGroups,
     ...jbc17CaseGroups,
     ...jbc18CaseGroups,
+    ...jbc31CaseGroups,
     ...jbc19CaseGroups,
     ...jbc20CaseGroups,
     ...jbc22CaseGroups,

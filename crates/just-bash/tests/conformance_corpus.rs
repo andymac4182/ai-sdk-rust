@@ -288,6 +288,7 @@ fn run_case(case: &CorpusCase) -> Result<CaseOutcome, String> {
         commands: case.commands.clone(),
         network_policy: None,
         network_responses: BTreeMap::new(),
+        ..BashOptions::default()
     });
     let result = bash.exec_with_options(command, exec_options(&case.options));
 

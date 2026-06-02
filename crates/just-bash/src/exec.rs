@@ -206,6 +206,190 @@ impl JustBashExecResult {
     }
 }
 
+/// Result returned by a Rust custom command.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct JustBashCustomCommandResult {
+    /// Captured standard output.
+    pub stdout: String,
+    /// Captured standard error.
+    pub stderr: String,
+    /// Process-like exit code.
+    pub exit_code: i32,
+}
+
+impl JustBashCustomCommandResult {
+    /// Creates a custom-command result.
+    pub fn new(stdout: impl Into<String>, stderr: impl Into<String>, exit_code: i32) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+        }
+    }
+
+    /// Creates a successful stdout-only result.
+    pub fn stdout(stdout: impl Into<String>) -> Self {
+        Self::new(stdout, "", 0)
+    }
+
+    /// Creates a failing stderr-only result.
+    pub fn stderr(exit_code: i32, stderr: impl Into<String>) -> Self {
+        Self::new("", stderr, exit_code)
+    }
+}
+
+impl From<JustBashExecResult> for JustBashCustomCommandResult {
+    fn from(result: JustBashExecResult) -> Self {
+        Self {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exit_code: result.exit_code,
+        }
+    }
+}
+
+/// Context passed to a Rust custom command handler.
+#[derive(Clone, Debug)]
+pub struct JustBashCustomCommandContext {
+    /// Arguments after the command name.
+    pub args: Vec<String>,
+    /// Effective working directory for the current exec.
+    pub cwd: String,
+    /// Effective environment for the current exec.
+    pub env: BTreeMap<String, String>,
+    /// Standard input received from a pipeline or per-exec stdin.
+    pub stdin: String,
+    session: JustBashSession,
+}
+
+impl JustBashCustomCommandContext {
+    /// Reads a UTF-8 virtual file relative to the current command cwd.
+    pub fn read_file(&self, path: &str) -> JustBashResult<String> {
+        self.session.read_file(&resolve_path(&self.cwd, path))
+    }
+
+    /// Writes a UTF-8 virtual file relative to the current command cwd.
+    pub fn write_file(&self, path: &str, content: &str) -> JustBashResult<()> {
+        self.session
+            .write_file(&resolve_path(&self.cwd, path), content)
+    }
+
+    /// Executes a subcommand in the same virtual session.
+    pub fn exec(&self, script: impl AsRef<str>) -> JustBashExecResult {
+        self.exec_with_options(script, JustBashExecOptions::new())
+    }
+
+    /// Executes a subcommand with explicit per-exec overrides.
+    pub fn exec_with_options(
+        &self,
+        script: impl AsRef<str>,
+        mut options: JustBashExecOptions,
+    ) -> JustBashExecResult {
+        let mut env = self.env.clone();
+        env.extend(options.env);
+        options.env = env;
+        if options.cwd.is_none() {
+            options.cwd = Some(self.cwd.clone());
+        }
+        self.session.exec(script, options)
+    }
+}
+
+enum JustBashCustomCommandKind {
+    Eager(Arc<dyn Fn(JustBashCustomCommandContext) -> JustBashCustomCommandResult + Send + Sync>),
+    Lazy {
+        loader: Arc<dyn Fn() -> JustBashCustomCommand + Send + Sync>,
+        cached: Arc<Mutex<Option<JustBashCustomCommand>>>,
+    },
+}
+
+impl fmt::Debug for JustBashCustomCommandKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Eager(_) => formatter.write_str("Eager(..)"),
+            Self::Lazy { cached, .. } => formatter
+                .debug_struct("Lazy")
+                .field(
+                    "loaded",
+                    &cached.lock().is_ok_and(|cached| cached.is_some()),
+                )
+                .finish(),
+        }
+    }
+}
+
+/// Public Rust custom command registered on a [`JustBashSession`].
+#[derive(Clone, Debug)]
+pub struct JustBashCustomCommand {
+    name: String,
+    kind: Arc<JustBashCustomCommandKind>,
+}
+
+impl JustBashCustomCommand {
+    /// Creates an eager custom command from a synchronous Rust handler.
+    pub fn new(
+        name: impl Into<String>,
+        handler: impl Fn(JustBashCustomCommandContext) -> JustBashCustomCommandResult
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: Arc::new(JustBashCustomCommandKind::Eager(Arc::new(handler))),
+        }
+    }
+
+    /// Creates a lazy custom command that loads once on first execution.
+    pub fn lazy(
+        name: impl Into<String>,
+        loader: impl Fn() -> JustBashCustomCommand + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: Arc::new(JustBashCustomCommandKind::Lazy {
+                loader: Arc::new(loader),
+                cached: Arc::new(Mutex::new(None)),
+            }),
+        }
+    }
+
+    /// Returns the command name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns true for lazy custom commands.
+    pub fn is_lazy(&self) -> bool {
+        matches!(&*self.kind, JustBashCustomCommandKind::Lazy { .. })
+    }
+
+    fn execute(&self, context: JustBashCustomCommandContext) -> JustBashCustomCommandResult {
+        match &*self.kind {
+            JustBashCustomCommandKind::Eager(handler) => handler(context),
+            JustBashCustomCommandKind::Lazy { loader, cached } => {
+                let loaded = match cached.lock() {
+                    Ok(mut cached) => {
+                        if cached.is_none() {
+                            *cached = Some(loader());
+                        }
+                        cached.clone()
+                    }
+                    Err(_) => {
+                        return JustBashCustomCommandResult::stderr(
+                            1,
+                            format!("{}: lazy command cache poisoned\n", self.name),
+                        );
+                    }
+                };
+                loaded
+                    .expect("lazy custom command should be loaded")
+                    .execute(context)
+            }
+        }
+    }
+}
+
 /// Inline executor tool.
 pub struct JustBashExecutorTool {
     description: Option<String>,
@@ -326,6 +510,8 @@ pub struct JustBashSessionOptions {
     pub executor: Option<JustBashExecutor>,
     /// Optional portable command allow-list.
     pub commands: Option<Vec<String>>,
+    /// Public Rust custom commands available before built-ins.
+    pub custom_commands: Vec<JustBashCustomCommand>,
     /// Whether to create the upstream default `/home/user` layout.
     pub create_default_layout: bool,
     /// Optional network policy. When present, `curl` is registered and routed
@@ -346,6 +532,7 @@ impl Default for JustBashSessionOptions {
             max_command_count: None,
             executor: None,
             commands: None,
+            custom_commands: Vec::new(),
             create_default_layout: true,
             network_policy: None,
             network_responses: BTreeMap::new(),
@@ -411,6 +598,21 @@ impl JustBashSessionOptions {
         self
     }
 
+    /// Adds one Rust custom command.
+    pub fn with_custom_command(mut self, command: JustBashCustomCommand) -> Self {
+        self.custom_commands.push(command);
+        self
+    }
+
+    /// Adds many Rust custom commands.
+    pub fn with_custom_commands<I>(mut self, commands: I) -> Self
+    where
+        I: IntoIterator<Item = JustBashCustomCommand>,
+    {
+        self.custom_commands.extend(commands);
+        self
+    }
+
     /// Controls whether the upstream default `/home/user` layout is created.
     pub fn with_create_default_layout(mut self, create: bool) -> Self {
         self.create_default_layout = create;
@@ -448,6 +650,7 @@ struct JustBashSessionInner {
     max_command_count: usize,
     executor: Option<JustBashExecutor>,
     commands: CommandRegistry,
+    custom_commands: BTreeMap<String, JustBashCustomCommand>,
     network_policy: Option<NetworkPolicy>,
     network_responses: BTreeMap<String, NetworkResponse>,
 }
@@ -519,6 +722,11 @@ impl JustBashSession {
                 max_command_count: options.max_command_count.unwrap_or(10_000),
                 executor: options.executor,
                 commands,
+                custom_commands: options
+                    .custom_commands
+                    .into_iter()
+                    .map(|command| (command.name().to_string(), command))
+                    .collect(),
                 network_policy: options.network_policy,
                 network_responses: options.network_responses,
             }),
@@ -625,7 +833,11 @@ impl JustBashSession {
 
     /// Returns sorted registered portable command names.
     pub fn registered_command_names(&self) -> Vec<String> {
-        self.inner.commands.names()
+        let mut names = self.inner.commands.names();
+        names.extend(self.inner.custom_commands.keys().cloned());
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Returns the session's persistent starting working directory.
@@ -826,6 +1038,9 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         let old_stdin = std::mem::replace(&mut state.stdin, stdin);
         let result = execute_control_script(state, &body);
         state.stdin = old_stdin;
+        return result;
+    }
+    if let Some(result) = execute_custom_command(state, command, &tokens[1..], &stdin) {
         return result;
     }
     if let Some(result) = execute_executor_command(state, command, &tokens[1..], &stdin) {
@@ -11658,6 +11873,29 @@ fn command_bash(
     restore_positional_args(state, old_positionals);
     state.stdin = old_stdin;
     result
+}
+
+fn execute_custom_command(
+    state: &ExecState<'_>,
+    command: &str,
+    args: &[String],
+    stdin: &str,
+) -> Option<CommandResult> {
+    let custom = state.session.inner.custom_commands.get(command)?.clone();
+    let context = JustBashCustomCommandContext {
+        args: args.to_vec(),
+        cwd: state.cwd.clone(),
+        env: state.env.clone(),
+        stdin: stdin.to_string(),
+        session: state.session.clone(),
+    };
+    let result = custom.execute(context);
+    Some(CommandResult {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        exit_requested: false,
+    })
 }
 
 fn execute_executor_command(

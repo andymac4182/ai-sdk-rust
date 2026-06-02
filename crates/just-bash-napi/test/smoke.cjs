@@ -58,6 +58,17 @@ function jbc18_napi_cjs_entrypoint_requires_and_executes_basic_commands() {
   assert.equal(result.stdout, "Hello from CJS consumer\n");
   assert.equal(result.exitCode, 0);
 
+  result = bash.exec('echo "Hello" > greeting.txt');
+  assert.equal(result.exitCode, 0);
+  assert.equal(bash.readFile("greeting.txt"), "Hello\n");
+
+  result = bash.exec("grep", { args: ["-n", "seed", "/workspace/input.txt"] });
+  assert.equal(result.stdout, "1:seed\n");
+  assert.equal(result.exitCode, 0);
+
+  assert.ok(bash.registeredCommandNames().includes("echo"));
+  assert.ok(bash.registeredCommandNames().includes("grep"));
+
   const websiteStyle = new Bash({
     files: {
       "/home/user/greeting.txt": "Hello\n",
