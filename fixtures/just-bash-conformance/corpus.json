@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1271,
-      "portable-verified": 400
+      "portable-pending": 1268,
+      "portable-verified": 403
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -338,13 +338,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:173:it:should perform addition",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_awk_12b6b6d5b72e83c0",
+        "notes": "JBC-35 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
         "found": true
       },
       "assertions": [],
@@ -355,6 +355,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_12b6b6d5b72e83c0",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1168,13 +1174,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:187:it:should perform multiplication",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_awk_cc47f33e4cb2516a",
+        "notes": "JBC-35 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
         "found": true
       },
       "assertions": [],
@@ -1185,6 +1191,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_cc47f33e4cb2516a",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {
@@ -1217,13 +1229,13 @@
         "stderr": "",
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:180:it:should perform subtraction",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_awk_d3e5d71775cfd1e6",
+        "notes": "JBC-35 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
         "found": true
       },
       "assertions": [],
@@ -1234,6 +1246,12 @@
         "locked": false,
         "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
         "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_d3e5d71775cfd1e6",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
       }
     },
     {

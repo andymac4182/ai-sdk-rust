@@ -15,12 +15,12 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 211,
+    "totalCases": 214,
     "byKind": {
-      "comparison-fixture": 211
+      "comparison-fixture": 214
     },
     "byDomain": {
-      "awk": 9,
+      "awk": 12,
       "basename-dirname": 15,
       "cat": 7,
       "cut": 14,
@@ -37,10 +37,65 @@
       "uniq": 10
     },
     "byStatus": {
-      "portable-verified": 211
+      "portable-verified": 214
     }
   },
   "cases": [
+    {
+      "id": "comparison:awk:12b6b6d5b72e83c0",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts",
+        "line": 173,
+        "suite": "awk - Real Bash Comparison > arithmetic",
+        "testName": "should perform addition",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
+        "fixtureId": "12b6b6d5b72e83c0"
+      },
+      "command": "awk '{print $1 + $2}' data.txt",
+      "script": "awk '{print $1 + $2}' data.txt",
+      "initialFiles": {
+        "data.txt": "10 20\n5 15\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "30\n20\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:173:it:should perform addition",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_awk_12b6b6d5b72e83c0",
+        "notes": "JBC-35 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "12b6b6d5b72e83c0",
+        "expectedFixtureId": "12b6b6d5b72e83c0",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_12b6b6d5b72e83c0",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
     {
       "id": "comparison:awk:5fb5a4d01bc7c720",
       "kind": "comparison-fixture",
@@ -475,6 +530,116 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_c08393a24070a7cf",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:cc47f33e4cb2516a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts",
+        "line": 187,
+        "suite": "awk - Real Bash Comparison > arithmetic",
+        "testName": "should perform multiplication",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
+        "fixtureId": "cc47f33e4cb2516a"
+      },
+      "command": "awk '{print $1 * $2}' data.txt",
+      "script": "awk '{print $1 * $2}' data.txt",
+      "initialFiles": {
+        "data.txt": "3 4\n5 6\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "12\n30\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:187:it:should perform multiplication",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_awk_cc47f33e4cb2516a",
+        "notes": "JBC-35 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "cc47f33e4cb2516a",
+        "expectedFixtureId": "cc47f33e4cb2516a",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_cc47f33e4cb2516a",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:d3e5d71775cfd1e6",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts",
+        "line": 180,
+        "suite": "awk - Real Bash Comparison > arithmetic",
+        "testName": "should perform subtraction",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
+        "fixtureId": "d3e5d71775cfd1e6"
+      },
+      "command": "awk '{print $1 - $2}' data.txt",
+      "script": "awk '{print $1 - $2}' data.txt",
+      "initialFiles": {
+        "data.txt": "20 5\n100 30\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "15\n70\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/awk.comparison.test.ts:180:it:should perform subtraction",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_awk_d3e5d71775cfd1e6",
+        "notes": "JBC-35 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "d3e5d71775cfd1e6",
+        "expectedFixtureId": "d3e5d71775cfd1e6",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/awk.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_awk_d3e5d71775cfd1e6",
+      "runnerProof": {
+        "source": "JBC-35",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
