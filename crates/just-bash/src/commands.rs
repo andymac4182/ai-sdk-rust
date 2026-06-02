@@ -138,6 +138,7 @@ const PORTABLE_BUILTINS: &[(&str, Builtin)] = &[
     ("xan", Builtin::Xan),
     ("sqlite3", Builtin::Sqlite3),
     ("sleep", Builtin::Sleep),
+    ("timeout", Builtin::Timeout),
     ("which", Builtin::Which),
     ("whoami", Builtin::Whoami),
 ];
@@ -185,6 +186,7 @@ pub enum Builtin {
     Xan,
     Sqlite3,
     Sleep,
+    Timeout,
     Which,
     Whoami,
 }

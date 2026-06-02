@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     JustBashExecOptions, JustBashExecResult, JustBashResult, JustBashSession,
-    JustBashSessionOptions,
+    JustBashSessionOptions, path::resolve_path,
 };
 
 /// Construction options for the upstream-style [`Bash`] facade.
@@ -35,10 +35,18 @@ impl Bash {
     /// Creates a session with explicit upstream-style options.
     pub fn with_options(options: BashOptions) -> Self {
         let mut session_options = JustBashSessionOptions::new();
+        let create_default_layout = options.cwd.is_none() && options.files.is_empty();
         session_options.files = options.files;
         session_options.env = options.env;
-        session_options.cwd = options.cwd;
+        session_options.cwd = options.cwd.or_else(|| {
+            if create_default_layout {
+                None
+            } else {
+                Some("/".to_string())
+            }
+        });
         session_options.commands = options.commands;
+        session_options.create_default_layout = create_default_layout;
         Self {
             session: JustBashSession::with_options(session_options),
         }
@@ -60,22 +68,34 @@ impl Bash {
 
     /// Reads a UTF-8 virtual file.
     pub fn read_file(&self, path: &str) -> JustBashResult<String> {
-        self.session.read_file(path)
+        self.session.read_file(&resolve_path(&self.get_cwd(), path))
     }
 
     /// Writes a UTF-8 virtual file.
     pub fn write_file(&self, path: &str, content: &str) -> JustBashResult<()> {
-        self.session.write_file(path, content)
+        self.session
+            .write_file(&resolve_path(&self.get_cwd(), path), content)
     }
 
     /// Returns true when a virtual path exists.
     pub fn file_exists(&self, path: &str) -> bool {
-        self.session.file_exists(path)
+        self.session
+            .file_exists(&resolve_path(&self.get_cwd(), path))
     }
 
     /// Returns sorted registered command names.
     pub fn registered_command_names(&self) -> Vec<String> {
         self.session.registered_command_names()
+    }
+
+    /// Returns the persistent starting working directory.
+    pub fn get_cwd(&self) -> String {
+        self.session.get_cwd()
+    }
+
+    /// Returns the persistent starting environment.
+    pub fn get_env(&self) -> BTreeMap<String, String> {
+        self.session.get_env()
     }
 }
 
@@ -496,6 +516,174 @@ and exhibited clearly, with a label attached.\n";
         for host_name in ["NODE_ENV=", "SHELL=", "TERM=", "LANG=", "USER="] {
             assert!(!isolated_env.stdout.contains(host_name));
         }
+    }
+
+    #[test]
+    fn jbc20_bash_general_default_layout_and_api_rows_match_upstream() {
+        let env = Bash::new();
+        assert_eq!(env.get_cwd(), "/home/user");
+        assert_eq!(
+            env.get_env().get("HOME").map(String::as_str),
+            Some("/home/user")
+        );
+        assert_eq!(env.exec("echo $HOME").stdout, "/home/user\n");
+        let bin = env.exec("ls /bin");
+        assert_eq!(bin.exit_code, 0);
+        assert!(bin.stdout.contains("echo"));
+        assert!(bin.stdout.contains("cat"));
+        assert!(bin.stdout.contains("grep"));
+        assert_eq!(env.exec("ls /tmp").exit_code, 0);
+        assert_eq!(env.exec("/bin/echo hello").stdout, "hello\n");
+
+        let with_files = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "content".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(with_files.get_cwd(), "/");
+        let missing_home = with_files.exec("ls /home/user");
+        assert_ne!(missing_home.exit_code, 0);
+        assert!(missing_home.stderr.contains("No such file or directory"));
+
+        let with_cwd = Bash::with_options(BashOptions {
+            cwd: Some("/custom".to_string()),
+            ..BashOptions::default()
+        });
+        assert_eq!(with_cwd.get_cwd(), "/custom");
+        let missing_default_home = with_cwd.exec("ls /home/user");
+        assert_ne!(missing_default_home.exit_code, 0);
+        assert!(
+            missing_default_home
+                .stderr
+                .contains("No such file or directory")
+        );
+
+        let file_api = Bash::with_options(BashOptions {
+            cwd: Some("/home/user".to_string()),
+            files: BTreeMap::from([("/home/user/file.txt".to_string(), "content".to_string())]),
+            env: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            file_api.read_file("/home/user/file.txt").unwrap(),
+            "content"
+        );
+        assert_eq!(file_api.read_file("file.txt").unwrap(), "content");
+        file_api.write_file("new.txt", "new content").unwrap();
+        assert_eq!(
+            file_api.read_file("/home/user/new.txt").unwrap(),
+            "new content"
+        );
+        assert_eq!(file_api.get_cwd(), "/home/user");
+        assert_eq!(
+            file_api.get_env().get("FOO").map(String::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
+    fn jbc20_cd_env_and_status_comparison_rows_match_core_runtime() {
+        let cd_env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                ("/subdir/file.txt".to_string(), "content".to_string()),
+                ("/parent/child/file.txt".to_string(), "content".to_string()),
+                ("/a/b/c/file.txt".to_string(), "content".to_string()),
+                ("/dir1/file.txt".to_string(), String::new()),
+                ("/dir2/file.txt".to_string(), String::new()),
+                ("/file.txt".to_string(), "content".to_string()),
+            ]),
+            env: BTreeMap::from([
+                ("TEST_VAR".to_string(), "test_value".to_string()),
+                ("HOME".to_string(), "/home/testuser".to_string()),
+                ("VAR1".to_string(), "value1".to_string()),
+                ("VAR2".to_string(), "value2".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert!(
+            cd_env
+                .exec("cd subdir && pwd")
+                .stdout
+                .trim()
+                .ends_with("/subdir")
+        );
+        assert!(
+            cd_env
+                .exec("cd parent/child && cd .. && pwd")
+                .stdout
+                .trim()
+                .ends_with("/parent")
+        );
+        assert!(
+            cd_env
+                .exec("cd a/b/c && cd ../.. && pwd")
+                .stdout
+                .trim()
+                .ends_with("/a")
+        );
+        assert!(
+            cd_env
+                .exec("cd dir1 && cd ../dir2 && cd - && pwd")
+                .stdout
+                .trim()
+                .ends_with("/dir1")
+        );
+        assert_eq!(cd_env.exec("cd nonexistent").exit_code, 1);
+        assert_eq!(cd_env.exec("cd file.txt").exit_code, 1);
+        assert!(
+            cd_env
+                .exec("cd ./subdir && pwd")
+                .stdout
+                .trim()
+                .ends_with("/subdir")
+        );
+        let same_dir = cd_env.exec("pwd; cd .; pwd");
+        let lines = same_dir.stdout.trim().lines().collect::<Vec<_>>();
+        assert_eq!(lines, vec!["/", "/"]);
+
+        let env_output = cd_env.exec("env");
+        assert!(env_output.stdout.contains("TEST_VAR=test_value"));
+        assert_eq!(env_output.exit_code, 0);
+        assert_eq!(cd_env.exec("printenv HOME").stdout, "/home/testuser\n");
+        assert_eq!(cd_env.exec("printenv NONEXISTENT_VAR_12345").exit_code, 1);
+        assert_eq!(cd_env.exec("printenv VAR1 VAR2").stdout, "value1\nvalue2\n");
+
+        let status = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([("/exists.txt".to_string(), "content".to_string())]),
+            ..BashOptions::default()
+        });
+        let unknown = status.exec("myunknowncommand");
+        assert_eq!(unknown.exit_code, 127);
+        assert!(unknown.stderr.contains("myunknowncommand"));
+        assert_eq!(status.exec("cat /nonexistent_file_12345.txt").exit_code, 1);
+        assert_eq!(
+            status
+                .exec("grep pattern /nonexistent_file_12345.txt")
+                .exit_code,
+            2
+        );
+        assert_eq!(status.exec("exit 42").exit_code, 42);
+        assert_eq!(status.exec("true").exit_code, 0);
+        assert_eq!(status.exec("false").exit_code, 1);
+        assert_eq!(status.exec("false && echo never").stdout, "");
+        assert_eq!(status.exec("true || echo never").stdout, "");
+        assert_eq!(status.exec("false || echo fallback").stdout, "fallback\n");
+        assert_eq!(status.exec("false; echo after").stdout, "after\n");
+        assert_eq!(
+            status.exec("echo \"hello   world\"").stdout,
+            "hello   world\n"
+        );
+        assert_eq!(
+            status.exec("echo 'hello   world'").stdout,
+            "hello   world\n"
+        );
+        assert_eq!(status.exec("export X=value; echo '$X'").stdout, "$X\n");
+        let empty = status.exec("");
+        assert_eq!(empty.exit_code, 0);
+        assert_eq!(empty.stdout, "");
+        assert_eq!(status.exec("   ").exit_code, 0);
     }
 
     #[test]

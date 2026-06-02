@@ -1387,6 +1387,75 @@ const jbc19CaseGroups = [
   },
 ];
 
+const jbc20CaseGroups = [
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [
+      87, 95, 199, 206, 215, 229, 244, 273, 288, 298, 311, 323, 335, 352,
+      368, 421, 448,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::session-scope',
+    rustTest: 'jbc20_exec_scope_restores_env_cwd_after_errors_and_concurrent_runs',
+    notes:
+      'JBC-20 verifies per-exec env/cwd scoping, restoration after command/tokenization errors, concurrent env isolation, command-set variable non-leakage, and portable sleep duration parsing without host shell fallback.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.general.test.ts',
+    lines: [506, 514, 521, 530, 540, 545, 583, 588, 597, 603, 609, 615, 624],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::bash-facade',
+    rustTest: 'jbc20_bash_general_default_layout_and_api_rows_match_upstream',
+    notes:
+      'JBC-20 verifies upstream-style Bash facade file APIs, getCwd/getEnv, virtual /bin command stubs, /tmp/default HOME layout, and no default /home/user layout when files or cwd are explicitly supplied.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/cd.comparison.test.ts',
+    lines: [21, 36, 54, 74, 95, 109, 127, 139],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'jbc20_cd_env_and_status_comparison_rows_match_core_runtime',
+    notes:
+      'JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/env.comparison.test.ts',
+    lines: [22, 50, 62, 77],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'jbc20_cd_env_and_status_comparison_rows_match_core_runtime',
+    notes:
+      'JBC-20 verifies portable env and printenv comparison rows for KEY=value output, specific variables, missing variable status, and multiple values.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/parse-errors.comparison.test.ts',
+    lines: [58, 66, 76, 86, 177, 185, 193, 203, 211, 219, 227, 236, 243, 250, 260, 269],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'jbc20_cd_env_and_status_comparison_rows_match_core_runtime',
+    notes:
+      'JBC-20 verifies portable comparison rows for unknown-command diagnostics, missing-file statuses, exit/true/false status, &&/||/semicolon behavior, quoting, and empty/whitespace commands.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/timeout/timeout.test.ts',
+    lines: [7, 17, 29, 41, 50, 59, 68, 79, 87, 95, 103, 113, 123, 133, 145, 165, 177, 194],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::timeout',
+    rustTest: 'jbc20_timeout_command_rows_use_cooperative_in_process_cancellation',
+    notes:
+      'JBC-20 verifies portable timeout command duration parsing, ignored foreground/kill/signal options, operand diagnostics, cooperative 124 cancellation, no post-timeout output or file side effects, and help output.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/pipeline-execution.test.ts',
+    lines: [5, 11, 16, 22, 27, 35, 57],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::pipeline',
+    rustTest: 'jbc20_pipeline_stderr_exit_status_and_metadata_rows_are_stable',
+    notes:
+      'JBC-20 verifies portable pipeline stderr propagation from first/middle/last commands, stdout/stderr separation, multiple error collection, and last-command exit status.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1427,6 +1496,7 @@ function caseOverrideFor(testCase) {
     ...jbc17CaseGroups,
     ...jbc18CaseGroups,
     ...jbc19CaseGroups,
+    ...jbc20CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

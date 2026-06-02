@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1360,
-      "portable-verified": 311
+      "portable-pending": 1348,
+      "portable-verified": 323
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -78681,13 +78681,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:109:it:should error when cd to file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [
@@ -78732,13 +78732,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:127:it:should handle relative path with .",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [],
@@ -78777,13 +78777,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:139:it:should stay in same directory with cd .",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [],
@@ -78822,13 +78822,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:21:it:should change directory and pwd should reflect it",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [
@@ -78872,13 +78872,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:36:it:should change to parent directory with ..",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [],
@@ -78917,13 +78917,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:54:it:should handle multiple .. in path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [],
@@ -78963,13 +78963,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:74:it:should return to previous directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [],
@@ -79006,13 +79006,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/cd.comparison.test.ts:95:it:should error on non-existent directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable cd/pwd comparison rows for relative traversal, cd -, cd errors, and dot path handling inside the virtual filesystem.",
         "found": true
       },
       "assertions": [
@@ -79055,13 +79055,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/env.comparison.test.ts:22:it:should output in KEY=value format",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable env and printenv comparison rows for KEY=value output, specific variables, missing variable status, and multiple values.",
         "found": true
       },
       "assertions": [
@@ -79109,13 +79109,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/env.comparison.test.ts:50:it:should print specific variable value",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable env and printenv comparison rows for KEY=value output, specific variables, missing variable status, and multiple values.",
         "found": true
       },
       "assertions": [
@@ -79163,13 +79163,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/env.comparison.test.ts:62:it:should return exit code 1 for non-existent variable",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable env and printenv comparison rows for KEY=value output, specific variables, missing variable status, and multiple values.",
         "found": true
       },
       "assertions": [
@@ -79216,13 +79216,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/env.comparison.test.ts:77:it:should print multiple variable values",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::comparison-core",
+        "rustTest": "jbc20_cd_env_and_status_comparison_rows_match_core_runtime",
+        "notes": "JBC-20 verifies portable env and printenv comparison rows for KEY=value output, specific variables, missing variable status, and multiple values.",
         "found": true
       },
       "assertions": [

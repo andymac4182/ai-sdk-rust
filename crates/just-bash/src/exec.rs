@@ -304,7 +304,7 @@ impl JustBashExecutor {
 }
 
 /// Session construction options.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct JustBashSessionOptions {
     /// Initial virtual files.
     pub files: BTreeMap<String, String>,
@@ -322,6 +322,24 @@ pub struct JustBashSessionOptions {
     pub executor: Option<JustBashExecutor>,
     /// Optional portable command allow-list.
     pub commands: Option<Vec<String>>,
+    /// Whether to create the upstream default `/home/user` layout.
+    pub create_default_layout: bool,
+}
+
+impl Default for JustBashSessionOptions {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            default_timeout_ms: None,
+            max_output_length: None,
+            max_command_count: None,
+            executor: None,
+            commands: None,
+            create_default_layout: true,
+        }
+    }
 }
 
 impl JustBashSessionOptions {
@@ -381,6 +399,12 @@ impl JustBashSessionOptions {
         self.commands = Some(commands.into_iter().map(Into::into).collect());
         self
     }
+
+    /// Controls whether the upstream default `/home/user` layout is created.
+    pub fn with_create_default_layout(mut self, create: bool) -> Self {
+        self.create_default_layout = create;
+        self
+    }
 }
 
 /// In-process shell session with a persistent virtual filesystem and fresh
@@ -410,9 +434,33 @@ impl JustBashSession {
 
     /// Creates a memory-backed session.
     pub fn with_options(options: JustBashSessionOptions) -> Self {
-        let cwd = options.cwd.unwrap_or_else(|| "/home/user".to_string());
+        let cwd = options.cwd.unwrap_or_else(|| {
+            if options.create_default_layout {
+                "/home/user".to_string()
+            } else {
+                "/".to_string()
+            }
+        });
+        let commands = options
+            .commands
+            .as_deref()
+            .map(CommandRegistry::filtered)
+            .unwrap_or_default();
         let mut fs = VirtualFileSystem::new();
-        for dir in ["/tmp", "/home", "/home/user", &cwd] {
+        fs.mkdir("/bin", MkdirOptions { recursive: true })
+            .expect("default Just Bash /bin directory is valid");
+        for name in commands.names() {
+            fs.write_file(&format!("/bin/{name}"), "")
+                .expect("command stub path is valid");
+        }
+        let layout_dirs: Vec<&str> = if options.create_default_layout {
+            vec!["/tmp", "/home", "/home/user", &cwd]
+        } else if cwd == "/" {
+            Vec::new()
+        } else {
+            vec![&cwd]
+        };
+        for dir in layout_dirs {
             fs.mkdir(dir, MkdirOptions { recursive: true })
                 .expect("default Just Bash directory is valid");
         }
@@ -436,11 +484,7 @@ impl JustBashSession {
                     .unwrap_or(JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH),
                 max_command_count: options.max_command_count.unwrap_or(10_000),
                 executor: options.executor,
-                commands: options
-                    .commands
-                    .as_deref()
-                    .map(CommandRegistry::filtered)
-                    .unwrap_or_default(),
+                commands,
             }),
         }
     }
@@ -546,6 +590,16 @@ impl JustBashSession {
     /// Returns sorted registered portable command names.
     pub fn registered_command_names(&self) -> Vec<String> {
         self.inner.commands.names()
+    }
+
+    /// Returns the session's persistent starting working directory.
+    pub fn get_cwd(&self) -> String {
+        self.inner.base_cwd.clone()
+    }
+
+    /// Returns the session's persistent starting environment.
+    pub fn get_env(&self) -> BTreeMap<String, String> {
+        self.inner.base_env.clone()
     }
 }
 
@@ -808,6 +862,7 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "which" => command_which(state, &tokens[1..]),
         "whoami" => stdout_result("user\n"),
         "sleep" => command_sleep(state, &tokens[1..]),
+        "timeout" => command_timeout(state, &tokens[1..], stdin),
         "bash" | "sh" => command_bash(command, state, &tokens[1..], stdin),
         _ => stderr_result(127, format!("bash: {}: command not found\n", tokens[0])),
     }
@@ -7794,8 +7849,7 @@ fn is_valid_var_name(name: &str) -> bool {
 fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     let ms = args
         .iter()
-        .filter_map(|arg| arg.parse::<f64>().ok())
-        .map(|seconds| (seconds * 1000.0) as u64)
+        .filter_map(|arg| parse_duration_ms(arg).ok())
         .sum::<u64>();
     let deadline = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < deadline {
@@ -7805,6 +7859,79 @@ fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         thread::sleep(Duration::from_millis(5));
     }
     CommandResult::default()
+}
+
+fn command_timeout(state: &mut ExecState<'_>, args: &[String], stdin: String) -> CommandResult {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--help" => {
+                return stdout_result(
+                    "Usage: timeout [OPTION] DURATION COMMAND [ARG]...\nRun COMMAND with a time limit.\n",
+                );
+            }
+            "--foreground" => index += 1,
+            "-k" | "-s" => {
+                if index + 1 >= args.len() {
+                    return stderr_result(
+                        1,
+                        format!("timeout: option '{}' requires an argument\n", arg),
+                    );
+                }
+                index += 2;
+            }
+            _ if arg.starts_with('-') => {
+                return stderr_result(1, format!("timeout: unrecognized option '{}'\n", arg));
+            }
+            _ => break,
+        }
+    }
+
+    let Some(duration) = args.get(index) else {
+        return stderr_result(1, "timeout: missing operand\n");
+    };
+    let timeout_ms = match parse_duration_ms(duration) {
+        Ok(ms) => ms.max(1),
+        Err(()) => {
+            return stderr_result(
+                1,
+                format!("timeout: invalid time interval '{}'\n", duration),
+            );
+        }
+    };
+    let command = &args[index + 1..];
+    if command.is_empty() {
+        return stderr_result(1, "timeout: missing operand after duration\n");
+    }
+
+    let old_started_at = state.started_at;
+    let old_timeout_ms = state.timeout_ms;
+    state.started_at = Instant::now();
+    state.timeout_ms = timeout_ms;
+    let mut result = execute_tokens(state, command, stdin);
+    state.started_at = old_started_at;
+    state.timeout_ms = old_timeout_ms;
+    if result.exit_code == JUST_BASH_TIMEOUT_EXIT_CODE
+        && result.stderr.starts_with("Command timed out after")
+    {
+        result.stderr.clear();
+    }
+    result
+}
+
+fn parse_duration_ms(raw: &str) -> Result<u64, ()> {
+    let (number, multiplier) = match raw.chars().last() {
+        Some('s') => (&raw[..raw.len() - 1], 1_000.0),
+        Some('m') => (&raw[..raw.len() - 1], 60_000.0),
+        Some('h') => (&raw[..raw.len() - 1], 3_600_000.0),
+        Some('d') => (&raw[..raw.len() - 1], 86_400_000.0),
+        _ => (raw, 1_000.0),
+    };
+    let seconds = number.parse::<f64>().map_err(|_| ())?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(());
+    }
+    Ok((seconds * multiplier) as u64)
 }
 
 fn command_bash(
@@ -8827,6 +8954,109 @@ mod tests {
     }
 
     #[test]
+    fn jbc20_exec_scope_restores_env_cwd_after_errors_and_concurrent_runs() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_env("SHARED", "original")
+                .with_env("VAR", "base")
+                .with_file("/work/input.txt", "content"),
+        );
+
+        let multi_env = bash.exec(
+            "echo \"$A $B $C\"; echo \"$MSG\"",
+            JustBashExecOptions::new()
+                .with_env("A", "1")
+                .with_env("B", "2")
+                .with_env("C", "3")
+                .with_env("MSG", "hello world"),
+        );
+        assert_eq!(multi_env.stdout, "1 2 3\nhello world\n");
+        assert!(!bash.get_env().contains_key("A"));
+        assert!(!bash.get_env().contains_key("MSG"));
+
+        let command_error = bash.exec(
+            "missing_command",
+            JustBashExecOptions::new()
+                .with_env("VAR", "temporary")
+                .with_env("TEMP_VAR", "temporary"),
+        );
+        assert_eq!(command_error.exit_code, 127);
+        assert_eq!(
+            bash.exec("echo \"$VAR:$TEMP_VAR\"", JustBashExecOptions::new())
+                .stdout,
+            "base:\n"
+        );
+
+        let parse_error = bash.exec(
+            "echo \"unterminated",
+            JustBashExecOptions::new()
+                .with_cwd("/work")
+                .with_env("VAR", "parse-temp"),
+        );
+        assert_eq!(parse_error.exit_code, 2);
+        assert!(parse_error.stderr.contains("unterminated quoted string"));
+        assert_eq!(
+            bash.exec("pwd; echo $VAR", JustBashExecOptions::new())
+                .stdout,
+            "/home/user\nbase\n"
+        );
+        assert_eq!(bash.get_cwd(), "/home/user");
+
+        let left = bash.clone();
+        let right = bash.clone();
+        let first = std::thread::spawn(move || {
+            left.exec(
+                "sleep 0.01; export VAR=left; echo \"$VAR $SHARED $OTHER\"",
+                JustBashExecOptions::new().with_env("OTHER", "A"),
+            )
+        });
+        let second = std::thread::spawn(move || {
+            right.exec(
+                "sleep 0.01; export VAR=right; echo \"$VAR $SHARED $OTHER\"",
+                JustBashExecOptions::new().with_env("OTHER", "B"),
+            )
+        });
+        let first = first.join().expect("left exec thread should complete");
+        let second = second.join().expect("right exec thread should complete");
+        assert_eq!(first.stdout, "left original A\n");
+        assert_eq!(second.stdout, "right original B\n");
+        assert_eq!(
+            bash.exec("echo \"$VAR:$OTHER\"", JustBashExecOptions::new())
+                .stdout,
+            "base:\n"
+        );
+        assert_eq!(bash.get_env().get("VAR").map(String::as_str), Some("base"));
+        assert!(!bash.get_env().contains_key("OTHER"));
+
+        let command_set_var = bash.exec(
+            "export NEW_VAR=created; export VAR=modified",
+            JustBashExecOptions::new().with_env("TEMP", "temp"),
+        );
+        assert_eq!(
+            command_set_var.env.get("NEW_VAR").map(String::as_str),
+            Some("created")
+        );
+        assert_eq!(
+            command_set_var.env.get("VAR").map(String::as_str),
+            Some("modified")
+        );
+        assert!(!bash.get_env().contains_key("NEW_VAR"));
+        assert!(!bash.get_env().contains_key("TEMP"));
+        assert_eq!(bash.get_env().get("VAR").map(String::as_str), Some("base"));
+
+        assert_eq!(
+            bash.exec("sleep 0.001m; echo minute", JustBashExecOptions::new())
+                .stdout,
+            "minute\n"
+        );
+        assert_eq!(
+            bash.exec("sleep 0.005 0.005; echo summed", JustBashExecOptions::new())
+                .stdout,
+            "summed\n"
+        );
+    }
+
+    #[test]
     fn just_bash_exec_args_forwarding_appends_literal_args_once_to_first_command() {
         let bash = JustBashSession::new();
 
@@ -8866,6 +9096,84 @@ mod tests {
     }
 
     #[test]
+    fn jbc20_timeout_command_rows_use_cooperative_in_process_cancellation() {
+        let bash = JustBashSession::new();
+
+        assert_eq!(
+            bash.exec("timeout 10 echo hello", JustBashExecOptions::new())
+                .stdout,
+            "hello\n"
+        );
+        assert_eq!(
+            bash.exec("timeout 10 echo one two three", JustBashExecOptions::new())
+                .stdout,
+            "one two three\n"
+        );
+        assert_eq!(
+            bash.exec("timeout 5s echo seconds", JustBashExecOptions::new())
+                .stdout,
+            "seconds\n"
+        );
+        assert_eq!(
+            bash.exec("timeout 1m echo minutes", JustBashExecOptions::new())
+                .stdout,
+            "minutes\n"
+        );
+        assert_eq!(
+            bash.exec("timeout 0.5 echo decimal", JustBashExecOptions::new())
+                .stdout,
+            "decimal\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "timeout --foreground -k 5 -s KILL 10 echo opts",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "opts\n"
+        );
+
+        let missing_duration = bash.exec("timeout", JustBashExecOptions::new());
+        assert_eq!(missing_duration.exit_code, 1);
+        assert!(missing_duration.stderr.contains("missing operand"));
+        let missing_command = bash.exec("timeout 5", JustBashExecOptions::new());
+        assert_eq!(missing_command.exit_code, 1);
+        assert!(missing_command.stderr.contains("missing operand"));
+        let invalid = bash.exec("timeout abc echo test", JustBashExecOptions::new());
+        assert_eq!(invalid.exit_code, 1);
+        assert!(invalid.stderr.contains("invalid time interval"));
+        let unknown = bash.exec("timeout --unknown 5 echo test", JustBashExecOptions::new());
+        assert_eq!(unknown.exit_code, 1);
+        assert!(unknown.stderr.contains("unrecognized option"));
+
+        let timed_out = bash.exec("timeout 0.01 sleep 0.05", JustBashExecOptions::new());
+        assert_eq!(timed_out.exit_code, JUST_BASH_TIMEOUT_EXIT_CODE);
+        assert_eq!(timed_out.stdout, "");
+        assert_eq!(timed_out.stderr, "");
+
+        let no_side_effect = bash.exec(
+            "timeout 0.01 bash -c 'sleep 0.05; echo LEAKED > /tmp/cancel-test'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(no_side_effect.exit_code, JUST_BASH_TIMEOUT_EXIT_CODE);
+        assert!(!bash.file_exists("/tmp/cancel-test"));
+
+        let multi_statement = bash.exec(
+            "timeout 0.01 bash -c 'sleep 0.05; echo A > /tmp/a; echo B > /tmp/b; echo C > /tmp/c'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(multi_statement.exit_code, JUST_BASH_TIMEOUT_EXIT_CODE);
+        assert!(!bash.file_exists("/tmp/a"));
+        assert!(!bash.file_exists("/tmp/b"));
+        assert!(!bash.file_exists("/tmp/c"));
+
+        let help = bash.exec("timeout --help", JustBashExecOptions::new());
+        assert_eq!(help.exit_code, 0);
+        assert!(help.stdout.contains("timeout"));
+        assert!(help.stdout.contains("DURATION"));
+    }
+
+    #[test]
     fn just_bash_default_metadata_reports_in_process_backend() {
         let bash = JustBashSession::new();
         let result = bash.exec("echo ok", JustBashExecOptions::new());
@@ -8876,6 +9184,65 @@ mod tests {
         assert_eq!(result.metadata.cwd, "/home/user");
         assert_eq!(result.metadata.command_count, 1);
         assert!(!result.metadata.truncated);
+    }
+
+    #[test]
+    fn jbc20_pipeline_stderr_exit_status_and_metadata_rows_are_stable() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/data/file.txt", "hello\n"),
+        );
+
+        let first_error = bash.exec("ls /no_such_path_xyz | cat", JustBashExecOptions::new());
+        assert_eq!(first_error.stdout, "");
+        assert!(first_error.stderr.contains("No such file or directory"));
+        let first_error_three_stage = bash.exec(
+            "ls /no_such_path_xyz | cat | cat",
+            JustBashExecOptions::new(),
+        );
+        assert!(
+            first_error_three_stage
+                .stderr
+                .contains("No such file or directory")
+        );
+        let middle_error = bash.exec(
+            "echo hello | ls /no_such_path_xyz | cat",
+            JustBashExecOptions::new(),
+        );
+        assert!(middle_error.stderr.contains("No such file or directory"));
+        let last_error = bash.exec(
+            "echo hello | ls /no_such_path_xyz",
+            JustBashExecOptions::new(),
+        );
+        assert!(last_error.stderr.contains("No such file or directory"));
+        let multiple_errors = bash.exec(
+            "ls /no_such_a | ls /no_such_b | cat",
+            JustBashExecOptions::new(),
+        );
+        assert!(multiple_errors.stderr.contains("no_such_a"));
+        assert!(multiple_errors.stderr.contains("no_such_b"));
+        let mixed = bash.exec(
+            "ls /data/file.txt /no_such_xyz | cat",
+            JustBashExecOptions::new(),
+        );
+        assert!(mixed.stdout.contains("/data/file.txt"));
+        assert!(mixed.stderr.contains("No such file or directory"));
+        assert_eq!(
+            bash.exec("echo hello | grep nomatch", JustBashExecOptions::new())
+                .exit_code,
+            1
+        );
+
+        let result = bash.exec(
+            "echo ok",
+            JustBashExecOptions::new()
+                .with_cwd("/data")
+                .with_timeout_ms(1234),
+        );
+        assert_eq!(result.metadata.backend, JUST_BASH_BACKEND);
+        assert!(!result.metadata.external_sandbox);
+        assert_eq!(result.metadata.cwd, "/data");
+        assert_eq!(result.metadata.timeout_ms, 1234);
+        assert_eq!(result.metadata.command_count, 1);
     }
 
     #[test]
