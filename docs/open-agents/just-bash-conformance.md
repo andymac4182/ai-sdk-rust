@@ -46,6 +46,13 @@ exact-pass corpus cases against either engine. The strict inventory still has
 3,276 gate gaps in this
 snapshot, so this is a final proof report, not strict parity completion.
 
+2026-06-02 goal append: the remaining Just Bash work is explicitly part of the
+parent parity goal. The next dispatch wave must keep using the `napi-rs`
+JavaScript bridge so portable upstream cases can be executed through both the
+TypeScript engine and Rust engine. The Rust crate is not 1:1 complete until the
+dual-engine harness, generated corpus, strict inventory, and Open Agents service
+proof all agree on zero portable unmapped rows.
+
 ## Source Snapshot
 
 | Field | Value |
@@ -110,6 +117,12 @@ snapshot, so this is a final proof report, not strict parity completion.
 | JBC-44 | Structured data and query strict gaps | Active thread `019e8764-fc8b-7420-bb7a-7d924a799795` closes remaining `jq`, `yq`, `xan`, `sqlite3`, query-engine, search-engine-helper, and adjacent structured-data rows with deterministic in-memory fixtures. | Focused structured/data tests; generated corpus structured subsets; `cargo test -p just-bash`; inventory/corpus checks; fmt/naming/diff gates. |
 | JBC-45 | Core, filesystem, and comparison strict gaps | Active thread `019e8765-0604-73a1-a61b-f33d95b957a3` closes remaining core runtime, virtual filesystem/path, source/comparison-fixture, and exact-pass corpus rows not covered by command-family owners. | Core/fs tests; raw TypeScript/Rust conformance runs for promoted comparison rows; `cargo test -p just-bash --test conformance_corpus`; inventory/corpus checks; fmt/naming/diff gates. |
 | JBC-46 | Archive, digest, and small-command leftovers | Active thread `019e8765-056a-7cd0-8a2d-a8e47b06c5ac` closes remaining small command rows such as `tar`, digest/checksum, `md5sum`, `touch`, `pwd`, `true`, `sleep`, and adjacent archive/file-inspection behavior against the virtual filesystem. | Focused archive/digest/small-command tests; conformance corpus command subsets; `cargo test -p just-bash`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-47 | Full dual-engine upstream runner expansion | Expand the JS harness so every still-portable upstream row that can be materialized as an executable case can run under both `JUST_BASH_ENGINE=typescript` and `JUST_BASH_ENGINE=rust`, with stable row ids and normalized stdout/stderr/status comparison. | Fresh Just Bash upstream fetch; TypeScript-engine full-materialized run; Rust-engine full-materialized run through NAPI; `node scripts/just-bash-test-inventory.mjs --check`; `node scripts/just-bash-conformance-corpus.mjs --check`; naming/diff gates. |
+| JBC-48 | NAPI session and filesystem parity hardening | Fill any missing `crates/just-bash-napi` surface needed by upstream tests: session lifecycle, cwd/env/stdin/args/options, virtual filesystem fixture seeding, command discovery, error/result serialization, and deterministic cancellation/time-limit behavior. | `cargo test -p just-bash-napi`; `npm test --prefix crates/just-bash-napi`; Rust-engine conformance smoke; inventory/corpus checks; fmt/clippy/naming/diff gates. |
+| JBC-49 | TypeScript oracle and golden corpus sync | Generate and store the exact TypeScript-engine golden expectations for materialized portable cases without closing rows that Rust has not matched. Golden rows must include upstream file/line/declaration/test title and normalized fixture state. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; corpus generator `--check`; no missing ledger links; `git diff --check`. |
+| JBC-50 | Rust NAPI mismatch burn-down wave | Use the JBC-47/JBC-49 shared test corpus to split remaining Rust-vs-TypeScript mismatches into owned implementation slices by command family and close rows only when Rust matches the TypeScript golden or has an explicit exception. | Rust-engine conformance run; focused `cargo test -p just-bash` command-family tests; `node scripts/just-bash-test-inventory.mjs --check`; strict gap count decreases by exact mapped rows only. |
+| JBC-51 | Open Agents Just Bash same-test service proof | Prove Open Agents invokes the same crate-backed Rust behavior exercised by the NAPI harness, including stateful virtual files, command errors, disabled host-shell fallback, and Slack/local-service command execution paths. | `cargo test -p open-agents-service -p open-agents-sandbox -p just-bash`; `scripts/open-agents-local-e2e.sh --just-bash-conformance`; Rust-engine conformance subset for service-backed commands; master gate. |
+| JBC-52 | Just Bash strict zero-gap finalization | After all implementation slices land, flip the Just Bash strict proof to zero `portable-pending` rows, update ledgers/progress/docs, and make the local strict gate the acceptance proof for this part of the parent goal. | `node scripts/just-bash-test-inventory.mjs --strict`; TypeScript and Rust verified-corpus runs; `cargo test -p just-bash -p just-bash-napi`; `npm test --prefix crates/just-bash-napi`; `scripts/open-agents-local-e2e.sh --just-bash-conformance`; `scripts/master-parity-gate.sh --check`; fmt/clippy/naming/diff gates. |
 
 ## Corpus Contract
 
