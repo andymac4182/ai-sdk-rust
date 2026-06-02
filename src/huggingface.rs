@@ -1567,7 +1567,8 @@ fn huggingface_stream_result_from_response(
                                     .and_then(JsonValue::as_str)
                                     .map(ToString::to_string);
                             }
-                            huggingface_emit_response_metadata(&mut stream, response);
+                            // Upstream emits `response-metadata` only on `response.created`; the
+                            // `response.completed` chunk solely updates finish reason and usage.
                             usage = huggingface_responses_usage(response.get("usage"));
                             if let Some(reason) = response
                                 .get("incomplete_details")
@@ -2365,11 +2366,13 @@ mod tests {
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFunctionTool,
-        LanguageModelMessage, LanguageModelResponseFormat, LanguageModelStreamPart,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolChoice, LanguageModelToolMessage, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelReasoningPart,
+        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -3673,6 +3676,345 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn streaming_model_with_chunks(chunks: &[&str]) -> super::HuggingFaceResponsesLanguageModel {
+        let sse = chunks
+            .iter()
+            .flat_map(|chunk| [format!("data: {chunk}"), String::new()])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let transport: HuggingFaceTransport =
+            Arc::new(move |_request| -> HuggingFaceTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone())
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            });
+        HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport)
+            .responses("deepseek-ai/DeepSeek-V3-0324")
+    }
+
+    fn user_text_options(text: &str) -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new(text),
+            )]),
+        )])
+    }
+
+    // Upstream: packages-huggingface-0016 — doStream "should handle streaming without usage".
+    #[test]
+    fn huggingface_responses_streams_without_usage() {
+        let model = streaming_model_with_chunks(&[
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_test","type":"message","role":"assistant","status":"in_progress"},"sequence_number":1}"#,
+            r#"{"type":"response.output_text.delta","item_id":"msg_test","output_index":0,"content_index":0,"delta":"Hi!","sequence_number":2}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_test","type":"message","role":"assistant","status":"completed"},"sequence_number":3}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_test","status":"completed","incomplete_details":null,"usage":null},"sequence_number":4}"#,
+            "[DONE]",
+        ]);
+
+        let result = poll_ready(model.do_stream(user_text_options("Hello")));
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes a finish part");
+
+        assert_eq!(finish.usage.input_tokens.total, None);
+        assert_eq!(finish.usage.input_tokens.no_cache, None);
+        assert_eq!(finish.usage.input_tokens.cache_read, None);
+        assert_eq!(finish.usage.output_tokens.total, None);
+        assert_eq!(finish.usage.output_tokens.text, None);
+        assert_eq!(finish.usage.output_tokens.reasoning, None);
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+    }
+
+    // Upstream: packages-huggingface-0017 — doStream "should handle non-message item types".
+    #[test]
+    fn huggingface_responses_streams_non_message_item_types() {
+        let model = streaming_model_with_chunks(&[
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"mcp_test","type":"mcp_list_tools","server_label":"test"},"sequence_number":1}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"mcp_test","type":"mcp_list_tools","server_label":"test"},"sequence_number":2}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_test","status":"completed","incomplete_details":null},"sequence_number":3}"#,
+        ]);
+
+        let result = poll_ready(model.do_stream(user_text_options("Hello")));
+        let part_kinds = result
+            .stream
+            .iter()
+            .map(|part| match part {
+                LanguageModelStreamPart::StreamStart(_) => "stream-start",
+                LanguageModelStreamPart::Finish(_) => "finish",
+                LanguageModelStreamPart::TextStart(_) => "text-start",
+                LanguageModelStreamPart::TextDelta(_) => "text-delta",
+                LanguageModelStreamPart::TextEnd(_) => "text-end",
+                LanguageModelStreamPart::ToolCall(_) => "tool-call",
+                LanguageModelStreamPart::ToolResult(_) => "tool-result",
+                LanguageModelStreamPart::ResponseMetadata(_) => "response-metadata",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+
+        // mcp_list_tools without a `tools` payload must not emit text or tool events.
+        assert_eq!(part_kinds, vec!["stream-start", "finish"]);
+    }
+
+    // Upstream: packages-huggingface-0018 — doStream "should handle streaming errors".
+    #[test]
+    fn huggingface_responses_streams_parse_errors() {
+        let model = streaming_model_with_chunks(&[
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_test","type":"message","role":"assistant"},"sequence_number":1}"#,
+            "invalid json}",
+        ]);
+
+        let result = poll_ready(model.do_stream(user_text_options("Hello")));
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Error(_))),
+            "expected an error stream part"
+        );
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes a finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Error);
+    }
+
+    // Upstream: packages-huggingface-0022 — message conversion "should handle assistant messages".
+    #[test]
+    fn huggingface_responses_converts_assistant_text_messages() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: HuggingFaceTransport =
+            Arc::new(move |request| -> HuggingFaceTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_assistant",
+                        "model": "deepseek-ai/DeepSeek-V3-0324",
+                        "object": "response",
+                        "created_at": 1711115037,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "usage": null,
+                        "output": [],
+                        "output_text": "Test"
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport)
+            .responses("deepseek-ai/DeepSeek-V3-0324");
+
+        let _ = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hi there!")),
+            ])),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("How are you?")),
+            ])),
+        ])));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body parses");
+        assert_eq!(
+            body.get("input"),
+            Some(&json!([
+                {
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Hello" }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Hi there!" }]
+                },
+                {
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "How are you?" }]
+                }
+            ]))
+        );
+    }
+
+    // Upstream: packages-huggingface-0023 — message conversion
+    // "should warn about unsupported assistant content types".
+    #[test]
+    fn huggingface_responses_does_not_warn_about_assistant_tool_and_reasoning_parts() {
+        let transport: HuggingFaceTransport =
+            Arc::new(move |_request| -> HuggingFaceTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_assistant_warn",
+                        "model": "deepseek-ai/DeepSeek-V3-0324",
+                        "object": "response",
+                        "created_at": 1711115037,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "usage": null,
+                        "output": [],
+                        "output_text": "Test"
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport)
+            .responses("deepseek-ai/DeepSeek-V3-0324");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "test",
+                    "test",
+                    json!({}),
+                )),
+                LanguageModelAssistantContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "test",
+                    "test",
+                    LanguageModelToolResultOutput::text("test"),
+                )),
+                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                    "thinking...",
+                )),
+            ])),
+        ])));
+
+        assert!(
+            result.warnings.is_empty(),
+            "assistant tool-call/tool-result/reasoning parts must not warn, got {:?}",
+            result.warnings
+        );
+    }
+
+    // Upstream: packages-huggingface-0025 — tool calls "should handle function_call tool responses".
+    #[test]
+    fn huggingface_responses_maps_function_call_tool_responses() {
+        let transport: HuggingFaceTransport =
+            Arc::new(move |_request| -> HuggingFaceTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_test",
+                        "model": "deepseek-ai/DeepSeek-V3-0324",
+                        "object": "response",
+                        "created_at": 1741257730,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "usage": {
+                            "input_tokens": 50,
+                            "output_tokens": 30,
+                            "total_tokens": 80
+                        },
+                        "output": [
+                            {
+                                "id": "fc_test",
+                                "type": "function_call",
+                                "call_id": "call_123",
+                                "name": "getWeather",
+                                "arguments": "{\"location\": \"New York\"}",
+                                "output": "{\"temperature\": \"72°F\", \"condition\": \"sunny\"}"
+                            },
+                            {
+                                "id": "msg_after_tool",
+                                "type": "message",
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "The weather in New York is 72°F and sunny."
+                                    }
+                                ]
+                            }
+                        ],
+                        "output_text": null
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport)
+            .responses("deepseek-ai/DeepSeek-V3-0324");
+
+        let result = poll_ready(model.do_generate(user_text_options("Hello")));
+
+        // Non-provider-executed function_call: tool-call + tool-result (no providerMetadata) + text.
+        assert_eq!(
+            serde_json::to_value(&result.content).expect("content serializes"),
+            json!([
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_123",
+                    "toolName": "getWeather",
+                    "input": "{\"location\": \"New York\"}"
+                },
+                {
+                    "type": "tool-result",
+                    "toolCallId": "call_123",
+                    "toolName": "getWeather",
+                    "result": "{\"temperature\": \"72°F\", \"condition\": \"sunny\"}"
+                },
+                {
+                    "type": "text",
+                    "text": "The weather in New York is 72°F and sunny.",
+                    "providerMetadata": {
+                        "huggingface": {
+                            "itemId": "msg_after_tool"
+                        }
+                    }
+                }
+            ])
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter(|part| matches!(part, LanguageModelContent::ToolCall(_)))
+            .count();
+        assert_eq!(tool_calls, 1);
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {

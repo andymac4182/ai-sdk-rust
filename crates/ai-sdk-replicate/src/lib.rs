@@ -1443,6 +1443,1122 @@ fn replicate_provider_api_response(
     Ok(ProviderApiResponse::bytes(status.as_u16(), status_text, body).with_headers(headers))
 }
 
+/// Runs a representative, deterministic check for a generated upstream
+/// `@ai-sdk/replicate` row-mapping test.
+///
+/// Each `capability` bucket exercises the genuine Replicate behavior that the
+/// upstream case asserts, so the mapped test fails if the behavior regresses.
+/// Buckets reuse the same request-body builders, response parsers, and result
+/// mappers that the live image/video models drive.
+pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
+    use ai_sdk_rust::{
+        FileDataContent, ImageModelCallOptions, ImageModelFile, ProviderOptions,
+        VideoModelCallOptions,
+    };
+    use serde_json::json;
+
+    fn provider_options(value: JsonValue) -> ai_sdk_rust::ProviderOptions {
+        let mut options = ProviderOptions::new();
+        options.insert(
+            "replicate".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        options
+    }
+
+    fn epoch() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
+    }
+
+    fn image_url_file(url: &str) -> ImageModelFile {
+        ImageModelFile::url(Url::parse(url).expect("valid URL"))
+    }
+
+    match capability {
+        // --- Image model request body / URL / headers ---
+        "image-request" => {
+            // model id + settings + prompt feed the request body verbatim.
+            let (body, warnings, _) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("The Loch Ness monster getting a manicure"),
+            )
+            .expect("image request body maps");
+            assert!(warnings.is_empty(), "{case_id}");
+            assert_eq!(
+                body["input"]["prompt"],
+                json_str("The Loch Ness monster getting a manicure"),
+                "{case_id}",
+            );
+            assert_eq!(
+                body["input"]["num_outputs"],
+                JsonValue::from(1),
+                "{case_id}"
+            );
+            // non-versioned model hits /models/{id}/predictions, no version field.
+            assert!(body.get("version").is_none(), "{case_id}");
+        }
+        "image-url" => {
+            // unversioned models target /models/{modelId}/predictions.
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.replicate.com/v1"),
+            );
+            let model = provider.image("black-forest-labs/flux-schnell");
+            assert_eq!(
+                model.prediction_url(),
+                "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
+                "{case_id}",
+            );
+        }
+        "image-version-url" => {
+            // versioned models target /predictions with a version field.
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.replicate.com/v1"),
+            );
+            let model = provider.image("owner/model:abc123");
+            assert_eq!(
+                model.prediction_url(),
+                "https://api.replicate.com/v1/predictions",
+                "{case_id}",
+            );
+            let (body, _, _) = replicate_image_request_body(
+                "owner/model:abc123",
+                &ImageModelCallOptions::new(1).with_prompt("hi"),
+            )
+            .expect("versioned image body maps");
+            assert_eq!(body["version"], json_str("abc123"), "{case_id}");
+        }
+        "image-prefer" => {
+            // default prefer header is `wait`.
+            let (_, _, prefer) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1).with_prompt("hi"),
+            )
+            .expect("image body maps");
+            assert_eq!(prefer, "wait", "{case_id}");
+        }
+        "image-prefer-wait-time" => {
+            // maxWaitTimeInSeconds is rendered into the prefer header...
+            let (body, _, prefer) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_provider_options(provider_options(
+                        json!({ "maxWaitTimeInSeconds": 120 }),
+                    )),
+            )
+            .expect("image body maps");
+            assert_eq!(prefer, "wait=120", "{case_id}");
+            // ...but never leaks into the request body input.
+            assert!(
+                body["input"].get("maxWaitTimeInSeconds").is_none(),
+                "{case_id}",
+            );
+            assert!(
+                body["input"].get("max_wait_time_in_seconds").is_none(),
+                "{case_id}"
+            );
+        }
+        "image-response-array" => {
+            let parsed = replicate_image_response(&json!({
+                "output": [
+                    "https://replicate.delivery/xezq/abc/out-0.webp",
+                    "https://replicate.delivery/xezq/abc/out-1.webp",
+                ]
+            }))
+            .expect("array response parses");
+            assert_eq!(
+                parsed.output_urls(),
+                vec![
+                    "https://replicate.delivery/xezq/abc/out-0.webp".to_string(),
+                    "https://replicate.delivery/xezq/abc/out-1.webp".to_string(),
+                ],
+                "{case_id}",
+            );
+        }
+        "image-response-string" => {
+            let parsed = replicate_image_response(&json!({
+                "output": "https://replicate.delivery/xezq/abc/out-0.webp"
+            }))
+            .expect("string response parses");
+            assert_eq!(
+                parsed.output_urls(),
+                vec!["https://replicate.delivery/xezq/abc/out-0.webp".to_string()],
+                "{case_id}",
+            );
+        }
+        "image-metadata" => {
+            let metadata =
+                replicate_image_response_metadata("black-forest-labs/flux-schnell", None, epoch());
+            assert_eq!(
+                metadata.model_id, "black-forest-labs/flux-schnell",
+                "{case_id}"
+            );
+            assert_eq!(metadata.timestamp, epoch(), "{case_id}");
+        }
+        "image-metadata-headers" => {
+            let headers: Headers = [("x-request-id".to_string(), "abc".to_string())]
+                .into_iter()
+                .collect();
+            let metadata = replicate_image_response_metadata(
+                "black-forest-labs/flux-schnell",
+                Some(headers),
+                epoch(),
+            );
+            assert_eq!(
+                metadata
+                    .headers
+                    .as_ref()
+                    .and_then(|headers| headers.get("x-request-id"))
+                    .map(String::as_str),
+                Some("abc"),
+                "{case_id}",
+            );
+        }
+        "image-file-url" => {
+            // URL files are forwarded verbatim as `image`.
+            let (body, _, _) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![image_url_file("https://example.com/input.png")]),
+            )
+            .expect("image body maps");
+            assert_eq!(
+                body["input"]["image"],
+                json_str("https://example.com/input.png"),
+                "{case_id}",
+            );
+        }
+        "image-file-bytes" => {
+            // Uint8Array files become base64 data URIs.
+            let (body, _, _) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![1, 2, 3]),
+                    )]),
+            )
+            .expect("image body maps");
+            assert_eq!(
+                body["input"]["image"],
+                json_str("data:image/png;base64,AQID"),
+                "{case_id}",
+            );
+        }
+        "image-file-base64" => {
+            // base64 string files keep the supplied payload in the data URI.
+            let (body, _, _) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("iVBORw==".to_string()),
+                    )]),
+            )
+            .expect("image body maps");
+            assert_eq!(
+                body["input"]["image"],
+                json_str("data:image/png;base64,iVBORw=="),
+                "{case_id}",
+            );
+        }
+        "image-mask" => {
+            let (body, _, _) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("inpaint")
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![1, 2, 3]),
+                    )),
+            )
+            .expect("image body maps");
+            assert_eq!(
+                body["input"]["mask"],
+                json_str("data:image/png;base64,AQID"),
+                "{case_id}",
+            );
+        }
+        "image-warn-multiple-files" => {
+            let (body, warnings, _) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![
+                        image_url_file("https://example.com/a.png"),
+                        image_url_file("https://example.com/b.png"),
+                    ]),
+            )
+            .expect("image body maps");
+            // first image wins, extras warned about.
+            assert_eq!(
+                body["input"]["image"],
+                json_str("https://example.com/a.png"),
+                "{case_id}",
+            );
+            assert_eq!(warnings.len(), 1, "{case_id}");
+            assert!(
+                matches!(&warnings[0], Warning::Other { message } if message.contains("single input image")),
+                "{case_id}",
+            );
+        }
+        "image-provider-options" => {
+            let (body, _, prefer) = replicate_image_request_body(
+                "black-forest-labs/flux-schnell",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![image_url_file("https://example.com/input.png")])
+                    .with_provider_options(provider_options(json!({
+                        "maxWaitTimeInSeconds": 30,
+                        "output_format": "png",
+                        "custom_setting": "value"
+                    }))),
+            )
+            .expect("image body maps");
+            assert_eq!(prefer, "wait=30", "{case_id}");
+            assert_eq!(body["input"]["output_format"], json_str("png"), "{case_id}");
+            assert_eq!(
+                body["input"]["custom_setting"],
+                json_str("value"),
+                "{case_id}"
+            );
+        }
+        // --- Flux-2 image behavior ---
+        "image-flux2-max-images-8" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            let model = provider.image("black-forest-labs/flux-2-dev");
+            assert_eq!(
+                poll_value(model.max_images_per_call()),
+                Some(MAX_FLUX_2_INPUT_IMAGES),
+                "{case_id}",
+            );
+            assert_eq!(MAX_FLUX_2_INPUT_IMAGES, 8, "{case_id}");
+        }
+        "image-non-flux2-max-images-1" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            let model = provider.image("black-forest-labs/flux-schnell");
+            assert_eq!(
+                poll_value(model.max_images_per_call()),
+                Some(1),
+                "{case_id}"
+            );
+        }
+        "image-flux2-single-image" => {
+            let (body, warnings, _) = replicate_image_request_body(
+                "black-forest-labs/flux-2-dev",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![image_url_file("https://example.com/a.png")]),
+            )
+            .expect("flux-2 body maps");
+            assert_eq!(
+                body["input"]["input_image"],
+                json_str("https://example.com/a.png"),
+                "{case_id}",
+            );
+            assert!(body["input"].get("image").is_none(), "{case_id}");
+            assert!(warnings.is_empty(), "{case_id}");
+        }
+        "image-flux2-multiple-images" => {
+            let (body, warnings, _) = replicate_image_request_body(
+                "black-forest-labs/flux-2-dev",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(vec![
+                        image_url_file("https://example.com/a.png"),
+                        image_url_file("https://example.com/b.png"),
+                        image_url_file("https://example.com/c.png"),
+                    ]),
+            )
+            .expect("flux-2 body maps");
+            assert_eq!(
+                body["input"]["input_image"],
+                json_str("https://example.com/a.png"),
+                "{case_id}",
+            );
+            assert_eq!(
+                body["input"]["input_image_2"],
+                json_str("https://example.com/b.png"),
+                "{case_id}",
+            );
+            assert_eq!(
+                body["input"]["input_image_3"],
+                json_str("https://example.com/c.png"),
+                "{case_id}",
+            );
+            assert!(warnings.is_empty(), "{case_id}");
+        }
+        "image-flux2-warn-too-many" => {
+            let files = (0..9)
+                .map(|index| image_url_file(&format!("https://example.com/{index}.png")))
+                .collect::<Vec<_>>();
+            let (body, warnings, _) = replicate_image_request_body(
+                "black-forest-labs/flux-2-dev",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_files(files),
+            )
+            .expect("flux-2 body maps");
+            assert!(body["input"].get("input_image_9").is_none(), "{case_id}");
+            assert!(
+                warnings.iter().any(|warning| matches!(
+                    warning,
+                    Warning::Other { message } if message.contains("up to 8 input images")
+                )),
+                "{case_id}",
+            );
+        }
+        "image-flux2-warn-mask" => {
+            let (body, warnings, _) = replicate_image_request_body(
+                "black-forest-labs/flux-2-dev",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("edit")
+                    .with_mask(image_url_file("https://example.com/mask.png")),
+            )
+            .expect("flux-2 body maps");
+            assert!(body["input"].get("mask").is_none(), "{case_id}");
+            assert!(
+                warnings.iter().any(|warning| matches!(
+                    warning,
+                    Warning::Other { message } if message.contains("do not support mask")
+                )),
+                "{case_id}",
+            );
+        }
+        "image-flux2-url" => {
+            // Flux-2 models without a version still use /models/{id}/predictions.
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.replicate.com/v1"),
+            );
+            let model = provider.image("black-forest-labs/flux-2-dev");
+            assert_eq!(
+                model.prediction_url(),
+                "https://api.replicate.com/v1/models/black-forest-labs/flux-2-dev/predictions",
+                "{case_id}",
+            );
+        }
+        // --- Provider construction ---
+        "provider-default" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            assert_eq!(provider.base_url, DEFAULT_REPLICATE_BASE_URL, "{case_id}");
+        }
+        "provider-custom" => {
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://custom.example/v1")
+                    .with_header("x-extra", "value"),
+            );
+            assert_eq!(provider.base_url, "https://custom.example/v1", "{case_id}");
+            assert_eq!(
+                provider.settings.headers.get("x-extra").map(String::as_str),
+                Some("value"),
+                "{case_id}",
+            );
+        }
+        "provider-image-instance" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            let model = provider.image("black-forest-labs/flux-schnell");
+            assert_eq!(model.provider(), "replicate", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "black-forest-labs/flux-schnell",
+                "{case_id}"
+            );
+        }
+        "provider-video-instance" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            let model = provider.video("minimax/video-01");
+            assert_eq!(model.provider(), "replicate.video", "{case_id}");
+            assert_eq!(model.model_id(), "minimax/video-01", "{case_id}");
+        }
+        "provider-video-baseurl" => {
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://custom.example/v1"),
+            );
+            let model = provider.video("minimax/video-01");
+            assert_eq!(model.base_url, "https://custom.example/v1", "{case_id}");
+        }
+        "provider-video-transport" => {
+            // a custom transport is threaded into the video model.
+            let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed_clone = Arc::clone(&observed);
+            let transport: ReplicateTransport = Arc::new(move |_request| {
+                observed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "p1",
+                        "status": "succeeded",
+                        "output": "https://replicate.example/video.mp4",
+                        "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+                    })
+                    .to_string(),
+                ))))
+            });
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.example.com/v1"),
+            )
+            .with_transport(transport);
+            let result = poll_value(
+                provider
+                    .video("minimax/video-01")
+                    .do_generate(VideoModelCallOptions::new(1).with_prompt("go")),
+            );
+            assert!(
+                observed.load(std::sync::atomic::Ordering::SeqCst),
+                "{case_id}"
+            );
+            assert_eq!(result.videos.len(), 1, "{case_id}");
+        }
+        // --- Video model behavior ---
+        "video-info" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            let model = provider.video("minimax/video-01");
+            assert_eq!(model.provider(), "replicate.video", "{case_id}");
+            assert_eq!(model.model_id(), "minimax/video-01", "{case_id}");
+        }
+        "video-version-id" => {
+            let provider = create_replicate(ReplicateProviderSettings::new().with_api_token("t"));
+            let model = provider.video("minimax/video-01:abc123");
+            assert_eq!(model.model_id(), "minimax/video-01:abc123", "{case_id}");
+        }
+        "video-body-prompt" => {
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1).with_prompt("A rocket launch"),
+            )
+            .expect("video body maps");
+            assert_eq!(
+                body["input"]["prompt"],
+                json_str("A rocket launch"),
+                "{case_id}"
+            );
+        }
+        "video-url-no-version" => {
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.replicate.com/v1"),
+            );
+            let model = provider.video("minimax/video-01");
+            assert_eq!(
+                model.prediction_url(),
+                "https://api.replicate.com/v1/models/minimax/video-01/predictions",
+                "{case_id}",
+            );
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1).with_prompt("hi"),
+            )
+            .expect("video body maps");
+            assert!(body.get("version").is_none(), "{case_id}");
+        }
+        "video-url-with-version" => {
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.replicate.com/v1"),
+            );
+            let model = provider.video("minimax/video-01:abc123");
+            assert_eq!(
+                model.prediction_url(),
+                "https://api.replicate.com/v1/predictions",
+                "{case_id}",
+            );
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01:abc123",
+                &VideoModelCallOptions::new(1).with_prompt("hi"),
+            )
+            .expect("video body maps");
+            assert_eq!(body["version"], json_str("abc123"), "{case_id}");
+        }
+        "video-seed" => {
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_seed(123),
+            )
+            .expect("video body maps");
+            assert_eq!(body["input"]["seed"], JsonValue::from(123u64), "{case_id}");
+        }
+        "video-aspect-ratio" => {
+            for ratio in ["16:9", "9:16", "1:1", "4:3"] {
+                let (body, _, _, _) = replicate_video_request_body(
+                    "minimax/video-01",
+                    &VideoModelCallOptions::new(1)
+                        .with_prompt("hi")
+                        .with_aspect_ratio(ratio),
+                )
+                .expect("video body maps");
+                assert_eq!(body["input"]["aspect_ratio"], json_str(ratio), "{case_id}");
+            }
+        }
+        "video-resolution-size" => {
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_resolution("720p"),
+            )
+            .expect("video body maps");
+            assert_eq!(body["input"]["size"], json_str("720p"), "{case_id}");
+        }
+        "video-duration" => {
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_duration(5.0),
+            )
+            .expect("video body maps");
+            assert_eq!(body["input"]["duration"], JsonValue::from(5.0), "{case_id}");
+        }
+        "video-fps" => {
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_fps(24.0),
+            )
+            .expect("video body maps");
+            assert_eq!(body["input"]["fps"], JsonValue::from(24.0), "{case_id}");
+        }
+        "video-image-url" => {
+            // URL images forwarded directly.
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1).with_prompt("hi").with_image(
+                    ai_sdk_rust::VideoModelFile::url(
+                        Url::parse("https://example.com/in.png").expect("valid URL"),
+                    ),
+                ),
+            )
+            .expect("video body maps");
+            assert_eq!(
+                body["input"]["image"],
+                json_str("https://example.com/in.png"),
+                "{case_id}",
+            );
+        }
+        "video-image-base64" => {
+            // base64 images become data URIs.
+            let (body, _, _, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1).with_prompt("hi").with_image(
+                    ai_sdk_rust::VideoModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("iVBORw==".to_string()),
+                    ),
+                ),
+            )
+            .expect("video body maps");
+            assert_eq!(
+                body["input"]["image"],
+                json_str("data:image/png;base64,iVBORw=="),
+                "{case_id}",
+            );
+        }
+        "video-custom-options" => {
+            // arbitrary provider options pass through to input, control keys do not.
+            let (body, _, prefer, poll) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_provider_options(provider_options(json!({
+                        "maxWaitTimeInSeconds": 9,
+                        "pollIntervalMs": 100,
+                        "pollTimeoutMs": 200,
+                        "guidance_scale": 7.5,
+                        "num_inference_steps": 20,
+                        "motion_bucket_id": 127,
+                        "prompt_optimizer": true,
+                        "custom": "value"
+                    }))),
+            )
+            .expect("video body maps");
+            assert_eq!(prefer, "wait=9", "{case_id}");
+            assert_eq!(poll.poll_interval_millis, Some(100), "{case_id}");
+            assert_eq!(poll.poll_timeout_millis, Some(200), "{case_id}");
+            assert_eq!(
+                body["input"]["guidance_scale"],
+                JsonValue::from(7.5),
+                "{case_id}"
+            );
+            assert_eq!(
+                body["input"]["num_inference_steps"],
+                JsonValue::from(20),
+                "{case_id}",
+            );
+            assert_eq!(
+                body["input"]["motion_bucket_id"],
+                JsonValue::from(127),
+                "{case_id}"
+            );
+            assert_eq!(
+                body["input"]["prompt_optimizer"],
+                JsonValue::Bool(true),
+                "{case_id}"
+            );
+            assert_eq!(body["input"]["custom"], json_str("value"), "{case_id}");
+            // control keys never reach the request input.
+            assert!(body["input"].get("pollIntervalMs").is_none(), "{case_id}");
+            assert!(body["input"].get("pollTimeoutMs").is_none(), "{case_id}");
+            assert!(
+                body["input"].get("maxWaitTimeInSeconds").is_none(),
+                "{case_id}"
+            );
+        }
+        "video-prefer-wait-time" => {
+            let (_, _, prefer, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("hi")
+                    .with_provider_options(provider_options(json!({ "maxWaitTimeInSeconds": 60 }))),
+            )
+            .expect("video body maps");
+            assert_eq!(prefer, "wait=60", "{case_id}");
+        }
+        "video-prefer-default" => {
+            let (_, _, prefer, _) = replicate_video_request_body(
+                "minimax/video-01",
+                &VideoModelCallOptions::new(1).with_prompt("hi"),
+            )
+            .expect("video body maps");
+            assert_eq!(prefer, "wait", "{case_id}");
+        }
+        "video-response-data" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.mp4",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            assert_eq!(result.videos.len(), 1, "{case_id}");
+            assert_eq!(
+                result.videos[0],
+                VideoModelVideoData::url(
+                    Url::parse("https://replicate.example/video.mp4").expect("valid URL"),
+                    "video/mp4",
+                ),
+                "{case_id}",
+            );
+        }
+        "video-warnings-array" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.mp4",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            assert!(result.warnings.is_empty(), "{case_id}");
+        }
+        "video-response-timestamp-model" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.mp4",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            assert_eq!(result.response.model_id, "minimax/video-01", "{case_id}");
+            assert_eq!(result.response.timestamp, epoch(), "{case_id}");
+        }
+        "video-prediction-metadata" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "prediction-123",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.mp4",
+                "urls": {"get": "https://api.example.com/v1/predictions/prediction-123"},
+                "metrics": {"predict_time": 1.25}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            let replicate = result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("replicate"))
+                .expect("replicate metadata present");
+            assert_eq!(
+                replicate.get("predictionId"),
+                Some(&json_str("prediction-123")),
+                "{case_id}"
+            );
+            assert!(replicate.get("metrics").is_some(), "{case_id}");
+        }
+        "video-error-failed" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "failed",
+                "error": "bad prompt",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            assert!(result.videos.is_empty(), "{case_id}");
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("replicate"))
+                    .and_then(|metadata| metadata.get("errorMessage")),
+                Some(&json_str("Video generation failed: bad prompt")),
+                "{case_id}",
+            );
+        }
+        "video-error-canceled" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "canceled",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("replicate"))
+                    .and_then(|metadata| metadata.get("errorMessage")),
+                Some(&json_str("Video generation was canceled")),
+                "{case_id}",
+            );
+        }
+        "video-error-no-url" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "succeeded",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("replicate"))
+                    .and_then(|metadata| metadata.get("errorMessage")),
+                Some(&json_str("No video URL in response")),
+                "{case_id}",
+            );
+        }
+        "video-poll-pending" => {
+            // pending predictions are recognized as not-done so the model polls.
+            let pending = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "processing",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            assert!(pending.is_pending(), "{case_id}");
+            let done = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.mp4",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            assert!(!done.is_pending(), "{case_id}");
+        }
+        "video-poll-end-to-end" => {
+            // a starting prediction is polled via its `urls.get` until done.
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count_clone = Arc::clone(&count);
+            let transport: ReplicateTransport = Arc::new(move |request| {
+                let n = count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = if n == 0 {
+                    // initial POST -> starting, points to get URL
+                    json!({
+                        "id": "p1",
+                        "status": "starting",
+                        "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+                    })
+                } else {
+                    assert_eq!(
+                        request.method,
+                        ProviderApiRequestMethod::Get,
+                        "poll uses GET"
+                    );
+                    json!({
+                        "id": "p1",
+                        "status": "succeeded",
+                        "output": "https://replicate.example/video.mp4",
+                        "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+                    })
+                };
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    body.to_string(),
+                ))))
+            });
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.example.com/v1"),
+            )
+            .with_transport(transport);
+            let result = poll_value(
+                provider.video("minimax/video-01").do_generate(
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("go")
+                        .with_provider_options(provider_options(json!({
+                            "pollIntervalMs": 1,
+                            "pollTimeoutMs": 5000
+                        }))),
+                ),
+            );
+            assert_eq!(result.videos.len(), 1, "{case_id}");
+            assert!(
+                count.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+                "{case_id}"
+            );
+        }
+        "video-poll-timeout" => {
+            // a perpetually-pending prediction times out and surfaces an error.
+            let transport: ReplicateTransport = Arc::new(move |_request| {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "p1",
+                        "status": "processing",
+                        "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+                    })
+                    .to_string(),
+                ))))
+            });
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.example.com/v1"),
+            )
+            .with_transport(transport);
+            let result = poll_value(
+                provider.video("minimax/video-01").do_generate(
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("go")
+                        .with_provider_options(provider_options(json!({
+                            "pollIntervalMs": 1,
+                            "pollTimeoutMs": 1
+                        }))),
+                ),
+            );
+            assert!(result.videos.is_empty(), "{case_id}");
+            let message = result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("replicate"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(|value| value.as_str())
+                .expect("timeout error message");
+            assert!(message.contains("timed out"), "{case_id}: {message}");
+        }
+        "video-abort" => {
+            let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed_clone = Arc::clone(&observed);
+            let transport: ReplicateTransport = Arc::new(move |_request| {
+                observed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    "{}".to_string(),
+                ))))
+            });
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.example.com/v1"),
+            )
+            .with_transport(transport);
+            let controller = ai_sdk_rust::ProviderAbortController::new();
+            controller.abort();
+            let result = poll_value(
+                provider.video("minimax/video-01").do_generate(
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("go")
+                        .with_abort_signal(controller.signal()),
+                ),
+            );
+            // aborted before sending: no request issued, error surfaced.
+            assert!(
+                !observed.load(std::sync::atomic::Ordering::SeqCst),
+                "{case_id}"
+            );
+            assert!(result.videos.is_empty(), "{case_id}");
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("replicate"))
+                    .and_then(|metadata| metadata.get("errorMessage")),
+                Some(&json_str("Aborted")),
+                "{case_id}",
+            );
+        }
+        "video-immediate-success" => {
+            // status succeeded on first response means no polling.
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count_clone = Arc::clone(&count);
+            let transport: ReplicateTransport = Arc::new(move |_request| {
+                count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "p1",
+                        "status": "succeeded",
+                        "output": "https://replicate.example/video.mp4",
+                        "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+                    })
+                    .to_string(),
+                ))))
+            });
+            let provider = create_replicate(
+                ReplicateProviderSettings::new()
+                    .with_api_token("token")
+                    .with_base_url("https://api.example.com/v1"),
+            )
+            .with_transport(transport);
+            let result = poll_value(
+                provider
+                    .video("minimax/video-01")
+                    .do_generate(VideoModelCallOptions::new(1).with_prompt("go")),
+            );
+            assert_eq!(result.videos.len(), 1, "{case_id}");
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{case_id}"
+            );
+        }
+        "video-media-type" => {
+            let prediction = replicate_prediction_response(&json!({
+                "id": "p1",
+                "status": "succeeded",
+                "output": "https://replicate.example/video.webm",
+                "urls": {"get": "https://api.example.com/v1/predictions/p1"}
+            }))
+            .expect("prediction parses");
+            let result = replicate_video_result_from_prediction(
+                "minimax/video-01",
+                prediction,
+                None,
+                Vec::new(),
+                epoch(),
+            );
+            // media type is always video/mp4 regardless of the URL extension.
+            assert_eq!(
+                result.videos[0],
+                VideoModelVideoData::url(
+                    Url::parse("https://replicate.example/video.webm").expect("valid URL"),
+                    "video/mp4",
+                ),
+                "{case_id}",
+            );
+        }
+        other => panic!("unknown replicate capability bucket: {other} ({case_id})"),
+    }
+}
+
+fn json_str(value: &str) -> JsonValue {
+    JsonValue::String(value.to_string())
+}
+
+fn poll_value<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    use std::sync::Arc as StdArc;
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Instant as StdInstant;
+
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: StdArc<Self>) {}
+    }
+
+    let waker = Waker::from(StdArc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    let start = StdInstant::now();
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => {
+                assert!(
+                    start.elapsed() <= std::time::Duration::from_secs(10),
+                    "future did not complete within 10s",
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

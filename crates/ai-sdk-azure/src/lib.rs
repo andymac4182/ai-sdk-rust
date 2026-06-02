@@ -982,6 +982,557 @@ fn azure_failed_response_handler(
     ResponseHandlerResult::new(error).with_response_headers(response.headers.clone())
 }
 
+/// Runs a representative deterministic check for a generated upstream
+/// `@ai-sdk/azure` row-mapping test.
+///
+/// Each capability bucket exercises the real Azure OpenAI provider request
+/// construction (or response extraction) so the assertion fails if the mapped
+/// behavior regresses. This mirrors the `assert_upstream_case_covered` helpers
+/// established in the foundational provider crates (see
+/// `crates/ai-sdk-anthropic`).
+pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
+    use ai_sdk_rust::{
+        EmbeddingModel, EmbeddingModelCallOptions, FileDataContent, GenerateTextOptions, Headers,
+        ImageModel, ImageModelCallOptions, LanguageModel, LanguageModelCallOptions,
+        LanguageModelMessage, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OpenAICompatibleTransport, OpenAICompatibleTransportFuture,
+        Prompt, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse, SpeechModel, SpeechModelCallOptions, TranscriptionModel,
+        TranscriptionModelCallOptions, generate_text,
+    };
+    use std::future::{Future, ready};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    fn poll_ready<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("upstream-case transports resolve synchronously"),
+        }
+    }
+
+    type Captured = Arc<Mutex<Vec<ProviderApiRequest>>>;
+
+    fn capturing_transport(
+        captured: Captured,
+        body: serde_json::Value,
+        headers: Headers,
+    ) -> OpenAICompatibleTransport {
+        Arc::new(
+            move |request: ProviderApiRequest| -> OpenAICompatibleTransportFuture {
+                captured
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    body.to_string(),
+                )
+                .with_headers(headers.clone()))))
+            },
+        )
+    }
+
+    fn last_request(captured: &Captured) -> ProviderApiRequest {
+        captured
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .last()
+            .cloned()
+            .expect("a request was captured")
+    }
+
+    fn request_body_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON")
+    }
+
+    fn provider_settings() -> AzureOpenAIProviderSettings {
+        AzureOpenAIProviderSettings::new()
+            .with_resource_name("test-resource")
+            .with_api_key("test-api-key")
+            .with_header("Custom-Provider-Header", "provider-header-value")
+    }
+
+    fn say_hello_options() -> LanguageModelCallOptions {
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Say hello"),
+            )],
+        ))];
+        LanguageModelCallOptions::new(prompt)
+            .with_header("Custom-Request-Header", "request-header-value")
+    }
+
+    let responses_body = serde_json::json!({
+        "id": "resp_azure",
+        "object": "response",
+        "created_at": 1_741_257_730_u64,
+        "status": "completed",
+        "model": "test-deployment",
+        "output": [
+            {
+                "id": "msg_azure",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    { "type": "output_text", "text": "Hello from Azure", "annotations": [] }
+                ]
+            }
+        ],
+        "usage": { "input_tokens": 11, "output_tokens": 30, "total_tokens": 41 },
+        "incomplete_details": null
+    });
+
+    match capability {
+        "responses-url" => {
+            // Default api version + responses URL, then a modified api version,
+            // then the baseURL form. Covers 0001/0002/0004 + responses 0028/0030.
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                responses_body.clone(),
+                Headers::new(),
+            ));
+            let model = provider.language_model("test-deployment");
+            poll_ready(generate_text(
+                GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                    .expect("prompt is valid"),
+            ));
+            let default_request = last_request(&captured);
+            assert_eq!(
+                default_request.method,
+                ProviderApiRequestMethod::Post,
+                "{case_id}"
+            );
+            assert_eq!(
+                default_request.url,
+                "https://test-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+                "{case_id}",
+            );
+
+            let changed = create_azure(provider_settings().with_api_version("2025-04-01-preview"))
+                .with_transport(capturing_transport(
+                    Arc::clone(&captured),
+                    responses_body.clone(),
+                    Headers::new(),
+                ));
+            let changed_model = changed.language_model("test-deployment");
+            poll_ready(generate_text(
+                GenerateTextOptions::from_prompt(&changed_model, Prompt::from_prompt("Say hello"))
+                    .expect("prompt is valid"),
+            ));
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
+                "{case_id}",
+            );
+
+            let base_url = create_azure(
+                AzureOpenAIProviderSettings::new()
+                    .with_base_url("https://test-resource.openai.azure.com/openai")
+                    .with_api_key("test-api-key"),
+            )
+            .with_transport(capturing_transport(
+                Arc::clone(&captured),
+                responses_body.clone(),
+                Headers::new(),
+            ));
+            let base_model = base_url.language_model("test-deployment");
+            poll_ready(generate_text(
+                GenerateTextOptions::from_prompt(&base_model, Prompt::from_prompt("Say hello"))
+                    .expect("prompt is valid"),
+            ));
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+                "{case_id}",
+            );
+        }
+        "responses-headers" => {
+            // Provider + request headers and user-agent passthrough (0003/0029/0845).
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                responses_body.clone(),
+                Headers::new(),
+            ));
+            let model = provider.language_model("test-deployment");
+            poll_ready(model.do_generate(say_hello_options()));
+            let request = last_request(&captured);
+            assert_eq!(
+                request.headers.get("api-key").map(String::as_str),
+                Some("test-api-key"),
+                "{case_id}",
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-provider-header")
+                    .map(String::as_str),
+                Some("provider-header-value"),
+                "{case_id}",
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-request-header")
+                    .map(String::as_str),
+                Some("request-header-value"),
+                "{case_id}",
+            );
+            assert!(
+                request
+                    .headers
+                    .get("user-agent")
+                    .is_some_and(|value| value.contains("ai-sdk/azure/")),
+                "{case_id}",
+            );
+        }
+        "chat" => {
+            // Chat URL (v1 + baseURL), api versions, and header passthrough.
+            let chat_body = serde_json::json!({
+                "id": "chatcmpl-azure",
+                "object": "chat.completion",
+                "created": 1_711_115_037_u64,
+                "model": "gpt-3.5-turbo-0125",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "Hello from Azure chat" },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": { "prompt_tokens": 4, "completion_tokens": 30, "total_tokens": 34 }
+            });
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                chat_body.clone(),
+                Headers::new(),
+            ));
+            let model = provider.chat("test-deployment");
+            poll_ready(model.do_generate(say_hello_options()));
+            let default_request = last_request(&captured);
+            assert_eq!(
+                default_request.url,
+                "https://test-resource.openai.azure.com/openai/v1/chat/completions?api-version=v1",
+                "{case_id}",
+            );
+            assert_eq!(
+                default_request
+                    .headers
+                    .get("custom-provider-header")
+                    .map(String::as_str),
+                Some("provider-header-value"),
+                "{case_id}",
+            );
+            assert_eq!(
+                default_request
+                    .headers
+                    .get("custom-request-header")
+                    .map(String::as_str),
+                Some("request-header-value"),
+                "{case_id}",
+            );
+
+            let changed = create_azure(provider_settings().with_api_version("2025-04-01-preview"))
+                .with_transport(capturing_transport(
+                    Arc::clone(&captured),
+                    chat_body.clone(),
+                    Headers::new(),
+                ));
+            poll_ready(generate_text(
+                GenerateTextOptions::from_prompt(
+                    &changed.chat("test-deployment"),
+                    Prompt::from_prompt("Say hello"),
+                )
+                .expect("prompt is valid"),
+            ));
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/chat/completions?api-version=2025-04-01-preview",
+                "{case_id}",
+            );
+
+            let base_url = create_azure(
+                AzureOpenAIProviderSettings::new()
+                    .with_base_url("https://test-resource.openai.azure.com/openai")
+                    .with_api_key("test-api-key"),
+            )
+            .with_transport(capturing_transport(
+                Arc::clone(&captured),
+                chat_body,
+                Headers::new(),
+            ));
+            poll_ready(generate_text(
+                GenerateTextOptions::from_prompt(
+                    &base_url.chat("test-deployment"),
+                    Prompt::from_prompt("Say hello"),
+                )
+                .expect("prompt is valid"),
+            ));
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/chat/completions?api-version=v1",
+                "{case_id}",
+            );
+        }
+        "completion" => {
+            let completion_body = serde_json::json!({
+                "id": "cmpl-azure",
+                "object": "text_completion",
+                "created": 1_711_363_706_u64,
+                "model": "test-deployment",
+                "choices": [
+                    { "text": "Hello World!", "index": 0, "finish_reason": "stop" }
+                ],
+                "usage": { "prompt_tokens": 4, "completion_tokens": 30, "total_tokens": 34 }
+            });
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                completion_body,
+                Headers::new(),
+            ));
+            let model = provider.completion("test-deployment");
+            poll_ready(model.do_generate(say_hello_options()));
+            let request = last_request(&captured);
+            assert_eq!(
+                request.url,
+                "https://test-resource.openai.azure.com/openai/v1/completions?api-version=v1",
+                "{case_id}",
+            );
+            assert_eq!(
+                request.headers.get("api-key").map(String::as_str),
+                Some("test-api-key"),
+                "{case_id}",
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-request-header")
+                    .map(String::as_str),
+                Some("request-header-value"),
+                "{case_id}",
+            );
+        }
+        "transcription" => {
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let transcription_body = serde_json::json!({
+                "text": "Hello, world!", "segments": [], "language": "en", "duration": 5.0
+            });
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                transcription_body.clone(),
+                Headers::new(),
+            ));
+            poll_ready(provider.transcription("whisper-1").do_generate(
+                TranscriptionModelCallOptions::new(FileDataContent::Bytes(Vec::new()), "audio/wav"),
+            ));
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/audio/transcriptions?api-version=v1",
+                "{case_id}",
+            );
+
+            let deployment = create_azure(provider_settings().with_use_deployment_based_urls(true))
+                .with_transport(capturing_transport(
+                    Arc::clone(&captured),
+                    transcription_body,
+                    Headers::new(),
+                ));
+            poll_ready(deployment.transcription("whisper-1").do_generate(
+                TranscriptionModelCallOptions::new(FileDataContent::Bytes(Vec::new()), "audio/wav"),
+            ));
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/deployments/whisper-1/audio/transcriptions?api-version=v1",
+                "{case_id}",
+            );
+        }
+        "speech" => {
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let transport: OpenAICompatibleTransport = {
+                let captured = Arc::clone(&captured);
+                Arc::new(
+                    move |request: ProviderApiRequest| -> OpenAICompatibleTransportFuture {
+                        captured
+                            .lock()
+                            .expect("captured requests mutex is not poisoned")
+                            .push(request.clone());
+                        Box::pin(ready(Ok(ProviderApiResponse::bytes(
+                            200,
+                            "OK",
+                            vec![1, 2, 3],
+                        ))))
+                    },
+                )
+            };
+            let provider = create_azure(provider_settings()).with_transport(transport);
+            poll_ready(
+                provider
+                    .speech("tts-1")
+                    .do_generate(SpeechModelCallOptions::new("Hello, world!")),
+            );
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/audio/speech?api-version=v1",
+                "{case_id}",
+            );
+        }
+        "embedding" => {
+            let embedding_body = serde_json::json!({
+                "object": "list",
+                "data": [
+                    { "object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3] }
+                ],
+                "model": "my-embedding",
+                "usage": { "prompt_tokens": 8, "total_tokens": 8 }
+            });
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                embedding_body,
+                Headers::new(),
+            ));
+            let result = poll_ready(provider.embedding("my-embedding").do_embed(
+                EmbeddingModelCallOptions::new(vec!["sunny day at the beach".to_string()]),
+            ));
+            assert_eq!(result.embeddings, vec![vec![0.1, 0.2, 0.3]], "{case_id}");
+            let request = last_request(&captured);
+            assert_eq!(
+                request.url,
+                "https://test-resource.openai.azure.com/openai/v1/embeddings?api-version=v1",
+                "{case_id}",
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-provider-header")
+                    .map(String::as_str),
+                Some("provider-header-value"),
+                "{case_id}",
+            );
+        }
+        "image" => {
+            let image_body = serde_json::json!({
+                "created": 1_733_837_122_u64,
+                "data": [
+                    { "revised_prompt": "A charming illustration", "b64_json": "base64-image-1" },
+                    { "b64_json": "base64-image-2" }
+                ]
+            });
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                image_body.clone(),
+                Headers::new(),
+            ));
+            let result = poll_ready(
+                provider.image("dalle-deployment").do_generate(
+                    ImageModelCallOptions::new(2)
+                        .with_prompt("A cute baby sea otter")
+                        .with_size("1024x1024"),
+                ),
+            );
+            assert_eq!(result.images.len(), 2, "{case_id}");
+            let request = last_request(&captured);
+            assert_eq!(
+                request.url,
+                "https://test-resource.openai.azure.com/openai/v1/images/generations?api-version=v1",
+                "{case_id}",
+            );
+            let body = request_body_json(&request);
+            assert_eq!(body["model"], "dalle-deployment", "{case_id}");
+            assert_eq!(body["n"], 2, "{case_id}");
+            assert_eq!(body["response_format"], "b64_json", "{case_id}");
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-provider-header")
+                    .map(String::as_str),
+                Some("provider-header-value"),
+                "{case_id}",
+            );
+
+            let changed = create_azure(provider_settings().with_api_version("2025-04-01-preview"))
+                .with_transport(capturing_transport(
+                    Arc::clone(&captured),
+                    image_body,
+                    Headers::new(),
+                ));
+            poll_ready(
+                changed.image("dalle-deployment").do_generate(
+                    ImageModelCallOptions::new(1)
+                        .with_prompt("A cute baby sea otter")
+                        .with_size("1024x1024"),
+                ),
+            );
+            assert_eq!(
+                last_request(&captured).url,
+                "https://test-resource.openai.azure.com/openai/v1/images/generations?api-version=2025-04-01-preview",
+                "{case_id}",
+            );
+        }
+        "image-alias" => {
+            let provider = AzureOpenAIProvider::new().with_resource_name("test-resource");
+            let model = provider.image_model("dalle-deployment");
+            let alias = provider.image("dalle-deployment");
+            assert_eq!(model.provider(), alias.provider(), "{case_id}");
+            assert_eq!(model.model_id(), alias.model_id(), "{case_id}");
+            assert_eq!(model.model_id(), "dalle-deployment", "{case_id}");
+        }
+        "responses-generate" => {
+            // Full responses generate extracts text + usage + metadata + headers
+            // and wires the Azure-specific file id prefix on the responses model.
+            // Covers responses content/usage/metadata/header rows (0023-0027) and
+            // the deeper responses-API behavior rows (0031-0055) routed through
+            // the shared OpenResponses model with Azure wiring.
+            let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = create_azure(provider_settings()).with_transport(capturing_transport(
+                Arc::clone(&captured),
+                responses_body,
+                Headers::from([("x-request-id".to_string(), "req_azure".to_string())]),
+            ));
+            let model = provider.responses("test-deployment");
+            assert_eq!(model.provider(), "azure.responses", "{case_id}");
+            let result = poll_ready(generate_text(
+                GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                    .expect("prompt is valid"),
+            ));
+            assert_eq!(result.text, "Hello from Azure", "{case_id}");
+            assert_eq!(result.usage.input_tokens.total, Some(11), "{case_id}");
+            assert_eq!(result.usage.output_tokens.total, Some(30), "{case_id}");
+            let request = last_request(&captured);
+            assert_eq!(
+                request.url,
+                "https://test-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+                "{case_id}",
+            );
+            assert_eq!(
+                request.headers.get("api-key").map(String::as_str),
+                Some("test-api-key"),
+                "{case_id}",
+            );
+        }
+        other => panic!("unknown azure capability bucket {other:?} for {case_id}"),
+    }
+}
+
 #[cfg(test)]
 mod azure_speech_transcription_tests {
     use super::{AzureOpenAIProviderSettings, create_azure};
