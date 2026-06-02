@@ -37,6 +37,7 @@ pub use exec::{
     JUST_BASH_TIMEOUT_EXIT_CODE, JustBashCancelToken, JustBashCustomCommand,
     JustBashCustomCommandContext, JustBashCustomCommandResult, JustBashExecMetadata,
     JustBashExecOptions, JustBashExecResult, JustBashExecutor, JustBashExecutorTool,
+    JustBashLanguageRuntime, JustBashLanguageRuntimeContext, JustBashLanguageRuntimeKind,
     JustBashSession, JustBashSessionOptions,
 };
 pub use file_reader::{

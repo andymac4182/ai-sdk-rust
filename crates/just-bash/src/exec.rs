@@ -248,6 +248,125 @@ impl From<JustBashExecResult> for JustBashCustomCommandResult {
     }
 }
 
+/// Optional language runtime family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JustBashLanguageRuntimeKind {
+    /// JavaScript/TypeScript commands (`js-exec` and `node` upstream aliases).
+    JavaScript,
+    /// Python commands (`python3` and `python` upstream aliases).
+    Python,
+}
+
+impl JustBashLanguageRuntimeKind {
+    const fn command_names(self) -> &'static [&'static str] {
+        match self {
+            Self::JavaScript => &["js-exec", "node"],
+            Self::Python => &["python3", "python"],
+        }
+    }
+}
+
+/// Context passed to an explicit optional language runtime backend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JustBashLanguageRuntimeContext {
+    /// Runtime family selected by the command name.
+    pub kind: JustBashLanguageRuntimeKind,
+    /// Actual command token used by the script, after basename normalization.
+    pub command: String,
+    /// Arguments after the command name.
+    pub args: Vec<String>,
+    /// Effective working directory for the current exec.
+    pub cwd: String,
+    /// Effective environment for the current exec.
+    pub env: BTreeMap<String, String>,
+    /// Standard input received from a pipeline or per-exec stdin.
+    pub stdin: String,
+}
+
+/// Explicit opt-in backend for optional language commands.
+///
+/// The Rust backend never discovers or falls back to host `node`, `python`, or
+/// `/bin/bash`. A caller must provide one of these backends to make the
+/// corresponding language command names available.
+#[derive(Clone)]
+pub struct JustBashLanguageRuntime {
+    kind: JustBashLanguageRuntimeKind,
+    handler:
+        Arc<dyn Fn(JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult + Send + Sync>,
+}
+
+impl fmt::Debug for JustBashLanguageRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JustBashLanguageRuntime")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl JustBashLanguageRuntime {
+    /// Creates a language runtime backend for the selected family.
+    pub fn new(
+        kind: JustBashLanguageRuntimeKind,
+        handler: impl Fn(JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            kind,
+            handler: Arc::new(handler),
+        }
+    }
+
+    /// Creates a JavaScript runtime backend for `js-exec` and `node`.
+    pub fn javascript(
+        handler: impl Fn(JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::new(JustBashLanguageRuntimeKind::JavaScript, handler)
+    }
+
+    /// Creates a Python runtime backend for `python3` and `python`.
+    pub fn python(
+        handler: impl Fn(JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::new(JustBashLanguageRuntimeKind::Python, handler)
+    }
+
+    /// Returns the runtime family.
+    pub const fn kind(&self) -> JustBashLanguageRuntimeKind {
+        self.kind
+    }
+
+    fn command_names(&self) -> &'static [&'static str] {
+        self.kind.command_names()
+    }
+
+    fn execute(
+        &self,
+        command: &str,
+        args: &[String],
+        cwd: &str,
+        env: &BTreeMap<String, String>,
+        stdin: &str,
+    ) -> JustBashCustomCommandResult {
+        (self.handler)(JustBashLanguageRuntimeContext {
+            kind: self.kind,
+            command: command.to_string(),
+            args: args.to_vec(),
+            cwd: cwd.to_string(),
+            env: env.clone(),
+            stdin: stdin.to_string(),
+        })
+    }
+}
+
 /// Context passed to a Rust custom command handler.
 #[derive(Clone, Debug)]
 pub struct JustBashCustomCommandContext {
@@ -512,6 +631,9 @@ pub struct JustBashSessionOptions {
     pub commands: Option<Vec<String>>,
     /// Public Rust custom commands available before built-ins.
     pub custom_commands: Vec<JustBashCustomCommand>,
+    /// Explicit optional language runtimes. Without these providers, `js-exec`,
+    /// `node`, `python3`, and `python` fail closed with command-not-found.
+    pub language_runtimes: Vec<JustBashLanguageRuntime>,
     /// Whether to create the upstream default `/home/user` layout.
     pub create_default_layout: bool,
     /// Optional network policy. When present, `curl` is registered and routed
@@ -533,6 +655,7 @@ impl Default for JustBashSessionOptions {
             executor: None,
             commands: None,
             custom_commands: Vec::new(),
+            language_runtimes: Vec::new(),
             create_default_layout: true,
             network_policy: None,
             network_responses: BTreeMap::new(),
@@ -613,6 +736,34 @@ impl JustBashSessionOptions {
         self
     }
 
+    /// Adds one explicit optional language runtime backend.
+    pub fn with_language_runtime(mut self, runtime: JustBashLanguageRuntime) -> Self {
+        self.language_runtimes.push(runtime);
+        self
+    }
+
+    /// Adds a JavaScript runtime backend for `js-exec` and `node`.
+    pub fn with_javascript_runtime(
+        self,
+        handler: impl Fn(JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.with_language_runtime(JustBashLanguageRuntime::javascript(handler))
+    }
+
+    /// Adds a Python runtime backend for `python3` and `python`.
+    pub fn with_python_runtime(
+        self,
+        handler: impl Fn(JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.with_language_runtime(JustBashLanguageRuntime::python(handler))
+    }
+
     /// Controls whether the upstream default `/home/user` layout is created.
     pub fn with_create_default_layout(mut self, create: bool) -> Self {
         self.create_default_layout = create;
@@ -651,6 +802,7 @@ struct JustBashSessionInner {
     executor: Option<JustBashExecutor>,
     commands: CommandRegistry,
     custom_commands: BTreeMap<String, JustBashCustomCommand>,
+    language_runtimes: BTreeMap<String, JustBashLanguageRuntime>,
     network_policy: Option<NetworkPolicy>,
     network_responses: BTreeMap<String, NetworkResponse>,
 }
@@ -683,10 +835,24 @@ impl JustBashSession {
                     registry
                 }
             });
+        let language_runtimes = options
+            .language_runtimes
+            .into_iter()
+            .flat_map(|runtime| {
+                runtime
+                    .command_names()
+                    .iter()
+                    .map(move |name| ((*name).to_string(), runtime.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut fs = VirtualFileSystem::new();
         fs.mkdir("/bin", MkdirOptions { recursive: true })
             .expect("default Just Bash /bin directory is valid");
-        for name in commands.names() {
+        for name in commands
+            .names()
+            .into_iter()
+            .chain(language_runtimes.keys().cloned())
+        {
             fs.write_file(&format!("/bin/{name}"), "")
                 .expect("command stub path is valid");
         }
@@ -727,6 +893,7 @@ impl JustBashSession {
                     .into_iter()
                     .map(|command| (command.name().to_string(), command))
                     .collect(),
+                language_runtimes,
                 network_policy: options.network_policy,
                 network_responses: options.network_responses,
             }),
@@ -835,6 +1002,7 @@ impl JustBashSession {
     pub fn registered_command_names(&self) -> Vec<String> {
         let mut names = self.inner.commands.names();
         names.extend(self.inner.custom_commands.keys().cloned());
+        names.extend(self.inner.language_runtimes.keys().cloned());
         names.sort();
         names.dedup();
         names
@@ -1044,6 +1212,9 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         return result;
     }
     if let Some(result) = execute_executor_command(state, command, &tokens[1..], &stdin) {
+        return result;
+    }
+    if let Some(result) = execute_language_runtime(state, command, &tokens[1..], &stdin) {
         return result;
     }
     if !state.session.inner.commands.contains(command) {
@@ -11898,6 +12069,22 @@ fn execute_custom_command(
     })
 }
 
+fn execute_language_runtime(
+    state: &ExecState<'_>,
+    command: &str,
+    args: &[String],
+    stdin: &str,
+) -> Option<CommandResult> {
+    let runtime = state.session.inner.language_runtimes.get(command)?;
+    let result = runtime.execute(command, args, &state.cwd, &state.env, stdin);
+    Some(CommandResult {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        exit_requested: false,
+    })
+}
+
 fn execute_executor_command(
     state: &ExecState<'_>,
     namespace: &str,
@@ -12542,6 +12729,148 @@ mod tests {
                 }),
             )
             .with_expose_tools_as_commands(false)
+    }
+
+    fn fake_runtime_result(context: JustBashLanguageRuntimeContext) -> JustBashCustomCommandResult {
+        if context.kind == JustBashLanguageRuntimeKind::Python
+            && context.args.len() == 1
+            && context.args[0] == "--version"
+        {
+            return JustBashCustomCommandResult::stdout("Python 3.13.0 (fake runtime)\n");
+        }
+        let kind = match context.kind {
+            JustBashLanguageRuntimeKind::JavaScript => "javascript",
+            JustBashLanguageRuntimeKind::Python => "python",
+        };
+        let trace = context
+            .env
+            .get("TRACE")
+            .cloned()
+            .unwrap_or_else(|| "missing".to_string());
+        JustBashCustomCommandResult::stdout(format!(
+            "fake:{kind}:{}:{}:{}:{}:{}\n",
+            context.command,
+            context.args.join(","),
+            context.stdin,
+            context.cwd,
+            trace
+        ))
+    }
+
+    #[test]
+    fn just_bash_optional_language_commands_fail_closed_until_backend_is_explicit() {
+        let session = JustBashSession::new();
+
+        assert!(
+            !session
+                .registered_command_names()
+                .contains(&"js-exec".to_string())
+        );
+        assert!(
+            !session
+                .registered_command_names()
+                .contains(&"node".to_string())
+        );
+        assert!(
+            !session
+                .registered_command_names()
+                .contains(&"python3".to_string())
+        );
+        assert!(
+            !session
+                .registered_command_names()
+                .contains(&"python".to_string())
+        );
+
+        for command in [
+            "js-exec -c \"console.log('host-js')\"",
+            "node -e \"console.log('host-node')\"",
+            "python3 -c \"print('host-python3')\"",
+            "python -c \"print('host-python')\"",
+            "/usr/bin/node -e \"console.log('host-node')\"",
+            "/usr/bin/python3 -c \"print('host-python3')\"",
+            "/usr/bin/env node -e \"console.log('host-node')\"",
+        ] {
+            let result = session.exec(command, JustBashExecOptions::new());
+            assert_eq!(result.exit_code, 127, "{command}");
+            assert_eq!(result.stdout, "", "{command}");
+            assert!(result.stderr.contains("command not found"), "{command}");
+            assert!(!result.stderr.contains("host-js"), "{command}");
+            assert!(!result.stderr.contains("host-node"), "{command}");
+            assert!(!result.stderr.contains("host-python"), "{command}");
+        }
+    }
+
+    #[test]
+    fn just_bash_optional_language_commands_use_only_explicit_fake_backend() {
+        let session = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_cwd("/workspace")
+                .with_file("/workspace/input.txt", "stdin payload")
+                .with_env("TRACE", "base")
+                .with_commands(["echo", "cat"])
+                .with_javascript_runtime(fake_runtime_result)
+                .with_python_runtime(fake_runtime_result),
+        );
+
+        let names = session.registered_command_names();
+        for name in ["echo", "cat", "js-exec", "node", "python3", "python"] {
+            assert!(names.contains(&name.to_string()), "{name}");
+        }
+        assert!(!names.contains(&"ls".to_string()));
+
+        let js = session.exec(
+            "cat input.txt | js-exec --module script.mjs arg1",
+            JustBashExecOptions::new().with_env("TRACE", "exec"),
+        );
+        assert_eq!(js.exit_code, 0);
+        assert_eq!(
+            js.stdout,
+            "fake:javascript:js-exec:--module,script.mjs,arg1:stdin payload:/workspace:exec\n"
+        );
+        assert_eq!(js.stderr, "");
+
+        let node = session.exec("/usr/bin/node -e code", JustBashExecOptions::new());
+        assert_eq!(
+            node.stdout,
+            "fake:javascript:node:-e,code::/workspace:base\n"
+        );
+
+        let python = session.exec(
+            "python3 - --answer 42",
+            JustBashExecOptions::new()
+                .with_stdin("print('fake')")
+                .with_env("TRACE", "stdin"),
+        );
+        assert_eq!(
+            python.stdout,
+            "fake:python:python3:-,--answer,42:print('fake'):/workspace:stdin\n"
+        );
+
+        let version = session.exec("python3 --version", JustBashExecOptions::new());
+        assert!(version.stdout.contains("Python 3."));
+
+        let alias = session.exec("python -c code", JustBashExecOptions::new());
+        assert_eq!(
+            alias.stdout,
+            "fake:python:python:-c,code::/workspace:base\n"
+        );
+    }
+
+    #[test]
+    fn just_bash_host_runtime_custom_command_defense_rows_are_classified_nonportable() {
+        let trusted = JustBashCustomCommand::new("myfetch", |_context| {
+            JustBashCustomCommandResult::stdout("custom-ok\n")
+        });
+        let session = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_custom_command(trusted),
+        );
+
+        let result = session.exec("myfetch", JustBashExecOptions::new());
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "custom-ok\n");
+        assert_eq!(result.stderr, "");
+        assert!(!result.metadata.external_sandbox);
     }
 
     fn countries_executor() -> JustBashExecutor {
