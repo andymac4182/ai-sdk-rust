@@ -25,9 +25,9 @@ inventory. Strict parity closes only when every portable upstream row in
 
 Just Bash is now part of the parent TypeScript-to-Rust parity goal and tracked
 alongside Open Agents, AI SDK, Chat SDK, Workflow SDK, and Open Plugin Spec.
-The current parity ledger maps 4,094 upstream rows to named Rust tests, NAPI-backed JS proofs, or generated corpus proofs, leaves
-5,318 rows `portable-pending`, documents 524 JS-only exceptions, and has 5,329 strict gate gaps. The remaining closure wave is tracked as JBC-29 through
-  JBC-32 in `docs/ts-to-rust-migration-tracker.md`.
+The current parity ledger maps 4,111 upstream rows to named Rust tests, NAPI-backed JS proofs, or generated
+corpus proofs, leaves 5,301 rows `portable-pending`, documents 524 JS-only exceptions, and has 5,312 strict gate gaps. The conformance corpus now maps 400 generated cases to Rust runner proofs and leaves 1,271 generated cases pending. The remaining closure wave is tracked as JBC-30
+through JBC-32 in `docs/ts-to-rust-migration-tracker.md`.
 
 ## Source Snapshot
 
@@ -75,10 +75,10 @@ The current parity ledger maps 4,094 upstream rows to named Rust tests, NAPI-bac
 | JBC-26 | Filesystem semantics and path edge closure | Close remaining `fs:*`, file-operation, path normalization, symlink, mount routing, overlay precedence, permissions, binary/text encoding, and error-shape rows not covered by JBC-13. | Focused filesystem/path tests; corpus file-op subsets; `cargo test -p just-bash`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-27 | Security, limits, and attack corpus closure | Close remaining security attack, limits, sandbox, fuzzing, prototype-pollution, and policy rows with deterministic Rust tests, documenting only true JavaScript worker/browser hardening rows as JS-only exceptions. | Focused security/fuzz/limits tests; `cargo test -p just-bash`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-28 | Host-runtime command and JS/Python boundary closure | Closed optional-runtime absence and direct host-runtime probes with Rust/Open Agents tests, documented true JavaScript worker/Node-compat/QuickJS/bridge rows as JS-only, and left enabled `js-exec`/`python3` behavior pending. | `cargo test -p just-bash just_bash_optional_js_python_commands_fail_closed_without_host_runtime`; `cargo test -p just-bash just_bash_runtime_bridge_surfaces_are_classified_nonportable`; `cargo test -p open-agents-sandbox open_agents_just_bash_blocks_js_python_host_runtime_without_fallback`; `cargo test -p just-bash -p open-agents-sandbox`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
-| JBC-29 | Comparison fixture broad closure | Run and promote the remaining portable comparison fixture rows through the dual-engine corpus, splitting command-family failures back to owning rows instead of broad smoke-mapping them. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs`; `cargo test -p just-bash --test conformance_corpus`; inventory/corpus checks. |
+| JBC-29 | Comparison fixture broad closure | Promoted 17 additional exact-pass `jq` comparison fixture rows through the Rust runner corpus without broad command-family smoke mapping, bringing the Rust fixture to 211 exact-pass comparison cases. | `JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs`; `JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs`; `cargo test -p just-bash --test conformance_corpus`; inventory/corpus checks. |
 | JBC-30 | Agent examples and Open Agents command integration closure | Close `agent-examples` and Open Agents command-execution rows proving Slack remote-agent tasks can use crate-backed Just Bash for multi-command workflows, stateful virtual files, failure surfaces, and no sandbox fallback unless explicitly selected. | `cargo test -p open-agents-service -p open-agents-sandbox -p just-bash`; `scripts/open-agents-local-e2e.sh --just-bash-conformance`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-31 | Upstream docs/examples parity closure | Close portable README, docs, examples, custom-command, website, and bash-agent example behavior that represents public Just Bash API usage, with explicit exceptions for docs-only or browser-only rows. | Docs/example inventory check; NAPI/JS harness examples where applicable; `cargo test -p just-bash`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
-| JBC-32 | Just Bash strict parity burn-down and final audit | Reconcile all remaining rows after JBC-19 through JBC-31, remove stale pending owners, prove every portable row maps to a named Rust test or corpus case, document final exceptions, and flip the strict gate only when zero `portable-pending` rows remain. | `node scripts/just-bash-test-inventory.mjs --strict`; `node scripts/just-bash-conformance-corpus.mjs --check`; TypeScript and Rust dual-engine conformance runs; `scripts/master-parity-gate.sh --check`; full fmt/clippy/naming/diff gates. |
+| JBC-32 | Just Bash strict parity burn-down and final audit | Reconcile all remaining rows after JBC-30 through JBC-31, remove stale pending owners, prove every portable row maps to a named Rust test or corpus case, document final exceptions, and flip the strict gate only when zero `portable-pending` rows remain. | `node scripts/just-bash-test-inventory.mjs --strict`; `node scripts/just-bash-conformance-corpus.mjs --check`; TypeScript and Rust dual-engine conformance runs; `scripts/master-parity-gate.sh --check`; full fmt/clippy/naming/diff gates. |
 
 ## Corpus Contract
 
@@ -144,8 +144,8 @@ The current parity ledger maps 4,094 upstream rows to named Rust tests, NAPI-bac
 
 | Status | Cases |
 | --- | --- |
-| portable-pending | 1288 |
-| portable-verified | 383 |
+| portable-pending | 1271 |
+| portable-verified | 400 |
 
 ## Rust Runner Fixture
 
@@ -156,7 +156,7 @@ stdout, stderr, and exit code; mismatching rows remain `portable-pending`.
 
 | Field | Value |
 | --- | --- |
-| Exact-pass comparison cases | 194 |
+| Exact-pass comparison cases | 211 |
 | Expected failures | 0 |
 | Test command | `cargo test -p just-bash --test conformance_corpus` |
 
@@ -169,7 +169,7 @@ stdout, stderr, and exit code; mismatching rows remain `portable-pending`.
 | echo | 26 |
 | grep | 19 |
 | head-tail | 12 |
-| jq | 10 |
+| jq | 27 |
 | ls | 9 |
 | pipes-redirections | 10 |
 | pwd-cd-env | 6 |

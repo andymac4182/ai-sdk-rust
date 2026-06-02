@@ -137,15 +137,32 @@ const rustRunnerComparisonCaseIds = [
   'comparison:head-tail:d99b0046180efb2b',
   'comparison:head-tail:e1cf4bd4e1e39e27',
   'comparison:head-tail:e72c50c3f9f71f29',
+  'comparison:jq:0c29bfa5bb213ca7',
   'comparison:jq:10c509b3ce6cdbb2',
+  'comparison:jq:1eee3b8ed9a28b4d',
+  'comparison:jq:22ace437afb05029',
   'comparison:jq:23c97b80a1a55790',
+  'comparison:jq:2ae5488e94cb05cc',
   'comparison:jq:3276c73f2ae560a6',
+  'comparison:jq:3a5bd13032387ef1',
+  'comparison:jq:71b1316136a76f95',
   'comparison:jq:7520876197cdc6be',
+  'comparison:jq:784cdf05d7bd0991',
+  'comparison:jq:7b7456943760154c',
+  'comparison:jq:8105f346b43748a2',
   'comparison:jq:91c885f22f4323a6',
+  'comparison:jq:937a32a880c8c8cd',
   'comparison:jq:a20be29f72c20715',
+  'comparison:jq:aac68dc54a55fad2',
   'comparison:jq:b9af66a6586c6d00',
+  'comparison:jq:bf18a612e809e249',
   'comparison:jq:c0f228f8add71471',
   'comparison:jq:de6ea82b7109ba1d',
+  'comparison:jq:e433b214be1f80db',
+  'comparison:jq:e808cfbdc52662c0',
+  'comparison:jq:eecd9132c8f55a66',
+  'comparison:jq:eed67a538c8414f7',
+  'comparison:jq:f1149342c3f0e494',
   'comparison:jq:ff7f24721da0b6cc',
   'comparison:ls:3b7d8ce2d6992be7',
   'comparison:ls:3ff2b49021e0b8df',
@@ -240,6 +257,25 @@ const rustRunnerComparisonCaseIds = [
 ];
 const rustRunnerComparisonCaseIdSet = new Set(rustRunnerComparisonCaseIds);
 const jbc21SmallCommandComparisonCaseIdSet = new Set(jbc21SmallCommandComparisonCaseIds);
+const jbc29RustRunnerComparisonCaseIdSet = new Set([
+  'comparison:jq:0c29bfa5bb213ca7',
+  'comparison:jq:1eee3b8ed9a28b4d',
+  'comparison:jq:22ace437afb05029',
+  'comparison:jq:2ae5488e94cb05cc',
+  'comparison:jq:3a5bd13032387ef1',
+  'comparison:jq:71b1316136a76f95',
+  'comparison:jq:784cdf05d7bd0991',
+  'comparison:jq:7b7456943760154c',
+  'comparison:jq:8105f346b43748a2',
+  'comparison:jq:937a32a880c8c8cd',
+  'comparison:jq:aac68dc54a55fad2',
+  'comparison:jq:bf18a612e809e249',
+  'comparison:jq:e433b214be1f80db',
+  'comparison:jq:e808cfbdc52662c0',
+  'comparison:jq:eecd9132c8f55a66',
+  'comparison:jq:eed67a538c8414f7',
+  'comparison:jq:f1149342c3f0e494',
+]);
 
 const unitSourceFiles = [
   'packages/just-bash/src/commands/printf/printf.test.ts',
@@ -417,6 +453,8 @@ function rustRunnerProofFor(testCase) {
     return undefined;
   }
   const isJbc21 = jbc21SmallCommandComparisonCaseIdSet.has(testCase.id);
+  const isJbc29 = jbc29RustRunnerComparisonCaseIdSet.has(testCase.id);
+  const source = isJbc21 ? 'JBC-21' : isJbc29 ? 'JBC-29' : 'JBC-11';
   return {
     status: 'portable-verified',
     owner: isJbc21
@@ -425,8 +463,8 @@ function rustRunnerProofFor(testCase) {
     rustTest: rustRunnerCaseName(testCase.id),
     notes: isJbc21
       ? 'JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.'
-      : 'JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.',
-    source: isJbc21 ? 'JBC-21' : 'JBC-11',
+      : `${source} Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.`,
+    source,
   };
 }
 
@@ -2092,6 +2130,9 @@ function renderDocs(corpus) {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([domain, count]) => [domain, count]);
   const parityLedgerSummary = readParityLedgerSummary();
+  const conformanceVerified =
+    corpus.summary.byStatus['portable-verified'] ?? 0;
+  const conformancePending = corpus.summary.byStatus['portable-pending'] ?? 0;
 
   return `# Just Bash Conformance Plan
 
@@ -2122,15 +2163,19 @@ Just Bash is now part of the parent TypeScript-to-Rust parity goal and tracked
 alongside Open Agents, AI SDK, Chat SDK, Workflow SDK, and Open Plugin Spec.
 The current parity ledger maps ${formatSummaryCount(
     parityLedgerSummary.portableVerified
-  )} upstream rows to named Rust tests, NAPI-backed JS proofs, or generated corpus proofs, leaves
-${formatSummaryCount(
+  )} upstream rows to named Rust tests, NAPI-backed JS proofs, or generated
+corpus proofs, leaves ${formatSummaryCount(
     parityLedgerSummary.portablePending
   )} rows \`portable-pending\`, documents ${formatSummaryCount(
     parityLedgerSummary.jsOnlyDocumented
   )} JS-only exceptions, and has ${formatSummaryCount(
     parityLedgerSummary.strictGateGaps
-  )} strict gate gaps. The remaining closure wave is tracked as JBC-29 through
-  JBC-32 in \`docs/ts-to-rust-migration-tracker.md\`.
+  )} strict gate gaps. The conformance corpus now maps ${formatSummaryCount(
+    conformanceVerified
+  )} generated cases to Rust runner proofs and leaves ${formatSummaryCount(
+    conformancePending
+  )} generated cases pending. The remaining closure wave is tracked as JBC-30
+through JBC-32 in \`docs/ts-to-rust-migration-tracker.md\`.
 
 ## Source Snapshot
 
@@ -2178,10 +2223,10 @@ ${formatSummaryCount(
 | JBC-26 | Filesystem semantics and path edge closure | Close remaining \`fs:*\`, file-operation, path normalization, symlink, mount routing, overlay precedence, permissions, binary/text encoding, and error-shape rows not covered by JBC-13. | Focused filesystem/path tests; corpus file-op subsets; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-27 | Security, limits, and attack corpus closure | Close remaining security attack, limits, sandbox, fuzzing, prototype-pollution, and policy rows with deterministic Rust tests, documenting only true JavaScript worker/browser hardening rows as JS-only exceptions. | Focused security/fuzz/limits tests; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-28 | Host-runtime command and JS/Python boundary closure | Closed optional-runtime absence and direct host-runtime probes with Rust/Open Agents tests, documented true JavaScript worker/Node-compat/QuickJS/bridge rows as JS-only, and left enabled \`js-exec\`/\`python3\` behavior pending. | \`cargo test -p just-bash just_bash_optional_js_python_commands_fail_closed_without_host_runtime\`; \`cargo test -p just-bash just_bash_runtime_bridge_surfaces_are_classified_nonportable\`; \`cargo test -p open-agents-sandbox open_agents_just_bash_blocks_js_python_host_runtime_without_fallback\`; \`cargo test -p just-bash -p open-agents-sandbox\`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
-| JBC-29 | Comparison fixture broad closure | Run and promote the remaining portable comparison fixture rows through the dual-engine corpus, splitting command-family failures back to owning rows instead of broad smoke-mapping them. | \`JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs\`; \`JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs\`; \`cargo test -p just-bash --test conformance_corpus\`; inventory/corpus checks. |
+| JBC-29 | Comparison fixture broad closure | Promoted 17 additional exact-pass \`jq\` comparison fixture rows through the Rust runner corpus without broad command-family smoke mapping, bringing the Rust fixture to ${rustRunnerCases.length} exact-pass comparison cases. | \`JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs\`; \`JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs\`; \`cargo test -p just-bash --test conformance_corpus\`; inventory/corpus checks. |
 | JBC-30 | Agent examples and Open Agents command integration closure | Close \`agent-examples\` and Open Agents command-execution rows proving Slack remote-agent tasks can use crate-backed Just Bash for multi-command workflows, stateful virtual files, failure surfaces, and no sandbox fallback unless explicitly selected. | \`cargo test -p open-agents-service -p open-agents-sandbox -p just-bash\`; \`scripts/open-agents-local-e2e.sh --just-bash-conformance\`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
 | JBC-31 | Upstream docs/examples parity closure | Close portable README, docs, examples, custom-command, website, and bash-agent example behavior that represents public Just Bash API usage, with explicit exceptions for docs-only or browser-only rows. | Docs/example inventory check; NAPI/JS harness examples where applicable; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/clippy/naming/diff gates. |
-| JBC-32 | Just Bash strict parity burn-down and final audit | Reconcile all remaining rows after JBC-19 through JBC-31, remove stale pending owners, prove every portable row maps to a named Rust test or corpus case, document final exceptions, and flip the strict gate only when zero \`portable-pending\` rows remain. | \`node scripts/just-bash-test-inventory.mjs --strict\`; \`node scripts/just-bash-conformance-corpus.mjs --check\`; TypeScript and Rust dual-engine conformance runs; \`scripts/master-parity-gate.sh --check\`; full fmt/clippy/naming/diff gates. |
+| JBC-32 | Just Bash strict parity burn-down and final audit | Reconcile all remaining rows after JBC-30 through JBC-31, remove stale pending owners, prove every portable row maps to a named Rust test or corpus case, document final exceptions, and flip the strict gate only when zero \`portable-pending\` rows remain. | \`node scripts/just-bash-test-inventory.mjs --strict\`; \`node scripts/just-bash-conformance-corpus.mjs --check\`; TypeScript and Rust dual-engine conformance runs; \`scripts/master-parity-gate.sh --check\`; full fmt/clippy/naming/diff gates. |
 
 ## Corpus Contract
 

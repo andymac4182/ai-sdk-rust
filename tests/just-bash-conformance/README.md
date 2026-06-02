@@ -17,11 +17,17 @@ Install upstream test dependencies once:
 npx --yes pnpm@10.33.2 --dir /Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel-labs/just-bash/main install --frozen-lockfile
 ```
 
-Playback mode uses the upstream fixture JSON files:
+Playback mode uses the upstream fixture JSON files. The TypeScript engine runs
+all upstream comparison domains by default; the Rust engine runs the generated
+verified comparison corpus by default so pending command-family rows do not get
+smoke-mapped. Use `--all`, `--domain`, or `JUST_BASH_DOMAINS` with the Rust
+engine when you intentionally want the raw upstream comparison sweep and its
+pending failures.
 
 ```bash
 JUST_BASH_ENGINE=typescript JUST_BASH_DOMAINS=echo,cat node scripts/just-bash-conformance.mjs
 JUST_BASH_ENGINE=rust JUST_BASH_RUST_ADDON=/absolute/path/to/jbc-01/adapter.js JUST_BASH_DOMAINS=echo,cat node scripts/just-bash-conformance.mjs
+JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs
 ```
 
 Until JBC-01 lands, the Rust path can prove harness wiring with the explicit

@@ -149,6 +149,7 @@ impl RustBash {
             files: into_btree(options.files),
             env: into_btree(options.env),
             cwd: Some(cwd.clone()),
+            ..BashOptions::default()
         });
 
         Self { inner, cwd }

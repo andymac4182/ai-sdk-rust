@@ -15,9 +15,9 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 194,
+    "totalCases": 211,
     "byKind": {
-      "comparison-fixture": 194
+      "comparison-fixture": 211
     },
     "byDomain": {
       "awk": 9,
@@ -27,7 +27,7 @@
       "echo": 26,
       "grep": 19,
       "head-tail": 12,
-      "jq": 10,
+      "jq": 27,
       "ls": 9,
       "pipes-redirections": 10,
       "pwd-cd-env": 6,
@@ -37,7 +37,7 @@
       "uniq": 10
     },
     "byStatus": {
-      "portable-verified": 194
+      "portable-verified": 211
     }
   },
   "cases": [
@@ -5140,6 +5140,61 @@
       }
     },
     {
+      "id": "comparison:jq:0c29bfa5bb213ca7",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 175,
+        "suite": "jq command - Real Bash Comparison > builtin functions",
+        "testName": "should add array",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "0c29bfa5bb213ca7"
+      },
+      "command": "jq 'add' data.json",
+      "script": "jq 'add' data.json",
+      "initialFiles": {
+        "data.json": "[1,2,3,4]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "10\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:175:it:should add array",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_0c29bfa5bb213ca7",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "0c29bfa5bb213ca7",
+        "expectedFixtureId": "0c29bfa5bb213ca7",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_0c29bfa5bb213ca7",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
       "id": "comparison:jq:10c509b3ce6cdbb2",
       "kind": "comparison-fixture",
       "classification": "comparison-golden",
@@ -5190,6 +5245,116 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_10c509b3ce6cdbb2",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:1eee3b8ed9a28b4d",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 140,
+        "suite": "jq command - Real Bash Comparison > builtin functions",
+        "testName": "should get keys",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "1eee3b8ed9a28b4d"
+      },
+      "command": "jq 'keys' data.json",
+      "script": "jq 'keys' data.json",
+      "initialFiles": {
+        "data.json": "{\"b\":1,\"a\":2}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  \"a\",\n  \"b\"\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:140:it:should get keys",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_1eee3b8ed9a28b4d",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "1eee3b8ed9a28b4d",
+        "expectedFixtureId": "1eee3b8ed9a28b4d",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_1eee3b8ed9a28b4d",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:22ace437afb05029",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 110,
+        "suite": "jq command - Real Bash Comparison > raw output (-r)",
+        "testName": "should output strings without quotes with -r",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "22ace437afb05029"
+      },
+      "command": "jq -r '.name' data.json",
+      "script": "jq -r '.name' data.json",
+      "initialFiles": {
+        "data.json": "{\"name\":\"test\"}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:110:it:should output strings without quotes with -r",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_22ace437afb05029",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "22ace437afb05029",
+        "expectedFixtureId": "22ace437afb05029",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_22ace437afb05029",
+      "runnerProof": {
+        "source": "JBC-29",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
@@ -5250,6 +5415,61 @@
       }
     },
     {
+      "id": "comparison:jq:2ae5488e94cb05cc",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 233,
+        "suite": "jq command - Real Bash Comparison > string functions",
+        "testName": "should split strings",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "2ae5488e94cb05cc"
+      },
+      "command": "jq 'split(\",\")' data.json",
+      "script": "jq 'split(\",\")' data.json",
+      "initialFiles": {
+        "data.json": "\"a,b,c\""
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  \"a\",\n  \"b\",\n  \"c\"\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:233:it:should split strings",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_2ae5488e94cb05cc",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "2ae5488e94cb05cc",
+        "expectedFixtureId": "2ae5488e94cb05cc",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_2ae5488e94cb05cc",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
       "id": "comparison:jq:3276c73f2ae560a6",
       "kind": "comparison-fixture",
       "classification": "comparison-golden",
@@ -5300,6 +5520,116 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_3276c73f2ae560a6",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:3a5bd13032387ef1",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 168,
+        "suite": "jq command - Real Bash Comparison > builtin functions",
+        "testName": "should reverse array",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "3a5bd13032387ef1"
+      },
+      "command": "jq 'reverse' data.json",
+      "script": "jq 'reverse' data.json",
+      "initialFiles": {
+        "data.json": "[1,2,3]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  3,\n  2,\n  1\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:168:it:should reverse array",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_3a5bd13032387ef1",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "3a5bd13032387ef1",
+        "expectedFixtureId": "3a5bd13032387ef1",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_3a5bd13032387ef1",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:71b1316136a76f95",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 195,
+        "suite": "jq command - Real Bash Comparison > select and map",
+        "testName": "should transform with map",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "71b1316136a76f95"
+      },
+      "command": "jq 'map(. * 2)' data.json",
+      "script": "jq 'map(. * 2)' data.json",
+      "initialFiles": {
+        "data.json": "[1,2,3]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  2,\n  4,\n  6\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:195:it:should transform with map",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_71b1316136a76f95",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "71b1316136a76f95",
+        "expectedFixtureId": "71b1316136a76f95",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_71b1316136a76f95",
+      "runnerProof": {
+        "source": "JBC-29",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
@@ -5360,6 +5690,171 @@
       }
     },
     {
+      "id": "comparison:jq:784cdf05d7bd0991",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 184,
+        "suite": "jq command - Real Bash Comparison > select and map",
+        "testName": "should filter with select",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "784cdf05d7bd0991"
+      },
+      "command": "jq '[.[] | select(. > 3)]' data.json",
+      "script": "jq '[.[] | select(. > 3)]' data.json",
+      "initialFiles": {
+        "data.json": "[1,2,3,4,5]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  4,\n  5\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:184:it:should filter with select",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_784cdf05d7bd0991",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "784cdf05d7bd0991",
+        "expectedFixtureId": "784cdf05d7bd0991",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_784cdf05d7bd0991",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:7b7456943760154c",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 147,
+        "suite": "jq command - Real Bash Comparison > builtin functions",
+        "testName": "should get length of array",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "7b7456943760154c"
+      },
+      "command": "jq 'length' data.json",
+      "script": "jq 'length' data.json",
+      "initialFiles": {
+        "data.json": "[1,2,3,4,5]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:147:it:should get length of array",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_7b7456943760154c",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "7b7456943760154c",
+        "expectedFixtureId": "7b7456943760154c",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_7b7456943760154c",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:8105f346b43748a2",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 161,
+        "suite": "jq command - Real Bash Comparison > builtin functions",
+        "testName": "should sort array",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "8105f346b43748a2"
+      },
+      "command": "jq 'sort' data.json",
+      "script": "jq 'sort' data.json",
+      "initialFiles": {
+        "data.json": "[3,1,2]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  1,\n  2,\n  3\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:161:it:should sort array",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_8105f346b43748a2",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "8105f346b43748a2",
+        "expectedFixtureId": "8105f346b43748a2",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_8105f346b43748a2",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
       "id": "comparison:jq:91c885f22f4323a6",
       "kind": "comparison-fixture",
       "classification": "comparison-golden",
@@ -5410,6 +5905,61 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_91c885f22f4323a6",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:937a32a880c8c8cd",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 101,
+        "suite": "jq command - Real Bash Comparison > compact output (-c)",
+        "testName": "should output compact JSON with -c",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "937a32a880c8c8cd"
+      },
+      "command": "jq -c '.' data.json",
+      "script": "jq -c '.' data.json",
+      "initialFiles": {
+        "data.json": "{\"a\":1,\"b\":2}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "{\"a\":1,\"b\":2}\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:101:it:should output compact JSON with -c",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_937a32a880c8c8cd",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "937a32a880c8c8cd",
+        "expectedFixtureId": "937a32a880c8c8cd",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_937a32a880c8c8cd",
+      "runnerProof": {
+        "source": "JBC-29",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
@@ -5470,6 +6020,61 @@
       }
     },
     {
+      "id": "comparison:jq:aac68dc54a55fad2",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 131,
+        "suite": "jq command - Real Bash Comparison > slurp (-s)",
+        "testName": "should slurp multiple JSON lines into array",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "aac68dc54a55fad2"
+      },
+      "command": "jq -s '.' data.json",
+      "script": "jq -s '.' data.json",
+      "initialFiles": {
+        "data.json": "1\n2\n3"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[\n  1,\n  2,\n  3\n]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:131:it:should slurp multiple JSON lines into array",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_aac68dc54a55fad2",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "aac68dc54a55fad2",
+        "expectedFixtureId": "aac68dc54a55fad2",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_aac68dc54a55fad2",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
       "id": "comparison:jq:b9af66a6586c6d00",
       "kind": "comparison-fixture",
       "classification": "comparison-golden",
@@ -5520,6 +6125,61 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_b9af66a6586c6d00",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:bf18a612e809e249",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 204,
+        "suite": "jq command - Real Bash Comparison > arithmetic",
+        "testName": "should add numbers",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "bf18a612e809e249"
+      },
+      "command": "jq '. + 3' data.json",
+      "script": "jq '. + 3' data.json",
+      "initialFiles": {
+        "data.json": "5"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "8\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:204:it:should add numbers",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_bf18a612e809e249",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "bf18a612e809e249",
+        "expectedFixtureId": "bf18a612e809e249",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_bf18a612e809e249",
+      "runnerProof": {
+        "source": "JBC-29",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
@@ -5630,6 +6290,279 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_de6ea82b7109ba1d",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:e433b214be1f80db",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 154,
+        "suite": "jq command - Real Bash Comparison > builtin functions",
+        "testName": "should get type",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "e433b214be1f80db"
+      },
+      "command": "jq 'type' data.json",
+      "script": "jq 'type' data.json",
+      "initialFiles": {
+        "data.json": "{\"a\":1}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "\"object\"\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:154:it:should get type",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_e433b214be1f80db",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "e433b214be1f80db",
+        "expectedFixtureId": "e433b214be1f80db",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_e433b214be1f80db",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:e808cfbdc52662c0",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 211,
+        "suite": "jq command - Real Bash Comparison > arithmetic",
+        "testName": "should multiply numbers",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "e808cfbdc52662c0"
+      },
+      "command": "jq '. * 7' data.json",
+      "script": "jq '. * 7' data.json",
+      "initialFiles": {
+        "data.json": "6"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "42\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:211:it:should multiply numbers",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_e808cfbdc52662c0",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "e808cfbdc52662c0",
+        "expectedFixtureId": "e808cfbdc52662c0",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_e808cfbdc52662c0",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:eecd9132c8f55a66",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 240,
+        "suite": "jq command - Real Bash Comparison > string functions",
+        "testName": "should join arrays",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "eecd9132c8f55a66"
+      },
+      "command": "jq 'join(\"-\")' data.json",
+      "script": "jq 'join(\"-\")' data.json",
+      "initialFiles": {
+        "data.json": "[\"a\",\"b\",\"c\"]"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "\"a-b-c\"\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:240:it:should join arrays",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_eecd9132c8f55a66",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "eecd9132c8f55a66",
+        "expectedFixtureId": "eecd9132c8f55a66",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_eecd9132c8f55a66",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:eed67a538c8414f7",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 119,
+        "suite": "jq command - Real Bash Comparison > null input (-n)",
+        "testName": "should work with null input",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "eed67a538c8414f7"
+      },
+      "command": "jq -n 'null'",
+      "script": "jq -n 'null'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "null\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:119:it:should work with null input",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_eed67a538c8414f7",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "eed67a538c8414f7",
+        "expectedFixtureId": "eed67a538c8414f7",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_eed67a538c8414f7",
+      "runnerProof": {
+        "source": "JBC-29",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:jq:f1149342c3f0e494",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "jq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts",
+        "line": 220,
+        "suite": "jq command - Real Bash Comparison > conditionals",
+        "testName": "should evaluate if-then-else",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "fixtureId": "f1149342c3f0e494"
+      },
+      "command": "jq 'if . > 3 then \"big\" else \"small\" end' data.json",
+      "script": "jq 'if . > 3 then \"big\" else \"small\" end' data.json",
+      "initialFiles": {
+        "data.json": "5"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "\"big\"\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/jq.comparison.test.ts:220:it:should evaluate if-then-else",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_jq_f1149342c3f0e494",
+        "notes": "JBC-29 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "f1149342c3f0e494",
+        "expectedFixtureId": "f1149342c3f0e494",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/jq.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_jq_f1149342c3f0e494",
+      "runnerProof": {
+        "source": "JBC-29",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }

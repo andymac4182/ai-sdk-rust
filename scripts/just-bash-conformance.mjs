@@ -32,12 +32,26 @@ const generatedRoot = path.join(
   'ai-sdk-rust-conformance'
 );
 const generatedComparisonRoot = path.join(generatedRoot, 'comparison-tests');
+const rustRunnerFixturePath = path.join(
+  repositoryRoot,
+  'crates',
+  'just-bash',
+  'tests',
+  'fixtures',
+  'just-bash-conformance.json'
+);
 
 const upstreamHead = 'd64009aef6bc1556e7c84b22ed455863275ea953';
 const pnpmVersion = '10.33.2';
 const validEngines = new Set(['typescript', 'rust']);
 
 const rustAddonCandidates = [
+  path.join(
+    repositoryRoot,
+    'crates',
+    'just-bash-napi',
+    `just-bash-napi.${process.platform}-${process.arch}.node`
+  ),
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'index.js'),
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'index.mjs'),
   path.join(repositoryRoot, 'crates', 'just-bash-napi', 'just-bash-napi.node'),
@@ -72,6 +86,10 @@ Environment:
   JUST_BASH_REQUIRE_RUST_ADDON=1
                               Treat missing Rust addon as an error instead of a skip.
   JUST_BASH_AUTO_INSTALL=1    Run pnpm install in the upstream mirror if deps are missing.
+
+By default, the TypeScript engine runs all upstream comparison domains. The Rust
+engine runs the generated verified comparison corpus; use --all or --domain to
+run raw upstream comparison files, including pending command-family failures.
 `);
 }
 
@@ -298,15 +316,10 @@ function maybeSkipMissingRustAddon(engine, rustAddonPath) {
 }
 
 function prepareGeneratedSuite(selectedDomains, engine, rustAddonPath) {
-  if (!generatedRoot.startsWith(upstreamPackageRoot + path.sep)) {
-    throw new Error(`Refusing to clean generated root outside upstream package: ${generatedRoot}`);
-  }
-
-  if (fs.existsSync(legacyGeneratedRoot)) {
-    fs.rmSync(legacyGeneratedRoot, { recursive: true, force: true });
-  }
-  fs.rmSync(generatedRoot, { recursive: true, force: true });
+  cleanGeneratedRoot();
   fs.mkdirSync(generatedComparisonRoot, { recursive: true });
+
+  writeFixtureRunner(engine, rustAddonPath);
 
   const generatedTestPaths = [];
   for (const entry of selectedDomains) {
@@ -320,17 +333,46 @@ function prepareGeneratedSuite(selectedDomains, engine, rustAddonPath) {
     generatedTestPaths.push(targetPath);
   }
 
-  fs.writeFileSync(
-    path.join(generatedComparisonRoot, 'vitest.setup.ts'),
-    `import { afterAll } from "vitest";\n` +
-      `import { isRecordMode, writeAllFixtures } from "./fixture-runner.js";\n\n` +
-      `afterAll(async () => {\n` +
-      `  if (isRecordMode) {\n` +
-      `    await writeAllFixtures();\n` +
-      `  }\n` +
-      `});\n`
-  );
+  writeVitestSetup();
 
+  return writeVitestConfig(generatedTestPaths);
+}
+
+function prepareGeneratedRustCorpusSuite(engine, rustAddonPath) {
+  cleanGeneratedRoot();
+  fs.mkdirSync(generatedComparisonRoot, { recursive: true });
+
+  writeFixtureRunner(engine, rustAddonPath);
+
+  if (!fs.existsSync(rustRunnerFixturePath)) {
+    throw new Error(
+      `Missing Rust runner fixture: ${rustRunnerFixturePath}\n` +
+        `Run: node scripts/just-bash-conformance-corpus.mjs`
+    );
+  }
+
+  const rustRunnerFixture = JSON.parse(fs.readFileSync(rustRunnerFixturePath, 'utf8'));
+  const generatedTestPath = path.join(generatedComparisonRoot, 'rust-corpus.test.ts');
+  fs.writeFileSync(generatedTestPath, rustCorpusTestSource(rustRunnerFixture));
+  writeVitestSetup();
+  console.log(
+    `[just-bash-conformance] rust verified corpus cases=${rustRunnerFixture.summary?.totalCases ?? 0}`
+  );
+  return writeVitestConfig([generatedTestPath]);
+}
+
+function cleanGeneratedRoot() {
+  if (!generatedRoot.startsWith(upstreamPackageRoot + path.sep)) {
+    throw new Error(`Refusing to clean generated root outside upstream package: ${generatedRoot}`);
+  }
+
+  if (fs.existsSync(legacyGeneratedRoot)) {
+    fs.rmSync(legacyGeneratedRoot, { recursive: true, force: true });
+  }
+  fs.rmSync(generatedRoot, { recursive: true, force: true });
+}
+
+function writeFixtureRunner(engine, rustAddonPath) {
   fs.writeFileSync(
     path.join(generatedComparisonRoot, 'fixture-runner.ts'),
     fixtureRunnerSource({
@@ -344,7 +386,22 @@ function prepareGeneratedSuite(selectedDomains, engine, rustAddonPath) {
       upstreamHead,
     })
   );
+}
 
+function writeVitestSetup() {
+  fs.writeFileSync(
+    path.join(generatedComparisonRoot, 'vitest.setup.ts'),
+    `import { afterAll } from "vitest";\n` +
+      `import { isRecordMode, writeAllFixtures } from "./fixture-runner.js";\n\n` +
+      `afterAll(async () => {\n` +
+      `  if (isRecordMode) {\n` +
+      `    await writeAllFixtures();\n` +
+      `  }\n` +
+      `});\n`
+  );
+}
+
+function writeVitestConfig(generatedTestPaths) {
   const vitestConfigPath = path.join(generatedRoot, 'vitest.config.ts');
   fs.writeFileSync(
     vitestConfigPath,
@@ -365,6 +422,68 @@ function prepareGeneratedSuite(selectedDomains, engine, rustAddonPath) {
   );
 
   return vitestConfigPath;
+}
+
+function rustCorpusTestSource(rustRunnerFixture) {
+  return `import { describe, expect, it } from "vitest";\n` +
+    `import { Bash } from "./fixture-runner.js";\n\n` +
+    `const corpus = ${JSON.stringify(rustRunnerFixture, null, 2)};\n` +
+    `const defaultCwd = corpus.defaultCwd ?? "/workspace";\n\n` +
+    `function normalizePath(input) {\n` +
+    `  const parts = [];\n` +
+    `  for (const part of input.split("/")) {\n` +
+    `    if (!part || part === ".") continue;\n` +
+    `    if (part === "..") parts.pop();\n` +
+    `    else parts.push(part);\n` +
+    `  }\n` +
+    `  return \`/\${parts.join("/")}\`;\n` +
+    `}\n\n` +
+    `function resolvePath(cwd, input) {\n` +
+    `  if (input.startsWith("/")) return normalizePath(input);\n` +
+    `  return normalizePath(\`\${cwd}/\${input}\`);\n` +
+    `}\n\n` +
+    `function effectiveCwd(cwd) {\n` +
+    `  if (cwd && cwd.trim() && cwd !== ".") {\n` +
+    `    return cwd.startsWith("/") ? cwd : resolvePath(defaultCwd, cwd);\n` +
+    `  }\n` +
+    `  return defaultCwd;\n` +
+    `}\n\n` +
+    `function seedFiles(testCase) {\n` +
+    `  const cwd = effectiveCwd(testCase.cwd);\n` +
+    `  const files = Object.create(null);\n` +
+    `  for (const [filePath, content] of Object.entries(testCase.initialFiles ?? {})) {\n` +
+    `    files[filePath.startsWith("/") ? filePath : resolvePath(cwd, filePath)] = content;\n` +
+    `  }\n` +
+    `  return files;\n` +
+    `}\n\n` +
+    `function execOptions(testCase) {\n` +
+    `  const options = testCase.options ?? {};\n` +
+    `  const exec = Object.create(null);\n` +
+    `  if (options.env) exec.env = options.env;\n` +
+    `  if (options.replaceEnv !== undefined) exec.replaceEnv = options.replaceEnv;\n` +
+    `  if (options.cwd) exec.cwd = options.cwd;\n` +
+    `  if (options.stdin !== undefined && options.stdin !== null) exec.stdin = options.stdin;\n` +
+    `  if (Array.isArray(options.args) && options.args.length > 0) exec.args = options.args;\n` +
+    `  if (options.timeoutMs !== undefined) exec.timeoutMs = options.timeoutMs;\n` +
+    `  return Object.keys(exec).length > 0 ? exec : undefined;\n` +
+    `}\n\n` +
+    `describe("Just Bash Rust verified comparison corpus", () => {\n` +
+    `  for (const testCase of corpus.cases ?? []) {\n` +
+    `    it(testCase.rustTestName ?? testCase.id, async () => {\n` +
+    `      expect(testCase.status).toBe("portable-verified");\n` +
+    `      const bash = new Bash({\n` +
+    `        files: seedFiles(testCase),\n` +
+    `        env: testCase.env ?? {},\n` +
+    `        cwd: effectiveCwd(testCase.cwd),\n` +
+    `        commands: testCase.commands,\n` +
+    `      });\n` +
+    `      const result = await bash.exec(testCase.command, execOptions(testCase));\n` +
+    `      expect(result.stdout).toBe(testCase.expected.stdout);\n` +
+    `      expect(result.stderr).toBe(testCase.expected.stderr);\n` +
+    `      expect(result.exitCode).toBe(testCase.expected.exitCode);\n` +
+    `    });\n` +
+    `  }\n` +
+    `});\n`;
 }
 
 function relativeImportSpecifier(fromDir, toPath) {
@@ -700,12 +819,44 @@ export class Bash {
     this.context = context;
   }
 
-  async exec(command) {
+  async exec(command, options) {
     const session = await this.sessionPromise;
     if (typeof session.__setComparisonContext === "function") {
       session.__setComparisonContext(this.context);
     }
-    return normalizeExecResult(await session.exec(command));
+    return normalizeExecResult(await session.exec(command, options));
+  }
+
+  async readFile(filePath) {
+    return this.delegate("readFile", filePath);
+  }
+
+  async writeFile(filePath, content) {
+    return this.delegate("writeFile", filePath, content);
+  }
+
+  async fileExists(filePath) {
+    return this.delegate("fileExists", filePath);
+  }
+
+  async getCwd() {
+    return this.delegate("getCwd");
+  }
+
+  async getEnv() {
+    return this.delegate("getEnv");
+  }
+
+  async registeredCommandNames() {
+    return this.delegate("registeredCommandNames");
+  }
+
+  async delegate(methodName, ...args) {
+    const session = await this.sessionPromise;
+    if (typeof session[methodName] !== "function") {
+      throw new Error(\`Engine session does not support \${methodName}\`);
+    }
+    return session[methodName](...args);
   }
 }
 
@@ -757,7 +908,11 @@ function instantiateRustAddon(addon, options) {
     return addon.createJustBash(options);
   }
   const Constructor =
-    addon.Bash ?? addon.JustBash ?? addon.JustBashSession ?? addon.default;
+    addon.Bash ??
+    addon.RustBash ??
+    addon.JustBash ??
+    addon.JustBashSession ??
+    addon.default;
   if (typeof Constructor === "function") {
     return new Constructor(options);
   }
@@ -876,17 +1031,21 @@ try {
     process.exit(0);
   }
 
-  const selectedDomains = selectDomains(allDomains, options.domains, options.runAll);
+  const useRustVerifiedCorpus =
+    options.engine === 'rust' && !options.runAll && options.domains.length === 0;
+  const selectedDomains = useRustVerifiedCorpus
+    ? []
+    : selectDomains(allDomains, options.domains, options.runAll);
   const rustAddonPath = resolveRustAddonPath();
   maybeSkipMissingRustAddon(options.engine, rustAddonPath);
   ensureUpstreamDependencies();
-  const vitestConfigPath = prepareGeneratedSuite(
-    selectedDomains,
-    options.engine,
-    rustAddonPath
-  );
+  const vitestConfigPath = useRustVerifiedCorpus
+    ? prepareGeneratedRustCorpusSuite(options.engine, rustAddonPath)
+    : prepareGeneratedSuite(selectedDomains, options.engine, rustAddonPath);
   runVitest(vitestConfigPath, {
-    domains: selectedDomains.map((entry) => entry.domain),
+    domains: useRustVerifiedCorpus
+      ? ['verified-comparison-corpus']
+      : selectedDomains.map((entry) => entry.domain),
     engine: options.engine,
     recordMode: options.recordMode,
     rustAddonPath,
