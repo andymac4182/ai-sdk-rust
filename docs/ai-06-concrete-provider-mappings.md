@@ -300,3 +300,65 @@ the strict inventory generator.
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when task status is failed | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no task_id is returned | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no videos in response | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
+
+## Azure OpenAI Exact Case Map
+
+All 55 portable `packages/azure` upstream cases map to named Rust tests in `crates/ai-sdk-azure/tests/upstream_mapping.rs`, each delegating to the deterministic `assert_upstream_case_covered` capability assertion in `crates/ai-sdk-azure/src/lib.rs` (mirroring the foundational provider crates). Buckets exercise the real Azure OpenAI provider request construction (URL, `api-version` query param, header and user-agent passthrough, request body) and response extraction (text, usage, metadata, headers) so each mapped test fails if the behavior regresses. The responses-API tool/streaming rows route through the shared `crates/ai-sdk-open-responses` model with Azure-specific `assistant-` file-id and `/responses?api-version=` wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct default api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0001_it_should_set_the_correct_default_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct modified api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0002_it_should_set_the_correct_modified_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0003_it_should_pass_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use the baseURL correctly | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0004_it_should_use_the_baseurl_correctly | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct default api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0005_it_should_set_the_correct_default_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct modified api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0006_it_should_set_the_correct_modified_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0007_it_should_pass_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use the baseURL correctly | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0008_it_should_use_the_baseurl_correctly | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0009_it_should_set_the_correct_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0010_it_should_pass_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use correct URL format | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0011_it_should_use_correct_url_format | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use deployment-based URL format when useDeploymentBasedUrls is true | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0012_it_should_use_deployment_based_url_format_when_usedeploymentbasedurls_is_true | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use correct URL format | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0013_it_should_use_correct_url_format | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0014_it_should_set_the_correct_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0015_it_should_pass_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct default api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0016_it_should_set_the_correct_default_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct modified api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0017_it_should_set_the_correct_modified_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0018_it_should_pass_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use the baseURL correctly | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0019_it_should_use_the_baseurl_correctly | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract the generated images | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0020_it_should_extract_the_generated_images | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send the correct request body | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0021_it_should_send_the_correct_request_body | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should create the same model as image method | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0022_it_should_create_the_same_model_as_image_method | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract text content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0023_it_should_extract_text_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract tool call content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0024_it_should_extract_tool_call_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract usage | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0025_it_should_extract_usage | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract response metadata | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0026_it_should_extract_response_metadata | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract response headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0027_it_should_extract_response_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should set the correct api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0028_it_should_set_the_correct_api_version | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0029_it_should_pass_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should use the baseURL correctly | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0030_it_should_use_the_baseurl_correctly | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should handle Azure file IDs with assistant- prefix | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0031_it_should_handle_azure_file_ids_with_assistant_prefix | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should handle PDF files with assistant- prefix | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0032_it_should_handle_pdf_files_with_assistant_prefix | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should fall back to base64 for non-assistant file IDs | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0033_it_should_fall_back_to_base64_for_non_assistant_file_ids | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send include provider option for file search results | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0034_it_should_send_include_provider_option_for_file_search_results | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should forward include provider options to request body | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0035_it_should_forward_include_provider_options_to_request_body | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send request body with include and tool | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0036_it_should_send_request_body_with_include_and_tool | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should include code interpreter tool call and result in content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0037_it_should_include_code_interpreter_tool_call_and_result_in_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send request body with tool | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0038_it_should_send_request_body_with_tool | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should include file search tool call and result in content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0039_it_should_include_file_search_tool_call_and_result_in_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send request body with tool | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0040_it_should_send_request_body_with_tool | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should include file search tool call and result in content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0041_it_should_include_file_search_tool_call_and_result_in_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream web search preview results include | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0042_it_should_stream_web_search_preview_results_include | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should generate with reasoning encrypted content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0043_it_should_generate_with_reasoning_encrypted_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send request body with include and tool | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0044_it_should_send_request_body_with_include_and_tool | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should include generate image tool call and result in content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0045_it_should_include_generate_image_tool_call_and_result_in_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream text content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0046_it_should_stream_text_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream tool call content | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0047_it_should_stream_tool_call_content | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should extract response headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0048_it_should_extract_response_headers | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should handle file_citation annotations without optional fields in streaming | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0049_it_should_handle_file_citation_annotations_without_optional_fields_in_streaming | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should send code interpreter calls | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0050_it_should_send_code_interpreter_calls | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream with reasoning encrypted content include reasoning-delta part | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0051_it_should_stream_with_reasoning_encrypted_content_include_reasoning_delta_part | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream file search results without results include | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0052_it_should_stream_file_search_results_without_results_include | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream file search results with results include | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0053_it_should_stream_file_search_results_with_results_include | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream web search preview results include | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0054_it_should_stream_web_search_preview_results_include | none |
+| `packages/azure/src/azure-openai-provider.test.ts` | should stream image generation tool results include | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0055_it_should_stream_image_generation_tool_results_include | none |
