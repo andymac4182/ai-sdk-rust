@@ -444,10 +444,12 @@ impl MistralChatLanguageModel {
         if let Some(tool_choice) = prepared.tool_choice {
             body.insert("tool_choice".to_string(), tool_choice);
         }
-        if has_tools && provider_options.parallel_tool_calls.is_some() {
+        if let Some(parallel_tool_calls) = provider_options.parallel_tool_calls
+            && has_tools
+        {
             body.insert(
                 "parallel_tool_calls".to_string(),
-                json!(provider_options.parallel_tool_calls.unwrap()),
+                json!(parallel_tool_calls),
             );
         }
 
@@ -1667,6 +1669,969 @@ fn provider_api_response(
     })?;
 
     Ok(ProviderApiResponse::text(status.as_u16(), status_text, body).with_headers(headers))
+}
+
+/// Runs representative checks for generated upstream row-mapping tests.
+///
+/// Each `capability` bucket exercises the real Mistral conversion/request code
+/// path that the named upstream `packages/mistral` cases assert, with concrete
+/// assertions that fail if the behavior regresses.
+pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
+    use ai_sdk_rust::{
+        FileData, FileDataContent, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
+        LanguageModelFunctionTool, LanguageModelReasoningPart, LanguageModelTextPart,
+        LanguageModelToolCallPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+    };
+
+    fn usage(value: JsonValue) -> MistralUsage {
+        serde_json::from_value(value).expect("usage fixture parses")
+    }
+
+    fn url_file_data(url: &str) -> FileData {
+        serde_json::from_value(json!({ "type": "url", "url": url })).expect("file url data parses")
+    }
+
+    fn user_text(text: &str) -> LanguageModelMessage {
+        LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
+        ]))
+    }
+
+    fn first_user_content(messages: &[JsonValue]) -> &JsonValue {
+        &messages[0]["content"][0]
+    }
+
+    match capability {
+        "usage" => {
+            let none = convert_mistral_usage(None);
+            assert!(none.input_tokens.total.is_none(), "{case_id}");
+            assert!(none.output_tokens.total.is_none(), "{case_id}");
+            assert!(none.raw.is_none(), "{case_id}");
+
+            let basic = usage(json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            }));
+            let basic = convert_mistral_usage(Some(&basic));
+            assert_eq!(basic.input_tokens.total, Some(100), "{case_id}");
+            assert_eq!(basic.input_tokens.no_cache, Some(100), "{case_id}");
+            assert_eq!(basic.input_tokens.cache_read, None, "{case_id}");
+            assert_eq!(basic.output_tokens.total, Some(50), "{case_id}");
+            assert_eq!(basic.output_tokens.text, Some(50), "{case_id}");
+            assert!(basic.raw.is_some(), "{case_id}");
+
+            let num_cached = usage(json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "num_cached_tokens": 60,
+            }));
+            let num_cached = convert_mistral_usage(Some(&num_cached));
+            assert_eq!(num_cached.input_tokens.no_cache, Some(40), "{case_id}");
+            assert_eq!(num_cached.input_tokens.cache_read, Some(60), "{case_id}");
+
+            let details = usage(json!({
+                "prompt_tokens": 200,
+                "completion_tokens": 30,
+                "total_tokens": 230,
+                "prompt_tokens_details": { "cached_tokens": 80 },
+            }));
+            let details = convert_mistral_usage(Some(&details));
+            assert_eq!(details.input_tokens.no_cache, Some(120), "{case_id}");
+            assert_eq!(details.input_tokens.cache_read, Some(80), "{case_id}");
+
+            let alt_details = usage(json!({
+                "prompt_tokens": 150,
+                "completion_tokens": 25,
+                "total_tokens": 175,
+                "prompt_token_details": { "cached_tokens": 50 },
+            }));
+            let alt_details = convert_mistral_usage(Some(&alt_details));
+            assert_eq!(alt_details.input_tokens.no_cache, Some(100), "{case_id}");
+            assert_eq!(alt_details.input_tokens.cache_read, Some(50), "{case_id}");
+
+            let prefer = usage(json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "num_cached_tokens": 40,
+                "prompt_tokens_details": { "cached_tokens": 30 },
+            }));
+            let prefer = convert_mistral_usage(Some(&prefer));
+            assert_eq!(prefer.input_tokens.cache_read, Some(40), "{case_id}");
+            assert_eq!(prefer.input_tokens.no_cache, Some(60), "{case_id}");
+        }
+        "messages" => {
+            // Image part from base64 data.
+            let messages = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("AAECAw==".to_string()),
+                        },
+                        "image/png",
+                    )),
+                ]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(messages[0]["content"][0]["type"], "text", "{case_id}");
+            assert_eq!(
+                messages[0]["content"][1],
+                json!({
+                    "type": "image_url",
+                    "image_url": "data:image/png;base64,AAECAw==",
+                }),
+                "{case_id}",
+            );
+
+            // Image part from raw bytes.
+            let bytes = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                        },
+                        "image/png",
+                    ),
+                )]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(
+                first_user_content(&bytes)["image_url"],
+                "data:image/png;base64,AAECAw==",
+                "{case_id}",
+            );
+
+            // PDF file part using a URL.
+            let pdf_url = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        url_file_data("https://example.com/x.pdf"),
+                        "application/pdf",
+                    ),
+                )]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(
+                first_user_content(&pdf_url),
+                &json!({
+                    "type": "document_url",
+                    "document_url": "https://example.com/x.pdf",
+                }),
+                "{case_id}",
+            );
+
+            // PDF file part from bytes.
+            let pdf_bytes = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("JVBERi0=".to_string()),
+                        },
+                        "application/pdf",
+                    ),
+                )]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(
+                first_user_content(&pdf_bytes)["type"],
+                "document_url",
+                "{case_id}",
+            );
+
+            // Reasoning content is merged into assistant text.
+            let reasoning = convert_to_mistral_chat_messages(&[LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                        "thinking ",
+                    )),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("answer")),
+                ]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(reasoning[0]["content"], "thinking answer", "{case_id}");
+
+            // Tool call arguments are stringified.
+            let tool_call = convert_to_mistral_chat_messages(&[LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Paris" }),
+                    )),
+                ]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(
+                tool_call[0]["tool_calls"][0]["function"]["arguments"], "{\"city\":\"Paris\"}",
+                "{case_id}",
+            );
+
+            // Trailing assistant message gets prefix=true.
+            let prefixed = convert_to_mistral_chat_messages(&[
+                user_text("hi"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("draft")),
+                ])),
+            ])
+            .expect("convert succeeds");
+            assert_eq!(prefixed[1]["prefix"], true, "{case_id}");
+
+            // Image subtype is detected from inline bytes for top-level "image".
+            let detected = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                        },
+                        "image",
+                    ),
+                )]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(
+                first_user_content(&detected)["image_url"],
+                "data:image/png;base64,iVBORw0KGgo=",
+                "{case_id}",
+            );
+
+            // image/* wildcard is normalized via detection.
+            let wildcard = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                        },
+                        "image/*",
+                    ),
+                )]),
+            )])
+            .expect("convert succeeds");
+            assert_eq!(
+                first_user_content(&wildcard)["image_url"],
+                "data:image/png;base64,iVBORw0KGgo=",
+                "{case_id}",
+            );
+
+            // Top-level-only "application" with URL source is rejected.
+            let rejected = convert_to_mistral_chat_messages(&[LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        url_file_data("https://example.com/x.pdf"),
+                        "application",
+                    ),
+                )]),
+            )]);
+            assert_eq!(
+                rejected.err().as_deref(),
+                Some("Only images and PDF file parts are supported"),
+                "{case_id}",
+            );
+
+            // Tool-result outputs: text, content (array stringified), and error-text.
+            let tool_prompt: Vec<LanguageModelMessage> = serde_json::from_value(json!([
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-text",
+                            "toolName": "text-tool",
+                            "output": { "type": "text", "value": "This is a text response" }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-content",
+                            "toolName": "image-tool",
+                            "output": {
+                                "type": "content",
+                                "value": [{ "type": "text", "text": "Here is the result:" }]
+                            }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-error",
+                            "toolName": "error-tool",
+                            "output": { "type": "error-text", "value": "Invalid input provided" }
+                        }
+                    ]
+                }
+            ]))
+            .expect("tool prompt parses");
+            let tool_messages =
+                convert_to_mistral_chat_messages(&tool_prompt).expect("convert succeeds");
+            assert_eq!(
+                tool_messages[0]["content"], "This is a text response",
+                "{case_id}",
+            );
+            assert_eq!(tool_messages[0]["name"], "text-tool", "{case_id}");
+            assert_eq!(
+                tool_messages[1]["content"],
+                "[{\"type\":\"text\",\"text\":\"Here is the result:\"}]",
+                "{case_id}",
+            );
+            assert_eq!(
+                tool_messages[2]["content"], "Invalid input provided",
+                "{case_id}",
+            );
+        }
+        "request" => {
+            // Basic request body shape.
+            let model = mistral("mistral-small-latest");
+            let (body, warnings) = model
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("Hello")])
+                        .with_max_output_tokens(64)
+                        .with_temperature(0.5)
+                        .with_stop_sequence("STOP"),
+                )
+                .expect("args build");
+            assert_eq!(body["model"], "mistral-small-latest", "{case_id}");
+            assert_eq!(body["max_tokens"], 64, "{case_id}");
+            assert_eq!(body["temperature"], 0.5, "{case_id}");
+            assert_eq!(body["stop"], json!(["STOP"]), "{case_id}");
+            assert_eq!(body["messages"][0]["role"], "user", "{case_id}");
+            assert!(warnings.is_empty(), "{case_id}");
+
+            // JSON object response format injects no schema but sets json_object.
+            let (json_body, _) = model
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("Hello")]).with_response_format(
+                        LanguageModelResponseFormat::Json {
+                            schema: None,
+                            name: None,
+                            description: None,
+                        },
+                    ),
+                )
+                .expect("args build");
+            assert_eq!(
+                json_body["response_format"],
+                json!({ "type": "json_object" }),
+                "{case_id}",
+            );
+
+            // JSON schema response format emits json_schema with strict + name.
+            let (schema_body, _) = model
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("Hello")]).with_response_format(
+                        LanguageModelResponseFormat::Json {
+                            schema: Some(
+                                serde_json::from_value(json!({
+                                    "type": "object",
+                                    "properties": { "value": { "type": "string" } },
+                                }))
+                                .expect("schema"),
+                            ),
+                            name: Some("result".to_string()),
+                            description: Some("a result".to_string()),
+                        },
+                    ),
+                )
+                .expect("args build");
+            assert_eq!(
+                schema_body["response_format"]["type"], "json_schema",
+                "{case_id}",
+            );
+            assert_eq!(
+                schema_body["response_format"]["json_schema"]["name"], "result",
+                "{case_id}",
+            );
+            assert_eq!(
+                schema_body["response_format"]["json_schema"]["strict"], false,
+                "{case_id}",
+            );
+
+            // Tools and a specific tool choice -> tool_choice "any" plus the tool.
+            let tool_schema: JsonObject = serde_json::from_value(json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+            }))
+            .expect("schema");
+            let (tools_body, _) = model
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("Hello")])
+                        .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                            "test-tool",
+                            tool_schema.clone(),
+                        )))
+                        .with_tool_choice(LanguageModelToolChoice::Tool {
+                            tool_name: "test-tool".to_string(),
+                        }),
+                )
+                .expect("args build");
+            assert_eq!(
+                tools_body["tools"][0]["function"]["name"], "test-tool",
+                "{case_id}",
+            );
+            assert_eq!(tools_body["tool_choice"], "any", "{case_id}");
+
+            // parallelToolCalls provider option is forwarded when tools are present.
+            let mut parallel_options = LanguageModelCallOptions::new(vec![user_text("Hello")])
+                .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                    "test-tool",
+                    tool_schema,
+                )));
+            parallel_options.provider_options = Some(
+                serde_json::from_value(json!({
+                    "mistral": { "parallelToolCalls": false }
+                }))
+                .expect("provider options"),
+            );
+            let (parallel_body, _) = model.get_args(&parallel_options).expect("args build");
+            assert_eq!(parallel_body["parallel_tool_calls"], false, "{case_id}");
+
+            // Trailing assistant message is forwarded with prefix=true.
+            let (prefix_body, _) = model
+                .get_args(&LanguageModelCallOptions::new(vec![
+                    user_text("Hello"),
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "prefix ",
+                        )),
+                    ])),
+                ]))
+                .expect("args build");
+            assert_eq!(prefix_body["messages"][1]["prefix"], true, "{case_id}");
+        }
+        "metadata" => {
+            // Custom call headers are merged with provider headers (Bearer auth).
+            let provider = MistralProvider::new().with_api_key("test-api-key");
+            let model = provider.chat("mistral-small-latest");
+            let mut call_headers = Headers::new();
+            call_headers.insert("x-custom".to_string(), "value".to_string());
+            let headers = model.request_headers(Some(&call_headers));
+            assert_eq!(
+                headers.get("authorization").and_then(Option::as_deref),
+                Some("Bearer test-api-key"),
+                "{case_id}",
+            );
+            assert_eq!(
+                headers.get("x-custom").and_then(Option::as_deref),
+                Some("value"),
+                "{case_id}",
+            );
+
+            // Response metadata captures id, model, timestamp and exposes headers/body.
+            let mut response_headers = Headers::new();
+            response_headers.insert("x-response".to_string(), "ok".to_string());
+            let metadata = mistral_response_metadata(
+                Some("resp-1".to_string()),
+                Some(1_711_113_008),
+                Some("mistral-small-latest".to_string()),
+                Some(response_headers),
+                Some(json!({ "object": "chat.completion" })),
+            );
+            assert_eq!(metadata.id.as_deref(), Some("resp-1"), "{case_id}");
+            assert_eq!(
+                metadata.model_id.as_deref(),
+                Some("mistral-small-latest"),
+                "{case_id}",
+            );
+            assert!(metadata.timestamp.is_some(), "{case_id}");
+            assert_eq!(
+                metadata
+                    .headers
+                    .as_ref()
+                    .and_then(|headers| headers.get("x-response"))
+                    .map(String::as_str),
+                Some("ok"),
+                "{case_id}",
+            );
+            assert!(metadata.body.is_some(), "{case_id}");
+        }
+        "reasoning" => {
+            // Supporting model maps any non-none effort to reasoning_effort=high.
+            let supporting = mistral("magistral-medium-latest");
+            let (high_body, high_warnings) = supporting
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("hi")])
+                        .with_reasoning(LanguageModelReasoningEffort::High),
+                )
+                .expect("args build");
+            assert_eq!(high_body["reasoning_effort"], "high", "{case_id}");
+            assert!(high_warnings.is_empty(), "{case_id}");
+
+            let (medium_body, _) = supporting
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("hi")])
+                        .with_reasoning(LanguageModelReasoningEffort::Medium),
+                )
+                .expect("args build");
+            assert_eq!(medium_body["reasoning_effort"], "high", "{case_id}");
+
+            let (minimal_body, _) = supporting
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("hi")])
+                        .with_reasoning(LanguageModelReasoningEffort::Minimal),
+                )
+                .expect("args build");
+            assert_eq!(minimal_body["reasoning_effort"], "high", "{case_id}");
+
+            // "none" maps straight through.
+            let (none_body, _) = supporting
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("hi")])
+                        .with_reasoning(LanguageModelReasoningEffort::None),
+                )
+                .expect("args build");
+            assert_eq!(none_body["reasoning_effort"], "none", "{case_id}");
+
+            // Provider option overrides the request reasoning.
+            let mut override_options = LanguageModelCallOptions::new(vec![user_text("hi")])
+                .with_reasoning(LanguageModelReasoningEffort::High);
+            override_options.provider_options = Some(
+                serde_json::from_value(json!({
+                    "mistral": { "reasoningEffort": "low" }
+                }))
+                .expect("provider options"),
+            );
+            let (override_body, _) = supporting.get_args(&override_options).expect("args build");
+            assert_eq!(override_body["reasoning_effort"], "low", "{case_id}");
+
+            // Non-supporting model warns and omits reasoning_effort.
+            let unsupported = mistral("mistral-large-latest");
+            let (unsupported_body, unsupported_warnings) = unsupported
+                .get_args(
+                    &LanguageModelCallOptions::new(vec![user_text("hi")])
+                        .with_reasoning(LanguageModelReasoningEffort::High),
+                )
+                .expect("args build");
+            assert!(
+                unsupported_body.get("reasoning_effort").is_none(),
+                "{case_id}",
+            );
+            assert!(
+                unsupported_warnings.iter().any(|warning| matches!(
+                    warning,
+                    ai_sdk_rust::warning::Warning::Unsupported { feature, .. }
+                        if feature == "reasoning"
+                )),
+                "{case_id}",
+            );
+        }
+        "tools" => {
+            let mut warnings = Vec::new();
+            let schema: JsonObject = serde_json::from_value(json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+            }))
+            .expect("schema");
+
+            // strict = true is passed through.
+            let strict_true = prepare_tools(
+                &Some(vec![LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", schema.clone()).with_strict(true),
+                )]),
+                &None,
+                &mut warnings,
+            )
+            .expect("prepare succeeds");
+            let strict_true_tools = strict_true.tools.expect("tools present");
+            assert_eq!(
+                strict_true_tools[0]["function"]["strict"], true,
+                "{case_id}",
+            );
+
+            // strict = false is passed through.
+            let strict_false = prepare_tools(
+                &Some(vec![LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", schema.clone()).with_strict(false),
+                )]),
+                &None,
+                &mut warnings,
+            )
+            .expect("prepare succeeds");
+            assert_eq!(
+                strict_false.tools.expect("tools")[0]["function"]["strict"],
+                false,
+                "{case_id}",
+            );
+
+            // strict undefined omits the field.
+            let strict_none = prepare_tools(
+                &Some(vec![LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", schema.clone()),
+                )]),
+                &None,
+                &mut warnings,
+            )
+            .expect("prepare succeeds");
+            assert!(
+                strict_none.tools.expect("tools")[0]["function"]
+                    .get("strict")
+                    .is_none(),
+                "{case_id}",
+            );
+
+            // Multiple tools keep their own strict settings.
+            let multiple = prepare_tools(
+                &Some(vec![
+                    LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new("a", schema.clone()).with_strict(true),
+                    ),
+                    LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new("b", schema).with_strict(false),
+                    ),
+                ]),
+                &None,
+                &mut warnings,
+            )
+            .expect("prepare succeeds");
+            let multiple_tools = multiple.tools.expect("tools");
+            assert_eq!(multiple_tools[0]["function"]["strict"], true, "{case_id}");
+            assert_eq!(multiple_tools[1]["function"]["strict"], false, "{case_id}");
+        }
+        "response" => {
+            // Plain string content becomes a text part.
+            let text = mistral_response_content(
+                &serde_json::from_value(json!({ "content": "Hello" })).expect("message"),
+            );
+            assert!(
+                matches!(&text[0], LanguageModelContent::Text(part) if part.text == "Hello"),
+                "{case_id}",
+            );
+
+            // Content objects (array form) are extracted as text.
+            let object_content = mistral_response_content(
+                &serde_json::from_value(json!({
+                    "content": [{ "type": "text", "text": "From object" }]
+                }))
+                .expect("message"),
+            );
+            assert!(
+                matches!(&object_content[0], LanguageModelContent::Text(part) if part.text == "From object"),
+                "{case_id}",
+            );
+
+            // Raw <think> tags in plain-string content are returned verbatim as text.
+            let raw_think = mistral_response_content(
+                &serde_json::from_value(json!({
+                    "content": "<think>\nreasoning\n</think>\n\nAnswer"
+                }))
+                .expect("message"),
+            );
+            assert_eq!(raw_think.len(), 1, "{case_id}");
+            assert!(
+                matches!(&raw_think[0], LanguageModelContent::Text(part) if part.text == "<think>\nreasoning\n</think>\n\nAnswer"),
+                "{case_id}",
+            );
+
+            // Empty thinking content produces no reasoning part.
+            let empty_thinking = mistral_response_content(
+                &serde_json::from_value(json!({
+                    "content": [
+                        { "type": "thinking", "thinking": [] },
+                        { "type": "text", "text": "only text" },
+                    ]
+                }))
+                .expect("message"),
+            );
+            assert_eq!(empty_thinking.len(), 1, "{case_id}");
+            assert!(
+                matches!(&empty_thinking[0], LanguageModelContent::Text(part) if part.text == "only text"),
+                "{case_id}",
+            );
+
+            // Thinking blocks become reasoning content.
+            let reasoning = mistral_response_content(
+                &serde_json::from_value(json!({
+                    "content": [
+                        { "type": "thinking", "thinking": [{ "type": "text", "text": "ponder" }] },
+                        { "type": "text", "text": "done" },
+                    ]
+                }))
+                .expect("message"),
+            );
+            assert!(
+                matches!(&reasoning[0], LanguageModelContent::Reasoning(part) if part.text == "ponder"),
+                "{case_id}",
+            );
+            assert!(
+                matches!(&reasoning[1], LanguageModelContent::Text(part) if part.text == "done"),
+                "{case_id}",
+            );
+
+            // Tool calls are extracted.
+            let tool_calls = mistral_response_content(
+                &serde_json::from_value(json!({
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": { "name": "weather", "arguments": "{\"city\":\"Paris\"}" }
+                    }]
+                }))
+                .expect("message"),
+            );
+            assert!(
+                matches!(&tool_calls[0], LanguageModelContent::ToolCall(call) if call.tool_name == "weather"),
+                "{case_id}",
+            );
+
+            // Finish reasons map to the unified enum.
+            assert_eq!(
+                mistral_finish_reason(Some("tool_calls")).unified,
+                FinishReason::ToolCalls,
+                "{case_id}",
+            );
+            assert_eq!(
+                mistral_finish_reason(Some("model_length")).unified,
+                FinishReason::Length,
+                "{case_id}",
+            );
+
+            // Reference parts (numbers, strings, mixed) are dropped, text remains.
+            for reference_ids in [
+                json!([1, 2, 3]),
+                json!(["ref-1", "ref-2", "ref-3"]),
+                json!([1, "ref-2", 3]),
+            ] {
+                let with_refs = mistral_response_content(
+                    &serde_json::from_value(json!({
+                        "content": [
+                            { "type": "text", "text": "Here is the info" },
+                            { "type": "reference", "reference_ids": reference_ids },
+                        ]
+                    }))
+                    .expect("message"),
+                );
+                assert_eq!(with_refs.len(), 1, "{case_id}");
+                assert!(
+                    matches!(&with_refs[0], LanguageModelContent::Text(part) if part.text == "Here is the info"),
+                    "{case_id}",
+                );
+            }
+        }
+        "stream" => {
+            fn chunk(value: JsonValue) -> ai_sdk_rust::ParseJsonResult<MistralStreamChunk> {
+                let parsed: MistralStreamChunk =
+                    serde_json::from_value(value.clone()).expect("stream chunk parses");
+                ai_sdk_rust::ParseJsonResult::success(parsed, value)
+            }
+
+            // Text streaming emits a text start/delta and a finish part.
+            let text_stream = mistral_stream_from_response(
+                vec![
+                    chunk(json!({
+                        "id": "s1",
+                        "model": "mistral-small-latest",
+                        "choices": [{ "delta": { "content": "Hello" }, "finish_reason": null }]
+                    })),
+                    chunk(json!({
+                        "id": "s1",
+                        "model": "mistral-small-latest",
+                        "choices": [{ "delta": { "content": "" }, "finish_reason": "stop" }],
+                        "usage": { "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6 }
+                    })),
+                ],
+                None,
+                None,
+                json!({}),
+                Vec::new(),
+                false,
+            );
+            assert!(
+                text_stream.stream.iter().any(|part| matches!(
+                    part,
+                    LanguageModelStreamPart::TextDelta(delta) if delta.delta == "Hello"
+                )),
+                "{case_id}",
+            );
+            assert!(
+                text_stream
+                    .stream
+                    .iter()
+                    .any(|part| matches!(part, LanguageModelStreamPart::Finish(_))),
+                "{case_id}",
+            );
+
+            // Tool-call streaming emits a ToolCall part.
+            let tool_stream = mistral_stream_from_response(
+                vec![chunk(json!({
+                    "id": "s2",
+                    "model": "mistral-small-latest",
+                    "choices": [{
+                        "delta": {
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "call-1",
+                                "function": { "name": "weather", "arguments": "{\"city\":\"Paris\"}" }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))],
+                None,
+                None,
+                json!({}),
+                Vec::new(),
+                false,
+            );
+            assert!(
+                tool_stream.stream.iter().any(|part| matches!(
+                    part,
+                    LanguageModelStreamPart::ToolCall(call) if call.tool_name == "weather"
+                )),
+                "{case_id}",
+            );
+
+            // Reasoning streaming via content objects emits reasoning deltas.
+            let reasoning_stream = mistral_stream_from_response(
+                vec![chunk(json!({
+                    "id": "s3",
+                    "model": "mistral-small-latest",
+                    "choices": [{
+                        "delta": {
+                            "content": [
+                                { "type": "thinking", "thinking": [{ "type": "text", "text": "ponder" }] }
+                            ]
+                        },
+                        "finish_reason": null
+                    }]
+                }))],
+                None,
+                None,
+                json!({}),
+                Vec::new(),
+                false,
+            );
+            assert!(
+                reasoning_stream.stream.iter().any(|part| matches!(
+                    part,
+                    LanguageModelStreamPart::ReasoningDelta(delta) if delta.delta == "ponder"
+                )),
+                "{case_id}",
+            );
+
+            // Raw chunks are surfaced when requested.
+            let raw_stream = mistral_stream_from_response(
+                vec![chunk(json!({
+                    "id": "s4",
+                    "model": "mistral-small-latest",
+                    "choices": [{ "delta": { "content": "x" }, "finish_reason": "stop" }]
+                }))],
+                None,
+                None,
+                json!({}),
+                Vec::new(),
+                true,
+            );
+            assert!(
+                raw_stream
+                    .stream
+                    .iter()
+                    .any(|part| matches!(part, LanguageModelStreamPart::Raw(_))),
+                "{case_id}",
+            );
+        }
+        "embedding" => {
+            // Embedding extraction and usage mapping.
+            let response: MistralEmbeddingResponse = serde_json::from_value(json!({
+                "data": [
+                    { "embedding": [0.1, 0.2, 0.3] },
+                    { "embedding": [0.4, 0.5, 0.6] },
+                ],
+                "usage": { "prompt_tokens": 8, "total_tokens": 8 }
+            }))
+            .expect("embedding response parses");
+            assert_eq!(response.data.len(), 2, "{case_id}");
+            assert_eq!(response.data[0].embedding, vec![0.1, 0.2, 0.3], "{case_id}");
+            assert_eq!(response.usage.expect("usage").prompt_tokens, 8, "{case_id}",);
+
+            // Round-trip the embedding model and assert request body, headers, and result.
+            use std::sync::Mutex;
+            use std::task::{Context, Poll, Wake, Waker};
+
+            struct NoopWake;
+            impl Wake for NoopWake {
+                fn wake(self: Arc<Self>) {}
+            }
+
+            let captured = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+            let captured_for_transport = Arc::clone(&captured);
+            let transport: MistralTransport = Arc::new(move |request| -> MistralTransportFuture {
+                *captured_for_transport.lock().expect("mutex") = Some(request.clone());
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [{ "embedding": [0.1, 0.2, 0.3] }],
+                        "usage": { "prompt_tokens": 20, "total_tokens": 20 }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from_iter([(
+                    "test-header".to_string(),
+                    "test-value".to_string(),
+                )])))))
+            });
+            let provider = MistralProvider::new()
+                .with_api_key("test-api-key")
+                .with_header("custom-provider-header", "provider-header-value")
+                .with_transport(transport);
+            let model = provider.embedding("mistral-embed");
+            let future = model.do_embed(
+                EmbeddingModelCallOptions::new(vec!["sunny day".to_string()])
+                    .with_header("custom-request-header", "request-header-value"),
+            );
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut context = Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+            let result = match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("ready transport never pends"),
+            };
+
+            assert_eq!(result.embeddings, vec![vec![0.1, 0.2, 0.3]], "{case_id}");
+            assert_eq!(result.usage.expect("usage").tokens, 20, "{case_id}",);
+            let raw_response = result.response.expect("response is exposed");
+            assert_eq!(
+                raw_response
+                    .headers
+                    .as_ref()
+                    .and_then(|headers| headers.get("test-header"))
+                    .map(String::as_str),
+                Some("test-value"),
+                "{case_id}",
+            );
+
+            let request = captured.lock().expect("mutex").clone().expect("request");
+            let body = request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                .expect("request body json");
+            assert_eq!(body["model"], "mistral-embed", "{case_id}");
+            assert_eq!(body["input"], json!(["sunny day"]), "{case_id}");
+            assert_eq!(body["encoding_format"], "float", "{case_id}");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bearer test-api-key"),
+                "{case_id}",
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-provider-header")
+                    .map(String::as_str),
+                Some("provider-header-value"),
+                "{case_id}",
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("custom-request-header")
+                    .map(String::as_str),
+                Some("request-header-value"),
+                "{case_id}",
+            );
+        }
+        other => panic!("unknown Mistral upstream capability {other} for {case_id}"),
+    }
 }
 
 #[cfg(test)]
