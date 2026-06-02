@@ -13,17 +13,17 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::commands::CommandRegistry;
-use crate::encoding::{BufferEncoding, OutputPayload, bytes_to_string};
+use crate::encoding::{BufferEncoding, OutputPayload, bytes_to_string, content_to_bytes};
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
 use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
-use crate::path::resolve_path;
+use crate::path::{normalize_path, resolve_path, resolve_symlink_target};
 use crate::security::{
     HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse, StaticNetworkTransport,
     execute_network_request,
@@ -1098,18 +1098,45 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "uniq" => command_uniq(state, &tokens[1..], &stdin),
         "cut" => command_cut(state, &tokens[1..], &stdin),
         "tr" => command_tr(&tokens[1..], &stdin),
+        "column" => command_column(state, &tokens[1..], &stdin),
+        "join" => command_join(state, &tokens[1..], &stdin),
         "basename" => command_basename_utility(&tokens[1..]),
         "dirname" => command_dirname_utility(&tokens[1..]),
+        "du" => command_du(state, &tokens[1..]),
+        "tree" => command_tree(state, &tokens[1..]),
         "ls" => command_ls(state, &tokens[1..]),
         "mkdir" => command_mkdir(state, &tokens[1..]),
         "touch" => command_touch(state, &tokens[1..]),
         "rm" => command_rm(state, &tokens[1..]),
         "cp" => command_cp(state, &tokens[1..]),
         "mv" => command_mv(state, &tokens[1..]),
+        "ln" => command_ln(state, &tokens[1..]),
+        "chmod" => command_chmod(state, &tokens[1..]),
+        "readlink" => command_readlink(state, &tokens[1..]),
+        "stat" => command_stat(state, &tokens[1..]),
         "find" => command_find(state, &tokens[1..]),
         "curl" => command_curl(state, &tokens[1..]),
         "read" => command_read(state, &tokens[1..], &stdin),
+        "comm" => command_comm(state, &tokens[1..], &stdin),
+        "paste" => command_paste(state, &tokens[1..], &stdin),
+        "rev" => command_rev(state, &tokens[1..], &stdin),
+        "nl" => command_nl(state, &tokens[1..], &stdin),
+        "fold" => command_fold(state, &tokens[1..], &stdin),
+        "expand" => command_expand(state, &tokens[1..], &stdin, false),
+        "unexpand" => command_expand(state, &tokens[1..], &stdin, true),
+        "strings" => command_strings(state, &tokens[1..], &stdin),
+        "split" => command_split(state, &tokens[1..], &stdin),
+        "tee" => command_tee(state, &tokens[1..], &stdin),
         "jq" => command_jq(state, &tokens[1..], &stdin),
+        "base64" => command_base64(state, &tokens[1..], &stdin),
+        "gzip" | "gunzip" | "zcat" => command_gzip(command, state, &tokens[1..], &stdin),
+        "diff" => command_diff(state, &tokens[1..], &stdin),
+        "date" => command_date(&tokens[1..]),
+        "seq" => command_seq(&tokens[1..]),
+        "file" => command_file(state, &tokens[1..]),
+        "xargs" => command_xargs(state, &tokens[1..], stdin),
+        "test" => command_test(state, &tokens[1..], false),
+        "[" => command_test(state, &tokens[1..], true),
         "yq" => command_yq(state, &tokens[1..], &stdin),
         "xan" => command_xan(state, &tokens[1..], &stdin),
         "sqlite3" => command_sqlite3(state, &tokens[1..], &stdin),
@@ -2588,6 +2615,795 @@ fn command_mv(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
         }
     }
     stdout_result(stdout)
+}
+
+fn command_ln(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: ln [OPTION]... TARGET LINK_NAME\nCreate hard or symbolic links.\n  -s, --symbolic\n  -f, --force\n",
+        );
+    }
+    let mut symbolic = false;
+    let mut force = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-s" | "--symbolic" => symbolic = true,
+            "-f" | "--force" => force = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        's' => symbolic = true,
+                        'f' => force = true,
+                        _ => return stderr_result(1, format!("ln: invalid option -- '{flag}'\n")),
+                    }
+                }
+            }
+            _ => paths.push(arg),
+        }
+    }
+    if paths.len() < 2 {
+        return stderr_result(1, "ln: missing file operand\n");
+    }
+    let target_arg = paths[0];
+    let link_arg = paths[1];
+    let link_path = resolve_path(&state.cwd, link_arg);
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "ln: filesystem lock poisoned\n"),
+    };
+    if force && fs.exists(&link_path) {
+        let _ = fs.rm(
+            &link_path,
+            RmOptions {
+                recursive: true,
+                force: true,
+            },
+        );
+    }
+    let result = if symbolic {
+        fs.symlink(target_arg, &link_path)
+    } else {
+        fs.link(&resolve_path(&state.cwd, target_arg), &link_path)
+    };
+    match result {
+        Ok(()) => CommandResult::default(),
+        Err(error) => stderr_result(1, format!("ln: {link_arg}: {}\n", fs_error_label(&error))),
+    }
+}
+
+fn command_chmod(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: chmod [OPTION]... MODE FILE...\nChange file mode bits.\n  -R, --recursive\n",
+        );
+    }
+    let mut recursive = false;
+    let mut values = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-R" | "--recursive" => recursive = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'R' => recursive = true,
+                        _ => {
+                            return stderr_result(
+                                1,
+                                format!("chmod: invalid option -- '{flag}'\n"),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => values.push(arg),
+        }
+    }
+    if values.is_empty() {
+        return stderr_result(1, "chmod: missing operand\n");
+    }
+    if values.len() == 1 {
+        return stderr_result(1, "chmod: missing file operand\n");
+    }
+    let mode_spec = values[0];
+    let paths = &values[1..];
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "chmod: filesystem lock poisoned\n"),
+    };
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, path);
+        let stat = match fs.stat(&resolved) {
+            Ok(stat) => stat,
+            Err(error) => {
+                return stderr_result(1, format!("chmod: {path}: {}\n", fs_error_label(&error)));
+            }
+        };
+        let mode = match parse_chmod_mode(mode_spec, stat.mode) {
+            Ok(mode) => mode,
+            Err(()) => return stderr_result(1, format!("chmod: invalid mode: '{mode_spec}'\n")),
+        };
+        let mut targets = vec![resolved.clone()];
+        if recursive && stat.is_directory {
+            let prefix = format!("{}/", resolved.trim_end_matches('/'));
+            targets.extend(
+                fs.get_all_paths()
+                    .into_iter()
+                    .filter(|candidate| candidate.starts_with(&prefix)),
+            );
+        }
+        for target in targets {
+            if let Err(error) = fs.chmod(&target, mode) {
+                return stderr_result(1, format!("chmod: {path}: {}\n", fs_error_label(&error)));
+            }
+        }
+    }
+    CommandResult::default()
+}
+
+fn parse_chmod_mode(spec: &str, current: u32) -> Result<u32, ()> {
+    if spec.chars().all(|ch| matches!(ch, '0'..='7')) {
+        return u32::from_str_radix(spec, 8)
+            .map_err(|_| ())
+            .map(|mode| mode & 0o777);
+    }
+    let (who, rest) = spec
+        .split_once(|ch| ['+', '-', '='].contains(&ch))
+        .ok_or(())?;
+    let op = spec
+        .chars()
+        .find(|ch| ['+', '-', '='].contains(ch))
+        .ok_or(())?;
+    let perms = rest;
+    let who_mask = if who.is_empty() || who.contains('a') {
+        0o777
+    } else {
+        let mut mask = 0;
+        if who.contains('u') {
+            mask |= 0o700;
+        }
+        if who.contains('g') {
+            mask |= 0o070;
+        }
+        if who.contains('o') {
+            mask |= 0o007;
+        }
+        mask
+    };
+    if who_mask == 0 {
+        return Err(());
+    }
+    let mut perm_bits = 0;
+    for ch in perms.chars() {
+        match ch {
+            'r' => perm_bits |= 0o444,
+            'w' => perm_bits |= 0o222,
+            'x' => perm_bits |= 0o111,
+            _ => return Err(()),
+        }
+    }
+    let perm_bits = perm_bits & who_mask;
+    Ok(match op {
+        '+' => current | perm_bits,
+        '-' => current & !perm_bits,
+        '=' => (current & !who_mask) | perm_bits,
+        _ => return Err(()),
+    } & 0o777)
+}
+
+fn command_readlink(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: readlink [OPTION]... FILE...\n  -f canonicalize\n");
+    }
+    let mut canonical = false;
+    let mut paths = Vec::new();
+    let mut end_options = false;
+    for arg in args {
+        if end_options {
+            paths.push(arg);
+            continue;
+        }
+        match arg.as_str() {
+            "--" => end_options = true,
+            "-f" | "--canonicalize" => canonical = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                return stderr_result(1, format!("readlink: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg),
+        }
+    }
+    if paths.is_empty() {
+        return stderr_result(1, "readlink: missing operand\n");
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "readlink: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut exit_code = 0;
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, path);
+        let value = if canonical {
+            canonical_readlink_path(&fs, &resolved)
+        } else {
+            fs.readlink(&resolved)
+        };
+        match value {
+            Ok(value) => {
+                stdout.push_str(&value);
+                stdout.push('\n');
+            }
+            Err(_) => exit_code = 1,
+        }
+    }
+    CommandResult {
+        stdout,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn canonical_readlink_path(fs: &VirtualFileSystem, path: &str) -> JustBashResult<String> {
+    let mut current = normalize_path(path);
+    for _ in 0..32 {
+        match fs.readlink(&current) {
+            Ok(target) => current = resolve_symlink_target(&current, &target),
+            Err(error) if matches!(error.kind(), JustBashErrorKind::InvalidInput) => {
+                return Ok(current);
+            }
+            Err(error) if matches!(error.kind(), JustBashErrorKind::NotFound) => {
+                return Ok(current);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(current)
+}
+
+fn command_stat(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: stat [OPTION]... FILE...\n  -c FORMAT\n");
+    }
+    let mut format = None;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-c" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "stat: option requires an argument -- 'c'\n");
+                };
+                format = Some(value.clone());
+                index += 2;
+            }
+            _ if arg.starts_with("-c") && arg.len() > 2 => {
+                format = Some(arg[2..].to_string());
+                index += 1;
+            }
+            _ if arg.starts_with('-') => index += 1,
+            _ => {
+                paths.push(arg.clone());
+                index += 1;
+            }
+        }
+    }
+    if paths.is_empty() {
+        return stderr_result(1, "stat: missing operand\n");
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "stat: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, &path);
+        match fs.stat(&resolved) {
+            Ok(stat) => {
+                if let Some(format) = format.as_deref() {
+                    stdout.push_str(&format_stat_custom(format, &resolved, &stat));
+                    stdout.push('\n');
+                } else {
+                    stdout.push_str(&format_stat_default(&resolved, &stat));
+                }
+            }
+            Err(_) => {
+                stderr.push_str(&format!(
+                    "stat: cannot stat '{path}': No such file or directory\n"
+                ));
+                exit_code = 1;
+            }
+        }
+    }
+    CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn format_stat_custom(format: &str, path: &str, stat: &FileStat) -> String {
+    let mut output = String::new();
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push_str(path),
+            Some('s') => output.push_str(&stat.size.to_string()),
+            Some('F') => output.push_str(file_type_label(stat)),
+            Some('a') => output.push_str(&format!("{:o}", stat.mode & 0o777)),
+            Some('%') => output.push('%'),
+            Some(other) => {
+                output.push('%');
+                output.push(other);
+            }
+            None => output.push('%'),
+        }
+    }
+    output
+}
+
+fn format_stat_default(path: &str, stat: &FileStat) -> String {
+    format!(
+        "  File: {path}\n  Size: {}\n  Mode: ({:04o}/{})\n",
+        stat.size,
+        stat.mode & 0o7777,
+        mode_string(stat),
+    )
+}
+
+fn file_type_label(stat: &FileStat) -> &'static str {
+    if stat.is_directory {
+        "directory"
+    } else if stat.is_symbolic_link {
+        "symbolic link"
+    } else {
+        "regular file"
+    }
+}
+
+fn mode_string(stat: &FileStat) -> String {
+    let mut output = String::new();
+    output.push(if stat.is_directory { 'd' } else { '-' });
+    for shift in [6, 3, 0] {
+        let bits = (stat.mode >> shift) & 0o7;
+        output.push(if bits & 0o4 != 0 { 'r' } else { '-' });
+        output.push(if bits & 0o2 != 0 { 'w' } else { '-' });
+        output.push(if bits & 0o1 != 0 { 'x' } else { '-' });
+    }
+    output
+}
+
+fn command_tee(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "tee - read from standard input and write to standard output and files\nUsage: tee [OPTION]... [FILE]...\n  -a, --append\n",
+        );
+    }
+    let mut append = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-a" | "--append" => append = true,
+            _ if arg.starts_with('-') => {}
+            _ => paths.push(arg),
+        }
+    }
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "tee: filesystem lock poisoned\n"),
+    };
+    for path in paths {
+        if let Err(error) = fs.write_redirection(
+            &state.cwd,
+            path,
+            OutputPayload::Text(stdin.to_string()),
+            append,
+        ) {
+            return stderr_result(1, format!("tee: {path}: {}\n", fs_error_label(&error)));
+        }
+    }
+    stdout_result(stdin.to_string())
+}
+
+fn command_file(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "file - determine file type\n\nUsage: file [OPTION]... FILE...\n\nOptions:\n  -b, --brief          do not prepend filenames to output\n  -i, --mime           output MIME type strings\n  -L, --dereference    follow symlinks\n      --help           display this help and exit\n",
+        );
+    }
+    let mut brief = false;
+    let mut mime = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-b" | "--brief" => brief = true,
+            "-i" | "--mime" => mime = true,
+            "-L" | "--dereference" => {}
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'b' => brief = true,
+                        'i' => mime = true,
+                        'L' => {}
+                        _ => {
+                            return stderr_result(1, format!("file: invalid option -- '{flag}'\n"));
+                        }
+                    }
+                }
+            }
+            _ => paths.push(arg),
+        }
+    }
+    if paths.is_empty() {
+        return stderr_result(1, "Usage: file [-bLi] FILE...\n");
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "file: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut exit_code = 0;
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, path);
+        let description = match fs.stat(&resolved) {
+            Ok(stat) if stat.is_directory => {
+                if mime {
+                    "inode/directory".to_string()
+                } else {
+                    "directory".to_string()
+                }
+            }
+            Ok(_) => match fs.read_file_buffer(&resolved) {
+                Ok(bytes) => describe_file_bytes(path, &bytes, mime),
+                Err(_) => {
+                    exit_code = 1;
+                    "cannot open (No such file or directory)".to_string()
+                }
+            },
+            Err(_) => {
+                exit_code = 1;
+                "cannot open (No such file or directory)".to_string()
+            }
+        };
+        if brief {
+            stdout.push_str(&description);
+        } else {
+            stdout.push_str(path);
+            stdout.push_str(": ");
+            stdout.push_str(&description);
+        }
+        stdout.push('\n');
+    }
+    CommandResult {
+        stdout,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn describe_file_bytes(path: &str, bytes: &[u8], mime: bool) -> String {
+    if bytes.is_empty() {
+        return if mime { "application/x-empty" } else { "empty" }.to_string();
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return if mime { "image/png" } else { "PNG image data" }.to_string();
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return if mime { "image/gif" } else { "GIF image data" }.to_string();
+    }
+    if bytes.starts_with(b"PK\x03\x04") {
+        return if mime {
+            "application/zip"
+        } else {
+            "Zip archive data"
+        }
+        .to_string();
+    }
+    if bytes.starts_with(b"%PDF-") {
+        return if mime {
+            "application/pdf"
+        } else {
+            "PDF document"
+        }
+        .to_string();
+    }
+    if mime {
+        return "text/plain".to_string();
+    }
+    if bytes.starts_with(b"#!/bin/bash") {
+        return "Bourne-Again shell script, ASCII text executable".to_string();
+    }
+    if bytes.starts_with(b"#!/usr/bin/env python") || bytes.starts_with(b"#!/usr/bin/python") {
+        return "Python script, ASCII text executable".to_string();
+    }
+    if path.ends_with(".ts") {
+        return "TypeScript source".to_string();
+    }
+    if path.ends_with(".js") {
+        return "JavaScript source".to_string();
+    }
+    if path.ends_with(".json") {
+        return "JSON data".to_string();
+    }
+    if path.ends_with(".md") {
+        return "Markdown document".to_string();
+    }
+    if bytes.contains(&b'\r') && bytes.contains(&b'\n') {
+        "ASCII text, with CRLF line terminators".to_string()
+    } else {
+        "ASCII text".to_string()
+    }
+}
+
+fn command_du(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: du [OPTION]... [FILE]...\n  -a  -s  -h  -c  --max-depth=N\n");
+    }
+    let mut all = false;
+    let mut summary = false;
+    let mut human = false;
+    let mut total = false;
+    let mut max_depth = None;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-a" | "--all" => all = true,
+            "-s" | "--summarize" => summary = true,
+            "-h" | "--human-readable" => human = true,
+            "-c" | "--total" => total = true,
+            _ if arg.starts_with("--max-depth=") => {
+                max_depth = arg["--max-depth=".len()..].parse::<usize>().ok();
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'a' => all = true,
+                        's' => summary = true,
+                        'h' => human = true,
+                        'c' => total = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+    if paths.is_empty() {
+        paths.push(".".to_string());
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "du: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut grand_total = 0;
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, &path);
+        if fs.stat(&resolved).is_err() {
+            return stderr_result(
+                1,
+                format!("du: cannot access '{path}': No such file or directory\n"),
+            );
+        }
+        let size = du_size(&fs, &resolved);
+        grand_total += size;
+        if all || (!summary && max_depth != Some(0)) {
+            for child in du_children(&fs, &resolved, max_depth.unwrap_or(usize::MAX), 0) {
+                stdout.push_str(&format!(
+                    "{}\t{}\n",
+                    format_du_size(du_size(&fs, &child), human),
+                    child
+                ));
+            }
+        }
+        stdout.push_str(&format!("{}\t{}\n", format_du_size(size, human), resolved));
+    }
+    if total {
+        stdout.push_str(&format!("{}\ttotal\n", format_du_size(grand_total, human)));
+    }
+    stdout_result(stdout)
+}
+
+fn du_size(fs: &VirtualFileSystem, path: &str) -> usize {
+    match fs.stat(path) {
+        Ok(stat) if stat.is_directory => {
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            fs.get_all_paths()
+                .into_iter()
+                .filter(|candidate| candidate == path || candidate.starts_with(&prefix))
+                .filter_map(|candidate| fs.stat(&candidate).ok())
+                .filter(|stat| stat.is_file)
+                .map(|stat| stat.size.max(1))
+                .sum::<usize>()
+                .max(1)
+        }
+        Ok(stat) => stat.size.max(1),
+        Err(_) => 0,
+    }
+}
+
+fn du_children(fs: &VirtualFileSystem, path: &str, max_depth: usize, depth: usize) -> Vec<String> {
+    if depth >= max_depth {
+        return Vec::new();
+    }
+    let mut output = Vec::new();
+    if let Ok(entries) = fs.readdir_with_file_types(path) {
+        for entry in entries {
+            let child = join_directory_child(path, &entry.name);
+            output.extend(du_children(fs, &child, max_depth, depth + 1));
+            output.push(child);
+        }
+    }
+    output
+}
+
+fn format_du_size(size: usize, human: bool) -> String {
+    if human && size >= 1024 {
+        format!("{:.1}K", size as f64 / 1024.0)
+    } else {
+        size.to_string()
+    }
+}
+
+fn command_tree(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "tree - list contents of directories in a tree-like format\nUsage: tree [OPTION]... [DIRECTORY]...\n  -a  -d  -L LEVEL  -f\n",
+        );
+    }
+    let mut show_hidden = false;
+    let mut directories_only = false;
+    let mut full_path = false;
+    let mut max_depth = usize::MAX;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-a" => show_hidden = true,
+            "-d" => directories_only = true,
+            "-f" => full_path = true,
+            "-L" => {
+                max_depth = args
+                    .get(index + 1)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(usize::MAX);
+                index += 1;
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'a' => show_hidden = true,
+                        'd' => directories_only = true,
+                        'f' => full_path = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if paths.is_empty() {
+        paths.push(".".to_string());
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "tree: filesystem lock poisoned\n"),
+    };
+    let mut stdout = String::new();
+    let mut counts = TreeCounts::default();
+    for raw in paths {
+        let root = resolve_path(&state.cwd, &raw);
+        if fs.stat(&root).is_err() {
+            return stderr_result(1, format!("tree: {raw}: No such file or directory\n"));
+        }
+        stdout.push_str(&root);
+        stdout.push('\n');
+        format_tree_children(
+            &fs,
+            &root,
+            "",
+            TreeOptions {
+                show_hidden,
+                directories_only,
+                full_path,
+                max_depth,
+            },
+            1,
+            &mut stdout,
+            &mut counts,
+        );
+    }
+    stdout.push_str(&format!(
+        "\n{} directories, {} files\n",
+        counts.dirs,
+        if directories_only { 0 } else { counts.files }
+    ));
+    stdout_result(stdout)
+}
+
+#[derive(Default)]
+struct TreeCounts {
+    dirs: usize,
+    files: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TreeOptions {
+    show_hidden: bool,
+    directories_only: bool,
+    full_path: bool,
+    max_depth: usize,
+}
+
+fn format_tree_children(
+    fs: &VirtualFileSystem,
+    path: &str,
+    prefix: &str,
+    options: TreeOptions,
+    depth: usize,
+    stdout: &mut String,
+    counts: &mut TreeCounts,
+) {
+    if depth > options.max_depth {
+        return;
+    }
+    let mut entries = match fs.readdir_with_file_types(path) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    entries.retain(|entry| {
+        (options.show_hidden || !entry.name.starts_with('.'))
+            && (!options.directories_only || entry.is_directory)
+    });
+    let len = entries.len();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let child = join_directory_child(path, &entry.name);
+        if entry.is_directory {
+            counts.dirs += 1;
+        } else {
+            counts.files += 1;
+        }
+        let branch = if index + 1 == len { "`-- " } else { "|-- " };
+        stdout.push_str(prefix);
+        stdout.push_str(branch);
+        stdout.push_str(if options.full_path {
+            &child
+        } else {
+            &entry.name
+        });
+        stdout.push('\n');
+        if entry.is_directory {
+            let next_prefix = format!(
+                "{}{}",
+                prefix,
+                if index + 1 == len { "    " } else { "|   " }
+            );
+            format_tree_children(fs, &child, &next_prefix, options, depth + 1, stdout, counts);
+        }
+    }
+}
+
+fn fs_error_label(error: &JustBashError) -> &'static str {
+    match error.kind() {
+        JustBashErrorKind::NotFound => "No such file or directory",
+        JustBashErrorKind::AlreadyExists => "File exists",
+        JustBashErrorKind::IsDirectory => "Is a directory",
+        JustBashErrorKind::NotDirectory => "Not a directory",
+        JustBashErrorKind::DirectoryNotEmpty => "Directory not empty",
+        JustBashErrorKind::PermissionDenied => "Operation not permitted",
+        JustBashErrorKind::ReadOnly => "Read-only file system",
+        JustBashErrorKind::SymlinkLoop => "Too many levels of symbolic links",
+        JustBashErrorKind::Busy => "Device or resource busy",
+        JustBashErrorKind::CrossDevice => "Invalid cross-device link",
+        JustBashErrorKind::InvalidInput => "Invalid argument",
+    }
 }
 
 fn number_text(text: &str, start: usize) -> (String, usize) {
@@ -11546,15 +12362,2592 @@ fn sql_value_quote(value: &SqlValue) -> String {
     }
 }
 
+fn command_comm(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: comm [OPTION]... FILE1 FILE2\nCompare two sorted files line by line.\n",
+        );
+    }
+    let mut show = [true, true, true];
+    let mut paths = Vec::new();
+    for arg in args {
+        if arg.starts_with('-') && arg != "-" {
+            for flag in arg[1..].chars() {
+                match flag {
+                    '1' => show[0] = false,
+                    '2' => show[1] = false,
+                    '3' => show[2] = false,
+                    _ => return stderr_result(1, format!("comm: invalid option -- '{flag}'\n")),
+                }
+            }
+        } else {
+            paths.push(arg.clone());
+        }
+    }
+    if paths.len() < 2 {
+        return stderr_result(1, "comm: missing operand\n");
+    }
+    let left = match read_text_source(state, &paths[0], stdin, "comm") {
+        Ok(text) => text,
+        Err(result) => return result,
+    };
+    let right = match read_text_source(state, &paths[1], stdin, "comm") {
+        Ok(text) => text,
+        Err(result) => return result,
+    };
+    let left = text_lines(&left);
+    let right = text_lines(&right);
+    let mut i = 0;
+    let mut j = 0;
+    let mut stdout = String::new();
+    while i < left.len() || j < right.len() {
+        match (left.get(i), right.get(j)) {
+            (Some(a), Some(b)) if a == b => {
+                if show[2] {
+                    stdout.push_str(&comm_prefix(2, show));
+                    stdout.push_str(a);
+                    stdout.push('\n');
+                }
+                i += 1;
+                j += 1;
+            }
+            (Some(a), Some(b)) if a < b => {
+                if show[0] {
+                    stdout.push_str(a);
+                    stdout.push('\n');
+                }
+                i += 1;
+            }
+            (Some(_), Some(b)) => {
+                if show[1] {
+                    stdout.push_str(&comm_prefix(1, show));
+                    stdout.push_str(b);
+                    stdout.push('\n');
+                }
+                j += 1;
+            }
+            (Some(a), None) => {
+                if show[0] {
+                    stdout.push_str(a);
+                    stdout.push('\n');
+                }
+                i += 1;
+            }
+            (None, Some(b)) => {
+                if show[1] {
+                    stdout.push_str(&comm_prefix(1, show));
+                    stdout.push_str(b);
+                    stdout.push('\n');
+                }
+                j += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    stdout_result(stdout)
+}
+
+fn command_column(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: column [OPTION]... [FILE]...\nColumnate lists.\n");
+    }
+    let mut table = false;
+    let mut input_separator = None::<String>;
+    let mut output_separator = None::<String>;
+    let mut no_merge = false;
+    let mut width = 80usize;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-t" | "--table" => table = true,
+            "-n" => no_merge = true,
+            "-s" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "column: option requires an argument -- 's'\n");
+                };
+                input_separator = Some(value.clone());
+                index += 1;
+            }
+            "-o" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "column: option requires an argument -- 'o'\n");
+                };
+                output_separator = Some(value.clone());
+                index += 1;
+            }
+            "-c" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "column: option requires an argument -- 'c'\n");
+                };
+                width = value.parse().unwrap_or(width);
+                index += 1;
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(1, format!("column: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_text_inputs_dash(state, &paths, stdin, "column") {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    if table {
+        stdout_result(format_column_table(
+            &input,
+            input_separator.as_deref(),
+            output_separator.as_deref(),
+            no_merge,
+        ))
+    } else {
+        stdout_result(format_column_fill(&input, width))
+    }
+}
+
+fn format_column_table(
+    input: &str,
+    input_separator: Option<&str>,
+    output_separator: Option<&str>,
+    no_merge: bool,
+) -> String {
+    let mut rows = Vec::<Vec<String>>::new();
+    for line in input.lines() {
+        let fields: Vec<String> = match input_separator {
+            Some(separator) if no_merge => line.split(separator).map(str::to_string).collect(),
+            Some(separator) => line
+                .split(separator)
+                .filter(|field| !field.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => line.split_whitespace().map(str::to_string).collect(),
+        };
+        if !fields.is_empty() {
+            rows.push(fields);
+        }
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    if let Some(separator) = output_separator {
+        return rows
+            .into_iter()
+            .map(|row| format!("{}\n", row.join(separator)))
+            .collect();
+    }
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0usize; columns];
+    for row in &rows {
+        for (index, field) in row.iter().enumerate() {
+            widths[index] = widths[index].max(display_width(field));
+        }
+    }
+    let mut output = String::new();
+    for row in rows {
+        for (index, field) in row.iter().enumerate() {
+            output.push_str(field);
+            if index + 1 < row.len() {
+                output
+                    .push_str(&" ".repeat(widths[index].saturating_sub(display_width(field)) + 2));
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
+fn format_column_fill(input: &str, width: usize) -> String {
+    let items: Vec<&str> = input.split_whitespace().collect();
+    if items.is_empty() {
+        return String::new();
+    }
+    let max_width = items
+        .iter()
+        .map(|item| display_width(item))
+        .max()
+        .unwrap_or(1);
+    if max_width + 2 > width {
+        return format!("{}\n", items.join("\n"));
+    }
+    let columns = (width / (max_width + 2)).max(1).min(items.len());
+    let mut output = String::new();
+    for (index, item) in items.iter().enumerate() {
+        output.push_str(item);
+        if index + 1 == items.len() || (index + 1) % columns == 0 {
+            output.push('\n');
+        } else {
+            output.push_str(&" ".repeat(max_width.saturating_sub(display_width(item)) + 2));
+        }
+    }
+    output
+}
+
+fn command_join(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: join [OPTION]... FILE1 FILE2\nJoin lines on a common field.\n",
+        );
+    }
+    let mut field1 = 0usize;
+    let mut field2 = 0usize;
+    let mut separator = None::<String>;
+    let mut print_unpairable = [false, false];
+    let mut only_unpairable = [false, false];
+    let mut empty = String::new();
+    let mut output_format = None::<Vec<JoinFieldSpec>>;
+    let mut ignore_case = false;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-1" | "-2" | "-a" | "-v" | "-t" | "-e" | "-o" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(
+                        1,
+                        format!("join: option requires an argument -- '{}'\n", &arg[1..]),
+                    );
+                };
+                match arg.as_str() {
+                    "-1" => {
+                        field1 = match parse_join_field(value) {
+                            Some(value) => value,
+                            None => return stderr_result(1, "join: invalid field number\n"),
+                        }
+                    }
+                    "-2" => {
+                        field2 = match parse_join_field(value) {
+                            Some(value) => value,
+                            None => return stderr_result(1, "join: invalid field number\n"),
+                        }
+                    }
+                    "-a" => match value.as_str() {
+                        "1" => print_unpairable[0] = true,
+                        "2" => print_unpairable[1] = true,
+                        _ => return stderr_result(1, "join: invalid file number\n"),
+                    },
+                    "-v" => match value.as_str() {
+                        "1" => only_unpairable[0] = true,
+                        "2" => only_unpairable[1] = true,
+                        _ => return stderr_result(1, "join: invalid file number\n"),
+                    },
+                    "-t" => separator = Some(value.clone()),
+                    "-e" => empty = value.clone(),
+                    "-o" => match parse_join_output_format(value) {
+                        Some(format) => output_format = Some(format),
+                        None => return stderr_result(1, "join: invalid field spec\n"),
+                    },
+                    _ => {}
+                }
+                index += 1;
+            }
+            "-i" | "--ignore-case" => ignore_case = true,
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(1, format!("join: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if paths.len() < 2 {
+        return stderr_result(1, "join: missing file operand\n");
+    }
+    let left = match read_join_records(state, &paths[0], stdin, separator.as_deref(), field1) {
+        Ok(records) => records,
+        Err(result) => return result,
+    };
+    let right = match read_join_records(state, &paths[1], stdin, separator.as_deref(), field2) {
+        Ok(records) => records,
+        Err(result) => return result,
+    };
+    stdout_result(render_join_records(JoinRender {
+        left: &left,
+        right: &right,
+        field1,
+        field2,
+        separator: separator.as_deref().unwrap_or(" "),
+        print_unpairable,
+        only_unpairable,
+        empty: &empty,
+        output_format: output_format.as_deref(),
+        ignore_case,
+    }))
+}
+
+#[derive(Clone)]
+struct JoinRecord {
+    fields: Vec<String>,
+    key: String,
+}
+
+#[derive(Clone)]
+struct JoinFieldSpec {
+    file: usize,
+    field: usize,
+}
+
+struct JoinRender<'a> {
+    left: &'a [JoinRecord],
+    right: &'a [JoinRecord],
+    field1: usize,
+    field2: usize,
+    separator: &'a str,
+    print_unpairable: [bool; 2],
+    only_unpairable: [bool; 2],
+    empty: &'a str,
+    output_format: Option<&'a [JoinFieldSpec]>,
+    ignore_case: bool,
+}
+
+fn parse_join_field(value: &str) -> Option<usize> {
+    value
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+}
+
+fn parse_join_output_format(value: &str) -> Option<Vec<JoinFieldSpec>> {
+    let mut specs = Vec::new();
+    for raw in value.split([',', ' ']).filter(|part| !part.is_empty()) {
+        let (file, field) = raw.split_once('.')?;
+        specs.push(JoinFieldSpec {
+            file: file.parse().ok()?,
+            field: field.parse().ok()?,
+        });
+    }
+    (!specs.is_empty()).then_some(specs)
+}
+
+fn read_join_records(
+    state: &ExecState<'_>,
+    path: &str,
+    stdin: &str,
+    separator: Option<&str>,
+    field: usize,
+) -> Result<Vec<JoinRecord>, CommandResult> {
+    let text = read_text_source(state, path, stdin, "join")?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<String> = match separator {
+                Some(separator) => line.split(separator).map(str::to_string).collect(),
+                None => line.split_whitespace().map(str::to_string).collect(),
+            };
+            fields.get(field).map(|key| JoinRecord {
+                fields: fields.clone(),
+                key: key.clone(),
+            })
+        })
+        .collect())
+}
+
+fn render_join_records(options: JoinRender<'_>) -> String {
+    let mut output = String::new();
+    let mut matched_right = vec![false; options.right.len()];
+    for left in options.left {
+        let mut matched = false;
+        for (right_index, right) in options.right.iter().enumerate() {
+            if join_keys_equal(&left.key, &right.key, options.ignore_case) {
+                matched = true;
+                matched_right[right_index] = true;
+                if !options.only_unpairable[0] && !options.only_unpairable[1] {
+                    output.push_str(&format_join_line(Some(left), Some(right), &options));
+                    output.push('\n');
+                }
+            }
+        }
+        if !matched && (options.print_unpairable[0] || options.only_unpairable[0]) {
+            output.push_str(&format_join_line(Some(left), None, &options));
+            output.push('\n');
+        }
+    }
+    for (right_index, right) in options.right.iter().enumerate() {
+        if !matched_right[right_index]
+            && (options.print_unpairable[1] || options.only_unpairable[1])
+        {
+            output.push_str(&format_join_line(None, Some(right), &options));
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn join_keys_equal(left: &str, right: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn format_join_line(
+    left: Option<&JoinRecord>,
+    right: Option<&JoinRecord>,
+    options: &JoinRender<'_>,
+) -> String {
+    if let Some(format) = options.output_format {
+        return format
+            .iter()
+            .map(|spec| {
+                join_field_value(spec, left, right, options)
+                    .unwrap_or_else(|| options.empty.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(options.separator);
+    }
+    let key = left
+        .map(|record| record.key.clone())
+        .or_else(|| right.map(|record| record.key.clone()))
+        .unwrap_or_default();
+    let mut fields = vec![if options.ignore_case {
+        key.to_ascii_lowercase()
+    } else {
+        key
+    }];
+    if let Some(record) = left {
+        fields.extend(join_non_key_fields(record, options.field1));
+    }
+    if let Some(record) = right {
+        fields.extend(join_non_key_fields(record, options.field2));
+    }
+    fields.join(options.separator)
+}
+
+fn join_field_value(
+    spec: &JoinFieldSpec,
+    left: Option<&JoinRecord>,
+    right: Option<&JoinRecord>,
+    options: &JoinRender<'_>,
+) -> Option<String> {
+    if spec.field == 0 {
+        return left
+            .map(|record| record.key.clone())
+            .or_else(|| right.map(|record| record.key.clone()));
+    }
+    let field_index = spec.field - 1;
+    match spec.file {
+        1 => left.and_then(|record| record.fields.get(field_index).cloned()),
+        2 => right.and_then(|record| record.fields.get(field_index).cloned()),
+        _ => None,
+    }
+    .or_else(|| (!options.empty.is_empty()).then(|| options.empty.to_string()))
+}
+
+fn join_non_key_fields(record: &JoinRecord, key_field: usize) -> impl Iterator<Item = String> + '_ {
+    record
+        .fields
+        .iter()
+        .enumerate()
+        .filter(move |(index, _)| *index != key_field)
+        .map(|(_, field)| field.clone())
+}
+
+fn command_split(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: split [OPTION]... [FILE [PREFIX]]\nSplit files into pieces.\n",
+        );
+    }
+    let mut mode = SplitMode::Lines(1000);
+    let mut numeric_suffixes = false;
+    let mut suffix_length = 2usize;
+    let mut additional_suffix = String::new();
+    let mut operands = Vec::new();
+    let mut index = 0;
+    let mut end_options = false;
+    while let Some(arg) = args.get(index) {
+        if end_options {
+            operands.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--" => end_options = true,
+            "-d" | "--numeric-suffixes" => numeric_suffixes = true,
+            "-l" | "-b" | "-n" | "-a" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(
+                        1,
+                        format!("split: option requires an argument -- '{}'\n", &arg[1..]),
+                    );
+                };
+                if let Err(result) = apply_split_option(arg, value, &mut mode, &mut suffix_length) {
+                    return result;
+                }
+                index += 1;
+            }
+            _ if arg.starts_with("-l") && arg.len() > 2 => {
+                if let Err(result) =
+                    apply_split_option("-l", &arg[2..], &mut mode, &mut suffix_length)
+                {
+                    return result;
+                }
+            }
+            _ if arg.starts_with("-b") && arg.len() > 2 => {
+                if let Err(result) =
+                    apply_split_option("-b", &arg[2..], &mut mode, &mut suffix_length)
+                {
+                    return result;
+                }
+            }
+            _ if arg.starts_with("-n") && arg.len() > 2 => {
+                if let Err(result) =
+                    apply_split_option("-n", &arg[2..], &mut mode, &mut suffix_length)
+                {
+                    return result;
+                }
+            }
+            _ if arg.starts_with("-a") && arg.len() > 2 => {
+                if let Err(result) =
+                    apply_split_option("-a", &arg[2..], &mut mode, &mut suffix_length)
+                {
+                    return result;
+                }
+            }
+            _ if arg.starts_with("--additional-suffix=") => {
+                additional_suffix = arg["--additional-suffix=".len()..].to_string();
+            }
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("split: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(1, format!("split: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => operands.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let (input_path, prefix) = match operands.as_slice() {
+        [] => (None, "x".to_string()),
+        [path] => (Some(path.as_str()), "x".to_string()),
+        [path, prefix] => (Some(path.as_str()), prefix.clone()),
+        _ => return stderr_result(1, "split: extra operand\n"),
+    };
+    let input = match input_path {
+        Some("-") | None => stdin.to_string(),
+        Some(path) => match read_text_source(state, path, stdin, "split") {
+            Ok(input) => input,
+            Err(result) => return result,
+        },
+    };
+    let chunks = match split_chunks(&input, mode) {
+        Ok(chunks) => chunks,
+        Err(result) => return result,
+    };
+    if chunks.len() > 100_000 {
+        return stderr_result(1, "split: too many output files\n");
+    }
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "split: filesystem lock poisoned\n"),
+    };
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let suffix = split_suffix(index, suffix_length, numeric_suffixes);
+        let path = resolve_path(&state.cwd, &format!("{prefix}{suffix}{additional_suffix}"));
+        if let Err(error) = fs.write_file(&path, chunk) {
+            return stderr_result(
+                1,
+                format!(
+                    "split: cannot write '{}': {}\n",
+                    path,
+                    fs_error_label(&error)
+                ),
+            );
+        }
+    }
+    CommandResult::default()
+}
+
+#[derive(Clone, Copy)]
+enum SplitMode {
+    Lines(usize),
+    Bytes(usize),
+    Chunks(usize),
+}
+
+fn apply_split_option(
+    option: &str,
+    value: &str,
+    mode: &mut SplitMode,
+    suffix_length: &mut usize,
+) -> Result<(), CommandResult> {
+    match option {
+        "-l" => {
+            let Some(lines) = parse_positive_usize(value) else {
+                return Err(stderr_result(1, "split: invalid number of lines\n"));
+            };
+            *mode = SplitMode::Lines(lines);
+        }
+        "-b" => {
+            let Some(bytes) = parse_split_size(value) else {
+                return Err(stderr_result(1, "split: invalid number of bytes\n"));
+            };
+            *mode = SplitMode::Bytes(bytes);
+        }
+        "-n" => {
+            let Some(chunks) = parse_positive_usize(value) else {
+                return Err(stderr_result(1, "split: invalid number of chunks\n"));
+            };
+            *mode = SplitMode::Chunks(chunks);
+        }
+        "-a" => {
+            let Some(length) = parse_positive_usize(value) else {
+                return Err(stderr_result(1, "split: invalid suffix length\n"));
+            };
+            *suffix_length = length;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_positive_usize(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok().filter(|value| *value > 0)
+}
+
+fn parse_split_size(value: &str) -> Option<usize> {
+    let (number, multiplier) = match value.chars().last() {
+        Some('K') | Some('k') => (&value[..value.len() - 1], 1024usize),
+        Some('M') | Some('m') => (&value[..value.len() - 1], 1024usize * 1024),
+        _ => (value, 1usize),
+    };
+    parse_positive_usize(number).map(|size| size.saturating_mul(multiplier))
+}
+
+fn split_chunks(input: &str, mode: SplitMode) -> Result<Vec<String>, CommandResult> {
+    Ok(match mode {
+        SplitMode::Lines(lines_per_chunk) => input
+            .split_inclusive('\n')
+            .collect::<Vec<_>>()
+            .chunks(lines_per_chunk)
+            .map(|chunk| chunk.concat())
+            .collect(),
+        SplitMode::Bytes(bytes_per_chunk) => input
+            .as_bytes()
+            .chunks(bytes_per_chunk)
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect(),
+        SplitMode::Chunks(count) => {
+            if count > 100_000 {
+                return Err(stderr_result(1, "split: too many output files\n"));
+            }
+            if input.is_empty() {
+                Vec::new()
+            } else {
+                let bytes = input.as_bytes();
+                let chunk_size = bytes.len().div_ceil(count);
+                bytes
+                    .chunks(chunk_size.max(1))
+                    .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                    .collect()
+            }
+        }
+    })
+}
+
+fn split_suffix(mut index: usize, length: usize, numeric: bool) -> String {
+    if numeric {
+        return format!("{index:0length$}");
+    }
+    let mut chars = vec!['a'; length];
+    for slot in (0..length).rev() {
+        chars[slot] = (b'a' + (index % 26) as u8) as char;
+        index /= 26;
+    }
+    chars.into_iter().collect()
+}
+
+fn comm_prefix(column: usize, show: [bool; 3]) -> String {
+    let tabs = (0..column).filter(|index| show[*index]).count();
+    "\t".repeat(tabs)
+}
+
+fn command_paste(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "paste - merge lines of files\nUsage: paste [-s] [-d delimiters] file ...\n  -d, --delimiters\n  -s, --serial\n",
+        );
+    }
+    let mut serial = false;
+    let mut delimiters = "\t".to_string();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" | "--serial" => serial = true,
+            "-d" | "--delimiters" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "paste: option requires an argument -- 'd'\n");
+                };
+                delimiters = value.clone();
+                index += 1;
+            }
+            _ if arg.starts_with("-d") && arg.len() > 2 => delimiters = arg[2..].to_string(),
+            _ if arg.starts_with("-sd") && arg.len() > 3 => {
+                serial = true;
+                delimiters = arg[3..].to_string();
+            }
+            _ if arg == "-x" => return stderr_result(1, "paste: invalid option -- 'x'\n"),
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("paste: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        's' => serial = true,
+                        _ => {
+                            return stderr_result(
+                                1,
+                                format!("paste: invalid option -- '{flag}'\n"),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if paths.is_empty() {
+        return stderr_result(1, "usage: paste [-s] [-d delimiters] file ...\n");
+    }
+    let delimiters = if delimiters.is_empty() {
+        "\0".to_string()
+    } else {
+        delimiters
+    };
+    if serial {
+        let mut stdout = String::new();
+        for path in paths {
+            let text = match read_text_source(state, &path, stdin, "paste") {
+                Ok(text) => text,
+                Err(result) => return result,
+            };
+            stdout.push_str(&join_with_cycling_delimiters(
+                &text_lines(&text),
+                &delimiters,
+            ));
+            stdout.push('\n');
+        }
+        return stdout_result(stdout);
+    }
+    if paths.iter().all(|path| path == "-") && paths.len() > 1 {
+        let lines = text_lines(stdin);
+        let mut stdout = String::new();
+        for chunk in lines.chunks(paths.len()) {
+            stdout.push_str(&join_with_cycling_delimiters(chunk, &delimiters));
+            stdout.push('\n');
+        }
+        return stdout_result(stdout);
+    }
+    let columns = paths
+        .iter()
+        .map(|path| read_text_source(state, path, stdin, "paste").map(|text| text_lines(&text)))
+        .collect::<Result<Vec<_>, _>>();
+    let columns = match columns {
+        Ok(columns) => columns,
+        Err(result) => return result,
+    };
+    let max_len = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let mut stdout = String::new();
+    for row in 0..max_len {
+        for (column_index, column) in columns.iter().enumerate() {
+            if column_index > 0 {
+                stdout.push(delimiter_at(&delimiters, column_index - 1));
+            }
+            if let Some(value) = column.get(row) {
+                stdout.push_str(value);
+            }
+        }
+        stdout.push('\n');
+    }
+    stdout_result(stdout)
+}
+
+fn join_with_cycling_delimiters(lines: &[String], delimiters: &str) -> String {
+    let mut output = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            output.push(delimiter_at(delimiters, index - 1));
+        }
+        output.push_str(line);
+    }
+    output
+}
+
+fn delimiter_at(delimiters: &str, index: usize) -> char {
+    let chars = delimiters.chars().collect::<Vec<_>>();
+    chars.get(index % chars.len()).copied().unwrap_or('\t')
+}
+
+fn command_expand(
+    state: &ExecState<'_>,
+    args: &[String],
+    stdin: &str,
+    unexpand: bool,
+) -> CommandResult {
+    let name = if unexpand { "unexpand" } else { "expand" };
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(format!(
+            "Usage: {name} [OPTION]... [FILE]...\nConvert tabs and spaces.\n"
+        ));
+    }
+    let mut tab_width = 8usize;
+    let mut initial = false;
+    let mut all = false;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-i" | "--initial" if !unexpand => initial = true,
+            "-a" | "--all" if unexpand => all = true,
+            "-t" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(
+                        1,
+                        format!("{name}: option requires an argument -- 't'\n"),
+                    );
+                };
+                tab_width = match parse_tab_width(value) {
+                    Some(value) => value,
+                    None => return stderr_result(1, format!("{name}: invalid tab size\n")),
+                };
+                index += 1;
+            }
+            _ if arg.starts_with("-t") && arg.len() > 2 => {
+                tab_width = match parse_tab_width(&arg[2..]) {
+                    Some(value) => value,
+                    None => return stderr_result(1, format!("{name}: invalid tab size\n")),
+                };
+            }
+            _ if arg.starts_with("--tabs=") => {
+                tab_width = match parse_tab_width(&arg["--tabs=".len()..]) {
+                    Some(value) => value,
+                    None => return stderr_result(1, format!("{name}: invalid tab size\n")),
+                };
+            }
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("{name}: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(1, format!("{name}: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_text_inputs_dash(state, &paths, stdin, name) {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    let output = if unexpand {
+        unexpand_text(&input, tab_width, all)
+    } else {
+        expand_text(&input, tab_width, initial)
+    };
+    stdout_result(output)
+}
+
+fn parse_tab_width(value: &str) -> Option<usize> {
+    value
+        .split(',')
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn expand_text(input: &str, tab_width: usize, initial_only: bool) -> String {
+    let mut output = String::new();
+    let mut col = 0usize;
+    let mut leading = true;
+    for ch in input.chars() {
+        match ch {
+            '\t' if !initial_only || leading => {
+                let spaces = tab_width - (col % tab_width);
+                output.push_str(&" ".repeat(spaces));
+                col += spaces;
+            }
+            '\n' => {
+                output.push('\n');
+                col = 0;
+                leading = true;
+            }
+            other => {
+                output.push(other);
+                col += 1;
+                if !other.is_whitespace() {
+                    leading = false;
+                }
+            }
+        }
+    }
+    output
+}
+
+fn unexpand_text(input: &str, tab_width: usize, all: bool) -> String {
+    let mut output = String::new();
+    for line in input.split_inclusive('\n') {
+        let had_newline = line.ends_with('\n');
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        output.push_str(&unexpand_line(content, tab_width, all));
+        if had_newline {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn unexpand_line(input: &str, tab_width: usize, all: bool) -> String {
+    let mut output = String::new();
+    let mut col = 0usize;
+    let mut chars = input.chars().peekable();
+    let mut leading = true;
+    while let Some(ch) = chars.next() {
+        if ch == ' ' && (all || leading) {
+            let mut count = 1usize;
+            while chars.peek().is_some_and(|next| *next == ' ') {
+                chars.next();
+                count += 1;
+            }
+            while count > 0 {
+                let to_tab = tab_width - (col % tab_width);
+                if count >= to_tab && to_tab > 1 {
+                    output.push('\t');
+                    col += to_tab;
+                    count -= to_tab;
+                } else {
+                    output.push(' ');
+                    col += 1;
+                    count -= 1;
+                }
+            }
+        } else {
+            output.push(ch);
+            col += if ch == '\t' {
+                tab_width - (col % tab_width)
+            } else {
+                1
+            };
+            if !ch.is_whitespace() {
+                leading = false;
+            }
+        }
+    }
+    output
+}
+
+fn command_fold(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: fold [OPTION]... [FILE]...\nWrap input lines.\n");
+    }
+    let mut width = 80usize;
+    let mut spaces = false;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" => spaces = true,
+            "-w" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "fold: option requires an argument -- 'w'\n");
+                };
+                width = match value.parse::<usize>().ok().filter(|value| *value > 0) {
+                    Some(value) => value,
+                    None => return stderr_result(1, "fold: invalid number of columns\n"),
+                };
+                index += 1;
+            }
+            "-sw" | "-ws" => {
+                spaces = true;
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "fold: option requires an argument -- 'w'\n");
+                };
+                width = match value.parse::<usize>().ok().filter(|value| *value > 0) {
+                    Some(value) => value,
+                    None => return stderr_result(1, "fold: invalid number of columns\n"),
+                };
+                index += 1;
+            }
+            _ if arg.starts_with("-w") && arg.len() > 2 => {
+                width = match arg[2..].parse::<usize>().ok().filter(|value| *value > 0) {
+                    Some(value) => value,
+                    None => return stderr_result(1, "fold: invalid number of columns\n"),
+                };
+            }
+            _ if arg.starts_with("-sw") && arg.len() > 3 => {
+                spaces = true;
+                width = match arg[3..].parse::<usize>().ok().filter(|value| *value > 0) {
+                    Some(value) => value,
+                    None => return stderr_result(1, "fold: invalid number of columns\n"),
+                };
+            }
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("fold: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        's' | 'b' => spaces = spaces || flag == 's',
+                        _ => {
+                            return stderr_result(1, format!("fold: invalid option -- '{flag}'\n"));
+                        }
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_text_inputs_dash(state, &paths, stdin, "fold") {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    stdout_result(fold_text(&input, width, spaces))
+}
+
+fn fold_text(input: &str, width: usize, spaces: bool) -> String {
+    let mut output = String::new();
+    for line in input.split_inclusive('\n') {
+        let had_newline = line.ends_with('\n');
+        let mut rest = line.strip_suffix('\n').unwrap_or(line).to_string();
+        while display_width(&rest) > width {
+            let split = if spaces {
+                rest.char_indices()
+                    .take_while(|(index, _)| display_width(&rest[..*index]) <= width)
+                    .filter(|(_, ch)| *ch == ' ')
+                    .map(|(index, ch)| index + ch.len_utf8())
+                    .last()
+                    .unwrap_or_else(|| display_width_boundary(&rest, width))
+            } else {
+                display_width_boundary(&rest, width)
+            };
+            output.push_str(&rest[..split]);
+            output.push('\n');
+            rest = rest[split..].to_string();
+        }
+        output.push_str(&rest);
+        if had_newline {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn display_width(input: &str) -> usize {
+    let mut col = 0usize;
+    for ch in input.chars() {
+        col += if ch == '\t' { 8 - (col % 8) } else { 1 };
+    }
+    col
+}
+
+fn display_width_boundary(input: &str, width: usize) -> usize {
+    let mut col = 0usize;
+    let mut last = 0usize;
+    for (index, ch) in input.char_indices() {
+        let next = col + if ch == '\t' { 8 - (col % 8) } else { 1 };
+        if next > width {
+            return last.max(index);
+        }
+        col = next;
+        last = index + ch.len_utf8();
+    }
+    input.len()
+}
+
+fn command_nl(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: nl [OPTION]... [FILE]...\nNumber lines.\n");
+    }
+    let mut number_all = false;
+    let mut number_none = false;
+    let mut format = "rn".to_string();
+    let mut width = 6usize;
+    let mut separator = "\t".to_string();
+    let mut current = 1i64;
+    let mut increment = 1i64;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-ba" => number_all = true,
+            "-bn" => number_none = true,
+            "-b" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "nl: option requires an argument -- 'b'\n");
+                };
+                match value.as_str() {
+                    "a" => number_all = true,
+                    "n" => number_none = true,
+                    "t" => {}
+                    _ => return stderr_result(1, "nl: invalid body numbering style\n"),
+                }
+                index += 1;
+            }
+            "-n" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "nl: option requires an argument -- 'n'\n");
+                };
+                if !matches!(value.as_str(), "ln" | "rn" | "rz") {
+                    return stderr_result(1, "nl: invalid line numbering format\n");
+                }
+                format = value.clone();
+                index += 1;
+            }
+            "-w" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "nl: option requires an argument -- 'w'\n");
+                };
+                width = match value.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => return stderr_result(1, "nl: invalid line number field width\n"),
+                };
+                index += 1;
+            }
+            "-s" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "nl: option requires an argument -- 's'\n");
+                };
+                separator = value.clone();
+                index += 1;
+            }
+            "-v" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "nl: option requires an argument -- 'v'\n");
+                };
+                current = value.parse().unwrap_or(current);
+                index += 1;
+            }
+            "-i" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "nl: option requires an argument -- 'i'\n");
+                };
+                increment = value.parse().unwrap_or(increment);
+                index += 1;
+            }
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("nl: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(1, format!("nl: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_text_inputs_dash(state, &paths, stdin, "nl") {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    stdout_result(number_lines(
+        &input,
+        NlOptions {
+            number_all,
+            number_none,
+            format: &format,
+            width,
+            separator: &separator,
+            increment,
+        },
+        &mut current,
+    ))
+}
+
+struct NlOptions<'a> {
+    number_all: bool,
+    number_none: bool,
+    format: &'a str,
+    width: usize,
+    separator: &'a str,
+    increment: i64,
+}
+
+fn number_lines(input: &str, options: NlOptions<'_>, current: &mut i64) -> String {
+    let mut output = String::new();
+    for line in input.split_inclusive('\n') {
+        let had_newline = line.ends_with('\n');
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let should_number =
+            !options.number_none && (options.number_all || !content.trim().is_empty());
+        if should_number {
+            output.push_str(&format_line_number(*current, options.format, options.width));
+            *current += options.increment;
+        } else {
+            output.push_str(&" ".repeat(options.width));
+        }
+        output.push_str(options.separator);
+        output.push_str(content);
+        if had_newline {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn format_line_number(value: i64, format: &str, width: usize) -> String {
+    match format {
+        "ln" => format!("{value:<width$}"),
+        "rz" => {
+            if value < 0 {
+                format!("-{:0>width$}", -value, width = width.saturating_sub(1))
+            } else {
+                format!("{value:0>width$}")
+            }
+        }
+        _ => format!("{value:>width$}"),
+    }
+}
+
+fn command_xargs(state: &mut ExecState<'_>, args: &[String], stdin: String) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: xargs [OPTION]... [COMMAND [INITIAL-ARGS]...]\nBuild and execute command lines from standard input.\n",
+        );
+    }
+    let mut batch_size = usize::MAX;
+    let mut replace = None::<String>;
+    let mut delimiter = None::<char>;
+    let mut verbose = false;
+    let mut no_run_if_empty = false;
+    let mut command = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-n" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "xargs: option requires an argument -- 'n'\n");
+                };
+                batch_size = value.parse().unwrap_or(usize::MAX);
+                index += 1;
+            }
+            "-I" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "xargs: option requires an argument -- 'I'\n");
+                };
+                replace = Some(value.clone());
+                index += 1;
+            }
+            "-0" => delimiter = Some('\0'),
+            "-d" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "xargs: option requires an argument -- 'd'\n");
+                };
+                delimiter = parse_xargs_delimiter(value);
+                index += 1;
+            }
+            "-t" => verbose = true,
+            "-r" => no_run_if_empty = true,
+            "-P" => {
+                index += 1;
+            }
+            _ if arg.starts_with("-P") && arg.len() > 2 => {}
+            _ => {
+                command.extend_from_slice(&args[index..]);
+                break;
+            }
+        }
+        index += 1;
+    }
+    if command.is_empty() {
+        command.push("echo".to_string());
+    }
+    let items = split_xargs_input(&stdin, delimiter);
+    if items.is_empty() && no_run_if_empty {
+        return CommandResult::default();
+    }
+    let batches = if let Some(marker) = replace.as_deref() {
+        items
+            .iter()
+            .map(|item| {
+                command
+                    .iter()
+                    .map(|arg| arg.replace(marker, item))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let batch_size = batch_size.max(1);
+        items
+            .chunks(batch_size)
+            .map(|chunk| {
+                let mut tokens = command.clone();
+                tokens.extend(chunk.iter().cloned());
+                tokens
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut combined = CommandResult::default();
+    for tokens in batches {
+        if verbose {
+            combined.stderr.push_str(&tokens.join(" "));
+            combined.stderr.push('\n');
+        }
+        let result = execute_tokens(state, &tokens, String::new());
+        combined.stdout.push_str(&result.stdout);
+        combined.stderr.push_str(&result.stderr);
+        combined.exit_code = result.exit_code;
+        if result.exit_code != 0 {
+            break;
+        }
+    }
+    combined
+}
+
+fn parse_xargs_delimiter(value: &str) -> Option<char> {
+    match value {
+        "\\n" => Some('\n'),
+        "\\t" => Some('\t'),
+        "\\\\" => Some('\\'),
+        "" => None,
+        other => other.chars().next(),
+    }
+}
+
+fn split_xargs_input(input: &str, delimiter: Option<char>) -> Vec<String> {
+    match delimiter {
+        Some(delimiter) => input
+            .split(delimiter)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        None => input
+            .split_whitespace()
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
+
+fn collect_text_inputs_dash(
+    state: &ExecState<'_>,
+    paths: &[String],
+    stdin: &str,
+    command: &str,
+) -> Result<String, CommandResult> {
+    if paths.is_empty() {
+        return Ok(stdin.to_string());
+    }
+    let mut output = String::new();
+    for path in paths {
+        output.push_str(&read_text_source(state, path, stdin, command)?);
+    }
+    Ok(output)
+}
+
+fn read_text_source(
+    state: &ExecState<'_>,
+    path: &str,
+    stdin: &str,
+    command: &str,
+) -> Result<String, CommandResult> {
+    if path == "-" {
+        return Ok(stdin.to_string());
+    }
+    let resolved = resolve_path(&state.cwd, path);
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, format!("{command}: filesystem lock poisoned\n")))?;
+    fs.read_file(&resolved)
+        .map_err(|_| stderr_result(1, format!("{command}: {path}: No such file or directory\n")))
+}
+
+fn text_lines(input: &str) -> Vec<String> {
+    input
+        .split('\n')
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+const VIRTUAL_GZIP_PREFIX: &str = "\u{1f}\u{8b}JUSTBASH-GZIP:";
+
+fn command_gzip(
+    command: &str,
+    state: &ExecState<'_>,
+    args: &[String],
+    stdin: &str,
+) -> CommandResult {
+    let decompress_command = command == "gunzip" || command == "zcat";
+    let stdout_command = command == "zcat";
+    if args.iter().any(|arg| arg == "--help") {
+        let action = if decompress_command {
+            "decompress"
+        } else {
+            "compress"
+        };
+        return stdout_result(format!(
+            "{command} - {action} files\nUsage: {command} [OPTION]... [FILE]...\n"
+        ));
+    }
+    let mut options = GzipOptions {
+        decompress: decompress_command,
+        stdout: stdout_command,
+        keep: stdout_command,
+        force: false,
+        suffix: ".gz".to_string(),
+        verbose: false,
+        recursive: false,
+        list: false,
+        test: false,
+        quiet: false,
+    };
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-S" | "--suffix" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(
+                        1,
+                        format!("{command}: option requires an argument -- 'S'\n"),
+                    );
+                };
+                options.suffix = value.clone();
+                index += 1;
+            }
+            "--fast" | "--best" => {}
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("{command}: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'd' => options.decompress = true,
+                        'c' => {
+                            options.stdout = true;
+                            options.keep = true;
+                        }
+                        'k' => options.keep = true,
+                        'f' => options.force = true,
+                        'v' => options.verbose = true,
+                        'r' => options.recursive = true,
+                        'l' => options.list = true,
+                        't' => options.test = true,
+                        'q' => options.quiet = true,
+                        '1'..='9' => {}
+                        _ => {
+                            return stderr_result(
+                                1,
+                                format!("{command}: invalid option -- '{flag}'\n"),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if paths.is_empty() || paths.iter().any(|path| path == "-") {
+        if options.decompress {
+            return match virtual_gzip_unpack(stdin) {
+                Ok(text) => stdout_result(text),
+                Err(message) => gzip_error(command, &options, message),
+            };
+        }
+        return stdout_result(virtual_gzip_pack(stdin));
+    }
+    if options.list {
+        return command_gzip_list(command, state, &paths, &options);
+    }
+    if options.test {
+        return command_gzip_test(command, state, &paths, &options);
+    }
+    let targets = match gzip_targets(command, state, &paths, options.recursive) {
+        Ok(targets) => targets,
+        Err(result) => return result,
+    };
+    if options.decompress {
+        command_gzip_decompress_files(command, state, &targets, &options)
+    } else {
+        command_gzip_compress_files(command, state, &targets, &options)
+    }
+}
+
+struct GzipOptions {
+    decompress: bool,
+    stdout: bool,
+    keep: bool,
+    force: bool,
+    suffix: String,
+    verbose: bool,
+    recursive: bool,
+    list: bool,
+    test: bool,
+    quiet: bool,
+}
+
+fn gzip_targets(
+    command: &str,
+    state: &ExecState<'_>,
+    paths: &[String],
+    recursive: bool,
+) -> Result<Vec<String>, CommandResult> {
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, format!("{command}: filesystem lock poisoned\n")))?;
+    let mut targets = Vec::new();
+    for path in paths {
+        let resolved = resolve_path(&state.cwd, path);
+        match fs.stat(&resolved) {
+            Ok(stat) if stat.is_directory && recursive => {
+                let prefix = format!("{}/", resolved.trim_end_matches('/'));
+                targets.extend(
+                    fs.get_all_paths()
+                        .into_iter()
+                        .filter(|candidate| candidate.starts_with(&prefix))
+                        .filter(|candidate| fs.stat(candidate).is_ok_and(|stat| stat.is_file)),
+                );
+            }
+            Ok(stat) if stat.is_directory => {
+                return Err(stderr_result(
+                    1,
+                    format!("{command}: {path}: is a directory\n"),
+                ));
+            }
+            Ok(_) => targets.push(resolved),
+            Err(_) => {
+                return Err(stderr_result(
+                    1,
+                    format!("{command}: {path}: No such file or directory\n"),
+                ));
+            }
+        }
+    }
+    targets.sort();
+    Ok(targets)
+}
+
+fn command_gzip_compress_files(
+    command: &str,
+    state: &ExecState<'_>,
+    paths: &[String],
+    options: &GzipOptions,
+) -> CommandResult {
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    for path in paths {
+        if path.ends_with(&options.suffix) {
+            exit_code = 1;
+            stderr.push_str(&format!(
+                "{command}: {path}: already has .gz suffix -- unchanged\n"
+            ));
+            continue;
+        }
+        let content = match fs.read_file(path) {
+            Ok(content) => content,
+            Err(_) => {
+                exit_code = 1;
+                stderr.push_str(&format!("{command}: {path}: No such file or directory\n"));
+                continue;
+            }
+        };
+        let packed = virtual_gzip_pack(&content);
+        if options.stdout {
+            stdout.push_str(&packed);
+        } else {
+            let output_path = format!("{path}{}", options.suffix);
+            if !options.force && fs.stat(&output_path).is_ok() {
+                return stderr_result(1, format!("{command}: {output_path} already exists\n"));
+            }
+            if let Err(error) = fs.write_file(&output_path, packed) {
+                return stderr_result(1, format!("{command}: {error}\n"));
+            }
+            if !options.keep {
+                let _ = fs.rm(
+                    path,
+                    RmOptions {
+                        recursive: false,
+                        force: true,
+                    },
+                );
+            }
+            if options.verbose {
+                stderr.push_str(&format!("{path}:\t  0.0% -- replaced with {output_path}\n"));
+            }
+        }
+    }
+    CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn command_gzip_decompress_files(
+    command: &str,
+    state: &ExecState<'_>,
+    paths: &[String],
+    options: &GzipOptions,
+) -> CommandResult {
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    for path in paths {
+        if !path.ends_with(&options.suffix) {
+            exit_code = 1;
+            if !options.quiet {
+                stderr.push_str(&format!("{command}: {path}: unknown suffix -- ignored\n"));
+            }
+            continue;
+        }
+        let packed = match fs.read_file(path) {
+            Ok(content) => content,
+            Err(_) => {
+                exit_code = 1;
+                if !options.quiet {
+                    stderr.push_str(&format!("{command}: {path}: No such file or directory\n"));
+                }
+                continue;
+            }
+        };
+        let unpacked = match virtual_gzip_unpack(&packed) {
+            Ok(content) => content,
+            Err(message) => {
+                exit_code = 1;
+                if !options.quiet {
+                    stderr.push_str(&format!("{command}: {path}: {message}\n"));
+                }
+                continue;
+            }
+        };
+        if options.stdout {
+            stdout.push_str(&unpacked);
+        } else {
+            let output_path = path.trim_end_matches(&options.suffix);
+            if let Err(error) = fs.write_file(output_path, unpacked) {
+                return stderr_result(1, format!("{command}: {error}\n"));
+            }
+            if !options.keep {
+                let _ = fs.rm(
+                    path,
+                    RmOptions {
+                        recursive: false,
+                        force: true,
+                    },
+                );
+            }
+        }
+        if options.verbose {
+            stderr.push_str(&format!("{path}: OK\n"));
+        }
+    }
+    CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn command_gzip_list(
+    command: &str,
+    state: &ExecState<'_>,
+    paths: &[String],
+    options: &GzipOptions,
+) -> CommandResult {
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
+    };
+    let mut stdout = "compressed uncompressed ratio uncompressed_name\n".to_string();
+    for raw in paths {
+        let path = resolve_path(&state.cwd, raw);
+        let packed = match fs.read_file(&path) {
+            Ok(content) => content,
+            Err(_) => {
+                return stderr_result(1, format!("{command}: {raw}: No such file or directory\n"));
+            }
+        };
+        let unpacked = match virtual_gzip_unpack(&packed) {
+            Ok(content) => content,
+            Err(message) => return gzip_error(command, options, message),
+        };
+        stdout.push_str(&format!(
+            "{} {} 0.0% {}\n",
+            packed.len(),
+            unpacked.len(),
+            path.trim_end_matches(&options.suffix)
+        ));
+    }
+    stdout_result(stdout)
+}
+
+fn command_gzip_test(
+    command: &str,
+    state: &ExecState<'_>,
+    paths: &[String],
+    options: &GzipOptions,
+) -> CommandResult {
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
+    };
+    let mut stderr = String::new();
+    for raw in paths {
+        let path = resolve_path(&state.cwd, raw);
+        let packed = match fs.read_file(&path) {
+            Ok(content) => content,
+            Err(_) => {
+                return stderr_result(1, format!("{command}: {raw}: No such file or directory\n"));
+            }
+        };
+        if let Err(message) = virtual_gzip_unpack(&packed) {
+            return gzip_error(command, options, message);
+        }
+        if options.verbose {
+            stderr.push_str(&format!("{raw}: OK\n"));
+        }
+    }
+    CommandResult {
+        stderr,
+        ..CommandResult::default()
+    }
+}
+
+fn gzip_error(command: &str, options: &GzipOptions, message: impl AsRef<str>) -> CommandResult {
+    if options.quiet {
+        stderr_result(1, "")
+    } else {
+        stderr_result(1, format!("{command}: {}\n", message.as_ref()))
+    }
+}
+
+fn virtual_gzip_pack(content: &str) -> String {
+    format!(
+        "{VIRTUAL_GZIP_PREFIX}{}",
+        bytes_to_string(content.as_bytes(), BufferEncoding::Base64)
+    )
+}
+
+fn virtual_gzip_unpack(content: &str) -> Result<String, &'static str> {
+    let Some(encoded) = content.strip_prefix(VIRTUAL_GZIP_PREFIX) else {
+        return Err("not in gzip format");
+    };
+    content_to_bytes(encoded, BufferEncoding::Base64)
+        .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
+        .map_err(|_| "not in gzip format")
+}
+
+fn command_base64(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: base64 [OPTION]... [FILE]\nBase64 encode or decode FILE, or standard input.\n  -d, --decode\n  -w, --wrap=COLS\n",
+        );
+    }
+    let mut decode = false;
+    let mut wrap = Some(76usize);
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-d" | "--decode" => decode = true,
+            "-w" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "base64: option requires an argument -- 'w'\n");
+                };
+                wrap = value.parse::<usize>().ok().filter(|value| *value > 0);
+                if value == "0" {
+                    wrap = None;
+                }
+                index += 1;
+            }
+            _ if arg.starts_with("-w") && arg.len() > 2 => {
+                wrap = arg[2..].parse::<usize>().ok().filter(|value| *value > 0);
+                if &arg[2..] == "0" {
+                    wrap = None;
+                }
+            }
+            _ if arg.starts_with("--wrap=") => {
+                let value = &arg["--wrap=".len()..];
+                wrap = value.parse::<usize>().ok().filter(|value| *value > 0);
+                if value == "0" {
+                    wrap = None;
+                }
+            }
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("base64: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(1, format!("base64: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_binary_inputs(state, &paths, stdin, "base64") {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    if decode {
+        let text = bytes_to_string(&input, BufferEncoding::Utf8);
+        match content_to_bytes(text, BufferEncoding::Base64) {
+            Ok(bytes) => stdout_result(bytes_to_string(&bytes, BufferEncoding::Utf8)),
+            Err(_) => stderr_result(1, "base64: invalid input\n"),
+        }
+    } else {
+        let mut encoded = bytes_to_string(&input, BufferEncoding::Base64);
+        if let Some(width) = wrap {
+            encoded = wrap_string(&encoded, width);
+        }
+        encoded.push('\n');
+        stdout_result(encoded)
+    }
+}
+
+fn collect_binary_inputs(
+    state: &ExecState<'_>,
+    paths: &[String],
+    stdin: &str,
+    command: &str,
+) -> Result<Vec<u8>, CommandResult> {
+    if paths.is_empty() || (paths.len() == 1 && paths[0] == "-") {
+        return Ok(stdin.as_bytes().to_vec());
+    }
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, format!("{command}: filesystem lock poisoned\n")))?;
+    let mut output = Vec::new();
+    for path in paths {
+        if path == "-" {
+            output.extend_from_slice(stdin.as_bytes());
+            continue;
+        }
+        let resolved = resolve_path(&state.cwd, path);
+        match fs.read_file_buffer(&resolved) {
+            Ok(bytes) => output.extend(bytes),
+            Err(_) => {
+                return Err(stderr_result(
+                    1,
+                    format!("{command}: {path}: No such file or directory\n"),
+                ));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn wrap_string(input: &str, width: usize) -> String {
+    if width == 0 {
+        return input.to_string();
+    }
+    let mut output = String::new();
+    for (index, ch) in input.chars().enumerate() {
+        if index > 0 && index % width == 0 {
+            output.push('\n');
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn command_diff(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: diff [OPTION]... FILES\nCompare files line by line.\n");
+    }
+    let mut brief = false;
+    let mut report_identical = false;
+    let mut ignore_case = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-q" | "--brief" => brief = true,
+            "-s" | "--report-identical-files" => report_identical = true,
+            "-i" | "--ignore-case" => ignore_case = true,
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("diff: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'q' => brief = true,
+                        's' => report_identical = true,
+                        'i' => ignore_case = true,
+                        _ => {
+                            return stderr_result(1, format!("diff: invalid option -- '{flag}'\n"));
+                        }
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+    if paths.len() < 2 {
+        return stderr_result(2, "diff: missing operand\n");
+    }
+    let left = match read_diff_input(state, &paths[0], stdin) {
+        Ok(text) => text,
+        Err(stderr) => return stderr_result(2, stderr),
+    };
+    let right = match read_diff_input(state, &paths[1], stdin) {
+        Ok(text) => text,
+        Err(stderr) => return stderr_result(2, stderr),
+    };
+    let comparable_left = if ignore_case {
+        left.to_lowercase()
+    } else {
+        left.clone()
+    };
+    let comparable_right = if ignore_case {
+        right.to_lowercase()
+    } else {
+        right.clone()
+    };
+    if comparable_left == comparable_right {
+        return if report_identical {
+            stdout_result(format!(
+                "Files {} and {} are identical\n",
+                paths[0], paths[1]
+            ))
+        } else {
+            CommandResult::default()
+        };
+    }
+    if brief {
+        return CommandResult {
+            stdout: format!("Files {} and {} differ\n", paths[0], paths[1]),
+            exit_code: 1,
+            ..CommandResult::default()
+        };
+    }
+    CommandResult {
+        stdout: format_unified_diff(&paths[0], &paths[1], &left, &right),
+        exit_code: 1,
+        ..CommandResult::default()
+    }
+}
+
+fn read_diff_input(state: &ExecState<'_>, path: &str, stdin: &str) -> Result<String, String> {
+    if path == "-" {
+        return Ok(stdin.to_string());
+    }
+    let resolved = resolve_path(&state.cwd, path);
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| "diff: filesystem lock poisoned\n".to_string())?;
+    fs.read_file(&resolved)
+        .map_err(|_| format!("diff: {path}: No such file or directory\n"))
+}
+
+fn format_unified_diff(left_path: &str, right_path: &str, left: &str, right: &str) -> String {
+    let mut output = format!("--- {left_path}\n+++ {right_path}\n");
+    let left_lines = left.split_inclusive('\n').collect::<Vec<_>>();
+    let right_lines = right.split_inclusive('\n').collect::<Vec<_>>();
+    let max = left_lines.len().max(right_lines.len());
+    for index in 0..max {
+        match (left_lines.get(index), right_lines.get(index)) {
+            (Some(left), Some(right)) if left == right => {
+                output.push(' ');
+                output.push_str(left.trim_end_matches('\n'));
+                output.push('\n');
+            }
+            (Some(left), Some(right)) => {
+                output.push('-');
+                output.push_str(left.trim_end_matches('\n'));
+                output.push('\n');
+                output.push('+');
+                output.push_str(right.trim_end_matches('\n'));
+                output.push('\n');
+            }
+            (Some(left), None) => {
+                output.push('-');
+                output.push_str(left.trim_end_matches('\n'));
+                output.push('\n');
+            }
+            (None, Some(right)) => {
+                output.push('+');
+                output.push_str(right.trim_end_matches('\n'));
+                output.push('\n');
+            }
+            (None, None) => {}
+        }
+    }
+    output
+}
+
+fn command_date(args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: date [OPTION]... [+FORMAT]\nDisplay or set date and time.\n");
+    }
+    let mut timestamp = current_unix_timestamp();
+    let mut format = None::<String>;
+    let mut iso = false;
+    let mut rfc = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-u" | "--utc" => {}
+            "-I" | "--iso-8601" => iso = true,
+            "-R" | "--rfc-email" => rfc = true,
+            "-d" | "--date" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "date: option requires an argument -- 'd'\n");
+                };
+                timestamp = match parse_date_argument(value, timestamp) {
+                    Some(value) => value,
+                    None => return stderr_result(1, format!("date: invalid date '{}'\n", value)),
+                };
+                index += 1;
+            }
+            _ if arg.starts_with("--date=") => {
+                let value = &arg["--date=".len()..];
+                timestamp = match parse_date_argument(value, timestamp) {
+                    Some(value) => value,
+                    None => return stderr_result(1, format!("date: invalid date '{}'\n", value)),
+                };
+            }
+            _ if arg.starts_with('+') => format = Some(arg[1..].to_string()),
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("date: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') => {
+                return stderr_result(1, format!("date: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let parts = utc_parts(timestamp);
+    let output = if iso {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
+            parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
+        )
+    } else if rfc {
+        format!(
+            "{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
+            weekday_name(parts.weekday),
+            parts.day,
+            month_name(parts.month),
+            parts.year,
+            parts.hour,
+            parts.minute,
+            parts.second
+        )
+    } else if let Some(format) = format {
+        format_date_string(&format, timestamp, parts)
+    } else {
+        format!(
+            "{} {} {:02} {:02}:{:02}:{:02} UTC {:04}",
+            weekday_name(parts.weekday),
+            month_name(parts.month),
+            parts.day,
+            parts.hour,
+            parts.minute,
+            parts.second,
+            parts.year
+        )
+    };
+    stdout_result(format!("{output}\n"))
+}
+
+#[derive(Clone, Copy)]
+struct UtcParts {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    weekday: u32,
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn parse_date_argument(value: &str, now: i64) -> Option<i64> {
+    match value {
+        "now" => Some(now),
+        "today" => Some(start_of_day(now)),
+        "yesterday" => Some(start_of_day(now) - 86_400),
+        "tomorrow" => Some(start_of_day(now) + 86_400),
+        _ => parse_iso_timestamp(value),
+    }
+}
+
+fn parse_iso_timestamp(value: &str) -> Option<i64> {
+    let (date, time) = value.split_once('T').unwrap_or((value, "00:00:00"));
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next().unwrap_or("0").parse::<u32>().ok()?;
+    let minute = time_parts.next().unwrap_or("0").parse::<u32>().ok()?;
+    let second_text = time_parts.next().unwrap_or("0");
+    let second = second_text
+        .trim_end_matches('Z')
+        .split(['+', '-'])
+        .next()
+        .unwrap_or(second_text)
+        .parse::<u32>()
+        .ok()?;
+    Some(
+        days_from_civil(year, month, day) * 86_400
+            + hour as i64 * 3_600
+            + minute as i64 * 60
+            + second as i64,
+    )
+}
+
+fn start_of_day(timestamp: i64) -> i64 {
+    timestamp.div_euclid(86_400) * 86_400
+}
+
+fn utc_parts(timestamp: i64) -> UtcParts {
+    let days = timestamp.div_euclid(86_400);
+    let seconds = timestamp.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    UtcParts {
+        year,
+        month,
+        day,
+        hour: (seconds / 3_600) as u32,
+        minute: ((seconds % 3_600) / 60) as u32,
+        second: (seconds % 60) as u32,
+        weekday: ((days + 4).rem_euclid(7)) as u32,
+    }
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    ((y + i64::from(m <= 2)) as i32, m as u32, d as u32)
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn format_date_string(format: &str, timestamp: i64, parts: UtcParts) -> String {
+    let mut output = String::new();
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('Y') => output.push_str(&format!("{:04}", parts.year)),
+            Some('m') => output.push_str(&format!("{:02}", parts.month)),
+            Some('d') => output.push_str(&format!("{:02}", parts.day)),
+            Some('F') => output.push_str(&format!(
+                "{:04}-{:02}-{:02}",
+                parts.year, parts.month, parts.day
+            )),
+            Some('T') => output.push_str(&format!(
+                "{:02}:{:02}:{:02}",
+                parts.hour, parts.minute, parts.second
+            )),
+            Some('H') => output.push_str(&format!("{:02}", parts.hour)),
+            Some('I') => {
+                let hour = match parts.hour % 12 {
+                    0 => 12,
+                    value => value,
+                };
+                output.push_str(&format!("{hour:02}"));
+            }
+            Some('M') => output.push_str(&format!("{:02}", parts.minute)),
+            Some('S') => output.push_str(&format!("{:02}", parts.second)),
+            Some('a') => output.push_str(weekday_name(parts.weekday)),
+            Some('b') => output.push_str(month_name(parts.month)),
+            Some('s') => output.push_str(&timestamp.to_string()),
+            Some('p') => output.push_str(if parts.hour < 12 { "AM" } else { "PM" }),
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('Z') => output.push_str("UTC"),
+            Some('z') => output.push_str("+0000"),
+            Some('%') => output.push('%'),
+            Some(other) => {
+                output.push('%');
+                output.push(other);
+            }
+            None => output.push('%'),
+        }
+    }
+    output
+}
+
+fn weekday_name(weekday: u32) -> &'static str {
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        .get(weekday as usize)
+        .copied()
+        .unwrap_or("Thu")
+}
+
+fn month_name(month: u32) -> &'static str {
+    [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .get(month as usize)
+    .copied()
+    .unwrap_or("Jan")
+}
+
+fn command_seq(args: &[String]) -> CommandResult {
+    let mut separator = "\n".to_string();
+    let mut equal_width = false;
+    let mut values = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "seq: option requires an argument -- 's'\n");
+                };
+                separator = value.clone();
+                index += 1;
+            }
+            "-w" => equal_width = true,
+            _ if arg.starts_with('-') && arg.len() > 1 && arg[1..].parse::<f64>().is_err() => {
+                return stderr_result(1, format!("seq: invalid option '{}'\n", arg));
+            }
+            _ => values.push(arg.clone()),
+        }
+        index += 1;
+    }
+    if values.is_empty() {
+        return stderr_result(1, "seq: missing operand\n");
+    }
+    let parsed = values
+        .iter()
+        .map(|value| value.parse::<f64>())
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(parsed) = parsed else {
+        return stderr_result(1, "seq: invalid floating point argument\n");
+    };
+    let (first, step, last) = match parsed.as_slice() {
+        [last] => (1.0, 1.0, *last),
+        [first, last] => (*first, 1.0, *last),
+        [first, step, last] => (*first, *step, *last),
+        _ => return stderr_result(1, "seq: extra operand\n"),
+    };
+    if step == 0.0 {
+        return stderr_result(1, "seq: Zero increment\n");
+    }
+    let decimal = values.iter().any(|value| value.contains('.'));
+    let mut numbers = Vec::new();
+    let mut current = first;
+    let mut guard = 0;
+    while (step > 0.0 && current <= last + f64::EPSILON)
+        || (step < 0.0 && current >= last - f64::EPSILON)
+    {
+        numbers.push(format_seq_number(current, decimal));
+        current += step;
+        guard += 1;
+        if guard > 100_000 {
+            break;
+        }
+    }
+    if equal_width {
+        let width = numbers.iter().map(String::len).max().unwrap_or(0);
+        numbers = numbers
+            .into_iter()
+            .map(|number| {
+                if let Some(stripped) = number.strip_prefix('-') {
+                    format!("-{:0>width$}", stripped, width = width.saturating_sub(1))
+                } else {
+                    format!("{number:0>width$}")
+                }
+            })
+            .collect();
+    }
+    if numbers.is_empty() {
+        return CommandResult::default();
+    }
+    stdout_result(format!("{}\n", numbers.join(&separator)))
+}
+
+fn format_seq_number(value: f64, decimal: bool) -> String {
+    if decimal {
+        format!("{value:.1}")
+    } else {
+        format!("{}", value as i64)
+    }
+}
+
+fn command_rev(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: rev [FILE]...\nReverse lines characterwise.\n");
+    }
+    let mut paths = Vec::new();
+    let mut end_options = false;
+    for arg in args {
+        if end_options {
+            paths.push(arg.clone());
+            continue;
+        }
+        match arg.as_str() {
+            "--" => end_options = true,
+            "-" => paths.push(arg.clone()),
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("rev: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') => {
+                return stderr_result(1, format!("rev: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+    let input = match collect_text_inputs(state, &paths, stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("rev: {error}\n")),
+    };
+    stdout_result(reverse_lines(&input))
+}
+
+fn reverse_lines(input: &str) -> String {
+    let mut output = String::new();
+    for line in input.split_inclusive('\n') {
+        let had_newline = line.ends_with('\n');
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        output.push_str(&content.chars().rev().collect::<String>());
+        if had_newline {
+            output.push('\n');
+        }
+    }
+    if input.is_empty() {
+        String::new()
+    } else {
+        output
+    }
+}
+
+fn command_strings(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: strings [OPTION]... [FILE]...\nPrint printable character sequences.\n",
+        );
+    }
+    let mut min_len = 4usize;
+    let mut offset_format = None;
+    let mut paths = Vec::new();
+    let mut end_options = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if end_options {
+            paths.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--" => end_options = true,
+            "-n" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "strings: option requires an argument -- 'n'\n");
+                };
+                let Ok(value) = value.parse::<usize>() else {
+                    return stderr_result(1, "strings: invalid minimum string length\n");
+                };
+                if value == 0 {
+                    return stderr_result(1, "strings: invalid minimum string length\n");
+                }
+                min_len = value;
+                index += 1;
+            }
+            "-t" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "strings: option requires an argument -- 't'\n");
+                };
+                if !matches!(value.as_str(), "d" | "x" | "o") {
+                    return stderr_result(1, "strings: invalid radix\n");
+                }
+                offset_format = value.chars().next();
+                index += 1;
+            }
+            "-e" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "strings: option requires an argument -- 'e'\n");
+                };
+                if !matches!(value.as_str(), "s" | "S") {
+                    return stderr_result(1, "strings: invalid encoding\n");
+                }
+                index += 1;
+            }
+            "-" => paths.push(arg.clone()),
+            _ if arg.starts_with("-n") && arg.len() > 2 => {
+                let Ok(value) = arg[2..].parse::<usize>() else {
+                    return stderr_result(1, "strings: invalid minimum string length\n");
+                };
+                if value == 0 {
+                    return stderr_result(1, "strings: invalid minimum string length\n");
+                }
+                min_len = value;
+            }
+            _ if arg.starts_with("-t") && arg.len() > 2 => {
+                let value = &arg[2..];
+                if !matches!(value, "d" | "x" | "o") {
+                    return stderr_result(1, "strings: invalid radix\n");
+                }
+                offset_format = value.chars().next();
+            }
+            _ if arg.starts_with('-') && arg[1..].chars().all(|ch| ch.is_ascii_digit()) => {
+                let Ok(value) = arg[1..].parse::<usize>() else {
+                    return stderr_result(1, "strings: invalid minimum string length\n");
+                };
+                if value == 0 {
+                    return stderr_result(1, "strings: invalid minimum string length\n");
+                }
+                min_len = value;
+            }
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("strings: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') => {
+                return stderr_result(1, format!("strings: invalid option -- '{}'\n", &arg[1..2]));
+            }
+            _ => paths.push(arg.clone()),
+        }
+        index += 1;
+    }
+    let input = match collect_binary_inputs(state, &paths, stdin, "strings") {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    stdout_result(extract_strings(&input, min_len, offset_format))
+}
+
+fn extract_strings(input: &[u8], min_len: usize, offset_format: Option<char>) -> String {
+    let mut output = String::new();
+    let mut current = Vec::new();
+    let mut start = 0usize;
+    for (index, byte) in input.iter().copied().enumerate() {
+        if byte == b'\t' || (0x20..=0x7e).contains(&byte) {
+            if current.is_empty() {
+                start = index;
+            }
+            current.push(byte);
+        } else {
+            flush_string(&mut output, &current, start, min_len, offset_format);
+            current.clear();
+        }
+    }
+    flush_string(&mut output, &current, start, min_len, offset_format);
+    output
+}
+
+fn flush_string(
+    output: &mut String,
+    current: &[u8],
+    start: usize,
+    min_len: usize,
+    offset_format: Option<char>,
+) {
+    if current.len() < min_len {
+        return;
+    }
+    if let Some(format) = offset_format {
+        match format {
+            'd' => output.push_str(&format!("{start} ")),
+            'x' => output.push_str(&format!("{start:x} ")),
+            'o' => output.push_str(&format!("{start:o} ")),
+            _ => {}
+        }
+    }
+    output.push_str(&bytes_to_string(current, BufferEncoding::Utf8));
+    output.push('\n');
+}
+
 fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result("Usage: which [-as] NAME...\nlocate a command\n");
+    }
+    let mut silent = false;
+    let mut all = false;
+    let mut names = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-s" => silent = true,
+            "-a" => all = true,
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        's' => silent = true,
+                        'a' => all = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => names.push(arg),
+        }
+    }
+    if names.is_empty() {
+        return CommandResult {
+            exit_code: 1,
+            ..CommandResult::default()
+        };
+    }
     let mut stdout = String::new();
     let mut exit_code = 0;
-    for arg in args {
-        if state.session.inner.commands.contains(arg) {
-            stdout.push_str("/usr/bin/");
-            stdout.push_str(arg);
-            stdout.push('\n');
-        } else {
+    let path_dirs = state
+        .env
+        .get("PATH")
+        .map(String::as_str)
+        .unwrap_or("/usr/bin:/bin")
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    for arg in names {
+        if arg.contains('/') || !state.session.inner.commands.contains(arg) {
+            exit_code = 1;
+            continue;
+        }
+        let mut matched = false;
+        for dir in &path_dirs {
+            if matches!(*dir, "/usr/bin" | "/bin") {
+                matched = true;
+                if !silent {
+                    stdout.push_str(dir);
+                    stdout.push('/');
+                    stdout.push_str(arg);
+                    stdout.push('\n');
+                }
+                if !all {
+                    break;
+                }
+            }
+        }
+        if !matched {
             exit_code = 1;
         }
     }
@@ -11562,6 +14955,92 @@ fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         stdout,
         exit_code,
         ..CommandResult::default()
+    }
+}
+
+fn command_test(state: &ExecState<'_>, args: &[String], bracket: bool) -> CommandResult {
+    let mut args = args.to_vec();
+    if bracket {
+        match args.last().map(String::as_str) {
+            Some("]") => {
+                args.pop();
+            }
+            _ => return stderr_result(2, "[: missing `]'\n"),
+        }
+    }
+    match eval_test_expr(state, &args) {
+        Ok(true) => CommandResult::default(),
+        Ok(false) => CommandResult {
+            exit_code: 1,
+            ..CommandResult::default()
+        },
+        Err(message) => stderr_result(2, format!("test: {message}\n")),
+    }
+}
+
+fn eval_test_expr(state: &ExecState<'_>, args: &[String]) -> Result<bool, String> {
+    if args.is_empty() {
+        return Ok(false);
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "-o") {
+        return Ok(
+            eval_test_expr(state, &args[..index])? || eval_test_expr(state, &args[index + 1..])?
+        );
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "-a") {
+        return Ok(
+            eval_test_expr(state, &args[..index])? && eval_test_expr(state, &args[index + 1..])?
+        );
+    }
+    if args.first().is_some_and(|arg| arg == "!") {
+        return Ok(!eval_test_expr(state, &args[1..])?);
+    }
+    match args {
+        [single] => Ok(!single.is_empty()),
+        [op, path] if matches!(op.as_str(), "-e" | "-f" | "-d" | "-s") => {
+            let resolved = resolve_path(&state.cwd, path);
+            let fs = state
+                .session
+                .inner
+                .fs
+                .lock()
+                .map_err(|_| "filesystem lock poisoned".to_string())?;
+            let stat = fs.stat(&resolved);
+            Ok(match op.as_str() {
+                "-e" => stat.is_ok(),
+                "-f" => stat.is_ok_and(|stat| stat.is_file),
+                "-d" => stat.is_ok_and(|stat| stat.is_directory),
+                "-s" => stat.is_ok_and(|stat| stat.size > 0),
+                _ => false,
+            })
+        }
+        [op, value] if op == "-z" => Ok(value.is_empty()),
+        [op, value] if op == "-n" => Ok(!value.is_empty()),
+        [left, op, right] if matches!(op.as_str(), "=" | "!=") => Ok(if op == "=" {
+            left == right
+        } else {
+            left != right
+        }),
+        [left, op, right]
+            if matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge") =>
+        {
+            let left = left
+                .parse::<i64>()
+                .map_err(|_| "integer expression expected".to_string())?;
+            let right = right
+                .parse::<i64>()
+                .map_err(|_| "integer expression expected".to_string())?;
+            Ok(match op.as_str() {
+                "-eq" => left == right,
+                "-ne" => left != right,
+                "-lt" => left < right,
+                "-le" => left <= right,
+                "-gt" => left > right,
+                "-ge" => left >= right,
+                _ => false,
+            })
+        }
+        _ => Err("unsupported expression".to_string()),
     }
 }
 
@@ -13400,5 +16879,305 @@ mod tests {
         let stored = bash.read_file("/tmp/countries.json").unwrap();
         assert!(stored.contains("Brazil"));
         assert!(stored.contains("Argentina"));
+    }
+
+    #[test]
+    fn jbc38_small_posix_path_commands_match_upstream_rows() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/dir/target.txt", "content\n")
+                .with_file("/dir/script.sh", "#!/bin/bash\n"),
+        );
+
+        let which = bash.exec("which ls cat echo", JustBashExecOptions::new());
+        assert_eq!(which.exit_code, 0);
+        assert_eq!(which.stdout, "/usr/bin/ls\n/usr/bin/cat\n/usr/bin/echo\n");
+        assert_eq!(
+            bash.exec("which -as ls", JustBashExecOptions::new()).stdout,
+            ""
+        );
+        assert_eq!(
+            bash.exec("export PATH=/bin; which ls", JustBashExecOptions::new())
+                .stdout,
+            "/bin/ls\n"
+        );
+
+        assert_eq!(
+            bash.exec(
+                "basename -s .txt /dir/target.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "target\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "dirname /dir/target.txt /file.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "/dir\n/\n"
+        );
+
+        assert_eq!(
+            bash.exec("ln -s target.txt /dir/link.txt", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("readlink /dir/link.txt", JustBashExecOptions::new())
+                .stdout,
+            "target.txt\n"
+        );
+        assert_eq!(
+            bash.exec("readlink -f /dir/link.txt", JustBashExecOptions::new())
+                .stdout,
+            "/dir/target.txt\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "ln /dir/target.txt /dir/hard.txt",
+                JustBashExecOptions::new()
+            )
+            .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("cat /dir/hard.txt", JustBashExecOptions::new())
+                .stdout,
+            "content\n"
+        );
+
+        assert_eq!(
+            bash.exec("chmod u+x /dir/script.sh", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("stat -c %a /dir/script.sh", JustBashExecOptions::new())
+                .stdout,
+            "744\n"
+        );
+        assert_eq!(
+            bash.exec("test -f /dir/target.txt", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("[ -d /dir ]", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("test ! -z value", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+    }
+
+    #[test]
+    fn jbc38_small_posix_stream_date_and_inspection_commands_match_upstream_rows() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.txt", "hello\n")
+                .with_file("/b.txt", "world\n")
+                .with_file("/gzip.txt", "Hello, World!")
+                .with_file("/bin.dat", "abc\0\0defgh\0"),
+        );
+
+        assert_eq!(
+            bash.exec("echo -n hello | base64", JustBashExecOptions::new())
+                .stdout,
+            "aGVsbG8=\n"
+        );
+        assert_eq!(
+            bash.exec("echo aGVsbG8= | base64 -d", JustBashExecOptions::new())
+                .stdout,
+            "hello"
+        );
+        assert_eq!(
+            bash.exec("seq -s ',' 3", JustBashExecOptions::new()).stdout,
+            "1,2,3\n"
+        );
+        assert_eq!(
+            bash.exec("seq -w 8 10", JustBashExecOptions::new()).stdout,
+            "08\n09\n10\n"
+        );
+        assert_eq!(
+            bash.exec("echo '日本語' | rev", JustBashExecOptions::new())
+                .stdout,
+            "語本日\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "date -d '2024-06-20T12:00:00' +%F",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "2024-06-20\n"
+        );
+
+        let diff = bash.exec("diff /a.txt /b.txt", JustBashExecOptions::new());
+        assert_eq!(diff.exit_code, 1);
+        assert!(diff.stdout.contains("-hello"));
+        assert!(diff.stdout.contains("+world"));
+        assert_eq!(
+            bash.exec("diff -q /a.txt /b.txt", JustBashExecOptions::new())
+                .stdout,
+            "Files /a.txt and /b.txt differ\n"
+        );
+        assert_eq!(
+            bash.exec("strings /bin.dat", JustBashExecOptions::new())
+                .stdout,
+            "defgh\n"
+        );
+        assert_eq!(
+            bash.exec("file -b /a.txt", JustBashExecOptions::new())
+                .stdout,
+            "ASCII text\n"
+        );
+        assert_eq!(
+            bash.exec("gzip /gzip.txt", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("gunzip /gzip.txt.gz", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("cat /gzip.txt", JustBashExecOptions::new())
+                .stdout,
+            "Hello, World!"
+        );
+        assert!(
+            bash.exec("gzip -c /gzip.txt", JustBashExecOptions::new())
+                .stdout
+                .starts_with("\u{1f}\u{8b}")
+        );
+        assert!(
+            !bash
+                .exec("gzip -c /gzip.txt | base64", JustBashExecOptions::new())
+                .stdout
+                .trim()
+                .is_empty()
+        );
+        assert_eq!(
+            bash.exec(
+                "gzip -k /gzip.txt; zcat /gzip.txt.gz",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "Hello, World!"
+        );
+
+        let tee = bash.exec("echo saved | tee /out.txt", JustBashExecOptions::new());
+        assert_eq!(tee.stdout, "saved\n");
+        assert_eq!(bash.read_file("/out.txt").unwrap(), "saved\n");
+        assert!(
+            bash.exec("du -c /a.txt /b.txt", JustBashExecOptions::new())
+                .stdout
+                .contains("total")
+        );
+        let tree = bash.exec("tree /", JustBashExecOptions::new());
+        assert!(tree.stdout.contains("a.txt"));
+        assert!(tree.stdout.contains("dir"));
+    }
+
+    #[test]
+    fn jbc38_small_posix_table_and_xargs_commands_match_upstream_rows() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/left.txt", "a\nb\nc\n")
+                .with_file("/right.txt", "b\nc\nd\n")
+                .with_file("/one.txt", "a\nb\nc\n")
+                .with_file("/two.txt", "1\n2\n3\n")
+                .with_file("/join-a.txt", "1 apple\n2 banana\n3 cherry\n")
+                .with_file("/join-b.txt", "1 red\n2 yellow\n3 red\n")
+                .with_file("/table.txt", "name age\nalice 30\nbob 25\n")
+                .with_file("/split.txt", "line1\nline2\nline3\n"),
+        );
+
+        assert_eq!(
+            bash.exec("printf 'a\\tb' | expand -t 4", JustBashExecOptions::new())
+                .stdout,
+            "a   b"
+        );
+        assert_eq!(
+            bash.exec(
+                "printf '    hello' | unexpand -t 4",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "\thello"
+        );
+        assert_eq!(
+            bash.exec("echo 'hello world' | fold -w 5", JustBashExecOptions::new())
+                .stdout,
+            "hello\n worl\nd\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "printf 'a\\n\\nb\\n' | nl -ba -w 3",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "  1\ta\n  2\t\n  3\tb\n"
+        );
+        assert_eq!(
+            bash.exec("paste /one.txt /two.txt", JustBashExecOptions::new())
+                .stdout,
+            "a\t1\nb\t2\nc\t3\n"
+        );
+        assert_eq!(
+            bash.exec("paste -sd, /one.txt", JustBashExecOptions::new())
+                .stdout,
+            "a,b,c\n"
+        );
+        assert_eq!(
+            bash.exec("comm -12 /left.txt /right.txt", JustBashExecOptions::new())
+                .stdout,
+            "b\nc\n"
+        );
+        assert_eq!(
+            bash.exec("column -t /table.txt", JustBashExecOptions::new())
+                .stdout,
+            "name   age\nalice  30\nbob    25\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "join -o '1.2,2.2' /join-a.txt /join-b.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "apple red\nbanana yellow\ncherry red\n"
+        );
+        assert_eq!(
+            bash.exec("split -l 1 /split.txt part_", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            bash.exec("cat part_aa part_ab", JustBashExecOptions::new())
+                .stdout,
+            "line1\nline2\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "printf 'a b c' | xargs -n 1 echo",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "a\nb\nc\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "printf 'x\\ny' | xargs -I {} echo file-{}",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "file-x\nfile-y\n"
+        );
     }
 }

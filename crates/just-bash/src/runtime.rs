@@ -993,7 +993,7 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
-    fn agent_examples_host_metadata_rows_fail_closed_without_host_runtime() {
+    fn agent_examples_host_metadata_rows_stay_virtual_without_host_runtime() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
                 (
@@ -1013,8 +1013,9 @@ and exhibited clearly, with a label attached.\n";
         });
 
         let du = env.exec("du -sh /project/dist");
-        assert_eq!(du.exit_code, 127);
-        assert!(du.stderr.contains("command not found"));
+        assert_eq!(du.exit_code, 0);
+        assert_eq!(du.stdout, "23\t/project/dist\n");
+        assert_eq!(du.stderr, "");
         let writable = env.exec("find /server -type f -perm -600");
         assert_eq!(writable.exit_code, 0);
         assert!(writable.stdout.contains("/server/bin/start.sh"));
