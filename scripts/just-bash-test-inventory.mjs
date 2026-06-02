@@ -2324,6 +2324,142 @@ const jbc23CaseGroups = [
   },
 ];
 
+const jbc34CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.basic.test.ts',
+    lines: [
+      119, 147, 156, 165, 174, 183, 194, 258, 278, 286, 294, 302, 310,
+      318, 326, 335, 343, 351, 359, 370, 379, 388, 399, 407, 415, 423,
+      431, 442, 450, 458, 466, 480, 488, 498, 506, 514, 522, 530, 538,
+      546, 554, 564, 662, 688, 704, 722, 732,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc34_grep_basic_regex_and_utf8_rows',
+    notes:
+      'JBC-34 verifies additional portable grep file-list, recursive, word, extended-regex, -e, directory diagnostic, regex, POSIX-class, combined-flag, Unicode, filename, and supported BRE-compatible rows without claiming unsupported BRE word-boundary, grouping, interval, include/exclude, PCRE, or binary behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.advanced.test.ts',
+    lines: [15, 245],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc34_grep_basic_regex_and_utf8_rows',
+    notes:
+      'JBC-34 verifies the portable grep pipeline filter row and case-insensitive max-count row; glob include and BRE alternation rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc34_grep_basic_regex_and_utf8_rows',
+    notes: 'JBC-34 verifies grep preserves multibyte stdin matches through the Rust pipe path.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.patterns.test.ts',
+    lines: [
+      5, 18, 31, 44, 57, 70, 85, 98, 113, 126, 139, 154, 167, 180, 193,
+      206, 219, 234, 249, 262, 276,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'text_search_jbc34_rg_patterns_gitignore_and_edge_rows',
+    notes:
+      'JBC-34 verifies rg word/line/fixed/invert patterns, multiple -e/--regexp rows, smart case, regex anchors, alternation, quantifiers, classes, and combined -w/-c/-l/-v rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.edge-cases.test.ts',
+    lines: [
+      5, 18, 31, 44, 57, 74, 87, 100, 113, 126, 142, 155, 168, 183, 196,
+      209, 224, 239, 255, 266, 277, 289, 303, 316, 329, 342, 359, 378,
+      393, 413, 427,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'text_search_jbc34_rg_patterns_gitignore_and_edge_rows',
+    notes:
+      'JBC-34 verifies rg empty/whitespace, fixed-special, boundary, Unicode, ordering, exit-code, word-boundary, inverted-context, gitignore comment/blank, and glob edge rows over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/gitignore.test.ts',
+    lines: [6, 14, 21, 30, 37, 47, 56, 72, 80, 90, 96, 105, 113, 121],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'text_search_jbc34_rg_patterns_gitignore_and_edge_rows',
+    notes:
+      'JBC-34 verifies rg gitignore extension, exact name, directory, negation, directory-only, rooted, double-star, comment, blank, question-mark, character-class, and negated-class rows; rooted slash-containing patterns remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.flags.test.ts',
+    lines: [87, 105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'text_search_jbc34_rg_patterns_gitignore_and_edge_rows',
+    notes:
+      'JBC-34 verifies portable rg -u no-ignore and -uu hidden-file search rows; symlink-follow and binary-as-text rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.regex.test.ts',
+    lines: [6, 15, 24, 33, 43, 52, 61, 70, 80, 90, 100],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc34_sed_regex_and_utf8_rows',
+    notes:
+      'JBC-34 verifies sed POSIX-class substitution rows backed by Rust regex; BRE/ERE grammar, backreference, newline/tab replacement, and quantifier edge rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc34_sed_regex_and_utf8_rows',
+    notes: 'JBC-34 verifies sed matches and replaces multibyte text from a piped virtual file.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sort/sort.utf8-stdin.test.ts',
+    lines: [5, 12],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands',
+    notes: 'JBC-34 verifies sort and sort -f preserve UTF-8 text through stdin without byte corruption.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/head/head.utf8-stdin.test.ts',
+    lines: [5, 12],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands',
+    notes: 'JBC-34 verifies head and tail preserve multibyte stdin lines; tac remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/wc/wc.utf8-stdin.test.ts',
+    lines: [6],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands',
+    notes: 'JBC-34 verifies wc -c counts UTF-8 bytes and wc -m counts codepoints from stdin.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/utf8-across-commands.test.ts',
+    lines: [202, 208, 216, 224, 241, 249, 257],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands',
+    notes:
+      'JBC-34 verifies UTF-8 preservation through implemented grep, sed, tr, sort, uniq, cut, head, tail, and wc pipeline combinations; tee, split, AWK redirect, and unimplemented command rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/utf8-bytestring.test.ts',
+    lines: [61, 71, 104, 116, 190],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands',
+    notes:
+      'JBC-34 verifies selected UTF-8 byte/codepoint rows for wc, cut, tr, uniq, and uniq-to-wc paths; rev, base64, split, tee, expand/unexpand, and sed newline-sensitive byte rows remain pending.',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -2990,6 +3126,7 @@ function caseOverrideFor(testCase) {
     ...jbc20CaseGroups,
     ...jbc22CaseGroups,
     ...jbc23CaseGroups,
+    ...jbc34CaseGroups,
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,

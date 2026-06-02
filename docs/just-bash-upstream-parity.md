@@ -12,7 +12,7 @@ Local mirror inspected at `/Users/andrewmcclenaghan/.opensrc/repos/github.com/ve
 
 JB-05 owns the portable command registry and earlier high-risk built-ins/coreutils/text/search command smoke coverage implemented in `crates/just-bash/src/commands.rs`, `crates/just-bash/src/runtime.rs`, and additive command hooks in `crates/just-bash/src/exec.rs`.
 
-JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 through JBC-31 progressively close AWK, ripgrep, comparison-corpus, syntax/transform, filesystem, sandbox/security, interpreter, executor/package, CLI, shell/transform, runtime/session, basename/dirname, `find`, fake-transport `curl`, deeper text/structured-data/query-engine/AWK rows, Open Agents command integration, and docs/examples API rows. JBC-33 closes additional parser/interpreter/syntax/transform/regex rows, JBC-35 closes additional AWK field rebuild/printf/BEGIN/END and AWK arithmetic comparison fixture rows, JBC-37 closes additional structured data/query rows for HTML-to-Markdown, `jq`, `yq`, `sqlite3`, `xan`, and query-engine sanitizer behavior, and JBC-39 adds explicit optional language runtime providers for `js-exec`/`node` and `python3`/`python`, maps portable fail-closed and fake-backend opt-in rows, and classifies real QuickJS/CPython worker/package runtime rows as JS-only. These slices do not claim upstream `fs/**`, remaining filesystem rows beyond the JBC-13/JBC-26 mappings, host-backed ReadWriteFs/OverlayFs constructors, real OS symlink/canonicalization/permission probes, lazy JavaScript file providers, remaining parser/syntax/transform rows beyond the JBC-12/JBC-19/JBC-33 mappings, command-family security-shaped rows outside their command owners, remaining interpreter rows beyond the JBC-15/JBC-19/JBC-20/JBC-33 mappings, full AWK/JQ/YQ languages, full ripgrep compatibility, full CSV/SQL engines, search-engine internals, binary tests, UTF-8 byte-level tests not named in the ledger, remaining AWK control-flow/function/getline/redirection/parser/error rows, PCRE/stats/replace/vimgrep/multiline/passthru behavior, host OverlayFS write policy/root existence, CLI errexit runtime behavior, bundled binary runtime execution rows, interactive readline shell semantics, remaining mock-clock/logger/PIPESTATUS behavior, broad `test`/`tee` comparison suites, remaining small POSIX command rows beyond the generated basename/dirname corpus subset, TeePlugin exec/file-capture rows, real QuickJS/CPython language execution, or host runtime/process fallback. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test, NAPI JS proof, generated corpus proof, or explicit exception below.
+JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 through JBC-31 progressively close AWK, ripgrep, comparison-corpus, syntax/transform, filesystem, sandbox/security, interpreter, executor/package, CLI, shell/transform, runtime/session, basename/dirname, `find`, fake-transport `curl`, deeper text/structured-data/query-engine/AWK rows, Open Agents command integration, and docs/examples API rows. JBC-33 closes additional parser/interpreter/syntax/transform/regex rows, JBC-34 closes additional `grep`, `rg`, `sed`, UTF-8, and adjacent text-stream rows, JBC-35 closes additional AWK field rebuild/printf/BEGIN/END and AWK arithmetic comparison fixture rows, JBC-37 closes additional structured data/query rows for HTML-to-Markdown, `jq`, `yq`, `sqlite3`, `xan`, and query-engine sanitizer behavior, and JBC-39 adds explicit optional language runtime providers for `js-exec`/`node` and `python3`/`python`, maps portable fail-closed and fake-backend opt-in rows, and classifies real QuickJS/CPython worker/package runtime rows as JS-only. These slices do not claim upstream `fs/**`, remaining filesystem rows beyond the JBC-13/JBC-26 mappings, host-backed ReadWriteFs/OverlayFs constructors, real OS symlink/canonicalization/permission probes, lazy JavaScript file providers, remaining parser/syntax/transform rows beyond the JBC-12/JBC-19/JBC-33 mappings, command-family security-shaped rows outside their command owners, remaining interpreter rows beyond the JBC-15/JBC-19/JBC-20/JBC-33 mappings, full AWK/JQ/YQ languages, full ripgrep compatibility, full CSV/SQL engines, search-engine internals, binary tests, UTF-8 byte-level tests not named in the ledger, remaining AWK control-flow/function/getline/redirection/parser/error rows, PCRE/stats/replace/vimgrep/multiline/passthru behavior, host OverlayFS write policy/root existence, CLI errexit runtime behavior, bundled binary runtime execution rows, interactive readline shell semantics, remaining mock-clock/logger/PIPESTATUS behavior, broad `test`/`tee` comparison suites, remaining small POSIX command rows beyond the generated basename/dirname corpus subset, TeePlugin exec/file-capture rows, real QuickJS/CPython language execution, or host runtime/process fallback. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test, NAPI JS proof, generated corpus proof, or explicit exception below.
 
 Mapped Rust/NAPI proofs:
 
@@ -56,6 +56,7 @@ Mapped Rust/NAPI proofs:
 | 6 docs-harness rows in `packages/just-bash/src/readme.test.ts` | `js-only-documented` | js-only-documented | JBC-31 classifies TypeScript markdown block presence, docs TypeScript compilation, and package docs execution harness rows as JavaScript documentation checks rather than Rust runtime behavior. |
 | `examples/custom-command/*`, `examples/bash-agent/agent.ts`, `examples/website/app/api/agent/route.ts`, and `examples/cjs-consumer/index.ts` source rows | `jbc31_custom_commands_match_public_api_usage_rows`; `jbc31_bash_agent_and_website_examples_use_virtual_workspace_commands`; `jbc18_napi_cjs_entrypoint_requires_and_executes_basic_commands` | portable-mapped | JBC-31 maps public Just Bash API usage in examples to deterministic Rust/NAPI proofs while leaving live AI provider, Next.js rendering, and browser terminal mechanics as explicit JS-only rows. |
 | Additional exact text rows across `echo.binary`, `printf`, `grep.advanced`, `sed`, `head`, `tail`, `wc`, `sort`, `cut`, `tr`, and `uniq` suites | `echo_upstream_command_handles_newline_and_escape_flags`; `printf_upstream_command_formats_core_specifiers_and_escapes`; `text_search_grep_rg_sed_and_awk_close_upstream_rows`; `text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows` | portable-mapped | JBC-23 closes deeper text-stream and text-pipeline cases over the Rust virtual filesystem without host command fallback. |
+| 147 exact rows across `grep.basic`, `grep.advanced`, `grep.utf8-stdin`, `rg.patterns`, `rg.edge-cases`, `rg/gitignore`, `rg.flags`, `sed.regex`, `sed.utf8-stdin`, `sort.utf8-stdin`, `head.utf8-stdin`, `wc.utf8-stdin`, `utf8-across-commands`, and `utf8-bytestring` suites | `text_search_jbc34_grep_basic_regex_and_utf8_rows`; `text_search_jbc34_rg_patterns_gitignore_and_edge_rows`; `text_search_jbc34_sed_regex_and_utf8_rows`; `text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands` | portable-mapped | JBC-34 verifies additional portable grep/rg/sed regex, gitignore, `--regexp`, UTF-8, and text-pipeline rows while leaving PCRE, unsupported BRE/ERE edges, search-engine internals, symlink/binary rg rows, advanced sort modes, and unimplemented text commands pending. |
 | 92 additional exact rows across `packages/just-bash/src/commands/jq/{jq.functions.test.ts,jq.operators.test.ts,jq.filters.test.ts,jq.construction.test.ts,jq.strings.test.ts,jq.keyword-field-access.test.ts,jq.prototype-pollution.test.ts}` | `structured_data_jq_deep_query_construction_and_operator_rows`; `structured_data_jq_string_keyword_and_safe_object_rows` | portable-mapped | JBC-24 covers additional jq functions, operators, filters, construction, keyword field access, string helpers, and dangerous-key handling over deterministic JSON stdin. |
 | 16 additional exact rows across `packages/just-bash/src/commands/yq/{yq.test.ts,yq.env.test.ts,yq.yaml-security.test.ts}` | `structured_data_yq_deep_query_env_and_security_rows` | portable-mapped | JBC-24 covers yq join/indent/combined-option behavior, additional jq-compatible functions, scoped env lookup, and YAML/JSON dangerous-key handling. |
 | 26 additional exact rows across `packages/just-bash/src/commands/xan/{xan.basic.test.ts,xan.columns.test.ts,xan.data.test.ts,xan.filter-sort.test.ts}` | `structured_data_xan_extended_csv_rows` | portable-mapped | JBC-24 covers additional xan headers/head/tail/slice/behead, select/drop/rename, filter/sort/dedup/search, and JSON conversion diagnostics over in-memory CSV/JSON fixtures. |
@@ -237,20 +238,23 @@ filesystem/path case rows plus three source rows, JBC-27 maps 713 additional
 portable security, limits, sandbox, fuzzing, prototype-pollution, policy, and
 attack-corpus rows while documenting 237 additional JavaScript worker/browser/runtime
 exceptions, JBC-28 closes 6 optional-runtime boundary rows plus 128 net
-additional JS-only runtime bridge exceptions, JBC-33 closes additional
-parser/interpreter/regex rows, JBC-35 closes 35 additional exact AWK rows plus
-three AWK arithmetic comparison fixtures, JBC-37 closes additional structured
-data/query rows, and JBC-39 closes optional language boundary rows while
-documenting host-runtime/package runtime exceptions. After regeneration the
-combined Just Bash ledger is `4,703` verified / `4,365` pending / `868`
-JS-only, with `4,376` strict gate gaps. These slices
+additional JS-only runtime bridge exceptions, JBC-29 promotes 17 additional
+exact-pass `jq` comparison fixture rows, JBC-30 closes 231 Open Agents
+agent-example command integration rows, JBC-31 closes 25 docs/examples public
+API rows, JBC-33 closes additional parser/interpreter/regex rows, JBC-34 closes
+147 additional text/search and UTF-8 command rows, JBC-35 closes 35 additional
+exact AWK rows plus three AWK arithmetic comparison fixtures, JBC-37 closes
+additional structured-data/query rows, and JBC-39 closes optional language
+boundary rows while documenting host-runtime/package runtime exceptions. After
+regeneration the combined Just Bash ledger is `4,850` verified / `4,218`
+pending / `868` JS-only, with `4,229` strict gate gaps. These slices
 do not claim full command, filesystem, syntax, transform, interpreter, security,
 executor, examples, host-backed CLI, or source-only command-module parity until
 every portable row is named in the generated ledger.
 
 The counts below are the exact current upstream command-family case counts from
 `docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, JBC-09,
-JBC-10, JBC-11, JBC-13, JBC-16, JBC-22, JBC-23, JBC-24, JBC-25, and JBC-35
+JBC-10, JBC-11, JBC-13, JBC-16, JBC-22, JBC-23, JBC-24, JBC-25, JBC-34, and JBC-35
 command-family row mappings. Seed smoke coverage in these slices does not close
 rows outside the named verified cases. JBC-12 syntax/transform closure,
 JBC-14/JBC-27 security closure, JBC-15 interpreter closure, JBC-17
@@ -264,14 +268,14 @@ generated source/test-case tables.
 | Family | Exact upstream command cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |
 | Core filesystem command rows closed by JBC-06 (`cat`, `ls`, `mkdir`, `rm`, `cp`, `mv`) | 92 | 92 | 0 |
-| `grep` basic/advanced/perl/exclude/binary/UTF-8 suite | 213 | 47 | 166 |
+| `grep` basic/advanced/perl/exclude/binary/UTF-8 suite | 213 | 97 | 116 |
 | Full `awk` command language suite | 643 | 211 | 432 |
-| Full `sed` command/address/error suite | 231 | 24 | 207 |
-| Full `rg` ripgrep compatibility suite, including imported tests | 590 | 207 | 383 |
-| `head` command suite | 17 | 12 | 5 |
+| Full `sed` command/address/error suite | 231 | 36 | 195 |
+| Full `rg` ripgrep compatibility suite, including imported tests | 590 | 275 | 315 |
+| `head` command suite | 17 | 14 | 3 |
 | `tail` command suite | 19 | 17 | 2 |
-| `wc` command suite | 20 | 15 | 5 |
-| `sort` command suite | 57 | 17 | 40 |
+| `wc` command suite | 20 | 16 | 4 |
+| `sort` command suite | 57 | 19 | 38 |
 | `uniq` command suite | 15 | 15 | 0 |
 | `cut` command suite | 16 | 13 | 3 |
 | `tr` command suite | 27 | 24 | 3 |
@@ -284,7 +288,7 @@ generated source/test-case tables.
 | `sqlite3` command suite | 151 | 44 | 96 |
 | `query-engine` safe-object/query helper suite | 45 | 10 | 35 |
 | `search-engine` internal matcher/prefilter suite | 53 | 0 | 53 |
-| Remaining command utilities outside the groups above | 1,402 | 155 | 1,212 |
+| Remaining command utilities outside the groups above | 1,402 | 167 | 1,200 |
 
 | Filesystem family | Exact upstream cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |
