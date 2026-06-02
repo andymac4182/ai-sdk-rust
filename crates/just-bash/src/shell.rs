@@ -5783,4 +5783,546 @@ esac"#,
             .expect_err("plugin should fail");
         assert!(error.to_string().contains("plugin failed"));
     }
+
+    #[test]
+    fn jbc33_syntax_variables_operators_and_loop_rows_match_upstream() {
+        let mut env_shell = shell().with_env([
+            ("NAME", "world"),
+            ("PREFIX", "pre"),
+            ("A", "hello"),
+            ("B", "world"),
+            ("HOME", "/home/user"),
+            ("SET", "value"),
+        ]);
+        env_shell
+            .files_mut()
+            .write("/home/user/file.txt", "content");
+        for (source, expected_stdout) in [
+            ("echo hello $NAME", "hello world\n"),
+            ("echo hello ${NAME}", "hello world\n"),
+            ("echo ${PREFIX}fix", "prefix\n"),
+            ("echo $A $B", "hello world\n"),
+            (r#"echo "[$UNSET]""#, "[]\n"),
+            ("echo ${MISSING:-default}", "default\n"),
+            ("echo ${SET:-default}", "value\n"),
+            (r#"echo "the $NAME is here""#, "the world is here\n"),
+            ("echo 'the $NAME is here'", "the $NAME is here\n"),
+            ("cat $HOME/file.txt", "content"),
+            ("export FOO=bar; echo $FOO", "bar\n"),
+            ("export A=1 B=2 C=3; echo $A $B $C", "1 2 3\n"),
+            (r#"unset FOO; echo "[$FOO]""#, "[]\n"),
+            (r#"echo "hello   world""#, "hello   world\n"),
+            ("echo 'hello   world'", "hello   world\n"),
+            (r#"echo "it's working""#, "it's working\n"),
+            (r#"echo "say \"hello\"""#, "say \"hello\"\n"),
+            (r#"echo """#, "\n"),
+            ("echo \"hello\"'world'", "helloworld\n"),
+            ("echo 'hello $NAME && test'", "hello $NAME && test\n"),
+            ("echo -e \"hello\\nworld\"", "hello\nworld\n"),
+            ("echo -e \"col1\\tcol2\"", "col1\tcol2\n"),
+            ("echo -e \"a\\nb\\nc\\nd\"", "a\nb\nc\nd\n"),
+            (r#"echo "hello\nworld""#, "hello\\nworld\n"),
+            ("MYVAR=\"hello\"; echo $MYVAR", "hello\n"),
+            ("MYVAR='hello'; echo $MYVAR", "hello\n"),
+            (r#"MYVAR=""; echo "value:$MYVAR:""#, "value::\n"),
+            ("MYVAR=''; echo \"value:$MYVAR:\"", "value::\n"),
+            ("MYVAR=; echo \"value:$MYVAR:\"", "value::\n"),
+            (r#"MYVAR="hello world"; echo "$MYVAR""#, "hello world\n"),
+            (r#"export MYVAR=""; echo "value:$MYVAR:""#, "value::\n"),
+        ] {
+            let result = env_shell.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+            assert_eq!(result.exit_code, 0, "{source}");
+        }
+
+        let mut op_shell = shell();
+        for (source, expected_stdout, expected_exit) in [
+            ("echo first && echo second", "first\nsecond\n", 0),
+            ("false && echo second", "", 1),
+            ("echo a && echo b && echo c && echo d", "a\nb\nc\nd\n", 0),
+            ("echo a && false && echo b", "a\n", 1),
+            ("false || echo fallback", "fallback\n", 0),
+            ("echo success || echo fallback", "success\n", 0),
+            ("false || false || echo fallback", "fallback\n", 0),
+            ("echo first ; echo second", "first\nsecond\n", 0),
+            ("false ; echo second", "second\n", 0),
+            ("echo a;echo b;echo c", "a\nb\nc\n", 0),
+            ("false && echo success || echo failure", "failure\n", 0),
+            (
+                "false || echo recovered && echo continued",
+                "recovered\ncontinued\n",
+                0,
+            ),
+            (
+                "echo ok && echo next || echo skip ; echo done",
+                "ok\nnext\ndone\n",
+                0,
+            ),
+            ("echo hello | cat | cat | cat", "hello\n", 0),
+            ("echo -e \"foo\\nbar\\nbaz\" | grep ba", "bar\nbaz\n", 0),
+            ("echo test | grep missing && echo found", "", 1),
+            ("echo test | grep test && echo found", "test\nfound\n", 0),
+            (
+                r#"echo test | grep missing || echo "not found""#,
+                "not found\n",
+                0,
+            ),
+        ] {
+            let result = op_shell.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+            assert_eq!(result.exit_code, expected_exit, "{source}");
+        }
+
+        for (source, path, expected_content) in [
+            ("echo hello > /output.txt", "/output.txt", "hello\n"),
+            ("echo new > /output.txt", "/output.txt", "new\n"),
+            ("echo line2 >> /output.txt", "/output.txt", "new\nline2\n"),
+            ("echo first >> /new.txt", "/new.txt", "first\n"),
+            ("cat /input.txt > /copy.txt", "/copy.txt", "content\n"),
+            (
+                r#"echo -e "a\nb\nc" | grep b > /grep.txt"#,
+                "/grep.txt",
+                "b\n",
+            ),
+            ("echo test>/nospace.txt", "/nospace.txt", "test\n"),
+            ("echo b>>/nospace.txt", "/nospace.txt", "test\nb\n"),
+        ] {
+            op_shell.files_mut().write("/input.txt", "content\n");
+            let result = op_shell.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.exit_code, 0, "{source}");
+            assert_eq!(
+                op_shell.files().read_to_string(path),
+                Some(expected_content),
+                "{source}"
+            );
+        }
+
+        for (source, expected_stdout, expected_exit) in [
+            ("exit", "", 0),
+            ("exit 42", "", 42),
+            ("exit 1", "", 1),
+            ("unknowncommand", "", 127),
+            ("foobar", "", 127),
+            ("", "", 0),
+            ("   ", "", 0),
+            ("   echo hello   ", "hello\n", 0),
+            ("echo   hello   world", "hello world\n", 0),
+            ("echo\thello\tworld", "hello world\n", 0),
+        ] {
+            let result = op_shell.exec(source);
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+            assert_eq!(result.exit_code, expected_exit, "{source}");
+        }
+
+        let mut loop_shell = shell();
+        loop_shell.files_mut().write("/file1.txt", "content1");
+        loop_shell.files_mut().write("/file2.txt", "content2");
+        for (source, expected_stdout, expected_exit) in [
+            ("for i in a b c; do echo $i; done", "a\nb\nc\n", 0),
+            ("for n in 1 2 3 4 5; do echo $n; done", "1\n2\n3\n4\n5\n", 0),
+            ("for x in hello; do echo $x; done", "hello\n", 0),
+            ("for x in; do echo $x; done", "", 0),
+            (
+                "for i in 1 2; do echo start $i; echo end $i; done",
+                "start 1\nend 1\nstart 2\nend 2\n",
+                0,
+            ),
+            (
+                "for f in /file1.txt /file2.txt; do cat $f; done",
+                "content1content2",
+                0,
+            ),
+            ("for i in 1 2; do false; done", "", 1),
+            (
+                "for i in a b; do for j in 1 2; do echo $i$j; done; done",
+                "a1\na2\nb1\nb2\n",
+                0,
+            ),
+        ] {
+            let result = loop_shell.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+            assert_eq!(result.exit_code, expected_exit, "{source}");
+        }
+    }
+
+    #[test]
+    fn jbc33_syntax_control_flow_functions_and_local_rows_match_upstream() {
+        let mut interp = shell();
+        interp.files_mut().write("/test.txt", "hello\nworld\n");
+        for (source, expected_stdout, expected_exit) in [
+            ("if true; then echo yes; fi", "yes\n", 0),
+            ("if false; then echo yes; fi", "", 0),
+            ("if false; then echo yes; else echo no; fi", "no\n", 0),
+            (
+                "if grep hello /test.txt > /dev/null; then echo found; fi",
+                "found\n",
+                0,
+            ),
+            (
+                "if false; then echo one; elif true; then echo two; else echo three; fi",
+                "two\n",
+                0,
+            ),
+            (
+                "if false; then echo 1; elif false; then echo 2; elif true; then echo 3; else echo 4; fi",
+                "3\n",
+                0,
+            ),
+            (
+                "if cat /test.txt | grep world > /dev/null; then echo found; fi",
+                "found\n",
+                0,
+            ),
+            (
+                "if true; then echo one; echo two; echo three; fi",
+                "one\ntwo\nthree\n",
+                0,
+            ),
+            (
+                "if true; then if true; then echo nested; fi; fi",
+                "nested\n",
+                0,
+            ),
+            (
+                "if true; then if true; then if true; then echo deep; fi; fi; fi",
+                "deep\n",
+                0,
+            ),
+            (
+                "check() { if true; then echo inside; fi; }; check",
+                "inside\n",
+                0,
+            ),
+            (
+                "if false; then echo one; else if true; then echo two; fi; fi",
+                "two\n",
+                0,
+            ),
+            (
+                "echo before; if true; then echo during; fi; echo after",
+                "before\nduring\nafter\n",
+                0,
+            ),
+            ("function greet { echo hello; }; greet", "hello\n", 0),
+            ("greet() { echo hello; }; greet", "hello\n", 0),
+            (
+                "greet() { echo Hello $1; }; greet World",
+                "Hello World\n",
+                0,
+            ),
+            ("count() { echo $#; }; count a b c", "3\n", 0),
+            (
+                "show() { echo $@; }; show one two three",
+                "one two three\n",
+                0,
+            ),
+            (
+                "multi() { echo first; echo second; echo third; }; multi",
+                "first\nsecond\nthird\n",
+                0,
+            ),
+            (
+                "inner() { echo inside; }; outer() { echo before; inner; echo after; }; outer",
+                "before\ninside\nafter\n",
+                0,
+            ),
+            ("fail() { echo hi; false; }; fail", "hi\n", 1),
+            ("echo() { true; }; echo hello", "", 0),
+            (
+                "test_func() { local x=hello; echo $x; }; test_func",
+                "hello\n",
+                0,
+            ),
+            (
+                "test_func() { local a=1 b=2 c=3; echo $a $b $c; }; test_func",
+                "1 2 3\n",
+                0,
+            ),
+        ] {
+            let result = interp.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+            assert_eq!(result.exit_code, expected_exit, "{source}");
+        }
+
+        let parse_error = interp.exec("if true; then echo hello");
+        assert_eq!(parse_error.exit_code, 2);
+        assert!(parse_error.stderr.contains("syntax error"));
+
+        let outside_local = interp.exec("local x=value");
+        assert_eq!(outside_local.exit_code, 1);
+        assert!(
+            outside_local
+                .stderr
+                .contains("can only be used in a function")
+        );
+    }
+
+    #[test]
+    fn jbc33_interpreter_prototype_keywords_remain_plain_shell_data() {
+        let mut interp = shell();
+        for keyword in [
+            "constructor",
+            "__proto__",
+            "prototype",
+            "hasOwnProperty",
+            "toString",
+            "valueOf",
+        ] {
+            let result = interp.exec(&format!("echo {keyword}"));
+            assert_eq!(result.exit_code, 0, "{keyword}");
+            assert_eq!(result.stdout, format!("{keyword}\n"), "{keyword}");
+        }
+
+        for (source, expected_stdout) in [
+            ("constructor=test; echo $constructor", "test\n"),
+            ("__proto__=test; echo $__proto__", "test\n"),
+            ("prototype=test; echo $prototype", "test\n"),
+            ("hasOwnProperty=test; echo $hasOwnProperty", "test\n"),
+            ("echo $constructor", "\n"),
+            ("echo $__proto__", "\n"),
+            ("echo $prototype", "\n"),
+            (
+                "x=\"test constructor test\"; echo $x",
+                "test constructor test\n",
+            ),
+            (
+                "x=\"test __proto__ test\"; echo $x",
+                "test __proto__ test\n",
+            ),
+            ("constructor() { echo 'func'; }; constructor", "func\n"),
+            ("__proto__() { echo 'func'; }; __proto__", "func\n"),
+            ("echo $(echo constructor)", "constructor\n"),
+            ("echo $(echo __proto__)", "__proto__\n"),
+            ("constructor=5; echo $((constructor + 3))", "8\n"),
+            ("__proto__=5; echo $((__proto__ + 3))", "8\n"),
+            (
+                "for constructor in a b c; do echo $constructor; done",
+                "a\nb\nc\n",
+            ),
+            (
+                "for x in constructor __proto__ prototype; do echo $x; done",
+                "constructor\n__proto__\nprototype\n",
+            ),
+            (
+                "x=constructor; case $x in constructor) echo matched;; *) echo nomatch;; esac",
+                "matched\n",
+            ),
+            ("echo .constructor", ".constructor\n"),
+            ("echo '[constructor]'", "[constructor]\n"),
+            ("echo '{constructor}'", "{constructor}\n"),
+            ("echo __proto__.test", "__proto__.test\n"),
+            (
+                "testfunc() { local __proto__=local_value; echo $__proto__; }; testfunc",
+                "local_value\n",
+            ),
+            (
+                "cat <<EOF\n__proto__\nconstructor\nprototype\nEOF",
+                "__proto__\nconstructor\nprototype\n",
+            ),
+            ("cat <<__proto__\ntest content\n__proto__", "test content\n"),
+            (
+                "echo {__proto__,constructor,prototype}",
+                "__proto__ constructor prototype\n",
+            ),
+            (
+                "echo test_{__proto__,constructor}",
+                "test___proto__ test_constructor\n",
+            ),
+            ("export __proto__=passed; echo $__proto__", "passed\n"),
+            (
+                "__proto__=set; unset __proto__; echo \"value: '$__proto__'\"",
+                "value: ''\n",
+            ),
+            (
+                "result=$(echo __proto__); echo \"got: $result\"",
+                "got: __proto__\n",
+            ),
+            ("( __proto__=subshell; echo $__proto__ )", "subshell\n"),
+        ] {
+            let mut case_shell = shell();
+            let result = case_shell.exec(source);
+            assert_eq!(result.stderr, "", "{source}");
+            assert_eq!(result.exit_code, 0, "{source}");
+            assert_eq!(result.stdout, expected_stdout, "{source}");
+        }
+    }
+
+    #[test]
+    fn jbc33_transform_exec_metadata_rows_are_portable() {
+        #[derive(Default)]
+        struct CustomPlugin;
+
+        impl TransformPlugin for CustomPlugin {
+            fn name(&self) -> &str {
+                "custom"
+            }
+
+            fn transform(&mut self, context: TransformContext<'_>) -> ShellResult<TransformResult> {
+                Ok(TransformResult {
+                    ast: context.ast.clone(),
+                    metadata: TransformMetadata {
+                        custom: BTreeMap::from([("custom".to_string(), true)]),
+                        ..TransformMetadata::default()
+                    },
+                })
+            }
+        }
+
+        struct RewritePlugin;
+
+        impl TransformPlugin for RewritePlugin {
+            fn name(&self) -> &str {
+                "rewrite"
+            }
+
+            fn transform(
+                &mut self,
+                _context: TransformContext<'_>,
+            ) -> ShellResult<TransformResult> {
+                Ok(TransformResult {
+                    ast: parse("echo transformed").expect("rewrite parses"),
+                    metadata: TransformMetadata {
+                        custom: BTreeMap::from([("rewritten".to_string(), true)]),
+                        ..TransformMetadata::default()
+                    },
+                })
+            }
+        }
+
+        let mut collector = BashTransformPipeline::new().use_plugin(CommandCollectorPlugin);
+        let collected = collector.transform("echo hello | cat").unwrap();
+        let mut transformed_shell = shell();
+        assert_eq!(transformed_shell.exec(&collected.script).stdout, "hello\n");
+        assert_eq!(collected.metadata.commands, vec!["cat", "echo"]);
+
+        let mut rewrite = BashTransformPipeline::new().use_plugin(RewritePlugin);
+        let rewritten = rewrite.transform("echo original").unwrap();
+        assert_eq!(shell().exec(&rewritten.script).stdout, "transformed\n");
+        assert_eq!(rewritten.metadata.custom.get("rewritten"), Some(&true));
+
+        let mut no_plugins = BashTransformPipeline::new();
+        let plain = no_plugins.transform("echo hello").unwrap();
+        assert!(plain.metadata.is_empty());
+        assert_eq!(shell().exec(&plain.script).stdout, "hello\n");
+
+        let mut merged = BashTransformPipeline::new()
+            .use_plugin(CommandCollectorPlugin)
+            .use_plugin(CustomPlugin);
+        let result = merged.transform("echo hello").unwrap();
+        assert_eq!(result.metadata.commands, vec!["echo"]);
+        assert_eq!(result.metadata.custom.get("custom"), Some(&true));
+    }
+
+    #[test]
+    fn jbc33_user_regex_portable_match_search_split_and_replace_rows() {
+        let foo = Regex::new("foo").unwrap();
+        assert_eq!(foo.as_str(), "foo");
+        assert!(foo.is_match("foobar"));
+        assert!(!foo.is_match("bar"));
+        assert!(Regex::new("(?i)foo").unwrap().is_match("FOO"));
+        let invalid_pattern = String::from("[");
+        assert!(
+            Regex::new(&invalid_pattern)
+                .expect_err("invalid pattern should fail")
+                .to_string()
+                .contains("unclosed")
+        );
+
+        let captures = Regex::new("f(o+)").unwrap().captures("foobar").unwrap();
+        assert_eq!(captures.get(0).unwrap().as_str(), "foo");
+        assert_eq!(captures.get(1).unwrap().as_str(), "oo");
+        assert_eq!(captures.get(0).unwrap().start(), 0);
+        assert_eq!(
+            Regex::new("o+")
+                .unwrap()
+                .find_iter("foobooo")
+                .map(|match_| match_.as_str())
+                .collect::<Vec<_>>(),
+            vec!["oo", "ooo"]
+        );
+        assert_eq!(
+            Regex::new(",\\s*")
+                .unwrap()
+                .split("a, b,  c")
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(
+            Regex::new(",")
+                .unwrap()
+                .split("a,b,c,d")
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            Regex::new("x").unwrap().split("abc").collect::<Vec<_>>(),
+            vec!["abc"]
+        );
+        assert_eq!(
+            Regex::new(",").unwrap().split("a,,b").collect::<Vec<_>>(),
+            vec!["a", "", "b"]
+        );
+
+        let first_o = Regex::new("o").unwrap();
+        assert_eq!(first_o.replace("foobar", "0"), "f0obar");
+        assert_eq!(
+            Regex::new("o").unwrap().replace_all("foobar", "0"),
+            "f00bar"
+        );
+        assert_eq!(
+            Regex::new("(f)(o+)").unwrap().replace("foobar", "$2$1"),
+            "oofbar"
+        );
+        assert_eq!(
+            Regex::new("\\d+").unwrap().replace_all("a1b22c333", "[$0]"),
+            "a[1]b[22]c[333]"
+        );
+        assert_eq!(
+            Regex::new("bar").unwrap().find("foobar").unwrap().start(),
+            3
+        );
+        assert!(Regex::new("xyz").unwrap().find("foobar").is_none());
+        assert!(Regex::new("\\[\\]\\(\\)").unwrap().is_match("[]()"));
+        assert_eq!(
+            Regex::new("[a-z]+")
+                .unwrap()
+                .find("ABC123def")
+                .unwrap()
+                .as_str(),
+            "def"
+        );
+        assert!(Regex::new("^foo$").unwrap().is_match("foo"));
+        assert!(!Regex::new("^foo$").unwrap().is_match("foobar"));
+        assert!(Regex::new("").unwrap().is_match("anything"));
+        assert_eq!(
+            Regex::new("\\s+")
+                .unwrap()
+                .split("a b  c")
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert!(Regex::new("café").unwrap().is_match("I love café"));
+        assert!(Regex::new("\\x{1F600}").unwrap().is_match("Hello 😀"));
+        assert!(Regex::new("(?s)a.b").unwrap().is_match("a\nb"));
+        assert!(!Regex::new("a.b").unwrap().is_match("a\nb"));
+        let named = Regex::new("(?P<year>\\d{4})-(?P<month>\\d{2})").unwrap();
+        let named_captures = named.captures("2024-01").unwrap();
+        assert_eq!(&named_captures["year"], "2024");
+        assert_eq!(&named_captures["month"], "01");
+        let nested = Regex::new("((a)(b))").unwrap().captures("ab").unwrap();
+        assert_eq!(nested.get(0).unwrap().as_str(), "ab");
+        assert_eq!(nested.get(1).unwrap().as_str(), "ab");
+        assert_eq!(nested.get(2).unwrap().as_str(), "a");
+        assert_eq!(nested.get(3).unwrap().as_str(), "b");
+        let non_capturing = Regex::new("(?:a)(b)").unwrap().captures("ab").unwrap();
+        assert_eq!(non_capturing.get(0).unwrap().as_str(), "ab");
+        assert_eq!(non_capturing.get(1).unwrap().as_str(), "b");
+        assert!(non_capturing.get(2).is_none());
+    }
 }
