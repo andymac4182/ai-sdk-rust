@@ -1238,6 +1238,162 @@ function gatewayVercelRustTests(testCase, rustTests) {
       'vercel_provider_creates_openai_compatible_chat_model',
       'vercel_provider_implements_provider_trait',
     ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:259': [
+      'gateway_fetch_metadata_keeps_known_models_and_filters_unknown_from_mixed_response',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:416': [
+      'gateway_fetch_metadata_does_not_double_wrap_existing_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:436': [
+      'gateway_fetch_metadata_handles_rate_limit_server_errors',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:573': [
+      'gateway_fetch_metadata_fetches_credits_from_correct_endpoint',
+    ],
+    'packages/gateway/src/gateway-fetch-metadata.test.ts:778': [
+      'gateway_fetch_metadata_does_not_double_wrap_existing_credit_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:297': [
+      'create_gateway_language_model_uses_oidc_when_api_key_is_absent',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:423': [
+      'create_gateway_embedding_model_returns_gateway_embedding_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:432': [
+      'create_gateway_image_model_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:449': [
+      'create_gateway_image_model_reuses_headers_transport_and_observability',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:480': [
+      'create_gateway_video_model_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:497': [
+      'create_gateway_video_model_reuses_headers_transport_and_observability',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:528': [
+      'create_gateway_reranking_model_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:545': [
+      'create_gateway_reranking_alias_returns_gateway_reranking_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:674': [
+      'gateway_provider_fetches_available_models_metadata',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:694': [
+      'gateway_provider_caches_available_models_until_refresh',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:728': [
+      'gateway_provider_uses_default_metadata_cache_refresh_interval',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:758': [
+      'create_gateway_language_model_passes_observability_headers_from_environment',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:801': [
+      'create_gateway_language_model_omits_missing_observability_headers',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:839': [
+      'default_gateway_export_exposes_provider_instance',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:846': [
+      'create_gateway_uses_default_base_url_when_none_is_provided',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:866': [
+      'create_gateway_accepts_empty_options',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:874': [
+      'default_gateway_export_constructs_image_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:887': [
+      'default_gateway_export_constructs_video_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:928': [
+      'create_gateway_overrides_default_base_url_when_provided',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:953': [
+      'create_gateway_prefers_api_key_over_oidc_token',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1286': [
+      'get_gateway_auth_token_treats_empty_environment_variables_as_missing',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1315': [
+      'get_gateway_auth_token_prioritizes_options_api_key_over_all_environment_variables',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1363': [
+      'get_gateway_auth_token_prefers_options_api_key_over_ai_gateway_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1377': [
+      'get_gateway_auth_token_prefers_ai_gateway_api_key_over_oidc_token',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1391': [
+      'get_gateway_auth_token_falls_back_to_oidc_when_no_api_keys_are_available',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1408': [
+      'gateway_provider_real_world_vercel_deployment_uses_oidc_authentication',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1439': [
+      'gateway_provider_real_world_local_development_uses_api_key_authentication',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1453': [
+      'gateway_provider_real_world_explicit_api_key_override_wins_over_environment',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1475': [
+      'gateway_provider_get_credits_fetches_successfully',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1495': [
+      'gateway_provider_get_credits_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1511': [
+      'gateway_provider_get_credits_uses_oidc_authentication_headers',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1522': [
+      'gateway_provider_get_credits_surfaces_endpoint_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1535': [
+      'gateway_provider_get_credits_includes_upstream_headers',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1555': [
+      'gateway_provider_get_credits_is_available_on_provider_interface',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1562': [
+      'gateway_provider_get_spend_report_fetches_successfully',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1587': [
+      'gateway_provider_get_spend_report_passes_params_through',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1613': [
+      'gateway_provider_get_spend_report_uses_custom_base_url',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1632': [
+      'gateway_provider_get_spend_report_uses_custom_transport',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1651': [
+      'gateway_provider_get_spend_report_surfaces_endpoint_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1681': [
+      'gateway_provider_get_spend_report_is_available_on_provider_interface',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1686': [
+      'default_gateway_export_get_spend_report_is_available',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1692': [
+      'gateway_provider_fetches_generation_info_and_unwraps_data',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1721': [
+      'gateway_provider_metadata_fetch_errors_convert_to_gateway_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1741': [
+      'gateway_provider_metadata_gateway_errors_are_not_double_wrapped',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1768': [
+      'gateway_provider_language_model_handles_model_specification_errors',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1805': [
+      'gateway_provider_language_model_accepts_any_model_id',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1851': [
+      'gateway_provider_language_model_accepts_non_existent_model_id',
+    ],
   };
 
   if (exact[key]) {
