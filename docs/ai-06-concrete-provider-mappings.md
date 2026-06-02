@@ -300,3 +300,45 @@ the strict inventory generator.
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when task status is failed | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no task_id is returned | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
 | `packages/klingai/src/klingai-video-model.test.ts` | should throw when no videos in response | `klingai_video_model_maps_failed_missing_task_and_empty_video_errors` | none |
+
+## Hugging Face Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should create provider with default configuration | `huggingface_provider_implements_provider_trait` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should create provider with custom settings | `huggingface_provider_settings_serde_accepts_upstream_base_url` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should expose responses method | `huggingface_provider_uses_default_base_url_and_function_alias` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should expose languageModel method | `huggingface_provider_implements_provider_trait` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should throw for text embedding models | `huggingface_provider_reports_unsupported_embedding_and_image` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should throw for image models | `huggingface_provider_reports_unsupported_embedding_and_image` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should generate text | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should extract usage | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should extract text from output array when output_text is missing | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle missing usage gracefully | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send model id, settings, and input | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle unsupported settings with warnings | `huggingface_responses_maps_warnings_and_stream_errors` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should generate text and sources from annotations | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle MCP tools with annotations | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should stream text deltas | `huggingface_responses_streams_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle streaming without usage | `huggingface_responses_streams_without_usage` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle non-message item types | `huggingface_responses_streams_non_message_item_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle streaming errors | `huggingface_responses_streams_parse_errors` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send correct streaming request | `huggingface_responses_streams_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should convert user messages with images | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should throw for file parts with provider references | `huggingface_responses_reports_unsupported_provider_references` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle assistant messages | `huggingface_responses_converts_assistant_text_messages` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should warn about unsupported assistant content types | `huggingface_responses_does_not_warn_about_assistant_tool_and_reasoning_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should warn about tool messages | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle function_call tool responses | `huggingface_responses_maps_function_call_tool_responses` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should stream tool calls | `huggingface_responses_streams_reasoning_text_and_tool_calls` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send text.format for structured output | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle structured output with custom name and description | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle reasoning content in responses | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should stream reasoning content | `huggingface_responses_streams_reasoning_text_and_tool_calls` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send provider-specific options | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should prepare tools correctly | `huggingface_responses_prepares_tools_and_tool_choices` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle auto and required tool choices | `huggingface_responses_prepares_tools_and_tool_choices` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | passes full image/png through unchanged for inline data | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | detects image subtype from inline bytes for top-level "image" | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | passes through URL source for top-level-only image | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | normalizes image/* wildcard via detection | `huggingface_responses_resolves_top_level_image_media_types` | none |
