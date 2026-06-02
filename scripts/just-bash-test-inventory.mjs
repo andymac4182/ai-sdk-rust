@@ -3297,6 +3297,93 @@ const jbc37CaseGroups = [
   },
 ];
 
+const jbc38CaseGroups = [
+  {
+    files: [
+      'packages/just-bash/src/commands/basename/basename.test.ts',
+      'packages/just-bash/src/commands/dirname/dirname.test.ts',
+      'packages/just-bash/src/commands/which/which.test.ts',
+      'packages/just-bash/src/commands/chmod/chmod.test.ts',
+      'packages/just-bash/src/commands/readlink/readlink.test.ts',
+      'packages/just-bash/src/commands/ln/ln.test.ts',
+      'packages/just-bash/src/commands/stat/stat.test.ts',
+      'packages/just-bash/src/commands/test/test.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-posix-path',
+    rustTest: 'jbc38_small_posix_path_commands_match_upstream_rows',
+    notes:
+      'JBC-38 verifies portable which, basename, dirname, ln/readlink, chmod/stat, and test/[ rows against the virtual filesystem and registry-bound command lookup.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/base64/base64.test.ts',
+    lines: [6, 14, 22, 32, 43, 53, 67, 75, 83, 93, 100, 111, 121, 128, 137, 147],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-posix-stream',
+    rustTest: 'jbc38_small_posix_stream_date_and_inspection_commands_match_upstream_rows',
+    notes:
+      'JBC-38 verifies portable base64 stdin/file encode/decode, wrapping, dash stdin, help, and option/error behavior; binary byte fixture rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/file/file.test.ts',
+    lines: [100, 108, 116, 128, 138, 152, 160, 168, 176, 186, 196, 204, 212, 222, 235, 244, 253],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-posix-inspection',
+    rustTest: 'jbc38_small_posix_stream_date_and_inspection_commands_match_upstream_rows',
+    notes:
+      'JBC-38 verifies portable file text, extension, directory, brief/MIME, multiple-file, missing-file, usage, and help rows; binary magic-byte rows remain pending.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/commands/base64/base64.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/gzip/gzip.test.ts',
+      'packages/just-bash/src/commands/rev/rev.test.ts',
+      'packages/just-bash/src/commands/rev/rev.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/seq/seq.test.ts',
+      'packages/just-bash/src/commands/date/date.test.ts',
+      'packages/just-bash/src/commands/diff/diff.test.ts',
+      'packages/just-bash/src/commands/diff/diff.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/strings/strings.test.ts',
+      'packages/just-bash/src/commands/strings/strings.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/tee/tee.test.ts',
+      'packages/just-bash/src/commands/tee/tee.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/du/du.test.ts',
+      'packages/just-bash/src/commands/tree/tree.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-posix-stream',
+    rustTest: 'jbc38_small_posix_stream_date_and_inspection_commands_match_upstream_rows',
+    notes:
+      'JBC-38 verifies portable gzip/gunzip/zcat, rev, seq, date, diff, strings, tee, du, and tree rows over virtual files/stdin with deterministic stdout, stderr, and exit codes; gzip uses the in-process virtual codec rather than host binary fallback.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/commands/comm/comm.test.ts',
+      'packages/just-bash/src/commands/comm/comm.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/column/column.test.ts',
+      'packages/just-bash/src/commands/join/join.test.ts',
+      'packages/just-bash/src/commands/paste/paste.test.ts',
+      'packages/just-bash/src/commands/paste/paste.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/expand/expand.test.ts',
+      'packages/just-bash/src/commands/expand/expand.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/expand/unexpand.test.ts',
+      'packages/just-bash/src/commands/expand/unexpand.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/fold/fold.test.ts',
+      'packages/just-bash/src/commands/fold/fold.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/nl/nl.test.ts',
+      'packages/just-bash/src/commands/nl/nl.utf8-stdin.test.ts',
+      'packages/just-bash/src/commands/split/split.test.ts',
+      'packages/just-bash/src/commands/xargs/xargs.test.ts',
+      'packages/just-bash/src/commands/xargs/xargs.utf8-stdin.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-posix-table',
+    rustTest: 'jbc38_small_posix_table_and_xargs_commands_match_upstream_rows',
+    notes:
+      'JBC-38 verifies portable comm, column, join, paste, expand/unexpand, fold, nl, split, and xargs rows over virtual files/stdin; quoted host-script command-name rows remain pending.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -3353,6 +3440,7 @@ function caseOverrideFor(testCase) {
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
+    ...jbc38CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
